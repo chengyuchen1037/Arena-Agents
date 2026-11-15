@@ -1,0 +1,1237 @@
+/* ==========================================================================
+   Arena-Agents v0.10 Frontend Core (pure helpers, no DOM access)
+   - Loaded before app.js in the browser (exposes window.ArenaCore)
+   - Also loadable from Node (module.exports) so tests/frontend/*.js can
+     exercise it without a browser.
+   ========================================================================== */
+
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === "object" && module.exports) {
+    module.exports = api;
+  } else {
+    root.ArenaCore = api;
+  }
+})(typeof self !== "undefined" ? self : this, function () {
+  "use strict";
+
+  // -------------------------------------------------------------------------
+  // Escaping & numbers
+  // -------------------------------------------------------------------------
+
+  function escapeHtml(str) {
+    if (str === null || str === undefined) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  /** Coerce any value to a finite number (fallback when not finite). */
+  function safeNum(value, fallback = 0) {
+    const n = typeof value === "number" ? value : Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  /** Number rendered as escaped text, safe to splice into HTML. */
+  function numText(value, fallback = 0) {
+    return escapeHtml(String(safeNum(value, fallback)));
+  }
+
+  // -------------------------------------------------------------------------
+  // Markdown-ish formatting (escape first, then wrap)
+  // -------------------------------------------------------------------------
+
+  function stripMarkdownForPreview(str) {
+    if (!str) return "";
+    return String(str)
+      .replace(/```[\s\S]*?```/g, " [代码] ")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\*\*([^*]+)\*\*/g, "$1")
+      .replace(/__([^_]+)__/g, "$1")
+      .replace(/(?:^|\s)#{1,6}\s+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function renderInlineFormatting(rawStr) {
+    if (!rawStr) return "";
+    const codePlaceholders = [];
+    let text = String(rawStr).replace(/`([^`\n]+)`/g, (_, codeContent) => {
+      const idx = codePlaceholders.length;
+      codePlaceholders.push(
+        `<code class="fmt-code">${escapeHtml(codeContent)}</code>`
+      );
+      return `\u0000CODE_${idx}\u0000`;
+    });
+
+    text = escapeHtml(text);
+
+    // Bold: **text** or __text__
+    text = text.replace(
+      /\*\*([\s\S]+?)\*\*/g,
+      '<strong class="fmt-strong">$1</strong>'
+    );
+    text = text.replace(
+      /__([\s\S]+?)__/g,
+      '<strong class="fmt-strong">$1</strong>'
+    );
+
+    // Italic: *text* (not adjacent to *)
+    text = text.replace(
+      /(^|[^*])\*([^*\n]+)\*(?!\*)/g,
+      '$1<em class="fmt-em">$2</em>'
+    );
+
+    // Restore inline code placeholders
+    text = text.replace(/\u0000CODE_(\d+)\u0000/g, (_, idx) => {
+      return codePlaceholders[Number(idx)] || "";
+    });
+
+    return text;
+  }
+
+  /**
+   * Render text into an array of top-level HTML blocks (each block is exactly
+   * one element). Returning blocks (instead of one string) lets the streaming
+   * view patch only the blocks that changed.
+   */
+  function renderFormattedBlocks(rawText) {
+    if (rawText === null || rawText === undefined) return [];
+    // NUL is used internally for placeholders; never let user text forge it.
+    let src = String(rawText)
+      .replace(/\u0000/g, "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\r/g, "\n");
+    if (!src.trim()) return [];
+
+    // Extract fenced code blocks ```...```
+    const blockCodePlaceholders = [];
+    src = src.replace(/```(?:[a-zA-Z0-9_-]+)?\n?([\s\S]*?)```/g, (_, code) => {
+      const idx = blockCodePlaceholders.length;
+      blockCodePlaceholders.push(
+        `<pre class="fmt-pre"><code>${escapeHtml(code.trim())}</code></pre>`
+      );
+      return `\n\u0000BLOCKCODE_${idx}\u0000\n`;
+    });
+
+    const lines = src.split("\n");
+    const htmlBlocks = [];
+    let paraLines = [];
+    let listType = null; // "ul" | "ol"
+    let listItems = [];
+    let quoteLines = [];
+
+    const flushPara = () => {
+      if (paraLines.length > 0) {
+        htmlBlocks.push(`<p class="fmt-p">${paraLines.join("<br/>")}</p>`);
+        paraLines = [];
+      }
+    };
+
+    const flushList = () => {
+      if (listItems.length > 0 && listType) {
+        const tag = listType;
+        const cls = listType === "ol" ? "fmt-ol" : "fmt-ul";
+        htmlBlocks.push(`<${tag} class="${cls}">${listItems.join("")}</${tag}>`);
+        listItems = [];
+        listType = null;
+      }
+    };
+
+    const flushQuote = () => {
+      if (quoteLines.length > 0) {
+        htmlBlocks.push(
+          `<blockquote class="fmt-quote">${quoteLines.join("<br/>")}</blockquote>`
+        );
+        quoteLines = [];
+      }
+    };
+
+    const flushAll = () => {
+      flushPara();
+      flushList();
+      flushQuote();
+    };
+
+    for (let i = 0; i < lines.length; i++) {
+      const rawLine = lines[i];
+      const trimmed = rawLine.trim();
+
+      if (!trimmed) {
+        flushAll();
+        continue;
+      }
+
+      const codeMatch = trimmed.match(/^\u0000BLOCKCODE_(\d+)\u0000$/);
+      if (codeMatch) {
+        flushAll();
+        htmlBlocks.push(blockCodePlaceholders[Number(codeMatch[1])] || "");
+        continue;
+      }
+
+      if (/^(\*{3,}|-{3,}|_{3,})$/.test(trimmed)) {
+        flushAll();
+        htmlBlocks.push('<hr class="fmt-hr" />');
+        continue;
+      }
+
+      const headingMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+      if (headingMatch) {
+        flushAll();
+        const level = headingMatch[1].length;
+        htmlBlocks.push(
+          `<div class="fmt-heading fmt-h${level}">${renderInlineFormatting(
+            headingMatch[2]
+          )}</div>`
+        );
+        continue;
+      }
+
+      const quoteMatch = trimmed.match(/^>\s?(.*)$/);
+      if (quoteMatch) {
+        flushPara();
+        flushList();
+        quoteLines.push(renderInlineFormatting(quoteMatch[1]));
+        continue;
+      } else if (quoteLines.length > 0) {
+        flushQuote();
+      }
+
+      const ulMatch = rawLine.match(/^\s*[-*•]\s+(.+)$/);
+      if (ulMatch) {
+        flushPara();
+        if (listType && listType !== "ul") flushList();
+        listType = "ul";
+        listItems.push(
+          `<li class="fmt-li">${renderInlineFormatting(ulMatch[1].trim())}</li>`
+        );
+        continue;
+      }
+
+      const olMatch = rawLine.match(/^\s*(\d+)[.)、]\s+(.+)$/);
+      if (olMatch) {
+        flushPara();
+        if (listType && listType !== "ol") flushList();
+        listType = "ol";
+        listItems.push(
+          `<li class="fmt-li" value="${escapeHtml(
+            olMatch[1]
+          )}">${renderInlineFormatting(olMatch[2].trim())}</li>`
+        );
+        continue;
+      }
+
+      if (listType) {
+        flushList();
+      }
+      paraLines.push(renderInlineFormatting(trimmed));
+    }
+
+    flushAll();
+    return htmlBlocks.filter(Boolean);
+  }
+
+  function renderFormattedText(rawText) {
+    return renderFormattedBlocks(rawText).join("");
+  }
+
+  // -------------------------------------------------------------------------
+  // Bounded Map (expand/collapse state must not grow forever)
+  // -------------------------------------------------------------------------
+
+  /** Set key on a Map, refreshing its recency and evicting the oldest entries. */
+  function boundedSet(map, key, value, max = 2000) {
+    if (map.has(key)) map.delete(key);
+    map.set(key, value);
+    while (map.size > max) {
+      const oldest = map.keys().next().value;
+      map.delete(oldest);
+    }
+    return map;
+  }
+
+  // -------------------------------------------------------------------------
+  // URL helpers (sub-path reverse-proxy friendly)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Derive the URL prefix the app is served under from the script's own URL
+   * ("/arena/static/js/app.js" -> "/arena/"). Falls back to "/".
+   */
+  function prefixFromScriptPath(scriptPathname) {
+    const p = String(scriptPathname || "");
+    const m = p.match(/^(.*\/)static\/js\/[^/]*$/);
+    if (m) return m[1];
+    return "/";
+  }
+
+  function joinUrl(prefix, path) {
+    const base = prefix || "";
+    const rel = String(path || "").replace(/^\/+/, "");
+    return base + rel;
+  }
+
+  function buildEventsUrl(prefix, token) {
+    const url = joinUrl(prefix, "api/events");
+    return token ? `${url}?token=${encodeURIComponent(token)}` : url;
+  }
+
+  // -------------------------------------------------------------------------
+  // Reconnect backoff
+  // -------------------------------------------------------------------------
+
+  /**
+   * Exponential backoff with jitter. attempt starts at 0. The result never
+   * exceeds capMs. jitter=0.3 means the delay is in [0.7*d, d].
+   */
+  function computeBackoff(attempt, opts = {}) {
+    const baseMs = opts.baseMs ?? 1000;
+    const capMs = opts.capMs ?? 30000;
+    const jitter = opts.jitter ?? 0.3;
+    const rand = opts.rand || Math.random;
+    const n = Math.max(0, Math.floor(safeNum(attempt, 0)));
+    const exp = Math.min(capMs, baseMs * Math.pow(2, Math.min(n, 30)));
+    return Math.max(0, Math.round(exp * (1 - jitter * rand())));
+  }
+
+  // -------------------------------------------------------------------------
+  // API error handling
+  // -------------------------------------------------------------------------
+
+  class ApiError extends Error {
+    constructor(message, info = {}) {
+      super(message);
+      this.name = "ApiError";
+      this.status = info.status || 0;
+      this.detail = info.detail || "";
+      this.kind = info.kind || "http"; // http | network | bad-response | auth
+    }
+  }
+
+  /** Turn any FastAPI-ish "detail" into a readable string (never "[object Object]"). */
+  function formatDetail(detail, depth = 0) {
+    if (detail === null || detail === undefined) return "";
+    if (typeof detail === "string") return detail;
+    if (typeof detail === "number" || typeof detail === "boolean") {
+      return String(detail);
+    }
+    if (Array.isArray(detail)) {
+      return detail
+        .map((x) => formatDetail(x, depth + 1))
+        .filter(Boolean)
+        .join("；");
+    }
+    if (typeof detail === "object") {
+      const inner =
+        detail.msg ?? detail.message ?? detail.detail ?? detail.error ?? null;
+      if (inner !== null && depth < 3) {
+        const msg = formatDetail(inner, depth + 1);
+        const loc = Array.isArray(detail.loc)
+          ? detail.loc.filter((x) => x !== "body").join(".")
+          : "";
+        return loc ? `${loc}: ${msg}` : msg;
+      }
+      try {
+        const j = JSON.stringify(detail);
+        return j === undefined ? "" : j;
+      } catch {
+        return "";
+      }
+    }
+    return "";
+  }
+
+  const STATUS_LABELS = {
+    400: "请求无效",
+    401: "需要有效的访问令牌",
+    403: "请求被拒绝（来源或权限不允许）",
+    404: "接口或资源不存在",
+    405: "请求方法不被允许",
+    409: "操作冲突（当前对局状态不允许）",
+    413: "请求内容过大",
+    422: "参数校验失败",
+    429: "请求过于频繁，请稍后再试",
+  };
+
+  function describeHttpError(status, detail) {
+    const d = formatDetail(detail).slice(0, 300);
+    let label = STATUS_LABELS[status];
+    if (!label) {
+      label = status >= 500 ? `服务器内部错误 (${status})` : `请求失败 (${status})`;
+    } else if (status >= 500) {
+      label = `服务器内部错误 (${status})`;
+    }
+    return d ? `${label}：${d}` : label;
+  }
+
+  function looksJson(text) {
+    const t = String(text || "").trimStart();
+    return t.startsWith("{") || t.startsWith("[");
+  }
+
+  /** Read a Response body without ever throwing on malformed/non-JSON content. */
+  async function readBody(resp) {
+    let ct = "";
+    try {
+      ct = String((resp.headers && resp.headers.get("content-type")) || "").toLowerCase();
+    } catch {
+      ct = "";
+    }
+    let text = "";
+    try {
+      text = await resp.text();
+    } catch {
+      text = "";
+    }
+    if (/json/.test(ct) || (!ct && looksJson(text))) {
+      try {
+        return { kind: "json", data: JSON.parse(text), text };
+      } catch {
+        return { kind: "invalid-json", data: null, text };
+      }
+    }
+    return { kind: "text", data: null, text };
+  }
+
+  /** Best-effort short, human-readable detail for an error response. */
+  function extractErrorDetail(body) {
+    if (body.kind === "json") {
+      const d = body.data;
+      if (d && typeof d === "object" && !Array.isArray(d) && "detail" in d) {
+        return formatDetail(d.detail);
+      }
+      return formatDetail(d);
+    }
+    const t = String(body.text || "").trim();
+    // Never dump HTML error pages or huge bodies into a toast.
+    if (!t || t.startsWith("<") || t.length > 200) return "";
+    return t;
+  }
+
+  /**
+   * Build an API client.
+   *  fetchImpl:      fetch-compatible function
+   *  getToken():     current token string ("" when none)
+   *  onAuthRequired({hadToken, usedToken, detail}) -> Promise<string|null>
+   *                  called on 401; resolve a (new) token to retry, or null to give up
+   *  prefix:         URL prefix, e.g. "/" or "/arena/"
+   */
+  function createApiClient(opts) {
+    const fetchImpl = opts.fetchImpl;
+    const getToken = opts.getToken || (() => "");
+    const onAuthRequired = opts.onAuthRequired || null;
+    const prefix = opts.prefix || "";
+    const maxAuthAttempts = opts.maxAuthAttempts ?? 5;
+
+    async function request(path, options = {}) {
+      const method = options.method || "GET";
+      const url = joinUrl(prefix, path);
+      let body;
+      if (options.body !== undefined && options.body !== null) {
+        body = JSON.stringify(options.body);
+      }
+
+      for (let attempt = 0; ; attempt++) {
+        const headers = { ...(options.headers || {}) };
+        if (body !== undefined) headers["Content-Type"] = "application/json";
+        const usedToken = getToken();
+        if (usedToken) headers["X-Arena-Token"] = usedToken;
+
+        let resp;
+        try {
+          resp = await fetchImpl(url, { method, headers, body });
+        } catch (e) {
+          throw new ApiError("无法连接到服务器，请检查网络或服务是否在运行", {
+            kind: "network",
+          });
+        }
+
+        const parsed = await readBody(resp);
+
+        if (resp.status === 401 && onAuthRequired && attempt < maxAuthAttempts) {
+          const detail = extractErrorDetail(parsed);
+          const tok = await onAuthRequired({
+            hadToken: Boolean(usedToken),
+            usedToken,
+            detail,
+          });
+          if (tok) continue;
+          throw new ApiError(describeHttpError(401, detail), {
+            status: 401,
+            detail,
+            kind: "auth",
+          });
+        }
+
+        if (!resp.ok) {
+          const detail = extractErrorDetail(parsed);
+          throw new ApiError(describeHttpError(resp.status, detail), {
+            status: resp.status,
+            detail,
+            kind: "http",
+          });
+        }
+
+        if (resp.status === 204 || !String(parsed.text || "").trim()) return null;
+        if (parsed.kind !== "json") {
+          throw new ApiError("服务器返回了非 JSON 响应（可能被代理或网关拦截）", {
+            status: resp.status,
+            kind: "bad-response",
+          });
+        }
+        return parsed.data;
+      }
+    }
+
+    return {
+      request,
+      get: (path, options) => request(path, { ...(options || {}), method: "GET" }),
+      post: (path, body, options) =>
+        request(path, { ...(options || {}), method: "POST", body }),
+      put: (path, body, options) =>
+        request(path, { ...(options || {}), method: "PUT", body }),
+      patch: (path, body, options) =>
+        request(path, { ...(options || {}), method: "PATCH", body }),
+      // DELETE with a JSON body (model ids may contain slashes, so they travel in the body).
+      del: (path, body, options) =>
+        request(path, { ...(options || {}), method: "DELETE", body }),
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.10: providers / models / bindings (pure helpers)
+  // -------------------------------------------------------------------------
+
+  const PROTOCOLS = [
+    { id: "openai_chat", label: "OpenAI 对话补全（Chat Completions）" },
+    { id: "openai_responses", label: "OpenAI 响应接口（Responses）" },
+    { id: "anthropic_messages", label: "Anthropic 消息接口（Messages）" },
+  ];
+
+  const REASONING_DEPTHS = [
+    { id: "low", label: "low（浅）" },
+    { id: "medium", label: "medium（中）" },
+    { id: "high", label: "high（深）" },
+    { id: "xhigh", label: "xhigh（极深）" },
+  ];
+
+  function protocolLabel(id) {
+    const p = PROTOCOLS.find((x) => x.id === id);
+    return p ? p.label : id ? String(id) : "未知协议";
+  }
+
+  /** Accept [..] or {providers:[..]}; always return an array of objects. */
+  function normalizeProviders(resp) {
+    const list = Array.isArray(resp)
+      ? resp
+      : resp && Array.isArray(resp.providers)
+        ? resp.providers
+        : [];
+    return list
+      .filter((p) => p && typeof p === "object" && p.id)
+      .map((p) => ({
+        ...p,
+        // v0.11: absent/legacy providers mean "auto-append the API path" (v0.10 behaviour).
+        auto_append_path: p.auto_append_path !== false,
+        models: Array.isArray(p.models) ? p.models.filter((m) => m && m.id) : [],
+      }));
+  }
+
+  /** Accept ["a"], [{id:"a"}], {models:[..]}; return unique non-empty strings. */
+  function normalizeModelIds(resp) {
+    const list = Array.isArray(resp) ? resp : resp && Array.isArray(resp.models) ? resp.models : [];
+    const out = [];
+    const seen = new Set();
+    for (const m of list) {
+      const id = typeof m === "string" ? m : m && typeof m === "object" ? m.id : "";
+      if (typeof id === "string" && id.trim() && !seen.has(id)) {
+        seen.add(id);
+        out.push(id);
+      }
+    }
+    return out;
+  }
+
+  function isBlank(v) {
+    return v === null || v === undefined || String(v).trim() === "";
+  }
+
+  /** Price is REQUIRED: empty is an error (never silently 0); finite and >= 0. */
+  function validatePrice(raw, label = "价格") {
+    if (isBlank(raw)) return { ok: false, error: `${label}为必填项` };
+    const s = String(raw).trim();
+    if (!/^[+]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) {
+      return { ok: false, error: `${label}必须是非负数字` };
+    }
+    const n = Number(s);
+    if (!Number.isFinite(n) || n < 0) {
+      return { ok: false, error: `${label}必须是有限的非负数字` };
+    }
+    return { ok: true, value: n };
+  }
+
+  /** Optional integer context window (empty => not provided). */
+  function validateContextWindow(raw) {
+    if (isBlank(raw)) return { ok: true, value: undefined };
+    const s = String(raw).trim();
+    if (!/^\d+$/.test(s)) return { ok: false, error: "上下文窗口必须是正整数" };
+    const n = Number(s);
+    if (!Number.isSafeInteger(n) || n < 2000) {
+      return { ok: false, error: "上下文窗口不能小于 2000 Tokens" };
+    }
+    return { ok: true, value: n };
+  }
+
+  function hasControlChars(s) {
+    return /[\u0000-\u001f\u007f]/.test(String(s));
+  }
+
+  function validateBaseUrl(raw) {
+    const s = String(raw === undefined || raw === null ? "" : raw).trim();
+    if (!s) return { ok: false, error: "Base URL 为必填项" };
+    if (hasControlChars(s)) return { ok: false, error: "Base URL 含有非法控制字符" };
+    let u;
+    try {
+      u = new URL(s);
+    } catch {
+      return { ok: false, error: "Base URL 不是有效的 URL" };
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      return { ok: false, error: "Base URL 必须以 http:// 或 https:// 开头" };
+    }
+    if (u.username || u.password) {
+      return { ok: false, error: "Base URL 不能包含用户名或密码" };
+    }
+    return { ok: true, value: s };
+  }
+
+  /**
+   * Build the body for POST /providers (existing=null) or PATCH /providers/{id}.
+   * Editing: only changed fields are sent; an empty key means "unchanged", but
+   * changing the endpoint (protocol / base_url / auto_append_path) REQUIRES a
+   * (new) key: the stored key would be sent to a different address.
+   */
+  function buildProviderPayload(form, existing) {
+    const errors = [];
+    const name = String(form.name || "").trim();
+    const protocol = String(form.protocol || "");
+    const apiKey = String(form.api_key || "").trim();
+    const baseUrlRes = validateBaseUrl(form.base_url);
+    const autoAppend = form.auto_append_path === undefined ? true : form.auto_append_path !== false;
+
+    if (!name) errors.push("名称为必填项");
+    else if (hasControlChars(name)) errors.push("名称含有非法控制字符");
+    if (!PROTOCOLS.some((p) => p.id === protocol)) errors.push("请选择协议");
+    if (!baseUrlRes.ok) errors.push(baseUrlRes.error);
+    if (apiKey && hasControlChars(apiKey)) errors.push("API Key 含有非法控制字符");
+
+    if (!existing) {
+      if (!apiKey) errors.push("API Key 为必填项");
+      if (errors.length) return { ok: false, errors };
+      return {
+        ok: true,
+        payload: {
+          name,
+          protocol,
+          base_url: baseUrlRes.value,
+          api_key: apiKey,
+          auto_append_path: autoAppend,
+        },
+      };
+    }
+
+    const payload = {};
+    if (name && name !== existing.name) payload.name = name;
+    const protocolChanged = protocol !== existing.protocol;
+    const baseChanged = baseUrlRes.ok && baseUrlRes.value !== existing.base_url;
+    const autoChanged = autoAppend !== providerAutoAppend(existing);
+    if (protocolChanged) payload.protocol = protocol;
+    if (baseChanged) payload.base_url = baseUrlRes.value;
+    if (autoChanged) payload.auto_append_path = autoAppend;
+    if ((protocolChanged || baseChanged || autoChanged) && !apiKey) {
+      errors.push("修改协议、Base URL 或自动拼接路径时必须重新输入 API Key");
+    }
+    if (apiKey) payload.api_key = apiKey;
+    if (errors.length) return { ok: false, errors };
+    return { ok: true, payload };
+  }
+
+  /** v0.11: providers stored before auto_append_path existed keep the v0.10 behaviour. */
+  function providerAutoAppend(provider) {
+    return !(provider && provider.auto_append_path === false);
+  }
+
+  /** "add" when the model id is new for this provider, otherwise "edit". */
+  function modelFormMode(provider, modelId) {
+    const id = String(modelId || "");
+    const exists = Boolean(provider && (provider.models || []).some((m) => m.id === id));
+    return exists ? "edit" : "add";
+  }
+
+  /** Body for POST (add) / PATCH (edit) of a single model. Prices are mandatory. */
+  function buildModelPayload(form) {
+    const errors = [];
+    const modelId = String(form.model_id || "").trim();
+    if (!modelId) errors.push("请选择或填写一个模型");
+    else if (hasControlChars(modelId)) errors.push("模型 ID 含有非法控制字符");
+    const pin = validatePrice(form.input_price_per_m, "输入价格");
+    const pout = validatePrice(form.output_price_per_m, "输出价格");
+    if (!pin.ok) errors.push(pin.error);
+    if (!pout.ok) errors.push(pout.error);
+    const ctx = validateContextWindow(form.context_window_tokens);
+    if (!ctx.ok) errors.push(ctx.error);
+    if (errors.length) return { ok: false, errors };
+    const payload = {
+      model_id: modelId,
+      input_price_per_m: pin.value,
+      output_price_per_m: pout.value,
+    };
+    if (ctx.value !== undefined) payload.context_window_tokens = ctx.value;
+    return { ok: true, payload };
+  }
+
+  /** Model / depth bindings are locked while a game is running. */
+  function bindingsLocked(session) {
+    return Boolean(session && session.status === "running");
+  }
+
+  function findProvider(providers, id) {
+    return (providers || []).find((p) => p.id === id) || null;
+  }
+
+  function findModel(provider, modelId) {
+    return provider ? (provider.models || []).find((m) => m.id === modelId) || null : null;
+  }
+
+  /** Human readable one-liner for a binding. */
+  function bindingSummary(binding, providers) {
+    if (!binding || !binding.provider_id || !binding.model_id) return "未绑定";
+    const provider = findProvider(providers, binding.provider_id);
+    const model = findModel(provider, binding.model_id);
+    if (!provider || !model) return "⚠ 绑定失效（需重新绑定）";
+    return `${provider.name} / ${model.id} · ${binding.reasoning_depth || "high"}`;
+  }
+
+  /**
+   * rows: [{actor_id, label?, provider_id, model_id, reasoning_depth}]
+   * Only rows with a provider+model are sent; a provider without a model is an error.
+   */
+  function buildBindingsPayload(rows, providers) {
+    const errors = [];
+    const bindings = {};
+    for (const r of rows) {
+      const hasP = !isBlank(r.provider_id);
+      const hasM = !isBlank(r.model_id);
+      if (!hasP && !hasM) continue;
+      const label = r.label || r.actor_id;
+      if (!hasP || !hasM) {
+        errors.push(`${label}：请同时选择 Provider 和模型`);
+        continue;
+      }
+      const provider = findProvider(providers, r.provider_id);
+      const model = findModel(provider, r.model_id);
+      if (!provider || !model) {
+        errors.push(`${label}：所选 Provider/模型不存在`);
+        continue;
+      }
+      const depth = REASONING_DEPTHS.some((d) => d.id === r.reasoning_depth)
+        ? r.reasoning_depth
+        : "high";
+      const b = { provider_id: provider.id, model_id: model.id, reasoning_depth: depth };
+      if (typeof model.context_window_tokens === "number") {
+        b.context_window_tokens = model.context_window_tokens;
+      }
+      bindings[r.actor_id] = b;
+    }
+    if (errors.length) return { ok: false, errors };
+    return { ok: true, payload: { bindings } };
+  }
+
+  /** Copy the moderator row's provider/model/depth to every participant row. */
+  function applyModeratorToAll(rows) {
+    const mod = rows.find((r) => r.actor_id === "moderator");
+    if (!mod) return rows;
+    return rows.map((r) =>
+      r.actor_id === "moderator"
+        ? r
+        : {
+            ...r,
+            provider_id: mod.provider_id,
+            model_id: mod.model_id,
+            reasoning_depth: mod.reasoning_depth,
+          }
+    );
+  }
+
+  /** Normalize GET /sessions (array or {sessions:[..]}) to a list of objects. */
+  function normalizeSessions(resp) {
+    const list = Array.isArray(resp)
+      ? resp
+      : resp && Array.isArray(resp.sessions)
+        ? resp.sessions
+        : [];
+    return list
+      .filter((s) => s && typeof s === "object")
+      .map((s) => ({ ...s, session_id: s.session_id || s.id || "" }))
+      .filter((s) => s.session_id);
+  }
+
+  /** Total cost: the server accumulates per-call price snapshots. */
+  function sessionCostUsd(usage) {
+    return usage && typeof usage.total_cost_usd === "number" && Number.isFinite(usage.total_cost_usd)
+      ? usage.total_cost_usd
+      : 0;
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.11: layout / card size (DOM-free helpers used by layout.js)
+  // -------------------------------------------------------------------------
+
+  const LAYOUT_STORAGE_KEY = "arena_layout_v1";
+  const CARD_SIZE_STORAGE_KEY = "arena_card_size_v1";
+
+  const LAYOUT_DEFAULTS = Object.freeze({
+    boardCollapsed: false,
+    leftCollapsed: false,
+    rightCollapsed: false,
+    boardHeight: null, // null => natural height (auto)
+    leftWidth: 245,
+    rightWidth: 275,
+  });
+
+  const PANEL_LIMITS = Object.freeze({
+    left: Object.freeze({ min: 170, max: 640 }),
+    right: Object.freeze({ min: 170, max: 640 }),
+    board: Object.freeze({ min: 96, maxRatio: 0.75 }),
+  });
+
+  const CARD_SIZES = [
+    { id: "compact", label: "紧凑" },
+    { id: "standard", label: "标准" },
+    { id: "large", label: "大" },
+    { id: "xlarge", label: "超大" },
+  ];
+
+  function clampNumber(value, min, max, fallback) {
+    const n = typeof value === "number" ? value : Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(max, Math.max(min, Math.round(n)));
+  }
+
+  function normalizeCardSize(id) {
+    const s = String(id === undefined || id === null ? "" : id).trim();
+    return CARD_SIZES.some((c) => c.id === s) ? s : "standard";
+  }
+
+  function normalizeLayoutState(raw) {
+    const src = raw && typeof raw === "object" ? raw : {};
+    const leftWidth = clampNumber(
+      src.leftWidth,
+      PANEL_LIMITS.left.min,
+      PANEL_LIMITS.left.max,
+      LAYOUT_DEFAULTS.leftWidth
+    );
+    const rightWidth = clampNumber(
+      src.rightWidth,
+      PANEL_LIMITS.right.min,
+      PANEL_LIMITS.right.max,
+      LAYOUT_DEFAULTS.rightWidth
+    );
+    const rawBoard = Number(src.boardHeight);
+    const boardHeight =
+      src.boardHeight === null || src.boardHeight === undefined || !Number.isFinite(rawBoard)
+        ? null
+        : rawBoard >= PANEL_LIMITS.board.min
+          ? Math.round(rawBoard)
+          : null;
+    return {
+      boardCollapsed: Boolean(src.boardCollapsed),
+      leftCollapsed: Boolean(src.leftCollapsed),
+      rightCollapsed: Boolean(src.rightCollapsed),
+      boardHeight,
+      leftWidth,
+      rightWidth,
+    };
+  }
+
+  function loadLayoutState(storage) {
+    try {
+      const raw = storage && storage.getItem ? storage.getItem(LAYOUT_STORAGE_KEY) : null;
+      if (!raw) return normalizeLayoutState(null);
+      return normalizeLayoutState(JSON.parse(raw));
+    } catch {
+      return normalizeLayoutState(null);
+    }
+  }
+
+  function saveLayoutState(storage, state) {
+    const normalized = normalizeLayoutState(state);
+    try {
+      if (storage && storage.setItem) {
+        storage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(normalized));
+      }
+    } catch {
+      /* storage unavailable: keep the in-memory state only */
+    }
+    return normalized;
+  }
+
+  function loadCardSize(storage) {
+    try {
+      return normalizeCardSize(
+        storage && storage.getItem ? storage.getItem(CARD_SIZE_STORAGE_KEY) : ""
+      );
+    } catch {
+      return "standard";
+    }
+  }
+
+  function saveCardSize(storage, id) {
+    const size = normalizeCardSize(id);
+    try {
+      if (storage && storage.setItem) storage.setItem(CARD_SIZE_STORAGE_KEY, size);
+    } catch {
+      /* ignore */
+    }
+    return size;
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.11: Provider auto_append_path + endpoint preview
+  // -------------------------------------------------------------------------
+
+  /** Body for POST /api/providers/endpoint-preview; validates locally first. */
+  function buildEndpointPreviewBody(form) {
+    const protocol = String((form && form.protocol) || "");
+    if (!PROTOCOLS.some((p) => p.id === protocol)) return { ok: false, error: "请选择协议" };
+    const base = validateBaseUrl(form && form.base_url);
+    if (!base.ok) return { ok: false, error: base.error };
+    return {
+      ok: true,
+      payload: {
+        protocol,
+        base_url: base.value,
+        auto_append_path: !(form && form.auto_append_path === false),
+      },
+    };
+  }
+
+  function normalizeEndpointPreview(resp) {
+    const r = resp && typeof resp === "object" ? resp : {};
+    const warnings = Array.isArray(r.warnings)
+      ? r.warnings.filter((w) => typeof w === "string" && w.trim())
+      : [];
+    return {
+      auto_append_path: r.auto_append_path !== false,
+      request_url: typeof r.request_url === "string" ? r.request_url.trim() : "",
+      models_url:
+        typeof r.models_url === "string" && r.models_url.trim() ? r.models_url.trim() : null,
+      warnings,
+    };
+  }
+
+  /** Model discovery is only possible when the server path is auto-appended. */
+  function canDiscoverModels(provider) {
+    return providerAutoAppend(provider) && !(provider && provider.read_only);
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.11: model templates (3 fixed slots)
+  // -------------------------------------------------------------------------
+
+  const TEMPLATE_SLOTS = 3;
+
+  /** Normalize GET/PUT /api/settings/templates -> {slots, locked, bySlot}. */
+  function normalizeTemplates(resp) {
+    const r = resp && typeof resp === "object" && !Array.isArray(resp) ? resp : {};
+    const list = Array.isArray(resp) ? resp : Array.isArray(r.templates) ? r.templates : [];
+    const declared = Number.isInteger(r.slots) ? r.slots : TEMPLATE_SLOTS;
+    const slots = declared >= 1 && declared <= 9 ? declared : TEMPLATE_SLOTS;
+    const bySlot = {};
+    for (const item of list) {
+      if (!item || typeof item !== "object") continue;
+      const slot = Number(item.slot);
+      if (!Number.isInteger(slot) || slot < 1 || slot > slots || bySlot[slot]) continue;
+      const providerId = typeof item.provider_id === "string" ? item.provider_id.trim() : "";
+      const modelId = typeof item.model_id === "string" ? item.model_id.trim() : "";
+      if (!providerId || !modelId) continue;
+      const depth = REASONING_DEPTHS.some((d) => d.id === item.reasoning_depth)
+        ? item.reasoning_depth
+        : "high";
+      bySlot[slot] = {
+        slot,
+        name:
+          typeof item.name === "string" && item.name.trim()
+            ? item.name.trim()
+            : `模板${slot}`,
+        provider_id: providerId,
+        model_id: modelId,
+        reasoning_depth: depth,
+        valid: item.valid !== false,
+      };
+    }
+    return { slots, locked: Boolean(r.locked), bySlot };
+  }
+
+  /** Editable rows for every template slot (saved values merged over blanks). */
+  function templateRows(normalized) {
+    const n =
+      normalized && typeof normalized === "object"
+        ? normalized
+        : normalizeTemplates(null);
+    const slots = n.slots || TEMPLATE_SLOTS;
+    const rows = [];
+    for (let slot = 1; slot <= slots; slot++) {
+      const t = n.bySlot ? n.bySlot[slot] : null;
+      rows.push({
+        slot,
+        name: t ? t.name : "",
+        provider_id: t ? t.provider_id : "",
+        model_id: t ? t.model_id : "",
+        reasoning_depth: t ? t.reasoning_depth : "high",
+        valid: t ? t.valid !== false : true,
+        saved: Boolean(t),
+      });
+    }
+    return rows;
+  }
+
+  /** An empty slot is skipped; a partially filled slot is an error (never silent). */
+  function buildTemplatesPayload(rows, providers) {
+    const errors = [];
+    const templates = [];
+    for (const row of rows || []) {
+      if (!row) continue;
+      const slot = Number(row.slot);
+      if (!Number.isInteger(slot) || slot < 1 || slot > TEMPLATE_SLOTS) continue;
+      const name = String(row.name || "").trim();
+      const providerId = String(row.provider_id || "").trim();
+      const modelId = String(row.model_id || "").trim();
+      if (!name && !providerId && !modelId) continue; // untouched slot: leave it empty
+      const label = `模板${slot}`;
+      if (!providerId || !modelId) {
+        errors.push(`${label}：请同时选择 Provider 和模型`);
+        continue;
+      }
+      if (hasControlChars(name)) {
+        errors.push(`${label}：名称含有非法控制字符`);
+        continue;
+      }
+      const provider = findProvider(providers, providerId);
+      const model = findModel(provider, modelId);
+      if (!provider || !model) {
+        errors.push(`${label}：所选 Provider/模型不存在`);
+        continue;
+      }
+      const depth = REASONING_DEPTHS.some((d) => d.id === row.reasoning_depth)
+        ? row.reasoning_depth
+        : "high";
+      templates.push({
+        slot,
+        name: name || label,
+        provider_id: provider.id,
+        model_id: model.id,
+        reasoning_depth: depth,
+      });
+    }
+    if (errors.length) return { ok: false, errors };
+    return { ok: true, payload: { templates } };
+  }
+
+  function templateRowComplete(row) {
+    return Boolean(
+      row && String(row.provider_id || "").trim() && String(row.model_id || "").trim()
+    );
+  }
+
+  function selectedActorIds(rows) {
+    const out = [];
+    for (const row of rows || []) {
+      if (row && row.selected && row.actor_id && !out.includes(row.actor_id)) {
+        out.push(row.actor_id);
+      }
+    }
+    return out;
+  }
+
+  /** Display summary for one template (used by apply hints / validity badges). */
+  function templateSummary(row, providers) {
+    if (!row || !row.provider_id || !row.model_id) return "未填写";
+    const provider = findProvider(providers, row.provider_id);
+    const model = findModel(provider, row.model_id);
+    if (!provider || !model) return "⚠ 引用失效";
+    return `${provider.name} / ${model.id} · ${row.reasoning_depth || "high"}`;
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.11: workspace (工作文件夹)
+  // -------------------------------------------------------------------------
+
+  const WORKSPACE_DEFAULT_LABEL = "工作文件夹";
+
+  function workspaceNameFromPath(path) {
+    const parts = String(path === undefined || path === null ? "" : path)
+      .replace(/[\\/]+$/, "")
+      .split(/[\\/]/)
+      .filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : "";
+  }
+
+  /** Normalize one workspace descriptor; returns null when it carries nothing useful. */
+  function normalizeWorkspaceInfo(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const path = typeof raw.path === "string" ? raw.path.trim() : "";
+    let name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (!name) name = workspaceNameFromPath(path);
+    const id = raw.id === undefined || raw.id === null ? "" : String(raw.id);
+    if (!name && !path && !id) return null;
+    return {
+      id,
+      name: name || WORKSPACE_DEFAULT_LABEL,
+      path: path || null,
+      last_session:
+        raw.last_session === undefined || raw.last_session === null ? null : raw.last_session,
+      status: typeof raw.status === "string" ? raw.status : "",
+      degraded: Boolean(raw.degraded),
+    };
+  }
+
+  function normalizeRecentWorkspaces(list) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const item of list) {
+      const info = normalizeWorkspaceInfo(item);
+      if (!info) continue;
+      const key = info.path || info.id || info.name;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(info);
+    }
+    return out;
+  }
+
+  /** Normalize GET /api/workspaces -> {enabled, current, recent, default_path, native_picker}. */
+  function normalizeWorkspaces(resp) {
+    const r = resp && typeof resp === "object" && !Array.isArray(resp) ? resp : {};
+    return {
+      enabled: r.enabled !== false,
+      current: normalizeWorkspaceInfo(r.current),
+      recent: normalizeRecentWorkspaces(r.recent),
+      default_path: typeof r.default_path === "string" && r.default_path.trim()
+        ? r.default_path.trim()
+        : null,
+      native_picker: r.native_picker !== false,
+    };
+  }
+
+  /** Client-side sanity check; the server still validates the real path rules. */
+  function validateWorkspacePath(raw) {
+    const s = String(raw === undefined || raw === null ? "" : raw).trim();
+    if (!s) return { ok: false, error: "请选择或输入工作文件夹的绝对路径" };
+    if (hasControlChars(s)) return { ok: false, error: "路径含有非法控制字符" };
+    const winAbs = /^[A-Za-z]:[\\/]/.test(s) || /^\\\\[^\\]/.test(s);
+    const posixAbs = /^\//.test(s);
+    if (!winAbs && !posixAbs) {
+      return { ok: false, error: "必须输入绝对路径（例如 D:\\Arena-Workspace\\MyWorkspace）" };
+    }
+    if (/^[A-Za-z]:[\\/]?$/.test(s) || s === "/") {
+      return { ok: false, error: "不能选择磁盘根目录" };
+    }
+    return { ok: true, value: s };
+  }
+
+  /** Body for POST /api/workspaces/select (optional flags only when ticked). */
+  function buildWorkspaceSelectPayload(form) {
+    const checked = validateWorkspacePath(form && form.path);
+    if (!checked.ok) return checked;
+    const payload = { path: checked.value };
+    if (form && form.initialize_existing) payload.initialize_existing = true;
+    if (form && form.create_if_missing) payload.create_if_missing = true;
+    return { ok: true, payload };
+  }
+
+  /** Workspace switching must be refused while a game is running (pause first). */
+  function workspaceSwitchBlocked(session) {
+    return Boolean(session && session.status === "running");
+  }
+
+  function workspacePathDisplay(info) {
+    if (!info) return "";
+    return info.path || "（远程访问不显示完整路径）";
+  }
+
+  return {
+    PROTOCOLS,
+    REASONING_DEPTHS,
+    protocolLabel,
+    normalizeProviders,
+    normalizeModelIds,
+    validatePrice,
+    validateContextWindow,
+    validateBaseUrl,
+    buildProviderPayload,
+    providerAutoAppend,
+    buildEndpointPreviewBody,
+    normalizeEndpointPreview,
+    canDiscoverModels,
+    modelFormMode,
+    buildModelPayload,
+    bindingsLocked,
+    findProvider,
+    findModel,
+    bindingSummary,
+    buildBindingsPayload,
+    applyModeratorToAll,
+    normalizeSessions,
+    sessionCostUsd,
+    // v0.11
+    LAYOUT_STORAGE_KEY,
+    CARD_SIZE_STORAGE_KEY,
+    LAYOUT_DEFAULTS,
+    PANEL_LIMITS,
+    CARD_SIZES,
+    normalizeCardSize,
+    clampNumber,
+    normalizeLayoutState,
+    loadLayoutState,
+    saveLayoutState,
+    loadCardSize,
+    saveCardSize,
+    TEMPLATE_SLOTS,
+    normalizeTemplates,
+    templateRows,
+    buildTemplatesPayload,
+    templateRowComplete,
+    selectedActorIds,
+    templateSummary,
+    WORKSPACE_DEFAULT_LABEL,
+    workspaceNameFromPath,
+    normalizeWorkspaceInfo,
+    normalizeWorkspaces,
+    validateWorkspacePath,
+    buildWorkspaceSelectPayload,
+    workspaceSwitchBlocked,
+    workspacePathDisplay,
+    escapeHtml,
+    safeNum,
+    numText,
+    stripMarkdownForPreview,
+    renderInlineFormatting,
+    renderFormattedBlocks,
+    renderFormattedText,
+    boundedSet,
+    prefixFromScriptPath,
+    joinUrl,
+    buildEventsUrl,
+    computeBackoff,
+    ApiError,
+    formatDetail,
+    describeHttpError,
+    readBody,
+    createApiClient,
+  };
+});

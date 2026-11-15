@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arena-Agents</title>
+  <!-- 相对路径：本地 "/" 与子路径反代（如 /arena/）均可用；页面需带结尾斜杠访问 -->
+  <link rel="stylesheet" href="static/css/style.css?v=0.11" />
+</head>
+<body>
+  <!-- 顶部导航与控制栏 -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="brand-group">
+        <span class="brand-title" id="app-title">Arena-Agents</span>
+        <span class="version-badge" id="app-version"></span>
+      </div>
+
+      <!-- v0.11: 工作文件夹入口（Provider / 模板 / 绑定 / 对局都保存在工作文件夹内） -->
+      <button class="btn btn-workspace" id="btn-open-workspace-modal" title="选择工作文件夹（Provider、模板、模型绑定与对局存档都保存在该文件夹内）">
+        <span class="folder-icon" aria-hidden="true">📁</span>
+        <span class="workspace-name" id="workspace-name-label">工作文件夹</span>
+      </button>
+
+      <button class="btn btn-xs layout-toggle" id="btn-toggle-board" title="折叠/展开参与者看板" aria-pressed="false">
+        <span id="btn-toggle-board-label">折叠看板</span>
+      </button>
+
+      <button class="btn btn-theme" id="btn-theme" title="切换明暗主题">
+        <span class="theme-icon">◐</span> 主题
+      </button>
+
+      <div class="status-pill" id="active-status-pill">
+        <span class="status-dot idle" id="active-status-dot"></span>
+        <span id="active-status-text">未开始 · 点击「开始」由主持人初始化对局</span>
+      </div>
+
+      <div class="phase-pill" id="phase-pill">
+        未开始 · 等待主持人初始化
+      </div>
+    </div>
+
+    <div class="topbar-right">
+      <div class="usage-telemetry-pill" id="usage-telemetry-pill" title="点击打开模型绑定（费用按每次调用的价格快照累加）">
+        <span class="usage-icon">🪙</span>
+        <span id="usage-tokens-text">0 Tokens</span>
+        <span class="usage-sep">&middot;</span>
+        <span class="usage-cost" id="usage-cost-text">$0.0000</span>
+      </div>
+      <span class="topbar-divider"></span>
+      <button class="btn btn-default" id="btn-new" title="重置并开启新对局">新建</button>
+      <button class="btn btn-default" id="btn-save" title="保存并导出当前对局 JSON">保存</button>
+      <span class="topbar-divider"></span>
+      <button class="btn btn-primary-outline" id="btn-start">开始</button>
+      <button class="btn btn-default" id="btn-pause" disabled>暂停</button>
+      <button class="btn btn-resume" id="btn-resume" disabled>继续</button>
+      <button class="btn btn-danger-outline" id="btn-force-pause" disabled>强制暂停</button>
+    </div>
+  </header>
+
+  <!-- 恢复/绑定提示条（仅在需要时显示，不会自动开始对局） -->
+  <div class="notice-bar" id="restore-notice" hidden>
+    <span id="restore-notice-text"></span>
+    <button class="btn btn-xs" id="btn-notice-bindings">查看模型绑定</button>
+    <button class="btn btn-xs" id="btn-dismiss-notice">知道了</button>
+  </div>
+
+  <!-- 主体容器 -->
+  <main class="main-container" id="main-container">
+    <!-- 上半部分：参与者看板 -->
+    <section class="board-section" id="board-section">
+      <div class="board-header">
+        <div class="board-header-left">
+          <h2 class="section-title">参与者看板</h2>
+          <button class="btn btn-xs" id="btn-shuffle-identities" title="重新随机生成开局身份种子（由主持人开局运行时赋予标签）">刷新身份</button>
+          <span class="board-subtitle">新对局由可执行 Markdown 剧本驱动；参与者属性与频道由通用引擎维护</span>
+        </div>
+        <div class="board-header-right">
+          <!-- v0.11: 玩家卡片尺寸档位（紧凑/标准/大/超大，保存在 localStorage） -->
+          <div class="card-size-picker" title="玩家卡片尺寸档位（保存在本机浏览器）">
+            <span class="depth-icon">▦</span>
+            <label for="select-card-size" class="exec-depth-label">卡片:</label>
+            <select id="select-card-size" class="exec-depth-select">
+              <option value="compact">紧凑</option>
+              <option value="standard" selected>标准</option>
+              <option value="large">大</option>
+              <option value="xlarge">超大</option>
+            </select>
+          </div>
+
+          <!-- 右上角：主持人实时工作状态指示器 -->
+          <div class="moderator-status-pill" id="moderator-status-pill" title="主持人 Agent 实时工作状态">
+            <span class="mod-dot" id="moderator-status-dot"></span>
+            <span class="mod-label">主持人:</span>
+            <span class="mod-text" id="moderator-status-text">待命 · 等待开局</span>
+          </div>
+
+          <!-- 执行深度选择档位 (v0.6) -->
+          <div class="exec-depth-picker" title="执行深度 = 玩家 Agent 每轮行动的最大工具调用预算（主持人无限制）。注意：这不是模型的“思考深度”，思考深度请在「模型绑定」中按角色设置。">
+            <span class="depth-icon">⚡</span>
+            <label for="select-exec-depth" class="exec-depth-label">执行深度:</label>
+            <select id="select-exec-depth" class="exec-depth-select">
+              <option value="low">Low (浅度)</option>
+              <option value="medium" selected>Medium (标准)</option>
+              <option value="high">High (深度)</option>
+              <option value="xhigh">XHigh (极深)</option>
+            </select>
+          </div>
+
+          <input type="file" id="file-import-session" accept=".json" style="display: none" />
+          <button class="btn btn-xs" id="btn-import-session" title="导入已保存的对局 JSON 文件">导入存档</button>
+          <button class="btn btn-xs" id="btn-open-sessions-modal" title="查看/删除保存在服务端外部数据目录的对局存档">会话</button>
+          <button class="btn btn-xs" id="btn-open-bindings-modal" title="为主持人与每位玩家选择 Provider / 模型 / 思考深度">
+            <span id="api-status-dot" class="api-dot"></span>
+            <span id="api-status-label">模型绑定</span>
+          </button>
+          <button class="btn btn-xs" id="btn-open-provider-modal" title="管理 Provider（协议、Base URL、API Key、模型与价格）">Provider</button>
+        </div>
+      </div>
+
+      <div class="participants-grid" id="participants-grid">
+        <!-- 由 JS 动态渲染 12 张座位卡片 -->
+      </div>
+    </section>
+
+    <!-- 看板与下方工作区之间的横向拖动条（双击恢复默认高度） -->
+    <div class="row-resizer" id="board-resizer" role="separator" aria-orientation="horizontal"
+         title="拖动调整看板高度，双击恢复默认高度"></div>
+
+    <!-- 下半部分：三栏工作区（频道 / 信息流 / 对局状态） -->
+    <section class="workspace-grid" id="workspace-grid">
+      <!-- 左栏：频道列表 -->
+      <aside class="channels-panel" id="channels-panel">
+        <div class="panel-header">
+          <h3 class="panel-title">频道</h3>
+          <button class="btn btn-xs panel-toggle" id="btn-toggle-channels" title="折叠/展开左侧频道栏" aria-pressed="false">◀</button>
+        </div>
+        <div class="channels-list" id="channels-list">
+          <!-- 由 JS 动态渲染：主持人处理流 / 全部 / 以及主持人动态创建的频道 -->
+        </div>
+      </aside>
+
+      <!-- 左栏宽度拖动条（双击恢复默认宽度） -->
+      <div class="col-resizer" id="channels-resizer" role="separator" aria-orientation="vertical"
+           title="拖动调整频道栏宽度，双击恢复默认宽度"></div>
+
+      <!-- 中栏：实时信息流 -->
+      <section class="feed-panel">
+        <div class="panel-header feed-header">
+          <div class="feed-header-left">
+            <h3 class="panel-title">信息流</h3>
+            <span class="feed-channel-label" id="feed-channel-label">频道: 全部记录</span>
+          </div>
+          <div class="feed-header-right">
+            <label class="checkbox-label">
+              <input type="checkbox" id="chk-show-tools" checked />
+              <span>显示工具调用</span>
+            </label>
+            <button class="btn btn-xs" id="btn-reset-default" title="恢复默认折叠（一级行动展开，二级仅发言展开，思维链与工具折叠）">恢复默认</button>
+            <button class="btn btn-xs" id="btn-expand-all" title="全展开（一级行动与二级思维链/工具/发言全部展开）">全展开</button>
+            <button class="btn btn-xs" id="btn-collapse-all" title="全折叠（一级行动卡片全部折叠）">全折叠</button>
+          </div>
+        </div>
+
+        <div class="feed-list" id="feed-list">
+          <div id="feed-records-container" class="feed-records-container"></div>
+          <div id="feed-streaming-container" class="feed-streaming-container"></div>
+        </div>
+      </section>
+
+      <!-- 右栏宽度拖动条（双击恢复默认宽度） -->
+      <div class="col-resizer" id="dashboard-resizer" role="separator" aria-orientation="vertical"
+           title="拖动调整状态栏宽度，双击恢复默认宽度"></div>
+
+      <!-- 右栏：对局状态 -->
+      <aside class="dashboard-panel" id="dashboard-panel">
+        <div class="panel-header">
+          <h3 class="panel-title">对局状态</h3>
+          <button class="btn btn-xs panel-toggle" id="btn-toggle-dashboard" title="折叠/展开右侧状态栏" aria-pressed="false">▶</button>
+        </div>
+        <div class="dashboard-content">
+          <div class="stat-card">
+            <div class="stat-card-title">阵营</div>
+            <div class="stat-rows" id="factions-list">
+              <!-- 由主持人调用 update_dashboard 动态写入 -->
+            </div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-card-title">标签统计</div>
+            <div class="stat-rows" id="tag-stats-list">
+              <!-- 由主持人调用 update_dashboard 动态写入 -->
+            </div>
+          </div>
+
+          <div class="isolation-note">
+            可见性同时校验当前频道成员与消息产生时的成员快照；后加入者不能回看敏感历史。
+          </div>
+        </div>
+      </aside>
+    </section>
+  </main>
+
+  <!-- Provider 管理弹窗 -->
+  <div class="modal-backdrop" id="provider-modal" style="display: none">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <span class="modal-title">Provider 管理</span>
+        <button class="btn btn-xs" id="btn-close-provider-modal">✕</button>
+      </div>
+      <div class="modal-body provider-layout">
+        <div class="provider-list-col">
+          <div class="provider-list" id="provider-list"></div>
+          <button class="btn btn-primary-outline" id="btn-new-provider">＋ 新增 Provider</button>
+        </div>
+        <div class="provider-edit-col">
+          <form id="provider-form" autocomplete="off">
+            <div class="form-group">
+              <label class="form-label" for="input-provider-name">名称</label>
+              <input type="text" class="form-input" id="input-provider-name" placeholder="自定义名称" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="select-provider-protocol">协议</label>
+              <select class="form-input" id="select-provider-protocol"></select>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="input-provider-base-url">Base URL</label>
+              <input type="text" class="form-input" id="input-provider-base-url" placeholder="https://..." />
+            </div>
+            <div class="form-group">
+              <label class="checkbox-label" for="chk-auto-append">
+                <input type="checkbox" id="chk-auto-append" checked />
+                <span>自动拼接路径（Base URL 作为根地址，自动补全 /v1/chat/completions 等路径）</span>
+              </label>
+              <span class="form-hint" id="auto-append-hint"></span>
+            </div>
+            <div class="endpoint-preview" id="endpoint-preview">
+              <div class="endpoint-preview-title">最终请求地址（由服务端 endpoint-preview 计算）</div>
+              <div class="endpoint-preview-status form-hint" id="endpoint-preview-status">填写 Base URL 后显示</div>
+              <div class="endpoint-preview-row">
+                <span class="endpoint-preview-label">消息 API</span>
+                <code class="endpoint-preview-url" id="endpoint-preview-message-url">—</code>
+              </div>
+              <div class="endpoint-preview-row">
+                <span class="endpoint-preview-label">获取模型 API</span>
+                <code class="endpoint-preview-url" id="endpoint-preview-models-url">—</code>
+              </div>
+              <div class="endpoint-preview-warnings" id="endpoint-preview-warnings" hidden></div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="input-provider-key">API Key</label>
+              <input type="password" class="form-input" id="input-provider-key" autocomplete="off" placeholder="sk-..." />
+              <span class="form-hint" id="hint-provider-key"></span>
+            </div>
+            <div class="form-error" id="provider-form-error" hidden></div>
+            <div class="provider-form-actions">
+              <button type="submit" class="btn btn-primary-outline" id="btn-save-provider">保存 Provider</button>
+              <button type="button" class="btn btn-danger-outline" id="btn-delete-provider">删除</button>
+            </div>
+          </form>
+
+          <div class="provider-models" id="provider-models-section" hidden>
+            <div class="provider-section-title">模型与价格（每次只添加一个模型）</div>
+            <div class="model-list" id="provider-model-list"></div>
+
+            <div class="provider-section-title">添加 / 编辑模型</div>
+            <div class="provider-discover-row">
+              <button type="button" class="btn btn-xs" id="btn-discover-models">获取模型</button>
+              <span class="form-hint" id="discover-status"></span>
+            </div>
+            <div class="discover-list" id="discover-list" role="radiogroup" aria-label="选择一个模型"></div>
+            <form id="model-form" autocomplete="off">
+              <div class="form-group">
+                <label class="form-label" for="input-model-id">模型 ID（从上方单选，或手动输入）</label>
+                <input type="text" class="form-input" id="input-model-id" placeholder="模型 ID" />
+              </div>
+              <div class="form-row-two">
+                <div class="form-group">
+                  <label class="form-label" for="input-model-price-in">输入价格 ($ / 1M Tokens，必填)</label>
+                  <input type="text" inputmode="decimal" class="form-input" id="input-model-price-in" placeholder="必填" />
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="input-model-price-out">输出价格 ($ / 1M Tokens，必填)</label>
+                  <input type="text" inputmode="decimal" class="form-input" id="input-model-price-out" placeholder="必填" />
+                </div>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="input-model-ctx">上下文窗口 (Tokens，可选，留空使用后端默认)</label>
+                <input type="text" inputmode="numeric" class="form-input" id="input-model-ctx" placeholder="可选" />
+              </div>
+              <div class="form-error" id="model-form-error" hidden></div>
+              <button type="submit" class="btn btn-primary-outline" id="btn-submit-model">添加模型</button>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模型绑定弹窗：主持人与每位玩家的 Provider / 模型 / 思考深度 -->
+  <div class="modal-backdrop" id="bindings-modal" style="display: none">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <span class="modal-title">模型绑定（思考深度 ≠ 执行深度）</span>
+        <button class="btn btn-xs" id="btn-close-bindings-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-hint" id="bindings-lock-hint"></div>
+        <div class="binding-issues" id="bindings-issues" hidden></div>
+
+        <!-- v0.11: 3 个模板槽位（名称 / Provider / 模型 / 思考深度），可编辑并保存 -->
+        <div class="templates-section" id="templates-section">
+          <div class="templates-header">
+            <span class="provider-section-title">模型模板（固定 3 个槽位）</span>
+            <span class="form-hint" id="templates-lock-hint"></span>
+          </div>
+          <div class="template-slots" id="template-slots"></div>
+          <div class="form-error" id="templates-error" hidden></div>
+          <div class="templates-actions">
+            <button type="button" class="btn btn-xs" id="btn-save-templates">保存模板</button>
+            <span class="topbar-divider"></span>
+            <button type="button" class="btn btn-xs" id="btn-select-all-actors" title="勾选全部角色">全选玩家</button>
+            <button type="button" class="btn btn-xs" id="btn-select-none-actors" title="取消勾选全部角色">全不选</button>
+            <span class="topbar-divider"></span>
+            <button type="button" class="btn btn-xs btn-primary-outline" id="btn-apply-template-1" title="把模板1应用到已勾选的角色">应用模板1</button>
+            <button type="button" class="btn btn-xs btn-primary-outline" id="btn-apply-template-2" title="把模板2应用到已勾选的角色">应用模板2</button>
+            <button type="button" class="btn btn-xs btn-primary-outline" id="btn-apply-template-3" title="把模板3应用到已勾选的角色">应用模板3</button>
+            <span class="form-hint" id="template-apply-hint"></span>
+          </div>
+        </div>
+
+        <!-- 高级手动绑定保留为折叠区；模板应用是主要入口 -->
+        <details class="advanced-bindings" id="advanced-bindings">
+          <summary>高级手动绑定（逐角色选择 Provider / 模型 / 思考深度）</summary>
+          <div class="bindings-table" id="bindings-table"></div>
+        </details>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-xs" id="btn-bindings-apply-all" title="把主持人的 Provider / 模型 / 思考深度复制到所有玩家">主持人设置应用到全部玩家</button>
+        <button class="btn btn-default" id="btn-cancel-bindings">关闭</button>
+        <button class="btn btn-primary-outline" id="btn-save-bindings">保存绑定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.11: 工作文件夹弹窗（当前工作区 / 最近工作区 / native picker / 手输路径 / 切换 / 载入本工作区对局） -->
+  <div class="modal-backdrop" id="workspace-modal" style="display: none">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <span class="modal-title">工作文件夹</span>
+        <button class="btn btn-xs" id="btn-close-workspace-modal">✕</button>
+      </div>
+      <div class="modal-body workspace-modal-body">
+        <div class="workspace-current">
+          <div class="workspace-current-label">当前工作区</div>
+          <div class="workspace-current-name" id="workspace-current-name">—</div>
+          <div class="workspace-current-path" id="workspace-current-path">—</div>
+          <div class="workspace-current-meta form-hint" id="workspace-current-meta"></div>
+          <div class="form-hint" id="workspace-mode-hint"></div>
+        </div>
+
+        <div class="workspace-recent">
+          <div class="provider-section-title">最近工作区</div>
+          <div class="workspace-recent-list" id="workspace-recent-list">
+            <div class="empty-placeholder">暂无最近工作区</div>
+          </div>
+        </div>
+
+        <div class="workspace-switch">
+          <div class="provider-section-title">切换到其他工作文件夹</div>
+          <div class="workspace-picker-row">
+            <button type="button" class="btn btn-xs" id="btn-pick-native-folder" title="通过服务器本机的系统对话框选择文件夹">选择文件夹…</button>
+            <span class="form-hint" id="workspace-picker-status">仅本机可打开系统选择器；远程访问请手动输入绝对路径</span>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="input-workspace-path">绝对路径（手动输入回退）</label>
+            <input type="text" class="form-input" id="input-workspace-path" placeholder="D:\Arena-Workspace\MyWorkspace" />
+          </div>
+          <label class="checkbox-label">
+            <input type="checkbox" id="chk-workspace-initialize-existing" />
+            <span>目标为已有非空文件夹（只初始化工作区标记与 .arena，不移动/删除原有文件）</span>
+          </label>
+          <label class="checkbox-label">
+            <input type="checkbox" id="chk-workspace-create-missing" checked />
+            <span>目标不存在时自动创建</span>
+          </label>
+          <div class="form-error" id="workspace-form-error" hidden></div>
+          <div class="workspace-switch-actions">
+            <button type="button" class="btn btn-primary-outline" id="btn-switch-workspace">切换工作区</button>
+            <span class="form-hint" id="workspace-switch-hint"></span>
+          </div>
+        </div>
+
+        <div class="workspace-sessions">
+          <div class="provider-section-title">载入本工作区对局</div>
+          <div class="session-list" id="workspace-session-list"></div>
+          <div class="workspace-sessions-actions">
+            <button type="button" class="btn btn-xs" id="btn-refresh-workspace-sessions">刷新</button>
+            <span class="form-hint" id="workspace-sessions-hint"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 会话列表弹窗 -->
+  <div class="modal-backdrop" id="sessions-modal" style="display: none">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <span class="modal-title">外部存档（服务端加密保存）</span>
+        <button class="btn btn-xs" id="btn-close-sessions-modal">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="session-list" id="session-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-default" id="btn-refresh-sessions">刷新</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 访问令牌弹窗：仅在服务端返回 401（设置了 ARENA_API_TOKEN）时显示 -->
+  <div class="modal-backdrop" id="token-modal" style="display: none">
+    <form class="modal-card" id="token-form" autocomplete="off">
+      <div class="modal-header">
+        <span class="modal-title">需要访问令牌</span>
+      </div>
+      <div class="modal-body">
+        <span class="form-hint" id="token-modal-message">服务器要求访问令牌（ARENA_API_TOKEN），请输入后继续。</span>
+        <div class="form-group">
+          <label class="form-label" for="input-api-token">访问令牌 (ARENA_API_TOKEN)</label>
+          <input type="password" class="form-input" id="input-api-token" autocomplete="off" />
+          <span class="form-hint">令牌仅保存在本浏览器的 localStorage 中。</span>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-default" id="btn-cancel-token">取消</button>
+        <button type="submit" class="btn btn-primary-outline" id="btn-submit-token">确定</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- 连接状态条：SSE 断线重连时显示 -->
+  <div class="conn-banner" id="conn-banner" role="status" aria-live="polite" hidden></div>
+
+  <!-- 轻提示 Toast -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="static/js/core.js?v=0.11"></script>
+  <script src="static/js/layout.js?v=0.11"></script>
+  <script src="static/js/providers.js?v=0.11"></script>
+  <script src="static/js/workspace.js?v=0.11"></script>
+  <script src="static/js/app.js?v=0.11"></script>
+</body>
+</html>

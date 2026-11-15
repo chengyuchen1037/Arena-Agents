@@ -1,0 +1,193 @@
+# =============================================================================
+# Arena-Agents 全局与预设剧本配置文件 (config.yml)
+# 核心理念：引擎不绑定任何特定游戏逻辑，所有规则、频道建立、标签赋予与面板统计均由主持人通过工具运行时操控
+# =============================================================================
+
+app:
+  title: "Arena-Agents"
+  version: "v0.11"
+
+scenario:
+  path: "scenarios/werewolf_12p.md"
+
+# -----------------------------------------------------------------------------
+# 0. 规则与策略经验知识库目录 (供主持人与玩家通过 list_documents / read_document 查阅)
+# -----------------------------------------------------------------------------
+knowledge_base:
+  docs_dir: "knowledge"
+  description: "游戏规则手册、主持人执裁指南与各阵营博弈策略经验库"
+
+# -----------------------------------------------------------------------------
+# 1. LLM 模型、推理与价格配置 (默认全员接入 deepseek-flash 并开启最高档思考)
+#
+# v0.10 起，Provider（名称/协议/base_url/api_key/模型清单与逐模型价格）的主配置保存在
+# 外部加密库（ARENA_DATA_DIR，默认 Windows 的 %LOCALAPPDATA%\Arena-Agent；Docker 为 /data），
+# 逐参与者的模型绑定与思考深度保存在外部 settings.json / 存档里，均通过界面的“Provider”管理维护。
+# 本节仅保留旧版默认值，用于：
+#   * 旧 .env / 旧部署的迁移与兼容（DEEPSEEK_* 环境变量会形成只读的“环境变量 Provider”）；
+#   * 未传入 binding 时的单元测试回退，以及超时/重试/温度/最大输出等非密钥通用参数。
+# 这里不要写真实密钥；api_key 只通过环境变量插值，不会写回本文件。
+# -----------------------------------------------------------------------------
+llm:
+  base_url: "${DEEPSEEK_BASE_URL:-https://api.deepseek.com}"
+  api_key: "${DEEPSEEK_API_KEY}"
+  default_model: "${DEEPSEEK_MODEL:-deepseek-flash}"
+  temperature: 0.7
+  max_tokens: 8192
+  context_window_tokens: 1000000  # DeepSeek 默认 1M 上下文
+  timeout_seconds: 120
+  execution_depth: "medium"      # 执行链默认深度档位: low, medium, high, xhigh
+
+  # 旧版全局 Token 单价（单位：美元 $ / 1M Tokens）。v0.10 起价格按模型在 Provider 管理里手动填写并
+  # 随每次调用快照记账；这里的值仅作为“旧配置迁移”所创建模型的价格，以及无 binding 时的回退。
+  pricing:
+    input_price_per_m: 0.27
+    output_price_per_m: 1.10
+
+  # 请求重试：连接错误 / 超时 / 408 / 429 / 5xx 做指数退避 + 抖动；其它 4xx 不重试。
+  # 流式调用只在尚未产出任何内容前重试。429 的 Retry-After 会被遵守（不超过 max_retry_after_seconds）。
+  retry:
+    max_attempts: 3                # 含首次请求的总尝试次数（1 = 不重试）
+    base_delay_seconds: 0.5        # 第 n 次重试前等待 base * 2^(n-1)
+    max_delay_seconds: 8           # 单次退避上限
+    jitter: 0.25                   # 抖动比例 0~1：等待时间在 [d*(1-jitter), d] 内随机
+    max_retry_after_seconds: 60    # 服务端 Retry-After 的采纳上限
+
+  # 思考与推理深度设置（思维链仅观战者可见，绝不进入任何 Agent 上下文）
+  # <think>...</think> 标签与原生 reasoning_content 始终都会被解析，无需配置。
+  thinking:
+    enabled: true
+    reasoning_effort: "high"       # 默认推理深度档位；仅作为顶层参数发送一次（不要写进 extra_body）
+    extra_body:                    # 透传给 OpenAI 兼容网关的扩展字段
+      thinking:
+        type: "enabled"
+
+  # 可选：针对主持人覆盖模型参数（model / temperature）。
+  # 也可以在此写 reasoning_effort 来强制覆盖主持人的推理深度；默认不写，
+  # 这样主持人与玩家一致，跟随前端/会话里设置的值。
+  moderator_override:
+    model: "${DEEPSEEK_MODEL:-deepseek-flash}"
+    temperature: 0.3
+
+# -----------------------------------------------------------------------------
+# 2. 参与者座位定义 (初始无任何标签，由主持人开局运行时赋予)
+# -----------------------------------------------------------------------------
+participants:
+  - id: "p01"
+    seat: "SEAT 01"
+    name: "Alice 1"
+    persona: "逻辑严密，善于从发言细节和投票轨迹中推敲破绽，发言条理清晰。"
+  - id: "p02"
+    seat: "SEAT 02"
+    name: "Bob 2"
+    persona: "稳健谨慎，倾向于整合场上多方信息后再站边，不轻易盲从。"
+  - id: "p03"
+    seat: "SEAT 03"
+    name: "Carol 3"
+    persona: "直觉敏锐，关注玩家言行的一致性与情绪变化，敢于果断出手。"
+  - id: "p04"
+    seat: "SEAT 04"
+    name: "David 4"
+    persona: "极具煽动性与伪装能力，擅长制造信息迷雾或引导公投方向。"
+  - id: "p05"
+    seat: "SEAT 05"
+    name: "Eve 5"
+    persona: "大局观强，善于梳理时间线与阵营视角，注重点位平衡。"
+  - id: "p06"
+    seat: "SEAT 06"
+    name: "Frank 6"
+    persona: "作风凌厉，进攻性强，擅长抓住关键时机一锤定音。"
+  - id: "p07"
+    seat: "SEAT 07"
+    name: "Grace 7"
+    persona: "外柔内刚，前期低调观察，关键轮次敢于亮明态度强势带队。"
+  - id: "p08"
+    seat: "SEAT 08"
+    name: "Henry 8"
+    persona: "领袖气质突出，喜欢主动控场、归票并承担团队决策责任。"
+  - id: "p09"
+    seat: "SEAT 09"
+    name: "Ivy 9"
+    persona: "细致入微，擅长复盘历史发言中的前后矛盾点。"
+  - id: "p10"
+    seat: "SEAT 10"
+    name: "Jack 10"
+    persona: "务实果断，倾向于通过收益最大化角度评估每一次行动。"
+  - id: "p11"
+    seat: "SEAT 11"
+    name: "Kate 11"
+    persona: "善于倾听与换位思考，经常能识破反逻辑与倒钩套路。"
+  - id: "p12"
+    seat: "SEAT 12"
+    name: "Leo 12"
+    persona: "思维跳跃，擅长在逆风局中寻找奇袭突破口。"
+
+# -----------------------------------------------------------------------------
+# 4. 标签样式与卡片置灰规则 (tag_styles)
+# 身份池与规则由 scenario.path 指向的 Markdown 唯一定义；此处仅负责展示。
+# -----------------------------------------------------------------------------
+tag_styles:
+  # 左侧身份标签 (slot: "left")
+  "狼人":
+    slot: "left"
+    variant: "danger"
+    gray_out_card: false
+  "白狼王":
+    slot: "left"
+    variant: "danger"
+    gray_out_card: false
+  "平民":
+    slot: "left"
+    variant: "neutral"
+    gray_out_card: false
+  "预言家":
+    slot: "left"
+    variant: "purple"
+    gray_out_card: false
+  "女巫":
+    slot: "left"
+    variant: "purple"
+    gray_out_card: false
+  "猎人":
+    slot: "left"
+    variant: "purple"
+    gray_out_card: false
+  "守卫":
+    slot: "left"
+    variant: "purple"
+    gray_out_card: false
+
+  # 右侧状态与徽标标签 (slot: "right")
+  "存活":
+    slot: "right"
+    variant: "success"
+    gray_out_card: false
+  "警长":
+    slot: "right"
+    variant: "warning"
+    gray_out_card: false
+  "出局":
+    slot: "right"
+    variant: "muted"
+    gray_out_card: true
+  "死亡":
+    slot: "right"
+    variant: "muted"
+    gray_out_card: true
+
+# -----------------------------------------------------------------------------
+# 5. 初始状态（未开始时频道与面板均为空，全部由主持人调用工具创建与更新）
+# -----------------------------------------------------------------------------
+initial_state:
+  phase_text: "未开始 · 等待主持人初始化"
+
+# -----------------------------------------------------------------------------
+# 6. 提示词模板路径与开局引导指令
+# -----------------------------------------------------------------------------
+prompts:
+  moderator_system: "prompts/moderator.md"
+  participant_system: "prompts/participant.md"
+  kickoff_instruction: |
+    对局正式开始。请依据当前会话中提供的剧本说明与通用工具初始化参与者状态、频道和展示信息，然后按剧本推进。不要自行发明规则；可执行 Markdown 模式下此提示不参与流程驱动。
+  resume_instruction: |
+    对局从当前进度继续运行。请查看当前阶段与最新频道消息记录，依据当前剧本继续执行下一步。

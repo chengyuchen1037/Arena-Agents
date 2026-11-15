@@ -1,0 +1,70 @@
+# Build context for the Arena-Agents image.
+# Only source assets needed at runtime are copied by the Dockerfile.
+
+# Version control / editors
+.git
+.gitignore
+.gitattributes
+.github/
+.vscode/
+.idea/
+**/.DS_Store
+**/Thumbs.db
+**/*.swp
+
+# Secrets, keys and local overrides
+**/.env
+**/.env.*
+!.env.example
+**/*.pem
+**/*.key
+**/*.enc
+**/master_key*
+**/arena_master_key*
+secrets/
+**/*.secret.yml
+config.local.yml
+config.secret.yml
+
+# Python environments and caches
+.venv/
+venv/
+env/
+ENV/
+**/__pycache__/
+**/__pycache__/**
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/*.egg-info/
+**/.coverage
+**/htmlcov/
+build/
+dist/
+
+# Runtime data and workspaces
+saves/
+sessions/
+logs/
+workspaces/
+arena-data/
+.arena/
+**/*.log
+
+# Not needed in the image
+docs/
+README.md
+CHANGELOG.md
+LICENSE
+tests/
+requirements-dev.txt
+docker-compose*.yml
+Dockerfile
+.dockerignore
+scratch/
+node_modules/
+pip-*/
+tmp_*/

@@ -1,0 +1,92 @@
+# Arena-Agents —— 生产/演示部署（镜像内含全部代码与剧本，不挂载源码）。
+#
+# 首次使用：
+#   1. cp .env.example .env，按需填写（至少建议设置 ARENA_API_TOKEN）。
+#   2. 生成主密钥（base64，32 字节），保存到**项目目录之外**的文件，并限制权限：
+#        python -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())" > /srv/arena-secrets/master_key
+#        （或 openssl rand -base64 32 > /srv/arena-secrets/master_key）
+#        Linux：sudo chown 10001:10001 /srv/arena-secrets/master_key && sudo chmod 400 /srv/arena-secrets/master_key
+#      主密钥丢失后，/data 里的加密 Provider 库与存档无法解密——请单独备份主密钥（不要和 /data 放在一起）。
+#   3. 在 .env 或 shell 里设置 ARENA_MASTER_KEY_HOST_FILE=/srv/arena-secrets/master_key（必填，缺失时 compose 报错，
+#      即 fail closed）；可选 ARENA_DATA_HOST=/srv/arena-data 指定宿主机数据目录（默认使用命名卷 arena-data）。
+#   4. docker compose up -d --build
+#   开发（挂载源码 + 热重载）：docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# 安全默认值：
+#   * 端口只绑定宿主机 127.0.0.1（容器内监听 0.0.0.0:8000）。要对局域网/公网开放，
+#     必须同时设置 ARENA_API_TOKEN，并在反向代理处终止 TLS；把 ARENA_BIND 改为 0.0.0.0 即可开放。
+#   * 经 Docker 端口映射进入容器的请求，来源地址是 docker 网关而不是回环地址，因此在**未设置**
+#     ARENA_API_TOKEN 时，后端会拒绝 Provider 管理、绑定修改、存档导入等修改类接口。
+#     容器部署请在 .env 中设置 ARENA_API_TOKEN。
+#   * 容器以非 root(uid 10001) 运行并丢弃全部 Linux capabilities；运行数据只写 /data。
+name: arena-agents
+
+services:
+  arena-agents:
+    image: arena-agents:0.11.0
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arena-agents
+    ports:
+      # 宿主机地址:宿主机端口:容器端口。PORT 仅决定宿主机侧端口。
+      - "${ARENA_BIND:-127.0.0.1}:${PORT:-8000}:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # 以下两项由 compose 固定，覆盖 .env 里面向“本机直接运行”的同名变量。
+      ARENA_DATA_DIR: /data
+      # v0.11：Provider、模板、绑定、对局与日志都在工作区内；容器只能使用 /data 下的工作区，
+      # 原生文件夹选择框在容器内不可用。宿主工作区如需更换，修改此路径并确保 /data 内可写。
+      ARENA_WORKSPACE_DIR: /data/workspace/default
+      ARENA_MASTER_KEY_FILE: /run/secrets/arena_master_key
+      # 兼容旧部署：.env 里的 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL / DEEPSEEK_MODEL 仍会经 env_file
+      # 传入，形成**只读**的“环境变量 Provider”（不可在界面编辑、不进入导出）。
+      # 其余密钥与访问控制（ARENA_API_TOKEN / ARENA_ALLOWED_ORIGINS / ARENA_ALLOWED_BASE_HOSTS /
+      # ARENA_ALLOW_PRIVATE_PROVIDERS）同样写在 .env 里即可，见 .env.example。
+    secrets:
+      - arena_master_key
+    volumes:
+      # 外部数据目录：加密 Provider 库、settings.json、加密对局存档、日志。
+      # 默认命名卷：首次创建时继承镜像里 arena(uid 10001) 的属主与 0700 权限，非 root 即可写。
+      # 若设置 ARENA_DATA_HOST 为宿主机目录（绝对路径或 ./ 开头），则变为绑定挂载，Linux 上需先
+      #   mkdir -p /srv/arena-data && sudo chown 10001:10001 /srv/arena-data && sudo chmod 700 /srv/arena-data
+      # （Docker Desktop for Windows/macOS 通常无需处理权限）。
+      - ${ARENA_DATA_HOST:-arena-data}:/data
+      # 一次性迁移 v0.9 及更早的明文存档：临时取消下一行注释（需可写；迁移会先加密存档，再复制到
+      # /data/quarantine/legacy-saves 并校验，最后才移除 ./saves 中的原件；目录须对 uid 10001 可写），
+      # 启动一次完成迁移后再注释掉并重启：
+      # - ./saves:/app/saves
+      # 可选：不重建镜像就调整配置/剧本/提示词时，取消下面几行注释（只读挂载）：
+      # - ./config.yml:/app/config.yml:ro
+      # - ./knowledge:/app/knowledge:ro
+      # - ./scenarios:/app/scenarios:ro
+      # - ./prompts:/app/prompts:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys,urllib.request as u; sys.exit(0 if u.urlopen('http://127.0.0.1:8000/api/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    # 退出时需要：暂停对局 → 刷新自动保存（加密落盘）→ 关闭 LLM 客户端；给足宽限期（uvicorn 另有 15s 连接排空）。
+    stop_grace_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+secrets:
+  arena_master_key:
+    # 主密钥文件在宿主机上的路径（必填）。文件内容为 base64/base64url 编码的 32 字节随机数。
+    # 注意：非 Swarm 的 compose 会把该文件以原权限只读挂载到 /run/secrets/arena_master_key，
+    # compose 不支持改 uid/mode，所以文件对 uid 10001 必须可读（见上方 chown/chmod）。
+    file: ${ARENA_MASTER_KEY_HOST_FILE:?请先设置 ARENA_MASTER_KEY_HOST_FILE（主密钥文件路径），见 docker-compose.yml 顶部说明}
+
+volumes:
+  arena-data:

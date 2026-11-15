@@ -1,0 +1,12 @@
+# 运行时依赖：兼容范围（下限为已知可用的最低版本，上限为下一个主版本）。
+# 需要可复现的安装（Docker 镜像、生产环境）请使用完全固定版本的 requirements.lock：
+#   pip install -r requirements.lock
+fastapi>=0.115.0,<1.0
+uvicorn[standard]>=0.30.0,<1.0
+openai>=1.50.0,<4.0
+anthropic>=0.40.0,<1.0
+cryptography>=42.0.0,<47.0
+pyyaml>=6.0.2,<7.0
+pydantic>=2.9.0,<3.0
+python-dotenv>=1.0.1,<2.0
+httpx>=0.27.2,<1.0

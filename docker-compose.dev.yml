@@ -1,0 +1,32 @@
+# 开发用覆盖文件：挂载源码并开启热重载。仅用于本机开发，不要用于对外部署。
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# 与 docker-compose.yml 合并：volumes 按容器内路径合并（同路径以本文件为准），
+# ports / env_file / environment / secrets / healthcheck 沿用主文件，
+# 因此开发时同样需要设置 ARENA_MASTER_KEY_HOST_FILE（主密钥文件，建议用只用于开发的独立密钥），
+# 运行数据写入 /data（命名卷 arena-data 或 ARENA_DATA_HOST 指定的目录），不会写进源码目录。
+# 源码以只读方式挂载；容器仍以非 root(uid 10001) 运行。
+services:
+  arena-agents:
+    image: arena-agents:dev
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/app
+      - --reload-dir
+      - /app/scenarios
+      - --reload-dir
+      - /app/prompts
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+      - ./knowledge:/app/knowledge:ro
+      - ./scenarios:/app/scenarios:ro
+      - ./prompts:/app/prompts:ro
+      - ./static:/app/static:ro
+      - ./app:/app/app:ro
