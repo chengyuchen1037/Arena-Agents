@@ -329,6 +329,42 @@ async def test_compact_context_rebuilds_the_conversation_and_the_reminder_can_co
     assert_extends(calls[3], calls[4])
 
 
+@async_test()
+async def test_a_window_too_small_for_the_opening_does_not_compact_in_a_loop():
+    rig = Rig()
+    rig.llm.script(
+        "a1",
+        speak_resp(prompt_tokens=700),  # the opening alone is over the threshold: the one reminder
+        llm_resp(("compact_context", {}), prompt_tokens=720),  # the agent complies ...
+        speak_resp(prompt_tokens=700),  # ... but the fresh opening is just as big: no second reminder at once
+        speak_resp(prompt_tokens=740),  # (+40: less than 10 % of the window)
+        speak_resp(prompt_tokens=830),  # +130 since the rebuild: now another rebuild could free something
+        sleep_resp(prompt_tokens=840),
+    )
+    agent = window_agent(rig)
+    async with running_agent(agent):
+        wake(agent)
+        await wait_until(lambda: agent.stats["runs"] == 1)
+    calls = rig.llm.calls
+    reminded = [i for i, c in enumerate(calls) if c.messages[-1]["content"] == COMPACT_NUDGE]
+    assert reminded == [1, 5]  # after the first call, and again only once the new conversation had grown
+    assert [t["used"] for t in rig.trace.of("compact_nudge", "a1")] == [700, 830]
+    assert rig.conversation().epoch == 2 and rig.conversation().rebuilt and rig.conversation().base_tokens == 700
+
+
+@async_test()
+async def test_a_conversation_that_was_never_rebuilt_is_reminded_even_when_its_opening_is_over_the_threshold():
+    rig = Rig()
+    rig.llm.script("a1", speak_resp(prompt_tokens=650), sleep_resp(prompt_tokens=650))
+    agent = window_agent(rig)
+    async with running_agent(agent):
+        wake(agent)
+        await wait_until(lambda: agent.stats["runs"] == 1)
+    conv = rig.conversation()
+    assert not conv.rebuilt and conv.base_tokens == 650  # the size of its FULL opening
+    assert rig.llm.calls[1].messages[-1]["content"] == COMPACT_NUDGE  # no growth needed the first time
+
+
 def big_speak(i: int, **kw):
     return speak_resp("x" * 300 + f" #{i}", **kw)
 

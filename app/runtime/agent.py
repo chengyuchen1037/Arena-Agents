@@ -30,7 +30,9 @@ Conversation (:mod:`app.runtime.conversation`)
     and ALL its tool results are appended in one synchronous stretch (no ``await``), so a cancellation can
     never leave a ``tool_call`` unpaired; a cancelled or stale model call is never written.  At 60 % of the
     model's context window the agent is reminded once to call ``compact_context`` (a *rebuild*: a fresh
-    FULL message); at 90 % the oldest complete rounds are trimmed as a last resort.
+    FULL message); at 90 % the oldest complete rounds are trimmed as a last resort.  A conversation produced
+    by a rebuild is reminded again only after it has grown by 10 % of the window (a window too small for the
+    opening would otherwise compact forever without gaining anything).
 
 Every run gets a new ``gen_id``; a Worker whose generation is no longer current stops before it touches the
 world.  A failing run (model exception, timeout, brain bug) is retried after an exponential back-off (at
@@ -83,6 +85,10 @@ CUT_OFF_NUDGE = (
 )
 #: Queued (once per conversation) when the input reaches ``compact_at`` of the model's context window.
 COMPACT_NUDGE = "（系统提示）会话已接近上限，请先调用 compact_context 生成摘要，再继续。"
+#: A conversation that already is the product of a compaction is reminded again only after it has grown by this
+#: share of the window: when the FULL opening alone is over the threshold (a window that is too small for it) a
+#: rebuild frees nothing, and compacting again and again would only burn tokens without any progress.
+MIN_COMPACT_GAIN = 0.1
 #: Queued after the emergency trim (``trim_at``) removed the oldest rounds.
 TRIM_NOTICE = (
     "（系统提示）会话已超出上下文上限，为继续运行，最早的 {rounds} 轮对话已被裁剪（开局信息与最近的对话仍在）。"
@@ -783,6 +789,7 @@ class Agent:
             messages=[user_message(text)],
             seen_seq=int(seen),
             epoch=conv.epoch + 1,
+            rebuilt=True,
         )
         self.book.put(fresh)
         self._trace("rebuild", gen=run.gen, epoch=fresh.epoch, seen_seq=fresh.seen_seq, dropped=len(conv.messages))
@@ -810,6 +817,8 @@ class Agent:
                 self._trace("trim_failed", used=used, window=window)
             return
         if cfg.compact_at and used >= cfg.compact_at * window and not conv.compact_nudged:
+            if conv.rebuilt and used - conv.base_tokens < MIN_COMPACT_GAIN * window:
+                return  # the last compaction left (nearly) the same size: another one would free nothing
             conv.compact_nudged = True
             conv.notes.append(COMPACT_NUDGE)
             self._trace("compact_nudge", used=used, window=window)
@@ -878,6 +887,8 @@ class Agent:
         cache_read = int(getattr(resp, "cache_read_tokens", 0) or 0)
         cache_write = int(getattr(resp, "cache_write_tokens", 0) or 0)
         conv.last_input_tokens = int(resp.prompt_tokens or 0) + cache_read + cache_write
+        if conv.base_tokens <= 0:
+            conv.base_tokens = conv.last_input_tokens  # the size of the FULL opening (what a rebuild goes back to)
         thought = (resp.thought or "").strip()
         if thought:
             self._count("thinking_rounds")

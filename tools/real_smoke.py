@@ -65,6 +65,22 @@ def parse_args() -> argparse.Namespace:
         "report shows what the provider really bills; also a live test of the price-source feature",
     )
     parser.add_argument(
+        "--window",
+        type=int,
+        default=0,
+        metavar="TOKENS",
+        help="pretend every bound model has only this context window (e.g. 16000), so the compaction reminder "
+        "(at compact_at of the window), the model's compact_context call and the emergency trim happen within a short game",
+    )
+    parser.add_argument(
+        "--resume-calls",
+        type=int,
+        default=0,
+        metavar="K",
+        help="after the call budget is reached: pause, resume the same game and let it run K more calls; reports whether "
+        "the provider's prompt cache kept hitting across the pause (the conversations and system prompts must survive it)",
+    )
+    parser.add_argument(
         "--oneshots",
         type=int,
         default=0,
@@ -77,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def prepare_scratch(source: Path, players: list[str]) -> Path:
+def prepare_scratch(source: Path, players: list[str], window: int = 0) -> Path:
     scratch = Path(tempfile.mkdtemp(prefix="arena-real-smoke-", dir=str(ROOT / ".demo-data")))
     for name in ("providers.v1.enc", "master.v1.dpapi"):
         src = source / name
@@ -95,6 +111,8 @@ def prepare_scratch(source: Path, players: list[str]) -> Path:
             raise SystemExit("no default model bindings found; bind models in the UI first")
         for actor in missing:
             wanted[actor] = fallback
+    if window > 0:  # a short context window on purpose (see --window)
+        wanted = {actor: {**binding, "context_window_tokens": window} for actor, binding in wanted.items()}
     # Only the model bindings (ids, no secrets); no last-session pointer, so nothing is restored.
     (scratch / "settings.json").write_text(
         json.dumps(
@@ -112,7 +130,7 @@ async def main() -> int:
     source = Path(args.source).expanduser().resolve()
     ids = [f"N{i}" for i in range(1, args.players + 1)]
     (ROOT / ".demo-data").mkdir(exist_ok=True)
-    scratch = prepare_scratch(source, ids)
+    scratch = prepare_scratch(source, ids, args.window)
     os.environ["ARENA_DISABLE_WORKSPACE"] = "1"
     os.environ["ARENA_DISABLE_LEGACY_MIGRATION"] = "1"
     os.environ["ARENA_DATA_DIR"] = str(scratch)
@@ -138,7 +156,7 @@ async def main() -> int:
         for index, pid in enumerate(ids, start=1):
             (scratch / "roster" / f"{pid}.persona.md").write_text(SEATS[index - 1][1] + "\n", encoding="utf-8")
 
-    calls = {"n": 0, "errors": collections.Counter()}
+    calls = {"n": 0, "errors": collections.Counter(), "log": []}  # log: (call number, agent, uncached, cache read)
 
     class Counting:
         def __init__(self, inner: GatedEngineLlm) -> None:
@@ -146,8 +164,11 @@ async def main() -> int:
 
         async def complete(self, agent_id, messages, tools, *, max_tokens=None):
             calls["n"] += 1
+            number = calls["n"]
             try:
-                return await self.inner.complete(agent_id, messages, tools, max_tokens=max_tokens)
+                resp = await self.inner.complete(agent_id, messages, tools, max_tokens=max_tokens)
+                calls["log"].append((number, agent_id, int(resp.prompt_tokens or 0), int(getattr(resp, "cache_read_tokens", 0) or 0)))
+                return resp
             except Exception as exc:  # noqa: BLE001 - reported, then re-raised for the runtime's own handling
                 calls["errors"][type(exc).__name__] += 1
                 raise
@@ -195,6 +216,8 @@ async def main() -> int:
                 await orch.pause("user")
                 break
         await asyncio.sleep(0.5)
+        if args.resume_calls > 0 and orch.session.status == "paused":
+            await resume_phase(orch, calls, args.resume_calls, started, args.timeout)
         report(orch, calls, time.monotonic() - started)
         if args.oneshots > 0:
             await exercise_oneshots(orch, args.oneshots)
@@ -209,6 +232,37 @@ async def main() -> int:
             print("scratch kept at", scratch)
         else:
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+async def resume_phase(orch, calls, more: int, started: float, timeout: float) -> None:
+    """Pause -> resume the SAME game and run ``more`` further calls; did the provider's prompt cache survive?"""
+    mark = calls["n"]
+    sessions_before = {a: len(c.messages) for a in orch._book.agents() if (c := orch._book.get(a)) is not None}
+    prompts_before = {a: c.system for a in orch._book.agents() if (c := orch._book.get(a)) is not None}
+    print(f"\n=== resume: the game is paused at call {mark}; resuming the same game for {more} more calls ===")
+    await orch.start_or_resume()
+    while True:
+        await asyncio.sleep(1.0)
+        if orch.session.status != "running":
+            print(f"game left 'running' after the resume: status={orch.session.status} reason={orch.session.pause_reason or '-'}")
+            break
+        if calls["n"] >= mark + more or time.monotonic() - started >= timeout:
+            await orch.pause("user")
+            break
+    after = [row for row in calls["log"] if row[0] >= mark]
+    kept = sum(1 for a, c in prompts_before.items() if (now := orch._book.get(a)) is not None and now.system == c)
+    grew = sum(1 for a, n in sessions_before.items() if (now := orch._book.get(a)) is not None and len(now.messages) >= n)
+    hits = [row for row in after if row[3] > 0]
+    print(
+        f"after the resume: {len(after)} calls, {len(hits)} reported cached input ({len(hits) / max(1, len(after)):.0%}); "
+        f"cache read {sum(r[3] for r in after)} vs uncached {sum(r[2] for r in after)} tokens"
+    )
+    print(f"conversations kept across the pause: {grew}/{len(sessions_before)} still start with what they had; system prompts byte-identical: {kept}/{len(prompts_before)}")
+    firsts = {}
+    for number, agent, uncached, cached in after:
+        firsts.setdefault(agent, (uncached, cached))
+    cold = [a for a, (u, c) in firsts.items() if c == 0]
+    print("first call of each agent after the resume reported no cache hit for:", cold or "nobody")
 
 
 async def exercise_oneshots(orch, count: int) -> None:
@@ -269,6 +323,7 @@ def report(orch, calls, seconds: float) -> None:
     errors: list[str] = []
     injections: collections.Counter[str] = collections.Counter()
     merged_reasons = 0
+    lifecycle: collections.Counter[str] = collections.Counter()  # compaction events (see --window)
     later_calls = later_cached = 0  # calls after an agent's first one: they must hit the prompt cache
     seen_first: set[str] = set()
     for file in files:
@@ -292,6 +347,8 @@ def report(orch, calls, seconds: float) -> None:
                     later_calls += 1
                     later_cached += 1 if int(row.get("cache_read_tokens") or 0) > 0 else 0
                 seen_first.add(agent)
+            elif row.get("event") in ("compact_nudge", "rebuild", "trim", "trim_failed", "discard", "long_run"):
+                lifecycle[str(row.get("event"))] += 1
             elif row.get("event") in ("error", "give_up", "retry"):
                 errors.append(f"{row.get('event')}: {str(row.get('message') or row.get('error') or row)[:200]}")
     print("tool usage:", dict(tool_names.most_common(25)))
@@ -300,6 +357,8 @@ def report(orch, calls, seconds: float) -> None:
         f"activations {injections.get('activation', 0)} | in-flight merges {merges}"
         f" (avg {merged_reasons / merges:.1f} messages per merge)" if merges else f"activations {injections.get('activation', 0)} | in-flight merges 0"
     )
+    if lifecycle:
+        print("conversation lifecycle:", dict(lifecycle))
     if later_calls:
         print(f"prompt cache: {later_cached}/{later_calls} calls after an agent's first one reported cached input ({later_cached / later_calls:.0%})")
     if rejections:

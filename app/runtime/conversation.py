@@ -76,6 +76,8 @@ class Conversation:
     epoch: int = 1  # bumped whenever the request prefix is rewritten (rebuild, trim)
     # -- runtime bookkeeping -------------------------------------------------------------------
     compact_nudged: bool = False  # the "please compact" reminder has been queued for this conversation
+    rebuilt: bool = False  # this conversation is the product of ``compact_context`` (a fresh FULL message)
+    base_tokens: int = 0  # input size of the first model call of this conversation (= its FULL opening)
     slept_s: float | None = None  # the duration the agent asked for with ``sleep_until``
     notes: list[str] = field(default_factory=list)  # system remarks waiting for the next user message
 
