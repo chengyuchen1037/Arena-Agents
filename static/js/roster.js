@@ -210,12 +210,20 @@
       const s = session();
       if (id === MOD) {
         const name = (s.moderator && s.moderator.name) || "主持人";
+        // the moderator has a random pixel avatar of its own (the fixed top hat only when the server sent none)
+        const avatar = s.moderator && s.moderator.avatar ? s.moderator.avatar : null;
+        // (a backend that sends no moderator avatar does not have the endpoint either: no button then)
+        const canRegen = Boolean(avatar) && isIdle() && st.editable && st.available;
+        const regenBusy = Boolean(st.saving[`regen:${MOD}`]);
         return (
           `<div class="detail-head-row">` +
-          `<div class="detail-avatar">${Avatar.imgHtml(MOD, undefined, null, { size: 80 })}</div>` +
+          `<div class="detail-avatar">${Avatar.imgHtml(MOD, undefined, avatar, { size: 80 })}</div>` +
           `<div class="detail-title"><div class="detail-name">${esc(name)}</div>` +
           `<div class="detail-sub">主持人</div></div>` +
-          `<button type="button" class="pop-close" data-detail-action="close" aria-label="关闭">✕</button></div>`
+          `<button type="button" class="pop-close" data-detail-action="close" aria-label="关闭">✕</button></div>` +
+          (canRegen
+            ? `<div class="detail-actions"><button type="button" class="btn btn-xs" id="btn-detail-regen" data-detail-action="regen-avatar"${regenBusy ? " disabled" : ""}>🎲 重新生成头像</button></div>`
+            : "")
         );
       }
       const p = View.participantOf(s, id);
@@ -522,8 +530,16 @@
       render({ head: true });
       try {
         const res = await api.post(`api/roster/${enc(id)}/avatar:regenerate`);
-        await afterWrite(id, res);
-        showToast("头像已重新生成");
+        if (id === MOD) {
+          // the moderator is not a seat: its new avatar goes straight to the session's moderator
+          if (res && res.avatar && typeof res.avatar === "object") patchParticipants([{ id: MOD, avatar: res.avatar }]);
+          else await load();
+          render();
+          onChange();
+        } else {
+          await afterWrite(id, res);
+        }
+        showToast(id === MOD ? "主持人头像已重新生成" : "头像已重新生成");
       } catch (e) {
         showToast(e.message);
       } finally {
@@ -819,7 +835,10 @@
         const res = await api.post("api/roster/avatars:regenerate");
         if (res && Array.isArray(res.seats) && res.seats.length) {
           applyRoster({ ...res, memory_enabled: st.memoryEnabled, editable: st.editable });
-          patchParticipants(res.seats.filter((x) => x && x.id).map((x) => ({ id: x.id, name: x.name, avatar: x.avatar })));
+          const patch = res.seats.filter((x) => x && x.id).map((x) => ({ id: x.id, name: x.name, avatar: x.avatar }));
+          // "all" includes the moderator: it is re-rolled together with the twelve seats
+          if (res.moderator && typeof res.moderator === "object" && res.moderator.avatar) patch.push({ id: MOD, avatar: res.moderator.avatar });
+          patchParticipants(patch);
         } else {
           await load();
           patchParticipants(roster().map((x) => ({ id: x.id, name: x.name, avatar: x.avatar })));

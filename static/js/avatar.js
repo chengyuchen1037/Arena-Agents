@@ -593,7 +593,12 @@
 
   /** The URL for any actor id (moderator / engine / player). */
   function urlFor(id, seat, desc, opts) {
-    if (id === MODERATOR_ID) return moderatorUrl((opts || {}).scale);
+    if (id === MODERATOR_ID) {
+      // v0.12.1: the moderator has a random avatar of its own; the fixed top hat is only the fallback for
+      // "no description yet" (older backend) or "no parts library"
+      if (parts && normalizeDescription(desc)) return dataUrl(desc, { ...(opts || {}), seat: 0, label: id });
+      return moderatorUrl((opts || {}).scale);
+    }
     if (id === ENGINE_ID) return systemUrl((opts || {}).scale);
     return dataUrl(desc, { ...(opts || {}), seat, label: id });
   }

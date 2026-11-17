@@ -301,7 +301,7 @@
     return (
       `${state.avatarEpoch}|` +
       s.participants.map((p) => `${p.id}:${p.name}:${Avatar.descriptionKey(p.avatar)}`).join("|") +
-      `|${s.moderator.name}`
+      `|${s.moderator.name}:${Avatar.descriptionKey(s.moderator.avatar)}`
     );
   }
 
@@ -373,7 +373,7 @@
     if (!elModChip) return;
     const t = View.moderatorTile(s, state.viewpoint, { clockNow: clockNow() });
     const html =
-      `${Avatar.imgHtml(MOD, undefined, null, { size: 20, className: "mod-chip-avatar" })}` +
+      `${avatarImg(MOD, 20, "mod-chip-avatar")}` +
       `<span class="mod-chip-name">${escapeHtml(t.name)}</span>` +
       (t.state
         ? `<span class="mod-chip-state st-${t.state}" title="${escapeHtml(t.stateTitle)}">${t.stateIcon}</span>`
@@ -401,6 +401,8 @@
     elStatusText.textContent = View.statusText(s);
     if (elStatusText.setAttribute) elStatusText.setAttribute("title", View.statusText(s));
     elPhasePill.textContent = s.phase_text || "未开始";
+    // before the game starts the phase repeats the status ("未开始 …"): a phone has no room for both
+    if (elPhasePill.classList) elPhasePill.classList.toggle("is-idle", s.status === "idle");
     elStatusDot.className = `status-dot ${View.statusDotClass(s)}`;
 
     // Top-right token & cost telemetry (the cost is accumulated server-side per call);
@@ -1082,7 +1084,11 @@
 
   /** roster.js / the store change names and avatars through the same code path as roster.updated. */
   function patchParticipants(list) {
-    const res = Store.applyEvent(state.session, { type: "roster.updated", data: { participants: list } });
+    // the moderator is not a participant: its entry travels as ``data.moderator`` (exactly like the SSE event)
+    const moderator = list.find((x) => x && x.id === MOD);
+    const data = { participants: list.filter((x) => !(x && x.id === MOD)) };
+    if (moderator) data.moderator = moderator;
+    const res = Store.applyEvent(state.session, { type: "roster.updated", data });
     scheduleRender(res.dirty);
   }
 

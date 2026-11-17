@@ -4291,6 +4291,15 @@ html[data-layout="compact"] .board-header-right .btn-xs {
   min-height: 32px;
 }
 
+/* ... but a touch tablet gets the comfortable hit area back */
+html[data-layout="compact"][data-input="touch"] .board-header-right .btn-xs {
+  min-height: 40px;
+}
+
+html[data-input="touch"] .mod-chip {
+  min-height: 40px;
+}
+
 html[data-layout="compact"] .topbar {
   padding-left: 14px;
   padding-right: 14px;
@@ -4425,13 +4434,20 @@ html[data-layout="phone"] .topbar .phase-pill {
 }
 
 html[data-layout="phone"] .status-pill > span:last-child {
-  max-width: 38vw;
+  max-width: 64vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 html[data-layout="phone"] .phase-pill {
   max-width: 44vw;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* "未开始 · …" says the same as the status pill */
+html[data-layout="phone"] .phase-pill.is-idle {
+  display: none;
 }
 
 html[data-layout="phone"] .topbar-status > .usage-telemetry-pill {

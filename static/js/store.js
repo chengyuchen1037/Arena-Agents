@@ -151,6 +151,8 @@
       ...m,
       id: MODERATOR_ID,
       name: str(m.name, "主持人"),
+      // v0.12.1: the moderator has a random pixel avatar like the players (null = the fixed top hat)
+      avatar: isObject(m.avatar) ? m.avatar : null,
       state: agentState(m.state),
       sleep_until: optNum(m.sleep_until),
     };
@@ -450,8 +452,22 @@
   const clockOf = (res, ctx) =>
     ctx && Number.isFinite(Number(ctx.clockNow)) ? Number(ctx.clockNow) : num(res.session.clock, 0);
 
-  /** Put the answer of one player into a request (last answer wins) and track re-answers. */
-  function setAnswer(req, answer) {
+  /** Seat order of a player: the participant's seat number, else the number inside the id ("N10" -> 10), else last. */
+  function seatRankOf(session, id) {
+    const p = findById(session.participants, id);
+    const seat = p ? Number(p.seat) : NaN;
+    if (Number.isFinite(seat) && seat > 0) return seat;
+    const m = /(\d+)\s*$/.exec(String(id));
+    return m ? Number(m[1]) : Infinity;
+  }
+
+  const bySeat = (session) => (a, b) => seatRankOf(session, a) - seatRankOf(session, b) || String(a).localeCompare(String(b));
+
+  /**
+   * Put the answer of one player into a request (last answer wins) and track re-answers. The lists stay in
+   * seat order, like the server's RequestView.answers (so events and snapshots reduce to the same thing).
+   */
+  function setAnswer(session, req, answer) {
     const i = req.answers.findIndex((a) => a.player_id === answer.player_id);
     if (i >= 0) {
       const before = req.answers[i];
@@ -463,6 +479,9 @@
       req.answers.push(answer);
     }
     if (!req.answered_by.includes(answer.player_id)) req.answered_by.push(answer.player_id);
+    const cmp = bySeat(session);
+    req.answers.sort((x, y) => cmp(x.player_id, y.player_id));
+    req.answered_by.sort(cmp);
   }
 
   const HANDLERS = {
@@ -525,7 +544,7 @@
     "request.answer"(res, d) {
       const r = findById(res.session.requests, d.request_id);
       if (!r || !d.player_id) return;
-      setAnswer(r, normalizeAnswer({ ...d, player_id: d.player_id }));
+      setAnswer(res.session, r, normalizeAnswer({ ...d, player_id: d.player_id }));
       res.dirty.topbar = res.dirty.feed = true;
     },
 
@@ -655,6 +674,11 @@
     "roster.updated"(res, d) {
       const list = Array.isArray(d.participants) ? d.participants : [];
       let changed = false;
+      // the moderator has an avatar of its own (a roster entry that is not a seat)
+      if (isObject(d.moderator) && isObject(d.moderator.avatar)) {
+        res.session.moderator.avatar = d.moderator.avatar;
+        changed = true;
+      }
       for (const item of list) {
         if (!isObject(item)) continue;
         const p = findById(res.session.participants, item.id);
@@ -683,7 +707,8 @@
       if (state === "done" && !r.done.includes(id)) r.done.push(id);
       r.running = Object.values(r.progress).some((p) => p.state === "running");
       res.reviewEvent = { id, state, message: str(d.message) };
-      res.dirty.board = res.dirty.popover = true;
+      // the 复盘全部 button (progress text) is part of the top-bar controls
+      res.dirty.board = res.dirty.popover = res.dirty.topbar = true;
     },
 
     "session.updated"(res, d) {

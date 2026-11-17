@@ -81,6 +81,11 @@
 
   /** {id, seat, avatar} of any actor, for the avatar renderer. */
   function actorAvatar(session, id) {
+    if (id === MODERATOR_ID) {
+      // the moderator's random avatar (null on an older backend: the renderer then draws the fixed top hat)
+      const m = session && session.moderator;
+      return { id, seat: undefined, desc: m && m.avatar ? m.avatar : null };
+    }
     const p = participantOf(session, id);
     return { id, seat: p ? p.seat : undefined, desc: p ? p.avatar : null };
   }
@@ -154,18 +159,18 @@
 
   /**
    * The channel selected when the user has not chosen one (the "all" channel is gone): the public
-   * channel (id "public", else a non-private channel everybody is in), else the first one.
-   * null when the viewpoint sees no channel yet.
+   * channel (id "public", else a non-private channel everybody is in), else the first group channel.
+   * Private chats are never selected on their own: before the game starts only those exist (one per
+   * player), and a feed that opens on "Alice"'s private chat would be a puzzle — null shows the hint
+   * "the moderator creates the channels once the game starts" instead.
    */
   function defaultChannelId(session, viewpoint) {
     const visible = visibleChannels(session, viewpoint);
-    if (!visible.length) return null;
     const pick =
       visible.find((c) => c.id === "public") ||
       visible.find((c) => !isDmChannel(c) && coversEveryone(session, c)) ||
-      visible.find((c) => !isDmChannel(c)) ||
-      visible[0];
-    return pick.id;
+      visible.find((c) => !isDmChannel(c));
+    return pick ? pick.id : null;
   }
 
   /** A channel the viewpoint can see, else the default channel (may be null). */
@@ -862,8 +867,16 @@
       });
     }
     if (s.stall_notice) {
-      const note = s.stall_notice === "对局似乎停滞了" ? "" : `：${s.stall_notice}`;
-      out.push({ kind: "stall", text: `⚠ 对局似乎停滞了${note}` });
+      // The watchdog's own sentence already says what is wrong ("对局静止：已连续 3 次唤醒主持人，账本仍无进展
+      // （约 120 秒）。"): show it as it is. A bare reason ("已 120 秒没有进展" would be a sentence too, but
+      // "3 次唤醒" is not) gets the heading.
+      const notice = String(s.stall_notice);
+      const says = /停滞|静止|没有进展|无进展/.test(notice);
+      out.push({
+        kind: "stall",
+        text: `⚠ ${says ? notice : `对局似乎停滞了：${notice}`}`,
+        short: "⚠ 对局似乎停滞了（游戏没有暂停）",
+      });
     }
     if (s.status === "finished") {
       const winner = s.winner ? `：${s.winner} 获胜` : "";

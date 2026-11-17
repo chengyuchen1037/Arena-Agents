@@ -354,6 +354,20 @@ test("request.answer: answers land in the card; a changed answer replaces the ol
   assert.equal(apply(s, "request.answer", { request_id: "r1", value: "x" }).dirty.feed, false);
 });
 
+test("request.answer keeps answers and answered_by in SEAT order (N10 after N9), whatever the arrival order", () => {
+  const s = fresh();
+  apply(s, "request.opened", { request: F.makeRequest({ to: F.PLAYER_IDS, share_answers: false, sealed: true }) });
+  const answer = (pid) => apply(s, "request.answer", { request_id: "r1", player_id: pid, value: "N5", label: "5号 Eve", reason: "", visible_to_ids: ["moderator"] });
+  for (const pid of ["N10", "N2", "N12", "N1", "N9"]) answer(pid);
+  const req = s.requests[0];
+  assert.deepEqual(req.answers.map((a) => a.player_id), ["N1", "N2", "N9", "N10", "N12"]);
+  assert.deepEqual(req.answered_by, ["N1", "N2", "N9", "N10", "N12"]);
+  // a player the session does not know is ordered by the number in the id, then last
+  answer("X7");
+  answer("guest");
+  assert.deepEqual(req.answers.map((a) => a.player_id), ["N1", "N2", "X7", "N9", "N10", "N12", "guest"]);
+});
+
 test("request.opened for an existing id replaces it (a re-open never duplicates)", () => {
   const s = fresh();
   const base = F.makeRequest({ id: "r1", question: "q" });
@@ -522,10 +536,37 @@ test("roster.updated renames and re-draws the listed players only", () => {
   assert.equal(s.participants.length, 12);
 });
 
+test("the moderator has a random avatar of its own: a snapshot keeps it, roster.updated changes it", () => {
+  const s = fresh();
+  assert.equal(s.moderator.avatar, null, "the fixture session has none: the renderer then draws the fixed top hat");
+  const av = F.avatarOf(7);
+  s.moderator = Store.normalizeSession({ ...s, moderator: { id: "moderator", name: "主持人", avatar: av, state: "sleeping" } }).moderator;
+  assert.deepEqual(s.moderator.avatar, av);
+  // garbage is repaired to "no avatar", never an exception
+  assert.equal(Store.normalizeSession({ ...s, moderator: { id: "moderator", avatar: "x" } }).moderator.avatar, null);
+  assert.equal(Store.normalizeSession({ ...s, moderator: { id: "moderator", avatar: [1] } }).moderator.avatar, null);
+
+  // the moderator's entry travels as ``moderator`` (it is not a participant) and repaints the same views
+  const next = F.avatarOf(8);
+  const r = apply(s, "roster.updated", { participants: [], moderator: { id: "moderator", avatar: next } });
+  assert.deepEqual(s.moderator.avatar, next);
+  assert.equal(r.rosterChanged, true);
+  assert.equal(r.dirty.topbar, true);
+  assert.equal(r.dirty.feed, true, "the moderator's messages in the feed carry its avatar");
+  assert.equal(s.participants.length, 12, "the moderator is not added to the players");
+  // an event without a usable moderator leaves it alone
+  apply(s, "roster.updated", { participants: [{ id: "N1", name: "Alicia" }], moderator: { id: "moderator", avatar: "nope" } });
+  assert.deepEqual(s.moderator.avatar, next);
+  apply(s, "roster.updated", { participants: [] });
+  assert.deepEqual(s.moderator.avatar, next);
+});
+
 test("review.progress tracks running / done / error per player; done players are remembered", () => {
   const s = fresh();
   let r = apply(s, "review.progress", { id: "N1", state: "running", message: "正在复盘…" });
   assert.deepEqual(r.reviewEvent, { id: "N1", state: "running", message: "正在复盘…" });
+  assert.equal(r.dirty.topbar, true, "the 复盘全部 button shows the progress");
+  assert.equal(r.dirty.board, true);
   assert.equal(s.review.running, true);
   assert.equal(s.review.progress.N1.state, "running");
   r = apply(s, "review.progress", { id: "N1", state: "done", message: "已写入" });

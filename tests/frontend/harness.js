@@ -23,7 +23,21 @@ const SRC = {
   workspace: read("workspace.js"),
   roster: read("roster.js"),
   budget: read("budget.js"),
+  platform: read("platform.js"),
+  avatar: read("avatar.js"),
+  core: read("core.js"),
+  view: read("view.js"),
+  store: read("store.js"),
 };
+// elements that carry the `hidden` attribute in index.html start hidden (the fake DOM creates elements on demand)
+const HIDDEN_IDS = new Set();
+(() => {
+  const html = fs.readFileSync(path.join(__dirname, "..", "..", "static", "index.html"), "utf8");
+  for (const m of html.matchAll(/<[a-zA-Z][^>]*>/g)) {
+    const id = (m[0].match(/\bid="([^"]+)"/) || [])[1];
+    if (id && /\shidden(?=[\s>\/=])/.test(m[0])) HIDDEN_IDS.add(id);
+  }
+})();
 const PARTS_MIN = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "parts.min.json"), "utf8"));
 const HTML_SRC = fs.readFileSync(path.join(ROOT, "static", "index.html"), "utf8");
 const CSS_SRC = fs.readFileSync(path.join(ROOT, "static", "css", "style.css"), "utf8");
@@ -185,7 +199,8 @@ function resp(status, body, ct = "application/json", extraHeaders = {}) {
       get: (k) => (k.toLowerCase() === "content-type" ? ct : extraHeaders[k.toLowerCase()] !== undefined ? extraHeaders[k.toLowerCase()] : null),
     },
     text: async () => text,
-    blob: async () => ({ size: text.length, type: ct, text }),
+    json: async () => JSON.parse(text),
+    blob: async () => new Blob([text], { type: ct }),
   };
 }
 
@@ -207,6 +222,7 @@ function makeEnv({
   const toasts = [];
   const esInstances = [];
   const reloads = [];
+  const downloads = [];
   const storage = new Map(Object.entries(initialStorage));
   if (storedToken) storage.set("arena_api_token", storedToken);
 
@@ -214,11 +230,17 @@ function makeEnv({
   const winListeners = {};
   const document = {
     getElementById(id) {
-      if (!els.has(id)) els.set(id, new FakeEl("div", id));
+      if (!els.has(id)) {
+        const el = new FakeEl("div", id);
+        if (HIDDEN_IDS.has(id)) el.hidden = true;
+        els.set(id, el);
+      }
       return els.get(id);
     },
     createElement(tag) {
-      return new FakeEl(tag);
+      const el = new FakeEl(tag);
+      if (tag === "a") el.click = () => downloads.push({ href: el.href, download: el.download });
+      return el;
     },
     addEventListener(t, fn) {
       (docListeners[t] = docListeners[t] || []).push(fn);
@@ -319,6 +341,7 @@ function makeEnv({
     storage,
     toasts,
     reloads,
+    downloads,
     document,
     el: (id) => document.getElementById(id),
     run: () => {
@@ -422,6 +445,7 @@ function makeBackend(overrides = {}) {
         persona: "",
         memory: "",
       })),
+      moderator: { id: "moderator", name: "主持人", avatar: F.avatarOf(13) },
     },
     importChanges: [{ id: "N3", persona: true, memory: true }, { id: "N5", persona: false, memory: true }],
     refineDraft: "【草稿】这是主持人模型完善后的设定。",
@@ -433,21 +457,27 @@ function makeBackend(overrides = {}) {
       default_path: "D:\\Arena-Workspace\\Default",
       native_picker: true,
     },
+    parts: PARTS_MIN, // the sprite library served at static/avatar/parts.json (null = 404)
     requireToken: "",
     failures: {},
     controlSession: null, // what POST /api/control/* answers with (defaults to the current session)
     ...overrides,
     session,
   };
-  b.fetch = async (url, init) => {
-    const isJson = !init.headers || !init.headers["Content-Type"] || /json/.test(init.headers["Content-Type"]);
+  b.fetch = async (url, init0) => {
+    const init = { method: "GET", ...(init0 || {}), headers: { ...((init0 && init0.headers) || {}) } };
+    const isJson = !init.headers["Content-Type"] || /json/.test(init.headers["Content-Type"]);
     const body = init.body ? (isJson ? JSON.parse(init.body) : init.body) : undefined;
     const call = { url, method: init.method, body, headers: init.headers };
     b.calls.push(call);
+    const key = init.method + " " + url.replace(/^\/arena/, "");
+    // static files are public (no token); the sprite library is one of them (null = "not generated yet": 404)
+    if (key === "GET /static/avatar/parts.json") {
+      return b.parts ? resp(200, b.parts) : resp(404, "not found", "text/plain");
+    }
     if (b.requireToken && init.headers["X-Arena-Token"] !== b.requireToken) {
       return resp(401, { detail: "Invalid or missing API token" });
     }
-    const key = init.method + " " + url.replace(/^\/arena/, "");
     if (b.failures[key]) return resp(b.failures[key][0], { detail: b.failures[key][1] });
     const find = (id) => b.providers.find((p) => p.id === id);
     let m;
@@ -541,6 +571,7 @@ function makeBackend(overrides = {}) {
     if (key === "GET /api/budget") return resp(200, b.budget);
     if (key === "PUT /api/budget") {
       b.budget = { ...b.budget, ...body };
+      b.budget.state = Core.budgetStateOf(b.budget); // like the server: the state follows the new limits
       return resp(200, b.budget);
     }
     if (key === "GET /api/roster") return resp(200, b.roster);
@@ -567,7 +598,13 @@ function makeBackend(overrides = {}) {
     if (key === "POST /api/roster/avatars:regenerate") {
       if (b.session.status !== "idle") return resp(409, { detail: "对局已开始，不能重新生成头像" });
       b.roster.seats.forEach((seat, i) => (seat.avatar = F.avatarOf(i + 20)));
-      return resp(200, { seats: b.roster.seats });
+      b.roster.moderator.avatar = F.avatarOf(40); // "all" includes the moderator
+      return resp(200, { seats: b.roster.seats, moderator: b.roster.moderator });
+    }
+    if (key === "POST /api/roster/moderator/avatar:regenerate") {
+      if (b.session.status !== "idle") return resp(409, { detail: "对局已开始，不能重新生成头像" });
+      b.roster.moderator.avatar = F.avatarOf(41 + (b.moderatorRolls = (b.moderatorRolls || 0) + 1));
+      return resp(200, b.roster.moderator);
     }
     if ((m = key.match(/^POST \/api\/roster\/([^/]+)\/avatar:regenerate$/))) {
       const seat = b.roster.seats.find((x) => x.id === m[1]);
@@ -607,8 +644,9 @@ function makeBackend(overrides = {}) {
 function routeFetch(calls, { requireToken = "", session } = {}) {
   const b = makeBackend({ requireToken, ...(session ? { session } : {}) });
   return async (url, init) => {
-    const r = await b.fetch(url, init);
-    calls.push({ url, init });
+    const norm = { method: "GET", ...(init || {}), headers: { ...((init && init.headers) || {}) } };
+    const r = await b.fetch(url, norm);
+    calls.push({ url, init: norm });
     return r;
   };
 }

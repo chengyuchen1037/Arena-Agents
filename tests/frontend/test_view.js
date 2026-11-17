@@ -28,6 +28,19 @@ test("names: the nickname everywhere, never the internal id; refName is what the
   assert.equal(View.displayName(s, "N3"), "Caroline");
 });
 
+test("actorAvatar: players give their own description, the moderator gives its random one (null = top hat)", () => {
+  const s = fresh();
+  const mine = F.avatarOf(3);
+  View.participantOf(s, "N3").avatar = mine;
+  assert.deepEqual(View.actorAvatar(s, "N3"), { id: "N3", seat: 3, desc: mine });
+  assert.deepEqual(View.actorAvatar(s, "N99"), { id: "N99", seat: undefined, desc: null });
+  assert.deepEqual(View.actorAvatar(s, "moderator"), { id: "moderator", seat: undefined, desc: null }, "an older backend sends none");
+  const host = F.avatarOf(8);
+  s.moderator.avatar = host;
+  assert.deepEqual(View.actorAvatar(s, "moderator"), { id: "moderator", seat: undefined, desc: host });
+  assert.deepEqual(View.actorAvatar(null, "moderator"), { id: "moderator", seat: undefined, desc: null }, "no session yet");
+});
+
 test("annotateIdRefs: 'N3' keeps its characters and gains the hover text 'N3 Carol'; markup and N1 vs N10 are safe", () => {
   const s = fresh();
   const out = View.annotateIdRefs("<p>狼人队友为 N3、N10。N1 说：N12 是狼，<b>N3</b></p>", s);
@@ -104,7 +117,7 @@ test("a player only lists the channels they are a member of; private chats are g
 });
 
 // ---- there is no "all" channel any more -----------------------------------------------------------------
-test("default channel: the public channel; without one a non-private channel everybody is in; else the first one", () => {
+test("default channel: the public channel; without one a group channel everybody is in, else the first group channel; never a private chat", () => {
   const s = fresh();
   assert.equal(View.defaultChannelId(s, GOD), "public");
   assert.equal(View.defaultChannelId(s, "N3"), "public");
@@ -112,15 +125,20 @@ test("default channel: the public channel; without one a non-private channel eve
   const t = fresh();
   Store.findById(t.channels, "public").id = "lobby";
   assert.equal(View.defaultChannelId(t, GOD), "lobby");
-  // no public channel at all: the first group channel, else the first private chat
+  // no public channel at all: the first group channel the viewpoint can see
   const u = fresh();
   u.channels = u.channels.filter((c) => c.id !== "public");
   assert.equal(View.defaultChannelId(u, GOD), "wolves");
-  assert.equal(View.defaultChannelId(u, "N1"), "dm-N1");
+  assert.equal(View.defaultChannelId(u, "N3"), "wolves");
+  // ... and when there is none (the game has not started: only the 12 private chats exist) nothing is
+  // selected, instead of opening the feed on "Alice"'s private chat
+  assert.equal(View.defaultChannelId(u, "N1"), null);
   const v = fresh();
   v.channels = v.channels.filter((c) => c.system);
-  assert.equal(View.defaultChannelId(v, GOD), "dm-N1");
+  assert.equal(View.defaultChannelId(v, GOD), null);
   assert.equal(View.defaultChannelId(Store.emptySession(), GOD), null);
+  // a private chat can still be chosen on purpose
+  assert.equal(View.normalizeSelectedChannel(v, GOD, "dm-N3"), "dm-N3");
 });
 
 test("normalizeSelectedChannel: a visible choice is kept; everything else (incl. the old \"all\") falls back to the default", () => {
@@ -657,6 +675,13 @@ test("banners: budget (yellow/red), stall, hold, errors, game over, autosave; ph
   assert.match(stall[0].text, /对局似乎停滞了/);
   assert.match(View.statusBanners({ status: "running", stall_notice: "已 120 秒没有进展" })[0].text, /已 120 秒没有进展/);
   assert.equal(View.statusBanners({ status: "running", stall_notice: "" }).length, 0);
+  assert.equal(stall[0].short, "⚠ 对局似乎停滞了（游戏没有暂停）", "a phone shows one short line");
+  // the real watchdog (app/runtime/supervisor.py) sends a whole sentence: it is shown as it is, not under a second heading
+  const watchdog = "对局静止：已连续 3 次唤醒主持人，账本仍无进展（约 120 秒）。";
+  assert.equal(View.statusBanners({ status: "running", stall_notice: watchdog })[0].text, `⚠ ${watchdog}`);
+  assert.equal(View.statusBanners({ status: "running", stall_notice: "对局似乎停滞了" })[0].text, "⚠ 对局似乎停滞了");
+  // a bare reason that does not say it gets the heading
+  assert.equal(View.statusBanners({ status: "running", stall_notice: "主持人 3 次没有回应" })[0].text, "⚠ 对局似乎停滞了：主持人 3 次没有回应");
   // most severe first
   const both = View.statusBanners({ status: "paused", pause_reason: "budget", budget: reachedBudget, stall_notice: "x", autosave_error: "y" });
   assert.deepEqual(both.map((b) => b.kind), ["budget", "stall", "error"]);

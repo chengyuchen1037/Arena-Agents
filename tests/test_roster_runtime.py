@@ -199,6 +199,43 @@ async def test_texts_edited_before_the_start_reach_the_system_prompt_and_memory_
 
 
 @async_test
+async def test_files_edited_outside_the_app_while_the_game_is_idle_are_what_the_game_starts_with(monkeypatch):
+    orch = make_orch(monkeypatch)
+    play_with(orch, idle)
+    store = orch._roster()
+    assert orch.session.participants[0].persona == "" and orch.session.participants[1].memory == ""
+    # an editor, not the API: nothing tells the orchestrator
+    (store._dir / "N1.persona.md").write_text("手工写的设定\n", encoding="utf-8")
+    (store._dir / "N2.memory.md").write_text("## 经验与印象\n手工写的记忆\n", encoding="utf-8")
+    await orch.start_or_resume()
+    try:
+        assert orch.session.participants[0].persona == "手工写的设定"
+        assert "手工写的记忆" in orch.session.participants[1].memory
+        prompt = orch._brain.system_prompt("N1")
+        assert "手工写的设定" in prompt and "手工写的记忆" not in prompt  # each player only gets his own memory
+        assert "手工写的记忆" in orch._brain.system_prompt("N2")
+        await orch.pause()
+        # a game that has started keeps the copy it started with, whatever happens to the files afterwards
+        (store._dir / "N1.persona.md").write_text("暂停期间又改了\n", encoding="utf-8")
+        await orch.start_or_resume()
+        assert orch.session.participants[0].persona == "手工写的设定"
+        assert "手工写的设定" in orch._brain.system_prompt("N1") and "暂停期间又改了" not in orch._brain.system_prompt("N1")
+    finally:
+        await orch.pause()
+
+
+@async_test
+async def test_the_start_of_a_game_does_not_touch_the_texts_when_the_roster_cannot_be_read(monkeypatch):
+    orch = make_orch(monkeypatch)
+    play_with(orch, idle)
+    await orch.update_roster_entry("N1", persona="先写好的设定")
+    orch._workspace_failed = True  # the workspace went away: nothing may be read or clobbered
+    orch._ensure_not_switching = lambda: None  # type: ignore[method-assign]  # (start_or_resume refuses a broken workspace itself)
+    orch._refresh_idle_texts()
+    assert orch.session.participants[0].persona == "先写好的设定"  # kept, not replaced by an empty text
+
+
+@async_test
 async def test_the_brain_and_its_prompts_survive_a_pause_and_a_resume(monkeypatch):
     orch = make_orch(monkeypatch)
     play_with(orch, idle)
@@ -206,7 +243,6 @@ async def test_the_brain_and_its_prompts_survive_a_pause_and_a_resume(monkeypatc
     brain = orch._brain
     prompt = brain.system_prompt("N1")
     await orch.pause()
-    await orch._roster().set_memory if False else None
     orch._roster().set_memory("N1", "暂停期间改了记忆")
     await orch.start_or_resume()
     try:
@@ -320,6 +356,49 @@ async def test_a_review_updates_each_players_record_and_memory_once(monkeypatch)
     assert [e.data["state"] for e in events_of(orch, "review.progress")].count("done") == 4
     assert await orch.start_review() == []  # every player reviews each game once
     assert orch.review_view() == {"available": True, "done": sorted(IDS, key=IDS.index), "running": False} or len(orch.review_view()["done"]) == 4
+
+
+def summed_metrics(orch: GameOrchestrator) -> dict[str, dict[str, Any]]:
+    """What a client adds up from the ``agent.metrics`` events: the last numbers of every actor."""
+    last: dict[str, dict[str, Any]] = {}
+    for event in events_of(orch, "agent.metrics"):
+        last[str(event.data["id"])] = dict(event.data)
+    return last
+
+
+@async_test
+async def test_the_calls_outside_the_game_loop_publish_their_numbers_so_the_clients_total_stays_exact(monkeypatch):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch)
+    before = summed_metrics(orch)
+    orch.llm_port_factory = lambda o: TextLlm("复盘")
+    await orch.start_review()
+    await wait_for(lambda: len(orch.session.review_done) == 4 and not orch._review_running)
+    await orch.refine_text("N1", "persona", "爱说冷笑话")  # "complete it": accounted under the pseudo-actor "roster"
+    after = summed_metrics(orch)
+    for agent in IDS:
+        assert after[agent]["calls"] == orch.usage.actor(agent).calls > before.get(agent, {}).get("calls", 0)
+        assert after[agent]["cost_usd"] == orch.usage.actor(agent).cost_usd
+    assert after["roster"] == orch.usage.metrics_for("roster") and after["roster"]["calls"] == 1
+    # the sum of the last numbers of every actor is the session's total: nothing is missing from the stream
+    assert sum(m["prompt_tokens"] + m["cache_read_tokens"] + m["cache_write_tokens"] + m["completion_tokens"] for m in after.values()) == orch.usage.total_tokens
+    assert abs(sum(m["cost_usd"] for m in after.values()) - orch.usage.total_cost_usd) < 1e-9
+
+
+@async_test
+async def test_while_a_game_runs_the_supervisor_publishes_its_agents_and_only_the_others_are_published_at_once(monkeypatch):
+    orch = make_orch(monkeypatch)
+    play_with(orch, idle)
+    await orch.start_or_resume()
+    try:
+        replay_before = len(events_of(orch, "agent.metrics"))
+        orch.llm_port_factory = lambda o: TextLlm("x")
+        orch._on_usage_recorded("N1", LLMResponse(content="", prompt_tokens=10))  # an agent of the running game: the metrics loop's job
+        assert len(events_of(orch, "agent.metrics")) == replay_before
+        orch.usage.record_llm("roster", LLMResponse(content="", prompt_tokens=10, completion_tokens=5, provider_id="p", model_id="m"))
+        assert [e.data["id"] for e in events_of(orch, "agent.metrics")][-1] == "roster"  # not one of the agents: published now
+    finally:
+        await orch.pause()
 
 
 @async_test

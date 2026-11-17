@@ -489,6 +489,15 @@ class RosterRuntimeMixin:
 
     def _on_usage_recorded(self, agent_id: str, resp: Any) -> None:
         self._on_budget_changed(force=False)
+        supervisor = getattr(self, "_supervisor", None)
+        if supervisor is None or agent_id not in supervisor.agents:
+            # Nobody publishes this actor's numbers (the post-game review, "complete it with the moderator's
+            # model", or any call while no game is running): tell the clients now, so that what they add up
+            # from the events stays equal to the session's own totals.
+            try:
+                self.bus.publish(UiEvent(type="agent.metrics", data=self.usage.metrics_for(agent_id)))  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - the numbers reach the clients with the next snapshot anyway
+                logger.debug("could not publish the metrics of %s", agent_id, exc_info=True)
 
     def _on_budget_changed(self, *, force: bool) -> None:
         if self._budget_watch is None:

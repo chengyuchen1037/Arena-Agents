@@ -1,8 +1,8 @@
 "use strict";
-// Frontend tests for the v0.11 features that survive in v0.12: layout collapse/resize,
-// workspace (工作文件夹) modal, provider auto_append_path + endpoint preview, and the 3-slot
-// model templates with actor checkboxes. (The card-size tiers of v0.11 were removed in v0.12:
-// players are fixed-size tiles.) Runs against a tiny fake DOM (no browser).
+// Frontend tests for the v0.11 features that survive in v0.12.1: layout collapse/resize (the right-hand
+// "对局状态" column is gone, the channel column collapses to an avatar rail), workspace (工作文件夹) modal,
+// provider auto_append_path + endpoint preview, and the 3-slot model templates with actor checkboxes.
+// Runs against a tiny fake DOM (no browser).
 // Run: node tests/frontend/test_v011_ui.js
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -539,16 +539,14 @@ const checkboxTarget = (actor, checked) => ({
 });
 
 // ---- HTML / CSS contract -----------------------------------------------------
-test("index.html ships every v0.11 control", () => {
+test("index.html ships every v0.11 control that survives (the right-hand column is gone)", () => {
   for (const id of [
     "btn-open-workspace-modal",
     "workspace-name-label",
     "btn-toggle-board",
     "btn-toggle-channels",
-    "btn-toggle-dashboard",
     "board-resizer",
     "channels-resizer",
-    "dashboard-resizer",
     "workspace-modal",
     "input-workspace-path",
     "btn-pick-native-folder",
@@ -570,27 +568,49 @@ test("index.html ships every v0.11 control", () => {
     assert.ok(HTML_SRC.includes(`id="${id}"`), `missing #${id}`);
   }
   assert.ok(!HTML_SRC.includes("select-card-size"), "the card size picker was removed in v0.12");
-  // scripts load in dependency order
+  for (const gone of ["btn-toggle-dashboard", "dashboard-resizer", "dashboard-panel", "id=\"dashboard"]) {
+    assert.ok(!HTML_SRC.includes(gone), `${gone} was folded into the participant bar in v0.12.1`);
+  }
+  // scripts load in dependency order (platform.js runs in <head>, before anything else)
+  const pf = HTML_SRC.indexOf("static/js/platform.js");
   const c = HTML_SRC.indexOf("static/js/core.js");
   const l = HTML_SRC.indexOf("static/js/layout.js");
   const p = HTML_SRC.indexOf("static/js/providers.js");
+  const r = HTML_SRC.indexOf("static/js/roster.js");
+  const b = HTML_SRC.indexOf("static/js/budget.js");
   const w = HTML_SRC.indexOf("static/js/workspace.js");
   const a = HTML_SRC.indexOf("static/js/app.js");
-  assert.ok(c >= 0 && c < l && l < p && p < w && w < a);
+  assert.ok(pf >= 0 && pf < c && c < l && l < p && p < r && r < b && b < w && w < a);
 });
 
-test("style.css defines the collapse/resize/template hooks and the v0.12 tile styles (no card tiers)", () => {
+test("style.css defines the collapse/resize/template hooks and the v0.12.1 card / responsive styles (no card tiers, no dashboard column)", () => {
   for (const frag of [
     ".row-resizer",
     ".col-resizer",
     ".board-collapsed",
     ".left-collapsed",
-    ".right-collapsed",
     ".narrow-layout",
-    ".tile",
-    ".tile-tag",
-    ".glyph-s-hexagon",
-    ".metrics-popover",
+    ".pcard",
+    ".pcard-num",
+    ".pcard-tag",
+    ".pbadge",
+    ".pcard.out",
+    ".avatar-img",
+    "image-rendering: pixelated",
+    ".board-summary",
+    ".channel-item.is-dm",
+    ".req-card",
+    ".detail-panel",
+    ".detail-editor",
+    ".budget-bar",
+    ".pricing-bar",
+    ".price-grid",
+    ".tabbar",
+    ".more-menu",
+    'html[data-layout="phone"]',
+    'html[data-layout="compact"]',
+    'data-budget="warning"',
+    'data-budget="reached"',
     ".endpoint-preview-url",
     ".template-row",
     ".advanced-bindings",
@@ -598,19 +618,35 @@ test("style.css defines the collapse/resize/template hooks and the v0.12 tile st
   ]) {
     assert.ok(CSS_SRC.includes(frag), `missing CSS ${frag}`);
   }
-  for (const gone of [".card-size-", ".player-card", ".action-card", ".trace-card", ".thought-card", ".subitem-"]) {
+  for (const gone of [
+    ".card-size-",
+    ".player-card",
+    ".action-card",
+    ".trace-card",
+    ".thought-card",
+    ".subitem-",
+    ".tile-tag",
+    ".glyph-s-",
+    ".metrics-popover",
+    ".dashboard-panel",
+    ".right-collapsed",
+    ".exec-depth",
+    ".board-legend",
+    ".badge-floor",
+    ".badge-waiting",
+  ]) {
     assert.ok(!CSS_SRC.includes(gone), `obsolete CSS ${gone} is still there`);
   }
 });
 
 // ---- layout ------------------------------------------------------------------
-test("layout: persisted collapse/size state is applied on create", () => {
+test("layout: persisted collapse/size state is applied on create (an old save with a right column is tolerated)", () => {
   const env = makeEnv({
     storage: {
       [Core.LAYOUT_STORAGE_KEY]: JSON.stringify({
         boardCollapsed: true,
         leftCollapsed: true,
-        rightCollapsed: false,
+        rightCollapsed: true, // v0.12.0 leftovers are ignored
         boardHeight: 200,
         leftWidth: 300,
         rightWidth: 320,
@@ -620,13 +656,14 @@ test("layout: persisted collapse/size state is applied on create", () => {
   assert.ok(env.el("main-container").classList.contains("board-collapsed"));
   assert.equal(env.el("board-section").style.height, ""); // collapsed hides it
   assert.ok(env.el("board-resizer").hidden);
+  // "collapsed" channel column = the avatar rail (names hidden), not a hidden column
   assert.ok(env.el("workspace-grid").classList.contains("left-collapsed"));
   assert.ok(!env.el("workspace-grid").classList.contains("right-collapsed"));
   assert.equal(env.el("channels-panel").style.width, "");
-  assert.equal(env.el("dashboard-panel").style.width, "320px");
   assert.ok(env.el("channels-resizer").hidden);
-  assert.ok(!env.el("dashboard-resizer").hidden);
   assert.equal(env.el("btn-toggle-board-label").textContent, "展开看板");
+  assert.equal(env.el("btn-toggle-channels").textContent, "▶");
+  assert.equal("rightWidth" in env.layout.state() || "rightCollapsed" in env.layout.state(), false);
 
   // expand the board: its persisted height comes back
   env.el("btn-toggle-board").dispatch("click");
@@ -647,14 +684,17 @@ test("layout: persisted collapse/size state is applied on create", () => {
 test("layout: toggles persist to localStorage", () => {
   const env = makeEnv();
   assert.ok(!env.el("main-container").classList.contains("board-collapsed"));
-  assert.equal(env.el("channels-panel").style.width, "245px");
-  assert.equal(env.el("dashboard-panel").style.width, "275px");
+  assert.equal(env.el("channels-panel").style.width, `${Core.LAYOUT_DEFAULTS.leftWidth}px`);
 
-  env.el("btn-toggle-dashboard").dispatch("click");
-  assert.ok(env.el("workspace-grid").classList.contains("right-collapsed"));
-  assert.equal(env.el("dashboard-panel").style.width, "");
+  env.el("btn-toggle-channels").dispatch("click");
+  assert.ok(env.el("workspace-grid").classList.contains("left-collapsed"));
+  assert.equal(env.el("channels-panel").style.width, "");
   const saved = JSON.parse(env.storageMap.get(Core.LAYOUT_STORAGE_KEY));
-  assert.equal(saved.rightCollapsed, true);
+  assert.equal(saved.leftCollapsed, true);
+  assert.equal("rightCollapsed" in saved, false);
+  env.el("btn-toggle-channels").dispatch("click");
+  assert.ok(!env.el("workspace-grid").classList.contains("left-collapsed"));
+  assert.equal(JSON.parse(env.storageMap.get(Core.LAYOUT_STORAGE_KEY)).leftCollapsed, false);
 
   // the four card-size tiers are gone: no picker, no class on the grid, nothing persisted
   assert.equal(env.layout.setCardSize, undefined);
@@ -666,20 +706,15 @@ test("layout: toggles persist to localStorage", () => {
 test("layout: drag resizers resize within limits and persist; dblclick resets", () => {
   const env = makeEnv();
   // left column: drag 80px to the right
+  const w0 = Core.LAYOUT_DEFAULTS.leftWidth;
   env.el("channels-resizer").dispatch("pointerdown", { clientX: 100, button: 0 });
   env.document.dispatchEvent("pointermove", { clientX: 180 });
   env.document.dispatchEvent("pointerup");
-  assert.equal(env.el("channels-panel").style.width, "325px");
+  assert.equal(env.el("channels-panel").style.width, `${w0 + 80}px`);
   assert.equal(
     JSON.parse(env.storageMap.get(Core.LAYOUT_STORAGE_KEY)).leftWidth,
-    325
+    w0 + 80
   );
-
-  // right column: dragging right shrinks it
-  env.el("dashboard-resizer").dispatch("pointerdown", { clientX: 500, button: 0 });
-  env.document.dispatchEvent("pointermove", { clientX: 450 });
-  env.document.dispatchEvent("pointerup");
-  assert.equal(env.el("dashboard-panel").style.width, "325px");
 
   // limits: clamping keeps a sane centre column / minimum width
   env.layout.beginResize("left", 0);
@@ -698,20 +733,35 @@ test("layout: drag resizers resize within limits and persist; dblclick resets", 
   // double-click restores the defaults
   env.el("channels-resizer").dispatch("dblclick");
   assert.equal(env.layout.state().leftWidth, Core.LAYOUT_DEFAULTS.leftWidth);
-  env.el("dashboard-resizer").dispatch("dblclick");
-  assert.equal(env.layout.state().rightWidth, Core.LAYOUT_DEFAULTS.rightWidth);
   env.el("board-resizer").dispatch("dblclick");
   assert.equal(env.layout.state().boardHeight, null);
   assert.equal(env.el("board-section").style.height, "");
   assert.equal(JSON.parse(env.storageMap.get(Core.LAYOUT_STORAGE_KEY)).boardHeight, null);
 });
 
-test("layout: narrow viewports converge the side panels automatically", () => {
+test("layout: narrow viewports turn the channel column into the avatar rail automatically", () => {
   const env = makeEnv({ innerWidth: 900 });
   env.layout.reflowLimits();
   assert.ok(env.el("workspace-grid").classList.contains("narrow-layout"));
   env.sandbox.innerWidth = 1400;
   env.layout.reflowLimits();
+  assert.ok(!env.el("workspace-grid").classList.contains("narrow-layout"));
+  assert.equal(env.layout.isNarrow(), false);
+});
+
+test("layout: the platform's <html data-layout> decides (a touch tablet at 1024 px is compact, a wide window is not)", () => {
+  const env = makeEnv({ innerWidth: 1024 });
+  const html = env.document.documentElement;
+  html.setAttribute("data-layout", "compact");
+  env.layout.apply();
+  assert.ok(env.el("workspace-grid").classList.contains("narrow-layout"), "compact -> rail even at 1024 px");
+  assert.equal(env.layout.isNarrow(), true);
+  html.setAttribute("data-layout", "wide");
+  env.layout.apply();
+  assert.ok(!env.el("workspace-grid").classList.contains("narrow-layout"));
+  // the phone layout has its own panes (tab bar): the rail class is not used there
+  html.setAttribute("data-layout", "phone");
+  env.layout.apply();
   assert.ok(!env.el("workspace-grid").classList.contains("narrow-layout"));
 });
 

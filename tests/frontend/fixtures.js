@@ -26,17 +26,24 @@ const EVERYONE = ["moderator", ...PLAYER_IDS];
 
 /** The avatar description of a seat in the minimal fixture library (tests/frontend/fixtures/parts.min.json). */
 function avatarOf(seat) {
-  const pick = (list, k) => list[(seat * k) % list.length];
+  // a different (hash based) pick per field, so neighbouring seats do not look alike
+  const hash = (k) => {
+    let h = (Math.imul(seat + 1, 2654435761) ^ Math.imul(k + 7, 40503)) >>> 0;
+    h = Math.imul(h ^ (h >>> 15), 2246822519) >>> 0;
+    h = Math.imul(h ^ (h >>> 13), 3266489917) >>> 0;
+    return (h ^ (h >>> 16)) >>> 0;
+  };
+  const pick = (list, k) => list[hash(k) % list.length];
   return {
     v: 1,
     face: pick(["f00", "f01", "f02"], 1),
     skin: pick(["s00", "s01", "s02"], 2),
-    hair: pick(["h00", "h01", "h02"], 1),
-    hair_color: pick(["c00", "c01", "c02"], 2),
-    eyes: pick(["e00", "e01", "e02"], 1),
-    mouth: pick(["m00", "m01", "m02"], 2),
-    accessory: pick(["a00", "a01", "a02"], 1),
-    accessory_color: pick(["k00", "k01"], 1),
+    hair: pick(["h01", "h02"], 3), // always a visible hairstyle: the pictures differ more
+    hair_color: pick(["c00", "c01", "c02"], 4),
+    eyes: pick(["e00", "e01", "e02"], 5),
+    mouth: pick(["m00", "m01", "m02"], 6),
+    accessory: pick(["a00", "a01", "a02"], 7),
+    accessory_color: pick(["k00", "k01"], 8),
   };
 }
 

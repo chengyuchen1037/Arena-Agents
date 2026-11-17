@@ -1,12 +1,13 @@
 "use strict";
 // Smoke test for static/js/app.js running against a tiny fake DOM (see harness.js):
 // wiring, startup, auth, SSE reconnect/resume, and the Provider / binding / session dialogs.
-// The v0.12 UI itself (tiles, popover, feed, channel bar, viewpoint) is in test_app_ui.js.
+// The v0.12.1 UI itself (cards, detail panel, feed, channel bar, viewpoint, budget, roster, price source,
+// phone layout) is in test_app_ui.js / test_v0121_ui.js.
 // Run: node tests/frontend/test_app_smoke.js
 const assert = require("node:assert/strict");
 const H = require("./harness.js");
 
-const { Core, F, SRC, HTML_SRC, resp, target, settle, makeEnv, makeBackend, routeFetch, boot, posts } = H;
+const { Core, F, SRC, HTML_SRC, CSS_SRC, resp, target, settle, makeEnv, makeBackend, routeFetch, boot, posts } = H;
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
@@ -18,16 +19,21 @@ function ids(src) {
 // ---- wiring --------------------------------------------------------------------
 test("every id used by the frontend modules exists in index.html", () => {
   const htmlIds = new Set([...HTML_SRC.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
-  const combined = SRC.app + SRC.providers + SRC.layout + SRC.workspace;
-  // app.js also reads ids through its `$ = (id) => getElementById(id)` helper
-  const viaHelper = new Set([...SRC.app.matchAll(/\$\("([^"]+)"\)/g)].map((m) => m[1]));
-  const missing = [...new Set([...ids(combined), ...viaHelper])].filter((i) => !htmlIds.has(i));
+  const combined = SRC.app + SRC.providers + SRC.layout + SRC.workspace + SRC.roster + SRC.budget;
+  // the modules also read ids through their `$ = (id) => getElementById(id)` helper
+  const viaHelper = new Set(
+    [SRC.app, SRC.roster, SRC.budget, SRC.providers, SRC.workspace].flatMap((src) => [...src.matchAll(/\$\(\s*[`"]([^`"$]+)[`"]\s*\)/g)].map((m) => m[1]))
+  );
+  // ids of elements the scripts render themselves (the detail panel's name field, the confirm dialog's
+  // checkbox) are written as id="..." inside a template string
+  const rendered = new Set([...combined.matchAll(/\bid="([^"$]+)"/g)].map((m) => m[1]));
+  const missing = [...new Set([...ids(combined), ...viaHelper])].filter((i) => !htmlIds.has(i) && !rendered.has(i));
   assert.deepEqual(missing, []);
 });
 
 test("index.html uses relative asset paths and loads the scripts in dependency order", () => {
   assert.ok(!/(?:src|href)="\/(?:static|api)/.test(HTML_SRC));
-  const order = ["core", "avatar", "store", "view", "layout", "providers", "workspace", "app"].map((n) =>
+  const order = ["platform", "core", "avatar", "store", "view", "layout", "providers", "roster", "budget", "workspace", "app"].map((n) =>
     HTML_SRC.indexOf(`static/js/${n}.js`)
   );
   assert.ok(order.every((i) => i >= 0), "every script is referenced");
@@ -35,13 +41,20 @@ test("index.html uses relative asset paths and loads the scripts in dependency o
 });
 
 test("frontend modules have no absolute /api or /static URLs", () => {
-  for (const src of [SRC.app, SRC.providers, SRC.layout, SRC.workspace]) {
+  for (const src of [SRC.app, SRC.providers, SRC.layout, SRC.workspace, SRC.roster, SRC.budget, SRC.platform, SRC.avatar]) {
     assert.ok(!/["'`]\/(api|static)\//.test(src));
   }
 });
 
-test("v0.11-only UI is gone: card sizes, force pause, tool toggle, fold buttons, streaming, engine stream", () => {
+test("v0.11 / v0.12.0-only UI is gone: card sizes, force pause, tool toggle, fold buttons, streaming, execution depth, legend, \"all\" channel, dashboard column", () => {
   for (const gone of [
+    "select-exec-depth",
+    "execution-depth",
+    "board-legend",
+    "dashboard-panel",
+    "btn-toggle-dashboard",
+    "metrics-popover",
+    "dashboard-resizer",
     "select-card-size",
     "btn-force-pause",
     "chk-show-tools",
@@ -55,6 +68,12 @@ test("v0.11-only UI is gone: card sizes, force pause, tool toggle, fold buttons,
     assert.ok(!HTML_SRC.includes(gone), `index.html still has ${gone}`);
     assert.ok(!SRC.app.includes(gone), `app.js still refers to ${gone}`);
   }
+  // the three removed agent states and their legend
+  for (const gone of ["🎤", "✋", "▪", "已停止", "执行深度"]) {
+    assert.ok(!HTML_SRC.includes(gone), `index.html still shows ${gone}`);
+  }
+  assert.ok(!SRC.app.includes("flow-floor") && !SRC.app.includes("badge-waiting"));
+  assert.ok(!CSS_SRC.includes(".exec-depth") && !CSS_SRC.includes(".dashboard-panel"));
   for (const gone of ["streaming_draft", "stream_chunk", "interrupt_quotas", "tool_call", "thought_text", "showToolCalls", "level1Expanded"]) {
     assert.ok(!SRC.app.includes(gone), `app.js still handles ${gone}`);
   }
@@ -67,9 +86,34 @@ test("v0.11-only UI is gone: card sizes, force pause, tool toggle, fold buttons,
     assert.ok(HTML_SRC.includes(`id="${id}"`), `missing #${id}`);
   }
   // ... and the v0.12 widgets
-  for (const id of ["select-viewpoint", "request-hints", "status-banner", "metrics-popover", "participants-grid", "channels-list", "feed-records-container"]) {
+  for (const id of [
+    "select-viewpoint",
+    "request-hints",
+    "status-banner",
+    "detail-panel",
+    "participants-grid",
+    "board-summary",
+    "channels-list",
+    "feed-records-container",
+    // v0.12.1
+    "btn-open-budget-modal",
+    "budget-modal",
+    "btn-regen-all-avatars",
+    "btn-roster-menu",
+    "chk-memory-enabled",
+    "btn-review-all",
+    "input-pricing-url",
+    "btn-refresh-pricing",
+    "input-model-price-cache-read",
+    "input-model-price-cache-write",
+    "btn-more",
+    "more-menu",
+    "tabbar",
+    "mod-chip",
+  ]) {
     assert.ok(HTML_SRC.includes(`id="${id}"`), `missing #${id}`);
   }
+  assert.match(HTML_SRC, /<html[^>]* data-platform="/, "the platform attribute exists before the script runs");
 });
 
 // ---- startup / auth ----------------------------------------------------------------
@@ -81,8 +125,15 @@ test("no token needed: no modal, no header, sub-path prefix, first SSE connect c
   env.flushRaf();
 
   assert.deepEqual(
-    calls.map((c) => c.url),
-    ["/arena/api/providers", "/arena/api/settings/bindings", "/arena/api/state", "/arena/api/workspaces"]
+    calls.map((c) => c.url).sort(),
+    [
+      "/arena/api/providers",
+      "/arena/api/roster",
+      "/arena/api/settings/bindings",
+      "/arena/api/state",
+      "/arena/api/workspaces",
+      "/arena/static/avatar/parts.json", // the sprite library: a public static file, fetched under the sub-path prefix
+    ]
   );
   assert.ok(calls.every((c) => !("X-Arena-Token" in c.init.headers)));
   assert.notEqual(env.el("token-modal").style.display, "flex");
@@ -90,7 +141,7 @@ test("no token needed: no modal, no header, sub-path prefix, first SSE connect c
   // moderator binding shown in the status pill; no legacy config endpoint used
   assert.match(env.el("api-status-label").textContent, /DeepSeek \/ model-x/);
   assert.ok(calls.every((c) => !c.url.endsWith("/api/config/llm")));
-  assert.equal(env.el("app-version").textContent, "v0.12-test"); // the application version, not the session's
+  assert.equal(env.el("app-version").textContent, "v0.12.1-test"); // the application version, not the session's
 
   // SSE is delayed 300ms and uses the prefixed URL without a token; the first stream always starts
   // with a snapshot (no last_event_id even though /api/state reported event_id=100)
@@ -105,7 +156,8 @@ test("401: modal appears, token is stored, requests retry with header, SSE gets 
   env.run();
   await settle();
   assert.equal(env.el("token-modal").style.display, "flex");
-  assert.equal(calls.length, 1); // one request waiting on the modal, no stampede
+  // one API request waiting on the modal, no stampede (the public sprite library is not an API call)
+  assert.equal(calls.filter((c) => !c.url.includes("/static/")).length, 1);
 
   env.el("input-api-token").value = "secret";
   env.el("token-form").dispatch("submit");
@@ -128,7 +180,9 @@ test("stored token is sent from the first request (no modal)", async () => {
   env.run();
   await settle();
   assert.notEqual(env.el("token-modal").style.display, "flex");
-  assert.ok(calls.every((c) => c.init.headers["X-Arena-Token"] === "secret"));
+  const api = calls.filter((c) => !c.url.includes("/static/"));
+  assert.ok(api.length >= 4);
+  assert.ok(api.every((c) => c.init.headers["X-Arena-Token"] === "secret"));
 });
 
 test("cancelling the token modal leaves a clickable banner and a clear toast", async () => {
@@ -319,7 +373,7 @@ test("import adopts the imported game (new session id) and toasts", async () => 
   assert.ok(imp, "import request sent");
   assert.ok(env.toasts.some((t) => /已成功导入/.test(t.textContent)));
   assert.equal(env.app().state.session.session_id, "s2");
-  assert.equal(env.app().state.selectedChannel, "all");
+  assert.equal(env.app().state.selectedChannel, "public"); // there is no "all" channel: the public one is the default
 });
 
 test("non-JSON 500 on init does not crash and toasts a clear message", async () => {
@@ -427,11 +481,14 @@ test("models: discover -> radio single-select -> prices REQUIRED -> add exactly 
   assert.ok(!/全选|批量/.test(list));
   assert.match(list, /已添加/); // model-x already exists
 
-  // pick a new model: prices must be typed, none are prefilled
+  // pick a new model without a price-source match: prices must be typed, none are prefilled
   env.el("discover-list").dispatch("change", { target: { value: "m-new" } });
   assert.equal(env.el("input-model-id").value, "m-new");
   assert.equal(env.el("input-model-price-in").value, "");
+  assert.equal(env.el("input-model-price-cache-read").value, "");
+  assert.equal(env.el("input-model-price-cache-write").value, "");
   assert.equal(env.el("input-model-price-out").value, "");
+  assert.match(env.el("model-price-hint").textContent, /没有匹配到/);
   assert.equal(env.el("btn-submit-model").textContent, "添加模型");
 
   env.el("model-form").dispatch("submit");
@@ -455,7 +512,14 @@ test("models: discover -> radio single-select -> prices REQUIRED -> add exactly 
   await settle();
   const req = posts(backend, "POST", "/models");
   assert.equal(req.length, 1);
-  assert.deepEqual(req[0].body, { model_id: "m-new", input_price_per_m: 1, output_price_per_m: 4.5 });
+  // the two cache prices were left empty: null = bill at the input price
+  assert.deepEqual(req[0].body, {
+    model_id: "m-new",
+    input_price_per_m: 1,
+    cache_read_price_per_m: null,
+    cache_write_price_per_m: null,
+    output_price_per_m: 4.5,
+  });
   // form is reset so the next model needs fresh prices
   assert.equal(env.el("input-model-id").value, "");
   assert.equal(env.el("input-model-price-in").value, "");
@@ -471,6 +535,8 @@ test("models: picking an existing model prefills prices and switches to edit (PA
   env.el("discover-list").dispatch("change", { target: { value: "model-x" } });
   assert.equal(env.el("btn-submit-model").textContent, "保存价格");
   assert.equal(env.el("input-model-price-in").value, "0.5");
+  assert.equal(env.el("input-model-price-cache-read").value, "0.1");
+  assert.equal(env.el("input-model-price-cache-write").value, "");
   env.el("input-model-price-in").value = "0.6";
   env.el("model-form").dispatch("submit");
   await settle();
@@ -479,6 +545,8 @@ test("models: picking an existing model prefills prices and switches to edit (PA
   assert.deepEqual(patch.body, {
     model_id: "model-x",
     input_price_per_m: 0.6,
+    cache_read_price_per_m: 0.1,
+    cache_write_price_per_m: null,
     output_price_per_m: 2,
     context_window_tokens: 128000,
   });
@@ -518,26 +586,28 @@ test("bindings: moderator + player rows, provider change resets model, save PUTs
   assert.equal((html.match(/class="binding-row/g) || []).length, 3);
   assert.match(html, /xhigh（极深）/);
   assert.ok(!/ disabled/.test(html));
-  assert.match(env.el("bindings-lock-hint").textContent, /执行深度/);
+  // v0.12.1: no execution depth any more; the hint talks about the reasoning depth per role only
+  assert.match(env.el("bindings-lock-hint").textContent, /思考深度/);
+  assert.ok(!/执行深度/.test(env.el("bindings-lock-hint").textContent));
 
   const change = (actor, field, value) =>
     env.el("bindings-table").dispatch("change", {
       target: target({ ".binding-row": { "data-actor": actor } }, { getAttribute: (k) => (k === "data-field" ? field : null), value }),
     });
-  change("p01", "provider_id", "p2");
-  change("p01", "model_id", "claude-y");
-  change("p01", "reasoning_depth", "xhigh");
+  change("N1", "provider_id", "p2");
+  change("N1", "model_id", "claude-y");
+  change("N1", "reasoning_depth", "xhigh");
   env.el("btn-save-bindings").dispatch("click");
   await settle();
   const put = backend.calls.find((c) => c.method === "PUT");
-  assert.deepEqual(put.body.bindings.p01, {
+  assert.deepEqual(put.body.bindings.N1, {
     provider_id: "p2",
     model_id: "claude-y",
     reasoning_depth: "xhigh",
     context_window_tokens: 200000,
   });
   assert.ok(put.body.bindings.moderator); // moderator binding kept
-  assert.equal(put.body.bindings.p02, undefined); // unbound players are not sent
+  assert.equal(put.body.bindings.N2, undefined); // unbound players are not sent
   assert.equal(env.el("bindings-modal").style.display, "none");
 });
 
@@ -547,7 +617,7 @@ test("bindings: partially filled row is rejected locally; apply-all copies the m
   env.el("btn-open-bindings-modal").dispatch("click");
   await settle();
   env.el("bindings-table").dispatch("change", {
-    target: target({ ".binding-row": { "data-actor": "p01" } }, { getAttribute: (k) => (k === "data-field" ? "provider_id" : null), value: "p1" }),
+    target: target({ ".binding-row": { "data-actor": "N1" } }, { getAttribute: (k) => (k === "data-field" ? "provider_id" : null), value: "p1" }),
   });
   env.el("btn-save-bindings").dispatch("click");
   await settle();
@@ -558,7 +628,7 @@ test("bindings: partially filled row is rejected locally; apply-all copies the m
   env.el("btn-save-bindings").dispatch("click");
   await settle();
   const put = backend.calls.find((c) => c.method === "PUT");
-  assert.equal(put.body.bindings.p01.model_id, "model-x");
+  assert.equal(put.body.bindings.N1.model_id, "model-x");
 });
 
 test("bindings are LOCKED while running: controls disabled, save does not send, and unlock live over SSE", async () => {
@@ -607,12 +677,12 @@ test("restored session shows a notice, never auto-starts, and can be dismissed",
     status: "paused",
     restored_from_save: true,
     restore_notice: "已恢复上次对局（已暂停）",
-    binding_issues: [{ actor_id: "p01", message: "Provider 已被删除" }],
+    binding_issues: [{ actor_id: "N1", message: "Provider 已被删除" }],
   });
   const { env, backend } = await H.bootLive({ session });
   assert.equal(env.el("restore-notice").hidden, false);
   assert.match(env.el("restore-notice-text").textContent, /已恢复上次对局（已暂停）/);
-  assert.match(env.el("restore-notice-text").textContent, /p01（Provider 已被删除）/);
+  assert.match(env.el("restore-notice-text").textContent, /Alice（Provider 已被删除）/, "the notice names the nickname, not the id");
   assert.equal(backend.calls.filter((c) => c.url.includes("/control/")).length, 0);
   env.el("btn-dismiss-notice").dispatch("click");
   assert.equal(env.el("restore-notice").hidden, true);
@@ -664,10 +734,10 @@ test("sessions modal lists, loads and deletes external saves (current one is pro
   assert.equal(env.app().state.session.session_id, "s9"); // the loaded game replaced the old one
 });
 
-test("UI keeps thinking depth and execution depth distinct", () => {
-  assert.match(HTML_SRC, /执行深度:/);
-  assert.match(HTML_SRC, /不是模型的“思考深度”/);
-  assert.match(HTML_SRC, /思考深度 ≠ 执行深度/);
+test("the execution depth is gone (backend removed it): no select, no endpoint, no label; the reasoning depth stays per role", () => {
+  assert.ok(!/执行深度/.test(HTML_SRC));
+  assert.ok(!/exec-depth|execution_depth|execution-depth/.test(HTML_SRC + SRC.app + SRC.providers));
+  assert.match(HTML_SRC, /思考深度/); // the binding table still has it
 });
 
 test("usage cost comes from the server total (price snapshots) and stays live with agent.metrics", async () => {
@@ -675,21 +745,16 @@ test("usage cost comes from the server total (price snapshots) and stays live wi
   const { env } = await H.bootLive({ session });
   assert.equal(env.el("usage-cost-text").textContent, "$0.1234");
   assert.match(env.el("usage-tokens-text").textContent, /1\.5K/);
-  env.sse("agent.metrics", { id: "p01", calls: 1, prompt_tokens: 1000, completion_tokens: 1000, cost_usd: 0.0766, tool_calls: 2, thinking_rounds: 1, rejections: 0 }, 160);
+  env.sse("agent.metrics", { id: "N1", calls: 1, prompt_tokens: 1000, cache_read_tokens: 0, cache_write_tokens: 0, completion_tokens: 1000, cost_usd: 0.0766, tool_calls: 2, thinking_rounds: 1, rejections: 0 }, 160);
   assert.equal(env.el("usage-cost-text").textContent, "$0.2000");
   assert.match(env.el("usage-tokens-text").textContent, /3\.5K/);
 });
 
-test("execution depth: the select posts the chosen depth; the session value is mirrored back", async () => {
+test("a session that still carries execution_depth (an older save) does not bring the select back", async () => {
   const { env, backend } = await H.bootLive({ session: F.makeSession({ execution_depth: "high" }) });
-  assert.equal(env.el("select-exec-depth").value, "high");
-  env.el("select-exec-depth").value = "low";
-  env.el("select-exec-depth").dispatch("change");
-  await settle();
-  const post = backend.calls.find((c) => c.url.endsWith("/api/session/execution-depth"));
-  assert.deepEqual(post.body, { execution_depth: "low" });
   env.sse("session.updated", { execution_depth: "xhigh" }, 170);
-  assert.equal(env.el("select-exec-depth").value, "xhigh");
+  assert.ok(!backend.calls.some((c) => c.url.includes("execution-depth")));
+  assert.ok(!env.el("participants-grid").innerHTML.includes("执行深度"));
 });
 
 // ---- v0.11: app wiring for layout + workspace ------------------------------------------------------

@@ -376,6 +376,10 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         self._recovery_pending = False
         session = self.session
         reason = {"idle": "started", "finished": "continued"}.get(self.world.state.status, "resumed")
+        if reason == "started":
+            # persona / memory are plain files that may have been edited outside the app while the game was idle:
+            # the game starts with what they say now (a resumed game keeps the copy it started with)
+            self._refresh_idle_texts()
         session.restored_from_save = False
         session.restore_notice = ""
         session.pause_reason = ""

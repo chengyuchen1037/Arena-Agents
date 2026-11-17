@@ -279,6 +279,32 @@ test("the moderator and the engine have their own icons, independent of the libr
   assert.notEqual(Avatar.urlFor("N3", 3, null), mod);
 });
 
+test("the moderator draws its random avatar when it has one; the fixed top hat is only the fallback", withParts(() => {
+  const hat = Avatar.moderatorUrl();
+  // no description (an older backend): the fixed icon
+  assert.equal(Avatar.urlFor("moderator", undefined, null), hat);
+  assert.equal(Avatar.urlFor("moderator", undefined, { v: 1 }), hat); // a description that cannot describe an avatar
+  // a description (v0.12.1): rendered from the library, exactly like a player with the same description
+  const own = Avatar.urlFor("moderator", undefined, DESC);
+  assert.notEqual(own, hat);
+  assert.match(own, /^data:image\/png;base64,/);
+  assert.equal(own, Avatar.dataUrl(DESC, { seat: 0, label: "moderator" }));
+  assert.equal(own, Avatar.urlFor("N5", 5, DESC)); // the picture depends on the description only
+  // a different description is a different picture; the same one is cached
+  const other = { ...DESC, hair: "h01", eyes: "e01" };
+  assert.notEqual(Avatar.urlFor("moderator", undefined, other), own);
+  assert.equal(Avatar.urlFor("moderator", undefined, DESC), own);
+  // the markup keeps the moderator's class (the chip's styling) and never echoes the description
+  const html = Avatar.imgHtml("moderator", undefined, DESC, { size: 20, className: "mod-chip-avatar" });
+  assert.match(html, /class="avatar-img avatar-moderator mod-chip-avatar"/);
+  assert.ok(html.includes(own) && !html.includes("f01"));
+}));
+
+test("without the library the moderator keeps its top hat even when it has a description", () => {
+  assert.equal(Avatar.hasParts(), false);
+  assert.equal(Avatar.urlFor("moderator", undefined, DESC), Avatar.moderatorUrl());
+});
+
 // ---- PNG / scaling -----------------------------------------------------------------------------------
 test("scalePixels enlarges by nearest neighbour", () => {
   const px = { width: 2, height: 1, data: new Uint8ClampedArray([1, 2, 3, 255, 9, 8, 7, 255]) };

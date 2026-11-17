@@ -308,7 +308,9 @@ class MockRoster:
         self.rng = rng
         self.parts = parts
         self.memory_enabled = True
-        avatars = roster_avatars(rng, parts)
+        avatars = roster_avatars(rng, parts, len(PLAYER_IDS) + 1)  # the last one is the moderator's
+        # the moderator is not a seat: it only has an avatar of its own (random like the players')
+        self.moderator: dict[str, Any] = {"id": MODERATOR, "name": "主持人", "avatar": avatars[len(PLAYER_IDS)]}
         self.seats: dict[str, dict[str, Any]] = {
             pid: {
                 "seat": i + 1,
@@ -349,12 +351,16 @@ class MockRoster:
         return None
 
     def regenerate(self, pid: str | None = None) -> list[str]:
+        """New avatars: everybody (the twelve seats and the moderator, picked together) or one seat / the moderator."""
         if pid is None:
-            avatars = roster_avatars(self.rng, self.parts)
+            avatars = roster_avatars(self.rng, self.parts, len(PLAYER_IDS) + 1)
             for p, a in zip(PLAYER_IDS, avatars):
                 self.seats[p]["avatar"] = a
-            return list(PLAYER_IDS)
+            self.moderator["avatar"] = avatars[len(PLAYER_IDS)]
+            return [*PLAYER_IDS, MODERATOR]
         others = [s["avatar"] for p, s in self.seats.items() if p != pid and s["avatar"]]
+        if pid != MODERATOR and self.moderator["avatar"]:
+            others.append(self.moderator["avatar"])
         best = None
         for _ in range(300):
             cand = random_avatar(self.rng, self.parts)
@@ -364,7 +370,10 @@ class MockRoster:
                 best = cand
                 break
             best = best or cand
-        self.seats[pid]["avatar"] = best
+        if pid == MODERATOR:
+            self.moderator["avatar"] = best
+        else:
+            self.seats[pid]["avatar"] = best
         return [pid]
 
     def export_zip(self) -> bytes:
@@ -687,6 +696,8 @@ def validate_session(s: Any) -> list[str]:
     mod = s.get("moderator")
     if not (isinstance(mod, dict) and mod.get("id") == MODERATOR and mod.get("state") in AGENT_STATES and _opt_num(mod.get("sleep_until"))):
         errs.append("session.moderator")
+    else:
+        errs += validate_avatar(mod.get("avatar"), "session.moderator.avatar")
     for i, c in enumerate(s.get("channels") or []):
         errs += validate_channel(c, f"session.channels[{i}]")
     for i, m in enumerate(s.get("messages") or []):
@@ -793,6 +804,10 @@ def validate_event(ev: Any) -> list[str]:
         if not (isinstance(ps, list) and all(isinstance(p, dict) and isinstance(p.get("id"), str) and isinstance(p.get("name"), str)
                                             and not validate_avatar(p.get("avatar")) for p in ps)):
             errs.append(w)
+        mod = data.get("moderator")  # the moderator's avatar (it is not a participant): optional
+        if mod is not None and not (isinstance(mod, dict) and mod.get("id") == MODERATOR and isinstance(mod.get("avatar"), dict)
+                                    and not validate_avatar(mod.get("avatar"))):
+            errs.append(f"{w}.moderator")
     elif etype == "review.progress":
         if not (isinstance(data.get("id"), str) and data.get("state") in REVIEW_STATES and isinstance(data.get("message"), str)):
             errs.append(w)
@@ -983,7 +998,13 @@ def build_session(session_id: str, bindings: dict[str, Any], roster: MockRoster,
         "event_id": 0,
         "clock": 0.0,
         "participants": participants,
-        "moderator": {"id": MODERATOR, "name": "主持人", "state": "sleeping", "sleep_until": None},
+        "moderator": {
+            "id": MODERATOR,
+            "name": "主持人",
+            "avatar": copy.deepcopy(roster.moderator["avatar"]),
+            "state": "sleeping",
+            "sleep_until": None,
+        },
         "channels": channels,
         "messages": [],
         "requests": [],
@@ -1059,6 +1080,8 @@ class MockGame:
                 return
             step = min(0.05, remaining)
             await asyncio.sleep(step)
+            if not self.gate.is_set():
+                continue  # paused during this step: it does not count, the game clock stands still (D18)
             self.session["clock"] = round(self.session["clock"] + step * self.speed, 3)
             remaining -= step
 
@@ -1954,11 +1977,16 @@ class MockGame:
     # ----------------------------------------------------------------------------- roster events
     def roster_changed(self, ids: list[str]) -> None:
         """Names / avatars were edited (idle only): update the session and tell every client (roster.updated)."""
-        for pid in ids:
+        seats = [pid for pid in ids if pid != MODERATOR]
+        for pid in seats:
             p = self.player(pid)
             p["name"] = self.roster.name(pid)
             p["avatar"] = copy.deepcopy(self.roster.seats[pid]["avatar"])
-        self.emit("roster.updated", participants=[self.roster.public(pid) for pid in ids])
+        data: dict[str, Any] = {"participants": [self.roster.public(pid) for pid in seats]}
+        if MODERATOR in ids:  # the moderator's avatar travels as ``moderator`` (it is not a participant)
+            self.session["moderator"]["avatar"] = copy.deepcopy(self.roster.moderator["avatar"])
+            data["moderator"] = {"id": MODERATOR, "avatar": copy.deepcopy(self.roster.moderator["avatar"])}
+        self.emit("roster.updated", **data)
 
 
 # --------------------------------------------------------------------------------------------------
@@ -2166,8 +2194,8 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         return {"ok": True, "session": session_payload()}
 
     # ---- roster (E13-E16, E21, E24): contract §10.4; {id} is the internal id ("N3")
-    def seat_or_404(pid: str) -> str:
-        if pid not in roster.seats:
+    def seat_or_404(pid: str, *, moderator_ok: bool = False) -> str:
+        if pid not in roster.seats and not (moderator_ok and pid == MODERATOR):
             raise HTTPException(status_code=404, detail="名册里没有这个座位")
         return pid
 
@@ -2177,7 +2205,12 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
 
     @app.get("/api/roster")
     async def get_roster() -> dict[str, Any]:
-        return {"memory_enabled": roster.memory_enabled, "editable": game().session["status"] == "idle", "seats": roster.entries()}
+        return {
+            "memory_enabled": roster.memory_enabled,
+            "editable": game().session["status"] == "idle",
+            "seats": roster.entries(),
+            "moderator": copy.deepcopy(roster.moderator),
+        }
 
     @app.put("/api/roster/memory-enabled")
     async def put_memory_enabled(body: dict[str, Any]) -> dict[str, Any]:
@@ -2217,11 +2250,20 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         require_idle("重新生成头像")
         ids = roster.regenerate(None)
         game().roster_changed(ids)
-        return {"seats": roster.entries()}
+        return {"seats": roster.entries(), "moderator": copy.deepcopy(roster.moderator)}
 
     @app.put("/api/roster/{pid}")
     async def put_seat(pid: str, body: dict[str, Any]) -> dict[str, Any]:
-        seat_or_404(pid)
+        seat_or_404(pid, moderator_ok=True)
+        if pid == MODERATOR:  # the moderator only has an avatar to change
+            if set(body) - {"avatar"}:
+                raise HTTPException(status_code=400, detail="主持人只能更换头像，名字、性格设定和记忆都是固定的。")
+            require_idle("修改头像")
+            if validate_avatar(body.get("avatar")) or body.get("avatar") is None:
+                raise HTTPException(status_code=422, detail="头像描述不合法")
+            roster.moderator["avatar"] = body["avatar"]
+            game().roster_changed([MODERATOR])
+            return copy.deepcopy(roster.moderator)
         changed = False
         if "name" in body or "avatar" in body:
             require_idle("修改名字或头像")
@@ -2247,14 +2289,16 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
 
     @app.post("/api/roster/{pid}/avatar:regenerate")
     async def regenerate_one(pid: str) -> dict[str, Any]:
-        seat_or_404(pid)
+        seat_or_404(pid, moderator_ok=True)
         require_idle("重新生成头像")
         ids = roster.regenerate(pid)
         game().roster_changed(ids)
-        return copy.deepcopy(roster.seats[pid])
+        return copy.deepcopy(roster.moderator if pid == MODERATOR else roster.seats[pid])
 
     @app.post("/api/roster/{pid}/refine")
     async def refine(pid: str, body: dict[str, Any]) -> dict[str, Any]:
+        if pid == MODERATOR:
+            raise HTTPException(status_code=400, detail="主持人没有性格设定和记忆。")
         seat_or_404(pid)
         kind = body.get("kind")
         text = str(body.get("text") or "").strip()
