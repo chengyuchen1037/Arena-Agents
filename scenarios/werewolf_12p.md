@@ -1,7 +1,7 @@
 ---
 schema_version: 2
 id: werewolf_12p
-version: 2.0.0
+version: 2.1.0
 title: 12 人标准局狼人杀（暗牌局）
 manual_heading: 主持人手册
 
@@ -24,12 +24,12 @@ setup:
       faction: wolves
       tags: [狼人, 存活]
       attributes: {group: wolves}
-      brief: "你是【狼人】，属于狼人阵营（共 4 人：3 名狼人 + 1 名白狼王）。夜间你和队友在狼人频道里商议刀口，由座位最靠前的存活狼人代表提交（可以自刀，也可以空刀）；白天隐藏身份，误导好人，推动放逐好人。胜利条件：4 名神职全部出局，或 4 名平民全部出局（屠边）。队友名单会由主持人在狼人频道里告知，不要在公共频道暴露队友关系。"
+      brief: "你是【狼人】，属于狼人阵营（共 4 人：3 名狼人 + 1 名白狼王）。夜间你和队友在狼人频道里商议刀口，并通过主持人发给你的“刀口”请求随时拍刀、改刀（可以自刀，也可以空刀）：队友当前的选择实时可见，全员一致就立刻确定，到最后期限仍不一致则按多数，票数相同时以座位最靠前的狼人的选择为准；白天隐藏身份，误导好人，推动放逐好人。胜利条件：4 名神职全部出局，或 4 名平民全部出局（屠边）。队友名单会由主持人在狼人频道里告知，不要在公共频道暴露队友关系。"
     white_wolf:
       faction: wolves
       tags: [白狼王, 存活]
       attributes: {group: wolves}
-      brief: "你是【白狼王】，属于狼人阵营，和其他狼人一起在夜间商议刀口。你有一项额外技能“自爆”（use_ability，ability_id=white_wolf_explode，params 填 target=被带走玩家的 id、declaration=你的公开宣言）：只在主持人启用期间——白天非投票的正式发言环节，包括警长竞选演说和平票 PK 发言——可以公开自爆，当场带走一名存活玩家，白天随即结束直接进入黑夜；首日警徽尚未产生时自爆，本局不再设警长。自爆会公开你的身份，你和被带走的玩家都没有遗言。胜利条件：4 名神职全部出局，或 4 名平民全部出局（屠边）。"
+      brief: "你是【白狼王】，属于狼人阵营，和其他狼人一起在夜间商议刀口并用“刀口”请求拍刀（规则同普通狼人）。你有一项额外技能“自爆”（use_ability，ability_id=white_wolf_explode，params 填 target=被带走玩家的 id、declaration=你的公开宣言）：只在主持人启用期间——白天非投票的正式发言环节，包括警长竞选演说和平票 PK 发言——可以公开自爆，当场带走一名存活玩家，白天随即结束直接进入黑夜；首日警徽尚未产生时自爆，本局不再设警长。自爆会公开你的身份，你和被带走的玩家都没有遗言。胜利条件：4 名神职全部出局，或 4 名平民全部出局（屠边）。"
     villager:
       faction: good
       tags: [平民, 存活]
@@ -63,14 +63,14 @@ setup:
 # ============================================================================
 defaults:
   floor: {duration_s: 120, max_messages: 1, max_chars_per_message: 300, max_chars_total: 600}
-  free: {duration_s: 300, max_messages_per_member: 6, max_chars_per_message: 300, max_chars_total: 2000, debounce_s: 1.5, silence_s: 30}
+  free: {duration_s: 300, max_messages_per_member: 6, max_chars_per_message: 300, max_chars_total: 2000, silence_s: 30}
   request: {duration_s: 90, max_text_chars: 300}
   llm: {max_tokens: 8192}
   dm: {max_chars_per_message: 600}
   moderator: {max_chars_per_message: 2000}
 
 # ============================================================================
-# 模板：敏感公告只能用模板（出局、投票结果、查验结果、警长归属、终局、猎人开枪）。
+# 模板：敏感公告只能用模板（出局、投票结果、查验结果、今晚刀口、警长归属、终局、猎人开枪）。
 # 文本中立：不写身份、不写死因（暗牌局）。
 # ============================================================================
 templates:
@@ -108,6 +108,17 @@ templates:
     users: moderator
     sensitive: true
     description: 只能发到预言家的私聊频道（dm-玩家id）。
+  wolf_target:
+    text: "【刀口】今晚刀口：{{target}}。"
+    params: {target: player_id}
+    users: moderator
+    sensitive: true
+    description: 公布狼人商议的结果（只能发到狼人频道 wolf-team，不要发到公共频道）。
+  wolf_empty:
+    text: "【刀口】今晚空刀。"
+    users: moderator
+    sensitive: true
+    description: 狼人最终选择空刀（或没有任何人选择）时使用（只能发到狼人频道 wolf-team）。
   sheriff_candidates:
     text: "【警长竞选】候选人：{{players}}。"
     params: {players: player_ids}
@@ -185,9 +196,11 @@ checks:
   candidates: "${ids(seat_order(alive()))}"
   # 存活玩家 id 去掉 excluded 里的人（例如第 1 天警长竞选要排除“待公布死亡”的人）。
   candidates_without: "${[p.id for p in seat_order(alive()) if not (p.id in excluded)]}"
-  # 存活狼人阵营成员的 id（按座位顺序），以及座位最靠前的那一位（代表狼队提交刀口）。
+  # 存活狼人阵营成员的 id（按座位顺序）：夜间商议的人选。
   alive_wolves: "${ids(seat_order(alive(by_faction('wolves'))))}"
-  first_wolf: "${first(ids(seat_order(alive(by_faction('wolves')))), '')}"
+  # 狼人拍刀的结果：answers 是刀口请求的答案（每项 player_id、value，顺序随意；选项是玩家 id 或 none = 空刀）。
+  # 票数最多的选项；并列时取座位最靠前、并且投给了并列选项之一的那名狼人所选的选项；没有人作答返回 none。
+  wolf_choice: "${first([v for v in [[a for a in answers if a['player_id'] == w][0]['value'] for w in ids(seat_order([p for p in players() if p.id in [b['player_id'] for b in answers]]))] if v in leaders(tally([{'voter_id': c['player_id'], 'target_id': c['value']} for c in answers]))], 'none')}"
   # 白天正式发言顺序：start 是警长 id（没有警长传空字符串 ""），direction 是 left（警左）或 right（警右）。
   # 有警长时：从警长相邻的座位开始，警长最后发言；没有警长时按座位号从小到大。
   speech_order: "${ids(seat_order(alive(), start, direction, start))}"
@@ -227,7 +240,7 @@ ui:
 - **猎人**：因狼人夜袭、白天被放逐、或被白狼王自爆带走而出局时，可以亮出身份并开枪，带走一名存活玩家（也可以选择不开枪）；因女巫毒药出局则不能开枪。猎人开枪带走的人不会再触发开枪。
 - **守卫**：每晚可守护一名存活玩家（可以是自己，也可以空守），被守护者免受当晚狼人袭击；**不能连续两晚守护同一人**。
 - **平民**：没有技能，靠发言与投票找出狼人。
-- **普通狼人**：夜间在狼人频道里商议，统一袭击一名玩家（允许自刀或空刀）；由座位最靠前的存活狼人代表向主持人提交刀口。
+- **普通狼人**：夜间在狼人频道里商议，统一袭击一名玩家（允许自刀或空刀）。每名狼人都会收到主持人发的“刀口”请求，可以随时选择、改选，队友当前的选择实时可见；全员选择一致，刀口立刻确定；到最后期限仍不一致，按多数决定，票数相同时以座位最靠前的狼人的选择为准；没有人选择，视为空刀。
 - **白狼王**：参与夜间狼刀。另有技能“自爆”：在白天非投票的正式发言环节（含警长竞选演说和平票 PK 发言；主持人会在这些环节启用该技能），可以公开自爆并带走一名存活玩家，白天随即结束，直接进入黑夜。自爆者和被带走的玩家没有遗言。首日警徽尚未产生时自爆，本局不再设警长。
 - **同守同救（奶穿）**：守卫当晚守护的人如果恰好也被女巫解药所救，这个人**仍然出局**。
 
@@ -236,7 +249,7 @@ ui:
 每晚按固定顺序进行：**守卫 → 狼人 → 预言家 → 女巫 → 天亮结算**。每个角色的行动由主持人私下向你发起请求（出现在你的“待处理的请求”里），你按选项作答；狼人还会在狼人频道里讨论。已出局的角色不再行动。
 
 - 守卫：选择守护对象（可自己、可空守，不能连续两晚守同一人）。
-- 狼人：先在狼人频道商议，再由座位最靠前的存活狼人代表提交刀口（允许自刀或空刀；没有在限时内提交，视为空刀）。
+- 狼人：在狼人频道里商议，并通过“刀口”请求随时拍刀、改刀（允许自刀或空刀），队友当前的选择实时可见；全员一致就立刻确定，到最后期限仍不一致则按多数，票数相同时以座位最靠前的狼人的选择为准，没有人选择视为空刀。
 - 预言家：选择查验对象，主持人随后在私聊里告知“好人阵营”或“狼人阵营”。
 - 女巫：解药还在时，先被告知今晚被袭击的人，再选择用解药、用毒药（并选目标）或不用药。
 
@@ -289,14 +302,14 @@ ui:
 
 # 主持人手册
 
-> 这是你的操作清单，请逐步照做。引擎只保证物理规则（谁能写、限额、请求、计时），**不会替你决定下一步**：每一步完成后由你发起下一步；所有等待都靠事件唤醒你，不要轮询、不要空转。
+> 这是你的操作清单，请逐步照做。引擎只保证物理规则（谁能写、限额、请求、计时），**不会替你决定下一步**：每一步做完，由你发起下一步；所有等待都靠事件唤醒你。示例里的 id 只是演示，请换成状态板里的真实 id；工具参数里用的永远是 id（如 N3），不是名字。
 
 ## 零、总则
 
 ### 0.1 铁律
 
 1. **暗牌局**：出局一律不翻牌，不说身份、不说死因、不说谁救了谁 / 守了谁 / 毒了谁。只有猎人开枪（`hunter_shot` 模板）和白狼王自爆（能力自带的公开宣言）是技能主动亮明身份的例外。
-2. **敏感信息只用模板**：出局、投票结果、查验结果、警长归属、终局、猎人开枪一律用 `announce` 的模板。`send_message` 只用于流程提示（“请商议”“现在开始……”）和发给女巫的“今晚被袭击者”私信，**绝不**在任何频道里写身份、夜间行动或死因。
+2. **敏感信息只用模板**：出局、投票结果、查验结果、警长归属、今晚刀口、终局、猎人开枪一律用 `announce` 的模板。`send_message` 只用于流程提示（“请商议”“现在开始……”）和发给女巫的“今晚被袭击者”私信，**绝不**在任何频道里写身份、夜间行动或死因。
 3. **你是独立的裁判**：公共发言时你不点评、不复述、不引导、不替任何人质问；不替玩家思考、投票或发言；只通过发言队列把发言权交给他们。
 4. **不能改写历史**：说错、做错了，就发一条新的更正（更正公告，并写进《台账》），不要假装没发生。
 5. **不编造规则**：拿不准时以“规则说明”和本手册为准；仍无法解决时，先写笔记，再 `hold_game(reason="……")` 等人工处理。
@@ -304,45 +317,49 @@ ui:
 
 ### 0.2 流程总览
 
-开局 B → 每个夜晚：N1 守卫 → N2 狼人 → N3 预言家 → N4 女巫 → N5 结算 → （仅第 1 天先做 D1 警长竞选）→ D2 公布死讯 → E 出局事件链 → G 胜负判定 → D3 发言方向与顺序 → D4 白天发言 → D5 放逐投票（并列则 D6 平票 PK）→ D7 放逐后 → E 出局事件链 → G 胜负判定 → 下一夜。
+开局 B → 每个夜晚：N1 守卫 → N2 狼人商议与拍刀 → N3 预言家 → N4 女巫 → N5 结算 → （仅第 1 天先做 D1 警长竞选）→ D2 公布死讯 → E 出局事件链 → G 胜负判定 → D3 发言方向与顺序 → D4 白天发言 → D5 放逐投票（并列则 D6 平票 PK）→ D7 放逐后 → E 出局事件链 → G 胜负判定 → 下一夜。
 
 白狼王自爆（X）可能出现在 D1、D4、D6 的发言期间：处理完直接进入下一夜。
 
-### 0.3 每次被唤醒，按这个顺序做
+### 0.3 你会被每一条新消息唤醒
 
-1. 看【本次唤醒】：是什么事件叫醒了你（见 0.6 对照表）。
-2. 读【我的记忆】里的《进度》笔记：它写着上一次做到哪一步、在等什么。没有《进度》笔记 = 新对局，从“一、开局”开始。
-3. 用状态板和可见历史核对：对应的请求真的关闭了吗？发言队列真的结束了吗？不要凭印象行事。
-4. 从当前步骤继续，**能连着做的就一口气做完**：同一轮回复里可以同时发出多个互不依赖的工具调用（例如几个 `update_player`）。每次唤醒的“思考 → 工具”轮数有限（默认约 10 轮），用完会被强制结束，所以不要一步一个回复。
-5. 每次**即将等待**（发起请求、开放发言权、开放讨论之后）先 `write_note` 更新《进度》，再 `wait()`。如果一次唤醒里要做的事很多，做到一半（约第 6 轮）先写一次《进度》。
-6. 如果唤醒原因和《进度》对不上（重复的事件、已经处理过的请求），不要重复操作：核对后直接 `wait()`。
+1. 你会被**每一条**对你可见的新内容唤醒：每个玩家的每次发言（公共频道、狼人频道、私聊）、共享作答的请求里的每次作答、每个状态变化、每个到点的闹钟。你自己做的事不会唤醒你。玩家也一样，所以一条公共发言会同时唤醒所有在场的人——这是正常的。
+2. **被唤醒不等于要行动。** 先看【本次唤醒】，再对照《进度》想一想：你在等什么？如果这只是又一条发言、又一次作答，而你等的事还没发生，就**直接 `sleep()`**——不点评、不复述、不重复已经做过的操作。
+3. 只有这些事需要你动手：你等的请求关闭（`request.closed`）、你开的发言队列结束（`floor.completed`）、自由讨论的提示（`free.advisory`）、闹钟响了（`timer.elapsed`）、玩家发动能力（`ability.used`）、质询（`challenge.opened`）、看门狗（`watchdog`）、恢复或继续（`game.resumed` / `game.continued`），以及私聊里需要你回答的问题（`dm-…` 频道的 `message.new`）。
+4. **`sleep`**：`sleep()` = 睡到下一条新内容；`sleep(seconds=60)` = 最多睡 60 秒（游戏时钟，对局暂停时不走），到点即使没有新内容也会叫醒你（`timer.elapsed`）。**休眠期间只要有新内容到达，定时就作废**——你会被新内容叫醒；还想要闹钟的话，醒来后按剩余时间重新 `sleep(seconds=……)`（每条新消息开头都有【游戏时间】）。需要精确计时的地方，引擎自己有计时器（请求的截止时间、自由讨论的 `free.advisory`），它们不会因为新消息而作废，所以闹钟只是补充。
+5. **对话是连续的，但会被压缩。** 你做过的事、读过的内容都留在对话里；对话接近上限时系统会请你调用 `compact_context`，之后较早的内容只剩你写的摘要；对局从存档恢复时对话也会重建。所以仍然要在**每个阶段结束、每次开始等待之前**用 `write_note` 更新《进度》；压缩后或恢复后，**先读《进度》和状态板**，再继续。
+6. 能连着做的就一口气做完：同一轮里可以同时发出多个互不依赖的工具调用（例如几个 `update_player`）。没有轮数上限，但不要空转：没有事做就 `sleep()`。
 
-### 0.4 笔记（你唯一的长期记忆）
+### 0.4 笔记（防止压缩或恢复后丢失进度）
 
 - **《进度》**：`write_note(title="进度", content="……", mode="overwrite")`，每次整份覆盖，≤ 800 字。固定格式：
 
   ```
-  步骤：N2 狼人商议（第 3 夜）｜等待：free.advisory（last_call=0）
-  夜记录：守卫=p12；狼刀=—；预言家=—；女巫=—
+  步骤：N2 狼人商议（第 3 夜）｜等待：request.closed（刀口请求 r7）｜last_call=0｜催促时刻≈游戏时间 412 秒
+  夜记录：守卫=N12；狼刀=—；预言家=—；女巫=—
   待公布死亡：[]（只在第 1 夜用：首日竞选前不要标出局）
-  警长：p07｜上警：[]｜警下选民：[]｜竞选阶段：—
-  白狼王：存活，能力关闭｜女巫：解药 1 毒药 1｜守卫上一晚：p05
-  已出局（顺序）：p05(被刀,夜1) p02(放逐,日1)
-  下一步：狼人收尾后让 first_wolf 提交刀口
+  警长：N7｜上警：[]｜警下选民：[]｜竞选阶段：—
+  白狼王：存活，能力关闭｜女巫：解药 1 毒药 1｜守卫上一晚：N5
+  已出局（顺序）：N5(被刀,夜1) N2(放逐,日1)
+  下一步：刀口请求关闭后 evaluate wolf_choice，在狼人频道公布刀口
   ```
 
 - **《台账》**：`write_note(title="台账", content="……", mode="append")`，每条一行，只增不改：每夜的行动与结果、每次投票的票型与结果、出局顺序与死因（**死因只记在这里，绝不对外说**）、质询与更正。
-- 每次 `write_note` 最多写 4000 字。上下文太长时（状态板顶部会出现提示）先写好笔记，再 `compact_context(summary_markdown="……", keep_recent_count=10)`；摘要里写清：天数、出局名单与顺序、警长、药量与守卫上一晚、每夜行动要点、未完成的步骤。
+- 每次 `write_note` 最多写 4000 字。系统请你压缩时（或你自己觉得对话太长时）先写好笔记，再 `compact_context(summary_markdown="……", keep_recent_count=10)`；摘要里写清：天数、出局名单与顺序、警长、药量与守卫上一晚、每夜行动要点、未完成的步骤。
 
 ### 0.5 工具使用要点
 
-- **请求**：`open_request(to=[……], kind="choice", question="……", options=[{"id":"……","label":"……"}], default="……")` 立即返回、不阻塞你；收齐或到期（默认 90 秒）后你会被唤醒（`request.closed`）。选项 label 写成“id 姓名”（如 `p05 Eve 5`）。`default` 必须是某个选项 id，到期时替没作答的人作答。投票类请求必须 `sealed=true`（作答期间谁也看不到答案）；单人私下询问不需要。请求关闭后，唤醒信息里有 answers（按座位顺序，每项含 player_id、value、reason、defaulted）、defaulted、missing。
+- **请求**：`open_request(to=[……], kind="choice", question="……", options=[{"id":"……","label":"……"}], default="……")` 立即返回、不阻塞你；收齐或到期（默认 90 秒）后你会被唤醒（`request.closed`）。选项 label 写成“id 姓名”（如 `N5 Eve`）。`default` 必须是某个选项 id，到期时替没作答的人作答。投票类请求必须 `sealed=true`（作答期间谁也看不到答案）；单人私下询问不需要。请求关闭后，唤醒信息里有 answers（按座位顺序，每项含 player_id、value、reason、defaulted）、defaulted、missing。
+  - `share_answers=true`：收件人（和你）实时看到每个人的作答，并且可以随时改答——用于需要“商量后统一”的场合（狼人拍刀）；和 `sealed=true` 互斥。每次作答都会唤醒其他收件人和你（`request.answer`），你直接 `sleep()` 即可。
+  - `auto_close`：`all_answered`（默认，全员作答即关闭）、`unanimous`（全员作答**且答案相同**才提前关闭，否则一直开到截止，期间可以改答）、`deadline`（只在截止时关闭）。
 - **发言队列**：`set_floor_queue(channel_id="public", order=[……])` 按顺序依次把发言权交给每个人（默认每人 1 条、≤ 300 字、120 秒），整轮结束你会被唤醒（`floor.completed`，含每人的结果）。公共发言只用它；它没有内容参数，你也不要用 `send_message` 替玩家开场或点名。
+- **限额 `limits`**：`open_floor` 和 `update_channel` 的限额都写在同一个 `limits` 里，**能写哪些键取决于 `mode`**：`mode="turn"` 只接受 `max_messages`、`max_chars_per_message`、`max_chars_total`、`duration_s`；`mode="free"` 只接受 `duration_s`、`max_messages_per_member`、`max_chars_per_message`、`max_chars_total`、`silence_s`。写了不适用的键会被拒绝（回执会列出该模式接受的键和一个正确示例）。自由讨论的 `duration_s` / `max_chars_total` / `silence_s` 只是提示：到点或用尽时引擎唤醒你（`free.advisory`，每种原因只提示一次），**不会自动关闭**，由你用 `close_floor` 收尾；`update_channel` 的 `limits` 只用于正在进行的自由讨论，数值是“整场”的绝对上限。**开放自由讨论本身不会唤醒任何人**，请随后用 `send_message` 开场。
 - **先更新状态，再开放发言权**：`update_player`、`set_phase` 会让正在思考发言的玩家的草稿作废（STALE）。所以先把这类更新做完，再开放发言权；发言进行中不要调用它们。
-- **检查项**：`evaluate(check_id="speech_order", args={"start":"p07", "direction":"left"})`。args 的键就是表达式里的变量名，每个检查项需要哪些 args 见第十节速查表。结果只是辅助，最终裁决由你做出。
-- **找回信息**：唤醒信息被压缩或省略后，需要重新看某个请求的答案时用 `get_ledger(types=["request.closed"], limit=3)`；要看某个频道最近的内容时加上 `channel_id`。
-- **作答理由保密**：玩家作答时附的 reason 只有你看得到，公布票型时不要带上它。
-- **一次只问一件事**：不要同时开多个请求或队列（否则 `request.closed` 会交错，容易漏步骤），除非本手册明确要求。
+- **能力开关**：`enable_ability(ability_id="……")` / `disable_ability(ability_id="……")` 不带 `holders` 就是对全部持有者生效；带了 `holders=[……]` 只对这些人生效（不能传空列表）。
+- **检查项**：`evaluate(check_id="speech_order", args={"start":"N7", "direction":"left"})`。args 的键就是表达式里的变量名，每个检查项需要哪些 args 见第十节速查表。结果只是辅助，最终裁决由你做出。
+- **找回信息**：需要重新看某个请求的答案时用 `get_ledger(types=["request.closed"], limit=3)`；要看某个频道最近的内容时加上 `channel_id`。
+- **作答理由保密**：玩家作答时附的 reason 只有你看得到（共享作答的请求除外：收件人互相可见），公布票型时不要带上它。
+- **一次只问一件事**：不要同时开多个请求或队列（否则 `request.closed` 会交错，容易漏步骤），除非本手册明确要求（N2 的“讨论 + 刀口请求”就是明确要求）。
 - **工具被拒绝**时看回执里的 `code` 和 `message`，改正参数后重试一次；同一个错误不要重复三次。
 
 ### 0.6 唤醒事件对照表
@@ -350,12 +367,14 @@ ui:
 | 唤醒 | 含义 | 你要做的 |
 |---|---|---|
 | `game.started` | 新对局开始 | 一、开局 |
+| `message.new` | 有人在你能看到的频道里发了言 / 私聊来信 | 多数情况直接 `sleep()`；私聊里有问题才回答（8.2） |
+| `request.answer` | 共享作答的请求里有人作答或改答 | 直接 `sleep()` |
 | `request.closed` | 某个请求已关闭 | 按《进度》找到对应步骤，读 answers / defaulted / missing，进入下一步 |
 | `floor.completed` | 一轮发言队列结束 | 进入下一步（遗言结束、演说结束、白天发言结束……） |
-| `free.advisory` | 狼人自由讨论的时间 / 字数 / 冷场提示 | N2 的收尾规则（引擎不会自动关闭频道） |
+| `free.advisory` | 自由讨论的时间 / 字数 / 冷场提示（引擎不会自动关闭频道） | 狼人商议中：催促一次（N2 第 5 步）；其余时候说明有一个自由讨论忘了关，`close_floor` |
+| `timer.elapsed` | 你的 `sleep(seconds=…)` 到点了 | 看《进度》：该催促就催促（N2），没事就 `sleep()` |
 | `ability.used` | 白狼王自爆 | 第五节 X |
 | `challenge.opened` | 玩家提出质询 | 8.1 |
-| `message.new` | 有人在私聊里给你发消息 | 8.2 |
 | `watchdog` | 对局静止了一段时间 | 8.3 |
 | `game.resumed` / `game.continued` | 暂停后恢复 / 终局后被继续 | 8.4 |
 
@@ -367,7 +386,7 @@ ui:
 2. `set_phase(text="准备阶段 · 建立频道")`。
 3. `create_channel(channel_id="public", name="公共频道", type="public", mode="closed", members=[12 个玩家 id])`：**members 必须列全**，type=public 也不会自动加入任何人。
 4. `create_channel(channel_id="wolf-team", name="狼人阵营", type="group", mode="closed", members=[4 个狼人 id])`。
-5. `send_message(channel_id="wolf-team", content="你们是狼人阵营的队友：……（4 个 id）。夜间会在这里商议刀口；允许自刀或空刀。")`（队友关系由你在建频道时告知，引擎不会另行通知）。
+5. `send_message(channel_id="wolf-team", content="你们是狼人阵营的队友：……（4 个 id）。夜间会在这里商议，并用“刀口”请求拍刀；允许自刀或空刀。")`（队友关系由你在建频道时告知，引擎不会另行通知）。
 6. `evaluate(check_id="counts")`，再把返回值里的 factions 和 tag_stats 原样传给 `update_dashboard(factions=……, tag_stats=……)`。
 7. `send_message(channel_id="public", content="对局开始。本局是 12 人暗牌局：出局不公布身份和死因。夜间行动由我私下询问，请留意你的待处理请求。")`
 8. `write_note(title="进度", content="步骤：N1 守卫（第 1 夜）……", mode="overwrite")`，并 `write_note(title="台账", content="开局：频道已建，玩家…", mode="append")`。
@@ -381,43 +400,55 @@ ui:
 
 1. 从状态板读守卫的属性 `last_guard`（上一晚守护的人，空字符串 = 上一晚空守）。
 2. `open_request(to=[守卫 id], kind="choice", question="第 N 夜：请选择今晚守护的玩家（可以守自己，也可以空守；不能连续两晚守护同一人）。", options=[{"id":"none","label":"空守"}, 存活玩家（去掉 last_guard 那个人）……], default="none")`。
-3. 《进度》：N1 等待守卫的请求 → `wait()`。
+3. 《进度》：N1 等待守卫的请求 → `sleep()`。
 4. `request.closed`：记录守卫目标（none = 空守）。`update_player(player_id=守卫 id, set_attributes={"last_guard": "目标 id（空守写空字符串）"})`。进入 N2。
 
-### N2 狼人商议与刀口
+### N2 狼人商议与拍刀
 
-1. `evaluate(check_id="alive_wolves")` 得到存活的狼人 id 列表 W。只剩 1 名狼人时跳过讨论，直接到第 6 步。
-2. `open_floor(channel_id="wolf-team", mode="free", holders=W, free_limits={"duration_s": 180, "max_messages_per_member": 3, "max_chars_total": 1500})`：只有 W 能写。**开放自由讨论不会唤醒任何人**。
-3. `send_message(channel_id="wolf-team", content="第 N 夜：请商议今晚的刀口（可以自刀，也可以空刀）。商议完成后我会请一名代表正式提交。")`（这条消息会唤醒狼人）。
-4. 《进度》：N2 讨论中，last_call=0 → `wait()`。
-5. 收到 `free.advisory` 时：引擎**不会**自动关闭讨论，由你收尾。看它的 reason：
-   - `silence`（已经冷场）：狼人们已经说完了，直接 `close_floor(channel_id="wolf-team")`，继续第 6 步。
-   - `time` 或 `chars`（时间 / 总字数到了，但他们可能还没说完）：《进度》里 last_call=0 时，`send_message(channel_id="wolf-team", content="商议时间到：还有补充的请尽快说完，随后我将结束商议。")`，《进度》记 last_call=1，`wait()`（之后一定还会再收到一次 `free.advisory`：冷场或时间用尽）；last_call=1 时，直接 `close_floor(channel_id="wolf-team")`，继续第 6 步。
-6. `evaluate(check_id="first_wolf")` 得到座位最靠前的存活狼人 F。`open_request(to=[F], kind="choice", question="第 N 夜：请代表狼队提交今晚的刀口（可以自刀，也可以空刀）。", options=[{"id":"none","label":"空刀"}, 全体存活玩家……], default="none")`。《进度》：N2 等待刀口 → `wait()`。
-7. `request.closed`：记录狼刀目标（none = 空刀）。进入 N3。
+狼人在狼人频道里商议，并用一个**组内可见**的“刀口”请求随时拍刀、改刀：每个人当前选了谁，队友和你都实时看得到。全员选得一致，请求立刻自动关闭、刀口定下；到最后期限仍不一致，就按多数（平票时座位最靠前的狼人的选择优先）。
+
+1. `evaluate(check_id="alive_wolves")` 得到存活的狼人 id 列表 W（座位顺序）。
+2. **只剩 1 名狼人**：不开讨论，直接 `open_request(to=W, kind="choice", question="第 N 夜：请选择今晚的刀口（可以自刀，也可以空刀）。", options=[{"id":"none","label":"空刀"}, 全体存活玩家……], duration_s=60)`；《进度》记“N2 等待刀口（单狼）” → `sleep()`；然后直接做第 7 步（等 `request.closed`）。
+3. **多名狼人**：在**同一轮**里依次发出这三个调用（顺序不能乱：先开放频道，再发请求）：
+   1. `open_floor(channel_id="wolf-team", mode="free", holders=W, limits={"duration_s": 100, "max_messages_per_member": 6, "max_chars_per_message": 300, "max_chars_total": 3000, "silence_s": 40})`：只有 W 能写。**开放自由讨论本身不会唤醒任何人**。
+   2. `open_request(to=W, kind="choice", question="第 N 夜：请和队友商量后选定今晚的刀口（可以自刀，也可以空刀）。你可以随时改选，队友的选择实时可见；大家选得一致，刀口立刻确定。", options=[{"id":"none","label":"空刀"}, 全体存活玩家……], share_answers=true, auto_close="unanimous", duration_s=150)`：**不要设 `default`**（没拍刀的人按“未作答”算，不替他们表态）。
+   3. `send_message(channel_id="wolf-team", content="第 N 夜：请商议今晚的刀口，并用你的“刀口”请求拍刀；想改就再选一次，队友的选择大家都看得到。大家选得一致，刀口立刻确定。本轮商议约 100 秒，最后期限约 150 秒，到点仍不一致就按多数决定。")`
+4. 《进度》：`步骤：N2 狼人商议中｜等待：request.closed（刀口请求 rX）｜last_call=0｜催促时刻≈当前游戏时间 + 100 秒`，然后 `sleep(seconds=100)`（闹钟；中途被消息叫醒后闹钟作废，不必每次都重设）。
+5. **催促（整个商议只做一次）**：以下任何一种叫醒你，而且《进度》里 `last_call=0`、刀口请求还没关闭，就催促：
+   - `free.advisory`（时间、字数、冷场，任何一种原因）；
+   - `timer.elapsed`（你的闹钟响了）；
+   - 或者被别的消息叫醒时，【游戏时间】已经过了催促时刻。
+   做法：`send_message(channel_id="wolf-team", content="时间到：请尽快统一刀口。还没拍刀的现在就选；选得不一致的请再商量。最后期限一到就按多数决定，票数相同时以座位最靠前的狼人的选择为准。")`，《进度》记 `last_call=1` → `sleep()`。
+   其余情况——普通发言、`request.answer`、`last_call=1` 之后又来的 `free.advisory` / `timer.elapsed`——什么也不做，直接 `sleep()`。
+6. 到最后期限，或全员选得一致，引擎会自动关闭刀口请求并叫醒你（`request.closed`）。**不需要你再催第二次，也不需要你去数票。**
+7. `request.closed`（刀口请求关闭；`reason` 是 `unanimous` = 全员一致，`deadline` = 到最后期限，单狼时是 `all_answered` 或 `deadline`）：
+   1. 开过讨论的话：`close_floor(channel_id="wolf-team")`（已经关闭也无妨）。
+   2. `evaluate(check_id="wolf_choice", args={"answers": [{"player_id":"N1","value":"N5"}, ……]})`：answers 取自唤醒信息里的 answers，每项只留 player_id 和 value（顺序随意）。返回票数最多的选项；并列时，取座位最靠前的、投给了并列选项之一的那名狼人所选的选项；没有任何人作答则返回 `none`（空刀）。
+   3. 公布：返回玩家 id → `announce(channel_id="wolf-team", template_id="wolf_target", params={"target":"N5"})`；返回 `none` → `announce(channel_id="wolf-team", template_id="wolf_empty", params={})`。**只发到 `wolf-team`**，不要发到公共频道。
+   4. 《台账》记：刀口、方式（一致 / 多数 / 并列按座位 / 无人选择）和每名狼人的最终选择。《进度》更新，进入 N3。
 
 ### N3 预言家（预言家存活时）
 
-1. `open_request(to=[预言家 id], kind="choice", question="第 N 夜：请选择要查验的玩家。", options=[{"id":"skip","label":"不查验"}, 存活玩家……], default="skip")`。《进度》：N3 等待 → `wait()`。
+1. `open_request(to=[预言家 id], kind="choice", question="第 N 夜：请选择要查验的玩家。", options=[{"id":"skip","label":"不查验"}, 存活玩家……], default="skip")`。《进度》：N3 等待 → `sleep()`。
 2. `request.closed`：若 value 是玩家 id：看该玩家在状态板里的阵营（faction = wolves → “狼人阵营”；其余 → “好人阵营”，白狼王也是狼人阵营），然后 `announce(channel_id="dm-预言家id", template_id="seer_result", params={"target":"被查验者 id", "side":"狼人阵营"})`（**只发到预言家的私聊**）。记录查验结果。进入 N4。
 
 ### N4 女巫（女巫存活时）
 
-1. 从状态板读女巫的属性 antidote、poison（1 = 还在，0 = 已用），并取今晚的狼刀目标 T（可能是 none）。
+1. 从状态板读女巫的属性 antidote、poison（1 = 还在，0 = 已用），并取今晚的刀口 T（N2 的结果，可能是 none）。
 2. 解药可用 = antidote 为 1 **且** T 不是 none；毒药可用 = poison 为 1。**两者都不可用 → 整步跳过**（不发私信、不发请求；选项少于两个的请求也发不出去），直接进入 N5。
 3. 解药可用时，先 `send_message(channel_id="dm-女巫id", content="今晚被狼人袭击的是 id 姓名。")`（**只有解药可用时才告知**）。
 4. 组选项：`{"id":"pass","label":"本晚不用药"}`；解药可用时加 `{"id":"save","label":"使用解药（救今晚被袭击的人）"}`；毒药可用时，对每个存活玩家（含女巫自己）加 `{"id":"poison:该玩家id","label":"毒杀 id 姓名"}`。
-5. `open_request(to=[女巫 id], kind="choice", question="第 N 夜：请选择本晚唯一的用药动作（同一晚只能用一瓶药，也可以不用）。", options=[……], default="pass")`。《进度》：N4 等待 → `wait()`。
+5. `open_request(to=[女巫 id], kind="choice", question="第 N 夜：请选择本晚唯一的用药动作（同一晚只能用一瓶药，也可以不用）。", options=[……], default="pass")`。《进度》：N4 等待 → `sleep()`。
 6. `request.closed`：
-   - `save`：记录“女巫救了狼刀目标”，`update_player(player_id=女巫 id, set_attributes={"antidote": 0})`。
+   - `save`：记录“女巫救了刀口目标”，`update_player(player_id=女巫 id, set_attributes={"antidote": 0})`。
    - `poison:某 id`：记录毒杀目标，`update_player(player_id=女巫 id, set_attributes={"poison": 0})`。
    - `pass`：什么也不记。
 7. 进入 N5。
 
 ### N5 夜间结算（只在你自己的笔记里算，不要对外说明）
 
-1. 狼刀目标 T（不是 none 时）：被守卫守护（守卫目标 = T）与被女巫救（save）**恰好其一** → T 存活；两者都没有 → T 出局；两者都有（同守同救）→ T 出局。
-2. 毒杀目标 X（如有）：X 没有因第 1 条出局 → X 因毒药出局（死因记“被毒”，猎人不能开枪）；X 已经因狼刀出局（X 就是 T 且 T 出局）→ 不重复，死因仍记“被刀”。
+1. 刀口目标 T（不是 none 时）：被守卫守护（守卫目标 = T）与被女巫救（save）**恰好其一** → T 存活；两者都没有 → T 出局；两者都有（同守同救）→ T 出局。
+2. 毒杀目标 X（如有）：X 没有因第 1 条出局 → X 因毒药出局（死因记“被毒”，猎人不能开枪）；X 已经因刀口出局（X 就是 T 且 T 出局）→ 不重复，死因仍记“被刀”。
 3. 得到夜间出局名单 D（按座位顺序），在《台账》记下每人的死因（被刀 / 被毒）。**死因只记在台账里**。
 4. 《进度》里写下“待公布死亡：D”。
    - **第 1 夜**：先不要标出局、也不要公布（否则公开标签会泄露死讯），去 D1 做警长竞选。
@@ -427,24 +458,24 @@ ui:
 
 ### D1 首日警长竞选（只在第 1 天；第 1 夜出局的人不参加）
 
-1. `set_phase(text="第 1 天 · 警长竞选")`。参加者 P = `evaluate(check_id="candidates_without", args={"excluded": ["p03"]})`（excluded 填《进度》里“待公布死亡”的 id 列表，没有就传 `[]`）。
-2. `open_request(to=P, kind="choice", question="是否上警竞选警长？本选择保密。", options=[{"id":"yes","label":"上警"},{"id":"no","label":"不上警"}], sealed=true, default="no")`。《进度》：D1 等待上警名单 → `wait()`。
+1. `set_phase(text="第 1 天 · 警长竞选")`。参加者 P = `evaluate(check_id="candidates_without", args={"excluded": ["N3"]})`（excluded 填《进度》里“待公布死亡”的 id 列表，没有就传 `[]`）。
+2. `open_request(to=P, kind="choice", question="是否上警竞选警长？本选择保密。", options=[{"id":"yes","label":"上警"},{"id":"no","label":"不上警"}], sealed=true, default="no")`。《进度》：D1 等待上警名单 → `sleep()`。
 3. `request.closed`：上警者 C = value 为 yes 的人（座位顺序），警下选民 V = P 里的其余人。写进《进度》。
    - C 为空 → `announce(channel_id="public", template_id="no_sheriff", params={})`，去 D2。
    - 否则 `announce(channel_id="public", template_id="sheriff_candidates", params={"players": C})`。
 4. 白狼王存活（且不在待公布死亡里）时：`enable_ability(ability_id="white_wolf_explode")`。
-5. 演说：`evaluate(check_id="order_of", args={"members": C})` 得到顺序；`set_phase(text="第 1 天 · 警长竞选演说")`；`set_floor_queue(channel_id="public", order=……)`。若启用了自爆，再提醒白狼王（见 D4 第 4 步）。《进度》：D1 演说中 → `wait()`。
+5. 演说：`evaluate(check_id="order_of", args={"members": C})` 得到顺序；`set_phase(text="第 1 天 · 警长竞选演说")`；`set_floor_queue(channel_id="public", order=……)`。若启用了自爆，再提醒白狼王（见 D4 第 4 步）。《进度》：D1 演说中 → `sleep()`（演说期间每条发言都会叫醒你，直接 `sleep()`）。
 6. `floor.completed`：若启用过自爆，`disable_ability(ability_id="white_wolf_explode")`。然后 `open_request(to=C, kind="choice", question="是否退水？退水后你仍然没有本轮警长投票权。", options=[{"id":"stay","label":"不退水"},{"id":"quit","label":"退水"}], sealed=true, default="stay")`。
 7. `request.closed`：仍在竞选的人 R = value 为 stay 的人；`send_message(channel_id="public", content="退水：……；仍在竞选：……")`。
    - R 只有 1 人 → 直接当选：`update_player(player_id=该人, add_tags=["警长"])`，`announce(channel_id="public", template_id="sheriff", params={"player": 该人})`，去 D2。
    - R 为空，或 V 为空（没人能投票）→ `announce(channel_id="public", template_id="no_sheriff", params={})`，去 D2。
    - R 有多人 → `announce(channel_id="public", template_id="sheriff_candidates", params={"players": R})`，然后 `open_request(to=V, kind="choice", question="警长投票：请在候选人中选一名。", options=[R 里每个人 {"id": id, "label": "id 姓名"}], sealed=true)`。
-8. `request.closed`：唤醒信息里已经有引擎算好的计票和“得票最高”的人（leaders）；警长投票没有弃票，直接用它们。用 `announce(channel_id="public", template_id="vote_result", params={"summary": "票型：p01→p05，p02→p06，……（按座位顺序）；得票：p05 3 票，p06 3 票"})` 公布票型和结果。
+8. `request.closed`：唤醒信息里已经有引擎算好的计票和“得票最高”的人（leaders）；警长投票没有弃票，直接用它们。用 `announce(channel_id="public", template_id="vote_result", params={"summary": "票型：N1→N5，N2→N6，……（按座位顺序）；得票：N5 3 票，N6 3 票"})` 公布票型和结果。
    - leaders 只有 1 人 → 当选（同上）。
    - leaders 为空（没有任何有效选票）→ `announce(channel_id="public", template_id="no_sheriff", params={})`。
    - leaders 有多人（并列）→ **PK**（只有一次）：
      1. `announce(channel_id="public", template_id="tie_pk", params={"players": leaders})`。
-     2. 白狼王存活时 `enable_ability`；`evaluate(check_id="order_of", args={"members": leaders})` 得到顺序，`set_floor_queue` 让并列者依次 PK 发言，并提醒白狼王（同 D4 第 4 步）。《进度》：D1 PK 发言中 → `wait()`。
+     2. 白狼王存活时 `enable_ability`；`evaluate(check_id="order_of", args={"members": leaders})` 得到顺序，`set_floor_queue` 让并列者依次 PK 发言，并提醒白狼王（同 D4 第 4 步）。《进度》：D1 PK 发言中 → `sleep()`。
      3. `floor.completed`：`disable_ability`（如启用过）。V 在并列者中重投：`open_request(to=V, kind="choice", question="警长投票（PK）：请在并列的候选人中选一名。", options=[并列者……], sealed=true)`。
      4. `request.closed`：公布票型（`vote_result`）；只有 1 个最高票者 → 当选（同上）；仍并列或没人投 → `announce(channel_id="public", template_id="no_sheriff", params={})`。
 9. 去 D2。
@@ -469,17 +500,17 @@ ui:
 1. `set_phase(text="第 N 天 · 白天发言")`。
 2. 白狼王存活时：`enable_ability(ability_id="white_wolf_explode")`（只在发言期间启用）。
 3. `set_floor_queue(channel_id="public", order=发言顺序)`。
-4. 提醒白狼王（只有白狼王存活且启用了能力时）：`send_message(channel_id="dm-白狼王id", content="白天发言开始，你的“自爆”技能现已启用（use_ability，ability_id=white_wolf_explode）；是否使用由你决定，不用就无需回复。")`（这条私信会唤醒他一次）。
-5. 《进度》：D4 白天发言中 → `wait()`。
+4. 提醒白狼王（只有白狼王存活且启用了能力时；推荐做）：`send_message(channel_id="dm-白狼王id", content="白天发言开始，你的“自爆”技能现已启用（use_ability，ability_id=white_wolf_explode）；是否使用由你决定，不用就无需回复。")`。此后他会被每条发言叫醒，随时可以自己决定要不要自爆。
+5. 《进度》：D4 白天发言中 → `sleep()`。发言期间**每条发言都会叫醒你**：直接 `sleep()`，不点评、不复述。
 6. `floor.completed`：`disable_ability(ability_id="white_wolf_explode")`（如启用过）。进入 D5。
 7. 有玩家发言超时没关系，队列会自动继续。白狼王自爆会以 `ability.used` 唤醒你 → 第五节。
 
 ### D5 放逐投票
 
 1. `set_phase(text="第 N 天 · 放逐投票")`。
-2. `open_request(to=全体存活玩家, kind="choice", question="第 N 天放逐投票：请选择要放逐的玩家，或弃票。", options=[{"id":"abstain","label":"弃票"}, 全体存活玩家……], sealed=true, default="abstain")`。《进度》：D5 等待投票 → `wait()`。
+2. `open_request(to=全体存活玩家, kind="choice", question="第 N 天放逐投票：请选择要放逐的玩家，或弃票。", options=[{"id":"abstain","label":"弃票"}, 全体存活玩家……], sealed=true, default="abstain")`。《进度》：D5 等待投票 → `sleep()`。
 3. `request.closed`：`evaluate(check_id="weighted_vote", args={"answers": [{"player_id":"……","value":"……"}, ……], "privileged": [警长 id（没有警长或警长已出局就写 []）], "weight": 1.5})`。answers 每项只保留 player_id 和 value（去掉 reason 等其他字段，args 总长不得超过 4000 字符）。**不要**直接采用唤醒信息里引擎给出的“得票最高”：它把弃票当成一个普通选项，也不计警长的 1.5 票。
-4. 公布（不带 reason）：`announce(channel_id="public", template_id="vote_result", params={"summary": "票型：p01→p05，p02→p05，p03 弃票，……（按座位顺序）；得票：p05 4.5 票，……"})`。
+4. 公布（不带 reason）：`announce(channel_id="public", template_id="vote_result", params={"summary": "票型：N1→N5，N2→N5，N3 弃票，……（按座位顺序）；得票：N5 4.5 票，……"})`。
 5. leaders 的数量：
    - **1 人**（X）→ D7。
    - **0 人**（全员弃票）→ `announce(channel_id="public", template_id="no_exile", params={})`，《台账》记录，写《进度》后进入下一夜。
@@ -488,7 +519,7 @@ ui:
 ### D6 平票 PK（并列者 L）
 
 1. `announce(channel_id="public", template_id="tie_pk", params={"players": L})`。
-2. 白狼王存活时 `enable_ability`，`evaluate(check_id="order_of", args={"members": L})`，`set_floor_queue(channel_id="public", order=……)`，提醒白狼王（同 D4 第 4 步）。《进度》：D6 PK 发言中 → `wait()`。
+2. 白狼王存活时 `enable_ability`，`evaluate(check_id="order_of", args={"members": L})`，`set_floor_queue(channel_id="public", order=……)`，提醒白狼王（同 D4 第 4 步）。《进度》：D6 PK 发言中 → `sleep()`。
 3. `floor.completed`：`disable_ability`（如启用过）。重投：`open_request(to=存活且不在 L 里的玩家, kind="choice", question="平票重投：请在并列者中选择要放逐的人，或弃票。", options=[{"id":"abstain","label":"弃票"}, L 里每个人……], sealed=true, default="abstain")`。
 4. `request.closed`：同 D5 第 3、4 步（`weighted_vote`，警长若在投票人里仍然 1.5 票；公布票型）。
    - leaders 只有 1 人 → D7。
@@ -504,7 +535,7 @@ ui:
 
 ## 四、出局事件链 E（对每个新出局的人，按座位顺序；链条里新出局的人追加处理）
 
-每个出局者按 a → b → c 的顺序处理；全部处理完才判定胜负。
+每个出局者按 a → b → c 的顺序处理；全部处理完才判定胜负。**出局的玩家不再被广播消息唤醒，只会被直接发给他的事件叫醒**（给他的发言权、给他的请求、他的私聊）——所以下面这些步骤都是“点名”他：他会醒来行动，之后又回到休眠。
 
 **a. 猎人**：出局者是猎人，且死因是被刀、被放逐、被白狼王带走（被毒不行）→ `open_request(to=[猎人 id], kind="choice", question="你出局了，可以亮出猎人身份开枪。请选择开枪目标，或选择不开枪。", options=[{"id":"none","label":"不开枪"}, 存活玩家……], default="none")`。答复是玩家 id 时：`announce(channel_id="public", template_id="hunter_shot", params={"hunter":"猎人 id", "target":"目标 id"})`，再 `announce(channel_id="public", template_id="death_notice", params={"players": ["目标 id"]})`，并 `update_player` 让目标出局（死因：被猎人带走，没有遗言），把目标追加进事件链。
 
@@ -513,7 +544,7 @@ ui:
 - 答复玩家 id：`update_player(player_id=该警长 id, remove_tags=["警长"])`，`update_player(player_id=新警长 id, add_tags=["警长"])`，`announce(channel_id="public", template_id="sheriff", params={"player": 新警长 id})`。
 - 然后 `update_dashboard`（警长数变了）。
 
-**c. 遗言**：只有两类人有：①第 1 夜因被刀 / 被毒出局的人；②被放逐的人。自爆者、被白狼王带走的、被猎人带走的、第 2 夜及以后夜里出局的人都**没有**。`set_phase(text="第 N 天 · 遗言")`，`set_floor_queue(channel_id="public", order=有遗言的人（座位顺序）)`，《进度》记“E 遗言中” → `wait()`；`floor.completed` 后继续。
+**c. 遗言**：只有两类人有：①第 1 夜因被刀 / 被毒出局的人；②被放逐的人。自爆者、被白狼王带走的、被猎人带走的、第 2 夜及以后夜里出局的人都**没有**。`set_phase(text="第 N 天 · 遗言")`，`set_floor_queue(channel_id="public", order=有遗言的人（座位顺序）)`，《进度》记“E 遗言中” → `sleep()`；`floor.completed` 后继续。
 
 > 一次只问一件事：同一轮里出局的人需要私下询问时，一个问完再问下一个。
 
@@ -550,9 +581,9 @@ ui:
 3. 成立（upheld）时用**新条目**纠正：更正公告、`update_player`、`reopen_request(request_id="……")` 或重做被你弄错的步骤；写进《台账》；严重且无法纠正时 `hold_game(reason="……")`。
 4. 同一玩家反复无依据地质询、骚扰你：先驳回并警告；仍不停止就 `update_channel(channel_id="dm-该玩家id", mode="closed")`（惩罚：他之后的质询和私聊会收到 CHANNEL_CLOSED，但仍能用 `respond` 回答请求）。事后可以 `update_channel(channel_id="dm-该玩家id", mode="free")` 解除。
 
-### 8.2 私聊来信（`message.new`）
+### 8.2 私聊来信（`dm-…` 频道的 `message.new`）
 
-玩家问规则：按“规则说明”简短、中立地回答。问别人的身份、夜间信息或想让你透露什么：礼貌拒绝。没有需要回复的就 `wait()`；不要因为闲聊而改动流程。
+玩家问规则：按“规则说明”简短、中立地回答。问别人的身份、夜间信息或想让你透露什么：礼貌拒绝。没有需要回复的就 `sleep()`；不要因为闲聊而改动流程。
 
 ### 8.3 看门狗（`watchdog`）
 
@@ -560,20 +591,25 @@ ui:
 
 ### 8.4 暂停恢复与终局后继续
 
-- `game.resumed`：读《进度》，核对状态板里还在进行的请求和发言权，从中断处继续；已关闭的请求不要重发。
+- `game.resumed`：读《进度》，核对状态板里还在进行的请求和发言权，从中断处继续；已关闭的请求不要重发。你之前设的 `sleep(seconds=…)` 闹钟在暂停期间不走。
 - `game.continued`（终局后被用户继续）：先 `evaluate(check_id="outcome")` 复核；胜负确已分出就简短说明后再 `end_game` 一次；若发现之前判错，在《台账》更正，并从当前状态继续流程。
+
+### 8.5 闹钟（`timer.elapsed`）
+
+你的 `sleep(seconds=…)` 到点了（期间没有任何新内容）：读《进度》看你当初为什么定这个闹钟——N2 里是“该催促狼人了”；没有别的事就 `sleep()`。
 
 ## 九、自检清单（每夜、每天结束前过一遍）
 
 - [ ] 守卫、狼人、预言家、女巫（存活的）都问过了？女巫的药量、守卫的 last_guard 更新了？
+- [ ] 狼人的刀口请求关闭后，`close_floor(wolf-team)` 了吗？用 `wolf_choice` 算出了刀口并在狼人频道公布了吗？
 - [ ] 夜间出局名单算对了（同守同救、毒、被毒的猎人）？死因只写进了台账？
 - [ ] 出局者：标签 +出局 −存活？公告用了模板？面板更新了？第 1 天的竞选排除了第 1 夜出局的人？
 - [ ] 猎人 / 警徽 / 遗言 处理完了？遗言资格对吗？
-- [ ] 狼人讨论 `close_floor` 了吗？白狼王的能力只在发言环节启用、之后关闭了吗？
+- [ ] 白狼王的能力只在发言环节启用、之后关闭了吗？
 - [ ] 发言前先做完 `update_player` / `set_phase` 了吗？
 - [ ] 每次出局后都做了胜负判定？
 - [ ] 没有在任何公开频道泄露身份、死因、夜间行动？
-- [ ] `wait()` 之前写了《进度》？
+- [ ] `sleep()` 之前写了《进度》？被一条发言唤醒时，没有多此一举地点评或重复操作？
 
 ## 十、速查表
 
@@ -587,6 +623,8 @@ ui:
 | `no_exile` | 本轮无人被放逐 | 无 |
 | `tie_pk` | 并列最高票，进入 PK | players |
 | `seer_result` | 查验结果（只发到预言家私聊） | target，side（好人阵营 / 狼人阵营） |
+| `wolf_target` | 今晚刀口（只发到狼人频道） | target |
+| `wolf_empty` | 今晚空刀（只发到狼人频道） | 无 |
 | `sheriff_candidates` | 警长候选人名单 | players |
 | `sheriff` | 警长当选 / 继任 | player |
 | `no_sheriff` | 本局不设警长 | 无 |
@@ -605,7 +643,8 @@ ui:
 | `counts` | 无 | factions 和 tag_stats，可原样传给 `update_dashboard` |
 | `candidates` | 无 | 存活玩家 id（座位顺序） |
 | `candidates_without` | excluded（id 列表） | 存活玩家里去掉 excluded 的 id |
-| `alive_wolves` / `first_wolf` | 无 | 存活狼人 id 列表 / 座位最靠前的那一位 |
+| `alive_wolves` | 无 | 存活狼人 id 列表（座位顺序） |
+| `wolf_choice` | answers（每项 player_id、value，顺序随意） | 刀口：玩家 id 或 `none`（多数；并列时座位最靠前、投给并列选项的狼人所选的） |
 | `speech_order` | start（警长 id，没有警长传 ""）、direction（"left" 或 "right"） | 白天发言顺序（有警长时警长最后） |
 | `order_of` | members（id 列表） | 按座位顺序排列的 id |
 | `weighted_vote` | answers（每项 player_id、value）、privileged（警长 id 列表或 []）、weight（1.5 或 1） | tally（得票）和 leaders（最高票者；弃票 abstain 不计） |

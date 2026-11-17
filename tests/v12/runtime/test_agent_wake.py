@@ -265,6 +265,24 @@ async def test_an_interrupt_for_the_focus_cancels_the_call_and_wakes_the_agent_a
 
 
 @async_test()
+async def test_a_run_cancelled_before_it_told_the_agent_anything_hands_its_reasons_to_the_next_run():
+    # found by the fuzz test: the activation had taken the envelopes, the interrupt came before the worker's first
+    # step - without this the agent would never have heard about them
+    rig = Rig()
+    rig.llm.script("a1", sleep_resp())
+    agent = rig.agent()
+    async with running_agent(agent):
+        agent.deliver(normal("message.new", channel_id="pub", label="m1"))
+        await asyncio.sleep(0)  # the activation ran (a worker exists), the worker has not had its first step
+        assert agent.busy and rig.brain.begins == [] and rig.llm.calls == []
+        agent.deliver(revoked("pub"))
+        await wait_until(lambda: agent.stats["runs"] == 1)
+    assert agent.stats["cancels"] == 1 and rig.llm.cancelled == []  # it never even reached a model call
+    (opening,) = rig.brain.starts
+    assert events(opening.reasons) == ["message.new", "floor.revoked"] and labels(opening.reasons)[0] == "m1"
+
+
+@async_test()
 async def test_an_interrupt_for_another_channel_is_just_merged():
     rig = Rig()
     hold = asyncio.Event()

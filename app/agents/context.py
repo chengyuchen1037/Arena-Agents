@@ -49,7 +49,7 @@ class Namer:
         self.channels = channels or {}
 
     def who(self, agent_id: str | None) -> str:
-        """``N3 Carol`` for a player (the id is what tools take, the name is what people say)."""
+        """``<id> <name>`` for a player (the id is what tools take, the name is what people say)."""
         if not agent_id:
             return "?"
         if agent_id == MODERATOR_ID:
@@ -427,7 +427,7 @@ def _wake_line(env: Envelope, namer: Namer) -> str:
         return f"{ch} 的发言权已全部结束：{json.dumps(p.get('results'), ensure_ascii=False)[:300]}。"
     if event == "free.advisory":
         why = {"time": "时间已到", "chars": "总字数已达上限", "silence": "已经冷场"}.get(str(p.get("reason")), p.get("reason"))
-        return f"{ch} 的自由讨论{why}。请先在频道里询问大家是否还有话要说，协商后再用 close_floor 收尾（引擎不会自动关闭）。"
+        return f"{ch} 的自由讨论{why}。引擎不会自动关闭自由讨论，请按手册的流程处理（需要结束时用 close_floor）。"
     if event == "request.opened":
         options = "；".join(f"{o.get('id')}={o.get('label') or o.get('id')}" for o in (p.get("options") or []))
         shared = "各收件人的答案会实时互相可见，可随时改答。" if p.get("share_answers") else ""

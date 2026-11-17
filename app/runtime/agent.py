@@ -413,6 +413,8 @@ class Agent:
         self.stats["cancels"] += 1
         self._gen += 1  # from now on the run is stale: whatever it still produces is discarded
         self._trace("cancel", gen=run.gen, streak=self._cancel_streak, envelope=_brief(envelope))
+        if not run.appended:
+            self._pending[:0] = run.reasons  # cancelled before it could tell the agent anything: tell it next time
         self._run = None
         self._task = None
         if task.done():
