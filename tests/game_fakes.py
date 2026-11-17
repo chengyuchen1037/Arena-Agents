@@ -34,9 +34,9 @@ CFG: dict[str, Any] = {
     "scenario": {"path": "scenarios/minimal_test.md"},
     "participants": PLAYERS,
     "tag_styles": {},
-    "llm": {"execution_depth": "medium"},
+    "llm": {},
     "knowledge_base": {"docs_dir": "knowledge"},
-    "runtime": {"debounce": 0.2, "tick_interval": 0.05, "watchdog": 30, "llm_timeout_seconds": 10},
+    "runtime": {"tick_interval": 0.05, "watchdog": 30, "llm_timeout_seconds": 10},
 }
 PROVIDER = ProviderConfig(
     id="prov", name="prov", protocol="openai_chat", base_url="https://example.invalid/v1", api_key="k",
@@ -85,6 +85,7 @@ class FakeSettings:
         self.defaults = dict(defaults or {})
         self.last_id: str | None = None
         self.fail_save_defaults = False
+        self.budget_defaults: dict[str, Any] = {}
 
     def get_default_bindings(self) -> dict[str, ModelBinding]:
         return dict(self.defaults)
@@ -93,6 +94,12 @@ class FakeSettings:
         if self.fail_save_defaults:
             raise RuntimeError("disk full")
         self.defaults = dict(bindings)
+
+    def get_budget_defaults(self) -> dict[str, Any]:
+        return dict(self.budget_defaults)
+
+    def save_budget_defaults(self, budget: dict[str, Any]) -> None:
+        self.budget_defaults = dict(budget)
 
     def get_last_session_id(self) -> str | None:
         return self.last_id
