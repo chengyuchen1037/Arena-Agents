@@ -5,6 +5,12 @@ control is given in quotes where it helps you find it. Everything below can be t
 key: start the server with `ARENA_DEMO=1` (scripted bots) or run the UI mock (see
 [Working on the UI](#working-on-the-ui)).
 
+![The main view in the god view](images/v0121-main-view.png)
+
+On a phone the same game looks like this (mini cards, bottom tab bar, the moderator's own random avatar):
+
+<img src="images/v0121-phone.png" alt="Phone portrait" width="260">
+
 ## Platforms and layouts
 
 The page adapts itself to the device. A tiny script in `<head>` (`static/js/platform.js`) runs
@@ -85,6 +91,8 @@ dialog:
 - Progress bars for each limit and the split of the used tokens into the four kinds, with the cache
   hit rate. The pill turns **yellow from 80 %** of a limit and **red at 100 %**; the dialog updates
   live.
+
+![The limit dialog at 81 % of the token limit](images/v0121-budget-dialog.png)
 
 ### Player cards
 

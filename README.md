@@ -11,11 +11,11 @@
 AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.12.1--dev-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.12.1-blue.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 
-<img src="docs/images/v012-main-view.png" alt="AI 狼人杀实时对局主界面（上帝视角）" width="100%">
+<img src="docs/images/v0121-main-view.png" alt="AI 狼人杀实时对局主界面（上帝视角）：像素头像、💭 思考 / ⚡ 行动 / 💤 休眠三种状态" width="100%">
 
 ## 主要能力
 
@@ -57,15 +57,18 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 ## 界面截图
 
-| 玩家指标浮层（点击标签） | 玩家视角（只看到该玩家可见的内容） |
+| 玩家详情（点击玩家卡片：四类 token、缓存命中率、性格设定与记忆、复盘） | 玩家视角（只看到该玩家可见的内容） |
 |---|---|
-| <img src="docs/images/v012-popover.png" alt="玩家指标浮层" width="100%"> | <img src="docs/images/v012-player-view.png" alt="玩家视角" width="100%"> |
-| **深色主题** | **工作文件夹** |
-| <img src="docs/images/v012-main-dark.png" alt="深色主题" width="100%"> | <img src="docs/images/workspace-modal.png" alt="工作文件夹选择" width="100%"> |
-| **Provider 管理与 API 地址预览** | **模型模板与玩家绑定** |
-| <img src="docs/images/provider-modal.png" alt="Provider 管理与 API 地址预览" width="100%"> | <img src="docs/images/templates-bindings.png" alt="模型模板与玩家绑定" width="100%"> |
+| <img src="docs/images/v0121-popover.png" alt="玩家详情面板" width="100%"> | <img src="docs/images/v0121-player-view.png" alt="玩家视角" width="100%"> |
+| **深色主题（含密封投票请求卡片）** | **手机竖屏（迷你卡片 + 底部标签栏）** |
+| <img src="docs/images/v0121-main-dark.png" alt="深色主题" width="100%"> | <img src="docs/images/v0121-phone.png" alt="手机竖屏" width="60%"> |
+| **token / 费用上限（按局，可强制停止）** | **Provider 管理：价格源与四个价格** |
+| <img src="docs/images/v0121-budget-dialog.png" alt="token / 费用上限对话框" width="100%"> | <img src="docs/images/provider-modal.png" alt="Provider 管理：价格源与四个价格" width="100%"> |
+| **工作文件夹** | **模型模板与玩家绑定** |
+| <img src="docs/images/workspace-modal.png" alt="工作文件夹选择" width="100%"> | <img src="docs/images/templates-bindings.png" alt="模型模板与玩家绑定" width="100%"> |
 
-> 截图来自本地**演示模式**对局（脚本化机器人）；工作区路径和 Provider 主机名已做像素化脱敏，不包含任何真实凭据。
+> 截图来自本地**演示模式**对局（脚本化机器人）；Provider 是一个演示用的示例（密钥为占位符），不包含任何真实凭据。
+> 工作文件夹与模板绑定两张图沿用 v0.12 的截图，其中的路径和主机名做过像素化脱敏。
 
 详细操作见 [docs/ui-guide.md](docs/ui-guide.md)。
 

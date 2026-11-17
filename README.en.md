@@ -14,14 +14,14 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.12.1--dev-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.12.1-blue.svg)](CHANGELOG.md)
 
 ---
 
 **Arena-Agents 是一个开源的 AI 狼人杀、社交推理与多智能体博弈沙盒。**
 游戏规则写在可执行 Markdown 剧本中，引擎负责玩家、发言、投票、频道、事件与断点恢复。内置一套完整的 12 人狼人杀，也可用同一引擎运行其他社交推理/桌游规则。
 
-<img src="docs/images/v012-main-view.png" alt="Arena-Agents AI Werewolf live game view (god view)" width="100%">
+<img src="docs/images/v0121-main-view.png" alt="Arena-Agents AI Werewolf live game view (god view): pixel avatars and the three agent states" width="100%">
 
 ## Highlights
 
@@ -77,16 +77,19 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 
 ## Screenshots
 
-| Player metrics popover (click a tag) | A player's viewpoint |
+| Player details (click a card: the four token kinds, cache hit rate, persona and memory, review) | A player's viewpoint |
 |---|---|
-| <img src="docs/images/v012-popover.png" alt="Player metrics popover" width="100%"> | <img src="docs/images/v012-player-view.png" alt="A player's viewpoint" width="100%"> |
-| **Dark theme** | **Workspace selector** |
-| <img src="docs/images/v012-main-dark.png" alt="Dark theme" width="100%"> | <img src="docs/images/workspace-modal.png" alt="Workspace selector" width="100%"> |
-| **Provider management and URL preview** | **Model templates and bindings** |
-| <img src="docs/images/provider-modal.png" alt="Provider management and endpoint preview" width="100%"> | <img src="docs/images/templates-bindings.png" alt="Model templates and bindings" width="100%"> |
+| <img src="docs/images/v0121-popover.png" alt="Player details panel" width="100%"> | <img src="docs/images/v0121-player-view.png" alt="A player's viewpoint" width="100%"> |
+| **Dark theme (with a sealed-vote request card)** | **Phone portrait (mini cards + bottom tab bar)** |
+| <img src="docs/images/v0121-main-dark.png" alt="Dark theme" width="100%"> | <img src="docs/images/v0121-phone.png" alt="Phone portrait" width="60%"> |
+| **Token / cost limit (per game, optional force stop)** | **Provider management: price source and four prices** |
+| <img src="docs/images/v0121-budget-dialog.png" alt="Token / cost limit dialog" width="100%"> | <img src="docs/images/provider-modal.png" alt="Provider management: price source and four prices" width="100%"> |
+| **Workspace selector** | **Model templates and bindings** |
+| <img src="docs/images/workspace-modal.png" alt="Workspace selector" width="100%"> | <img src="docs/images/templates-bindings.png" alt="Model templates and bindings" width="100%"> |
 
-> Screenshots are taken from a local **demo-mode** game (scripted bots). Workspace paths and provider hostnames are
-> pixelated before publication; no credentials are displayed.
+> Screenshots are taken from a local **demo-mode** game (scripted bots). The provider is a demo example (placeholder
+> key); no credentials are displayed. The workspace and template/bindings pictures are carried over from v0.12 (their
+> paths and hostnames were pixelated before publication).
 
 More UI walkthrough: [docs/ui-guide.md](docs/ui-guide.md).
 
