@@ -100,10 +100,57 @@ def test_names_and_avatars_need_an_idle_game_but_persona_and_memory_do_not(clien
 
 def test_avatars_can_be_regenerated_only_when_a_library_exists(client):
     # until the parts library is installed the endpoints say so instead of failing
-    for response in (client.post("/api/roster/avatars:regenerate"), client.post("/api/roster/N1/avatar:regenerate")):
+    for response in (client.post("/api/roster/avatars:regenerate"), client.post("/api/roster/N1/avatar:regenerate"), client.post("/api/roster/moderator/avatar:regenerate")):
         assert response.status_code in (200, 400)
         if response.status_code == 400:
             assert "头像素材库" in detail(response)
+
+
+# ------------------------------------------------------------------------------------ the moderator's avatar
+def test_the_roster_lists_the_moderator_with_an_avatar_of_its_own(client):
+    body = client.get("/api/roster").json()
+    moderator = body["moderator"]
+    assert set(moderator) == {"id", "name", "avatar"} and moderator["id"] == "moderator" and moderator["name"] == "主持人"
+    assert moderator["avatar"]["v"] == 1 and moderator["avatar"] not in [s["avatar"] for s in body["seats"]]
+    assert [s["id"] for s in body["seats"]] == IDS  # the moderator is not a seat
+    assert client.get("/api/state").json()["session"]["moderator"]["avatar"] == moderator["avatar"]
+
+
+def test_the_moderators_avatar_can_be_regenerated_alone_or_with_everybody(client):
+    before = client.get("/api/roster").json()
+    one = client.post("/api/roster/moderator/avatar:regenerate")
+    assert one.status_code == 200 and one.json()["id"] == "moderator" and one.json()["avatar"] != before["moderator"]["avatar"]
+    mid = client.get("/api/roster").json()
+    assert mid["moderator"]["avatar"] == one.json()["avatar"]
+    assert [s["avatar"] for s in mid["seats"]] == [s["avatar"] for s in before["seats"]]  # the players were not touched
+
+    everybody = client.post("/api/roster/avatars:regenerate")
+    assert everybody.status_code == 200 and set(everybody.json()) == {"seats", "moderator"}
+    assert [s["id"] for s in everybody.json()["seats"]] == IDS and everybody.json()["moderator"]["id"] == "moderator"
+    assert everybody.json()["moderator"]["avatar"] != mid["moderator"]["avatar"]
+    assert client.get("/api/roster").json()["moderator"] == everybody.json()["moderator"]
+
+
+def test_the_moderator_can_be_given_a_chosen_avatar_but_nothing_else(client):
+    from app import avatars
+
+    chosen = avatars.make_description(0, [s["avatar"] for s in client.get("/api/roster").json()["seats"]], seed=11)
+    put = client.put("/api/roster/moderator", json={"avatar": chosen})
+    assert put.status_code == 200 and put.json() == {"id": "moderator", "name": "主持人", "avatar": chosen}
+    for body in ({"name": "Boss"}, {"persona": "严厉"}, {"memory": "x"}):
+        response = client.put("/api/roster/moderator", json=body)
+        assert response.status_code == 400 and "只能更换头像" in detail(response)
+    bad = client.put("/api/roster/moderator", json={"avatar": {"v": 1, "face": "nope"}})
+    assert bad.status_code == 400 and detail(bad)
+    refine = client.post("/api/roster/moderator/refine", json={"kind": "persona", "text": "x"})
+    assert refine.status_code == 400 and "主持人没有性格设定" in detail(refine)
+    assert client.get("/api/roster").json()["moderator"]["avatar"] == chosen
+
+
+def test_the_moderators_avatar_is_idle_only_like_the_players(client, orch):
+    orch.session.status = "paused"
+    for response in (client.post("/api/roster/moderator/avatar:regenerate"), client.post("/api/roster/avatars:regenerate")):
+        assert response.status_code == 409 and "开始之前" in detail(response)
 
 
 # ------------------------------------------------------------------------------------ memory

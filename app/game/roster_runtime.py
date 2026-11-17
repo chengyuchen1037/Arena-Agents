@@ -78,15 +78,16 @@ class RosterRuntimeMixin:
 
     def _roster_snapshot(self) -> dict[str, Any]:
         """The roster as the next game takes it; falls back to the config's names when it cannot be read."""
+        nothing: dict[str, Any] = {"seats": [], "moderator": {"id": MODERATOR_ID, "name": "主持人", "avatar": None}}
         if not self._roster_io_allowed():
-            return {"memory_enabled": True, "seats": []}
+            return {"memory_enabled": True, **nothing}
         try:
             roster = self._roster()
             self._ensure_avatars(roster)
             return roster.snapshot()
         except Exception:  # noqa: BLE001 - never block a new game on a roster problem
             logger.warning("Could not read the roster", exc_info=True)
-            return {"memory_enabled": False, "seats": []}
+            return {"memory_enabled": False, **nothing}
 
     def _roster_players(self) -> list[dict[str, Any]]:
         """The seats of a new game: ``config.yml`` decides how many and their ids / seats, the roster
@@ -108,6 +109,8 @@ class RosterRuntimeMixin:
                 }
             )
         self._memory_enabled_snapshot = bool(snapshot.get("memory_enabled", True))
+        moderator = snapshot.get("moderator") or {}
+        self._moderator_avatar_snapshot = moderator.get("avatar") if isinstance(moderator.get("avatar"), dict) else None
         return players
 
     def roster_payload(self) -> dict[str, Any]:
@@ -121,7 +124,10 @@ class RosterRuntimeMixin:
     def _roster_event(self) -> UiEvent:
         return UiEvent(
             type="roster.updated",
-            data={"participants": [{"id": p.id, "name": p.name, "avatar": p.avatar} for p in self.session.participants]},
+            data={
+                "participants": [{"id": p.id, "name": p.name, "avatar": p.avatar} for p in self.session.participants],
+                "moderator": {"id": MODERATOR_ID, "avatar": self.session.moderator_avatar},  # type: ignore[attr-defined]
+            },
         )
 
     def _require_idle(self, what: str) -> None:
@@ -140,6 +146,7 @@ class RosterRuntimeMixin:
 
         self.session.participants = [Participant(**p) for p in players]
         self.session.memory_enabled = bool(getattr(self, "_memory_enabled_snapshot", True))
+        self.session.moderator_avatar = getattr(self, "_moderator_avatar_snapshot", None)
         self._reset_conversations()  # type: ignore[attr-defined]
         await self.broadcast_state("identities_shuffled")  # type: ignore[attr-defined]  # a fresh snapshot, no autosave churn
         self.bus.publish(self._roster_event())  # type: ignore[attr-defined]
@@ -153,10 +160,13 @@ class RosterRuntimeMixin:
         persona: Any = None,
         memory: Any = None,
     ) -> dict[str, Any]:
-        """Change one seat.  Name / avatar need an idle game; persona / memory are files and may be edited at
-        any time (a running game keeps the copy it started with)."""
+        """Change one seat (or the moderator, whose only setting is its avatar).  Name / avatar need an idle
+        game; persona / memory are files and may be edited at any time (a running game keeps the copy it
+        started with)."""
         roster = self._roster()
         entry = roster.entry(agent_id)  # validates the id
+        if agent_id == MODERATOR_ID and (name is not None or persona is not None or memory is not None):
+            raise RosterError("主持人只能更换头像，名字、性格设定和记忆都是固定的。")
         rebuild = False
         if name is not None and str(name).strip() != entry["name"]:
             self._require_idle("名字")
@@ -170,6 +180,8 @@ class RosterRuntimeMixin:
                 avatar = avatars.validate_description(avatar)
             except ImportError:
                 pass
+            except FileNotFoundError:
+                raise RosterError("头像素材库不可用，请先运行 tools/avatar_lab.py 生成。") from None
             except ValueError as exc:
                 raise RosterError(str(exc)) from None
             roster.set_avatar(agent_id, avatar)
@@ -198,6 +210,7 @@ class RosterRuntimeMixin:
         session = self.session  # type: ignore[attr-defined]
         session.participants = [Participant(**p) for p in players]
         session.memory_enabled = bool(getattr(self, "_memory_enabled_snapshot", True))
+        session.moderator_avatar = getattr(self, "_moderator_avatar_snapshot", None)
         session.budget = self._load_budget_defaults()
         self._reset_conversations()  # type: ignore[attr-defined]
 
@@ -212,23 +225,39 @@ class RosterRuntimeMixin:
         self.session.memory_enabled = bool(snapshot.get("memory_enabled", True))
         self._brain = None  # a game that has not started takes the new texts when it starts
 
-    async def regenerate_avatars(self, agent_id: str | None = None) -> list[dict[str, Any]]:
-        """New random avatars for one seat or all of them (idle games only)."""
+    async def regenerate_avatars(self, agent_id: str | None = None) -> dict[str, Any]:
+        """New random avatars (idle games only): one seat, the moderator (``"moderator"``) or - without an id -
+        all twelve seats *and* the moderator, picked together so that no two look alike.
+
+        Returns the entry of the one that changed, or ``{"seats": [...], "moderator": {...}}`` for all."""
         self._require_idle("头像")
         try:
             from app import avatars
         except ImportError as exc:
             raise RosterError("头像素材库不可用。") from exc
         roster = self._roster()
-        rows = roster.get()["seats"]
-        if agent_id is not None:
-            roster.entry(agent_id)
-            taken = [r["avatar"] for r in rows if r["id"] != agent_id and r["avatar"]]
-            roster.set_avatar(agent_id, avatars.make_description(int(agent_id[1:]), taken))
-        else:
-            roster.set_all_avatars({r["id"]: d for r, d in zip(rows, avatars.make_roster(len(rows)))})
+        data = roster.get()
+        rows = data["seats"]
+        try:
+            if agent_id is None:
+                picked = avatars.make_roster(len(rows) + 1)  # the last one is the moderator's
+                updates = {r["id"]: d for r, d in zip(rows, picked)}
+                updates[MODERATOR_ID] = picked[len(rows)]
+                roster.set_all_avatars(updates)
+            else:
+                roster.entry(agent_id)  # validates the id
+                taken = [r["avatar"] for r in rows if r["id"] != agent_id and r["avatar"]]
+                if agent_id != MODERATOR_ID and data["moderator"]["avatar"]:
+                    taken.append(data["moderator"]["avatar"])  # (for the moderator, ``taken`` is every player's)
+                seat = 0 if agent_id == MODERATOR_ID else int(agent_id[1:])
+                roster.set_avatar(agent_id, avatars.make_description(seat, taken))
+        except FileNotFoundError:
+            raise RosterError("头像素材库不可用，请先运行 tools/avatar_lab.py 生成。") from None
         await self._rebuild_idle_world()
-        return roster.get()["seats"] if agent_id is None else [roster.entry(agent_id)]
+        fresh = roster.get()
+        if agent_id is None:
+            return {"seats": fresh["seats"], "moderator": fresh["moderator"]}
+        return roster.entry(agent_id)
 
     async def set_memory_enabled(self, enabled: bool) -> dict[str, Any]:
         self._roster().set_memory_enabled(bool(enabled))
@@ -278,6 +307,8 @@ class RosterRuntimeMixin:
         """Expand a few notes into a complete persona / memory with the *moderator's* model.  The draft is
         returned, never saved: the user reads it first."""
         roster = self._roster()
+        if agent_id == MODERATOR_ID:
+            raise RosterError("主持人没有性格设定和记忆。")
         entry = roster.entry(agent_id)
         if kind not in ("persona", "memory"):
             raise RosterError("kind 必须是 persona 或 memory。")

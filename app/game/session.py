@@ -78,6 +78,7 @@ class GameSession(BaseModel):
     # v0.12.1
     budget: BudgetSettings = Field(default_factory=BudgetSettings)  # the user's limit for THIS game (E22)
     memory_enabled: bool = True  # whether the agents were given their memory at the start of this game
+    moderator_avatar: dict[str, Any] | None = None  # the moderator's random pixel avatar, fixed for this game
     review_done: list[str] = Field(default_factory=list)  # seats whose post-game review has been written (E21)
 
     scenario_spec: dict[str, Any] = Field(default_factory=dict)

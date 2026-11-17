@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import io
+import json
 import zipfile
 from typing import Any
 
@@ -437,7 +438,11 @@ async def test_the_public_session_has_the_v3_fields_and_no_execution_depth(monke
     s = orch.public_session()
     assert s["schema_version"] == 4 and s["version"] == "v0.12.1" and "execution_depth" not in s
     assert s["budget"]["state"] == "ok" and s["memory_enabled"] is True and s["review"] == {"available": False, "done": [], "running": False}
-    assert s["stall_notice"] == "" and s["moderator"] == {"id": MODERATOR_ID, "name": "主持人", "state": "sleeping", "sleep_until": None}
+    moderator = s["moderator"]
+    assert s["stall_notice"] == "" and {k: moderator[k] for k in ("id", "name", "state", "sleep_until")} == {
+        "id": MODERATOR_ID, "name": "主持人", "state": "sleeping", "sleep_until": None,
+    }
+    assert moderator["avatar"] is None or moderator["avatar"]["v"] == 1  # the moderator has a random avatar of its own
     first = s["participants"][0]
     assert (first["id"], first["name"], first["state"], first["sleep_until"]) == ("N1", "Alice", "sleeping", None)
     assert first["avatar"] is None or first["avatar"]["v"] == 1  # a description once the parts library is installed
@@ -488,3 +493,96 @@ async def test_a_finished_review_is_saved_so_a_restart_cannot_review_the_same_ga
     await other.load_session_data(copy.deepcopy(saved))
     assert other.review_view()["done"] and other.review_view()["available"] is True
     assert await other.start_review() == []  # nothing left to review
+
+
+# ------------------------------------------------------------------------------------ the moderator's avatar
+def avatar_key(desc):
+    return json.dumps(desc, sort_keys=True)
+
+
+def differing_parts(a, b):
+    return sum(1 for k in ("face", "skin", "hair", "hair_color", "eyes", "mouth", "accessory", "accessory_color") if a.get(k) != b.get(k))
+
+
+@async_test
+async def test_the_moderator_gets_a_random_avatar_like_the_players(monkeypatch):
+    orch = make_orch(monkeypatch)
+    s = orch.public_session()
+    moderator = s["moderator"]["avatar"]
+    assert moderator and moderator["v"] == 1 and orch.session.moderator_avatar == moderator
+    players = [p["avatar"] for p in s["participants"]]
+    assert all(players) and all(differing_parts(moderator, p) >= 3 for p in players)  # nobody looks like the host
+    assert orch.roster_payload()["moderator"] == {"id": "moderator", "name": "主持人", "avatar": moderator}
+    await orch.new_game()
+    assert orch.public_session()["moderator"]["avatar"] == moderator  # fixed in the roster, not re-rolled per game
+
+
+@async_test
+async def test_regenerating_the_moderator_changes_only_the_moderator(monkeypatch):
+    orch = make_orch(monkeypatch)
+    before = orch.public_session()
+    entry = await orch.regenerate_avatars("moderator")
+    after = orch.public_session()
+    assert entry["id"] == "moderator" and entry["avatar"] == after["moderator"]["avatar"] != before["moderator"]["avatar"]
+    assert [p["avatar"] for p in after["participants"]] == [p["avatar"] for p in before["participants"]]
+    assert all(differing_parts(entry["avatar"], p["avatar"]) >= 3 for p in after["participants"])
+    updates = events_of(orch, "roster.updated")
+    assert updates and updates[-1].data["moderator"] == {"id": "moderator", "avatar": entry["avatar"]}
+    assert orch._roster().entry("moderator")["avatar"] == entry["avatar"]  # saved for the next games
+
+
+@async_test
+async def test_regenerating_everybody_rerolls_the_twelve_seats_and_the_moderator_together(monkeypatch):
+    orch = make_orch(monkeypatch)
+    before = orch.public_session()
+    result = await orch.regenerate_avatars()
+    assert [s["id"] for s in result["seats"]] == IDS  # (this test game has four seats; the real one twelve)
+    assert result["moderator"]["id"] == "moderator"
+    everyone = [s["avatar"] for s in result["seats"]] + [result["moderator"]["avatar"]]
+    assert len({avatar_key(a) for a in everyone}) == len(IDS) + 1
+    assert all(differing_parts(a, b) >= 3 for i, a in enumerate(everyone) for b in everyone[i + 1:])  # all clearly different faces
+    assert result["moderator"]["avatar"] != before["moderator"]["avatar"]
+    assert orch.public_session()["moderator"]["avatar"] == result["moderator"]["avatar"]
+
+
+@async_test
+async def test_a_single_player_regeneration_keeps_clear_of_the_moderators_face(monkeypatch):
+    orch = make_orch(monkeypatch)
+    moderator = orch.public_session()["moderator"]["avatar"]
+    for seat in ("N1", "N2", "N3", "N4"):
+        entry = await orch.regenerate_avatars(seat)
+        assert differing_parts(entry["avatar"], moderator) >= 3
+
+
+@async_test
+async def test_the_moderator_only_has_an_avatar_to_change_and_only_before_the_game(monkeypatch):
+    orch = make_orch(monkeypatch)
+    for kwargs in ({"name": "Boss"}, {"persona": "严厉"}, {"memory": "x"}):
+        with pytest.raises(RosterError, match="只能更换头像"):
+            await orch.update_roster_entry("moderator", **kwargs)
+    with pytest.raises(RosterError, match="没有性格设定和记忆"):
+        await orch.refine_text("moderator", "persona", "严厉")
+    from app import avatars
+
+    chosen = avatars.make_description(0, [p["avatar"] for p in orch.public_session()["participants"]], seed=5)
+    entry = await orch.update_roster_entry("moderator", avatar=chosen)
+    assert entry["avatar"] == chosen and orch.public_session()["moderator"]["avatar"] == chosen
+    with pytest.raises(RosterError):
+        await orch.update_roster_entry("moderator", avatar={"v": 1, "face": "nope"})  # not a description of this library
+    orch.session.status = "paused"
+    with pytest.raises(RuntimeError, match="开始之前"):
+        await orch.update_roster_entry("moderator", avatar=chosen)
+    with pytest.raises(RuntimeError, match="开始之前"):
+        await orch.regenerate_avatars("moderator")
+
+
+@async_test
+async def test_the_moderators_avatar_is_part_of_the_save_and_survives_a_restore(monkeypatch):
+    orch = make_orch(monkeypatch)
+    moderator = orch.public_session()["moderator"]["avatar"]
+    payload = json.loads(json.dumps(orch.session_payload()))
+    assert payload["moderator_avatar"] == moderator
+    orch._roster().set_avatar("moderator", {"v": 1, "face": "later"})  # the roster moves on ...
+    other = make_orch(monkeypatch)
+    await other.load_session_data(payload)
+    assert other.public_session()["moderator"]["avatar"] == moderator  # the game keeps the host it started with

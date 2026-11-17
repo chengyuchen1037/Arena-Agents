@@ -98,8 +98,9 @@ def test_ensure_avatars_fills_only_the_missing_ones_and_is_stable(store):
         made.append(seat)
         return {"v": 1, "face": f"f{seat:02d}", "taken": len(taken)}
 
-    assert store.ensure_avatars(make) is True and made == list(range(1, 13))
+    assert store.ensure_avatars(make) is True and made == [*range(1, 13), 0]  # the moderator (seat 0) comes last
     assert [row["avatar"]["taken"] for row in store.get()["seats"]] == list(range(12))  # each saw the earlier ones
+    assert store.entry("moderator")["avatar"]["taken"] == 12  # ... the moderator saw all twelve players
     made.clear()
     assert store.ensure_avatars(make) is False and made == []  # nothing missing: nothing generated, nothing written
     store.set_avatar("N5", {"v": 1, "face": "fXX"})
@@ -113,6 +114,37 @@ def test_set_all_avatars_replaces_the_listed_seats(store):
         store.set_avatar("N1", {})
     with pytest.raises(RosterError):
         store.set_avatar("N1", "not a dict")  # type: ignore[arg-type]
+
+
+# ------------------------------------------------------------------------------------ the moderator's avatar
+def test_the_moderator_is_not_a_seat_it_only_has_an_avatar(store):
+    assert store.get()["moderator"] == {"id": "moderator", "name": "主持人", "avatar": None}
+    assert [row["id"] for row in store.get()["seats"]] == [f"N{i}" for i in range(1, 13)]  # still twelve seats
+    assert store.entry("moderator") == {"id": "moderator", "name": "主持人", "avatar": None}
+    store.set_avatar("moderator", {"v": 1, "face": "f07"})
+    assert store.entry("moderator")["avatar"] == {"v": 1, "face": "f07"} and store.snapshot()["moderator"]["avatar"] == {"v": 1, "face": "f07"}
+    assert RosterStore(store.data_dir).get()["moderator"]["avatar"] == {"v": 1, "face": "f07"}  # persisted for the next games
+    assert store.entry("N1")["avatar"] is None  # the seats are untouched
+    store.set_all_avatars({"moderator": {"v": 1, "face": "f08"}, "N2": {"v": 1, "face": "x"}})
+    assert store.entry("moderator")["avatar"]["face"] == "f08" and store.entry("N2")["avatar"]["face"] == "x"
+
+
+def test_the_moderator_has_no_name_persona_or_memory_to_set(store):
+    for call in (lambda: store.set_name("moderator", "Boss"), lambda: store.set_persona("moderator", "x"), lambda: store.set_memory("moderator", "x")):
+        with pytest.raises(RosterError, match="没有这个座位"):
+            call()
+    with pytest.raises(RosterError):
+        store.set_avatar("moderator", {})
+    assert store.get()["moderator"]["name"] == "主持人"
+    assert "moderator" not in {row["id"] for row in store.get()["seats"]} and store.export_zip()  # no moderator.md in a pack
+
+
+def test_an_old_roster_without_a_moderator_gets_one_and_keeps_every_player(store):
+    store.set_all_avatars({f"N{i}": {"v": 1, "face": f"old{i}"} for i in range(1, 13)})  # a roster written by an earlier version
+    assert store.entry("moderator")["avatar"] is None
+    assert store.ensure_avatars(lambda seat, taken: {"v": 1, "face": f"new{seat}", "taken": len(taken)}) is True
+    assert store.entry("moderator")["avatar"] == {"v": 1, "face": "new0", "taken": 12}  # picked to differ from all twelve
+    assert [store.entry(f"N{i}")["avatar"]["face"] for i in (1, 12)] == ["old1", "old12"]  # the players were not re-rolled
 
 
 # ------------------------------------------------------------------------------------ persona / memory files

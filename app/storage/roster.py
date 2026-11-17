@@ -28,6 +28,8 @@ from app.storage.errors import StorageError
 from app.storage.paths import get_data_dir
 
 DEFAULT_NAMES = ["Alice", "Bob", "Carol", "David", "Eve", "Frank", "Grace", "Henry", "Ivy", "Jack", "Kate", "Leo"]
+MODERATOR_ID = "moderator"  # the moderator is not a seat: it only has a (random) avatar of its own
+MODERATOR_NAME = "主持人"
 MAX_NAME_CHARS = 20
 MAX_TEXT_CHARS = 20_000  # persona / memory
 MAX_ZIP_BYTES = 2 * 1024 * 1024
@@ -201,8 +203,14 @@ class RosterStore:
     def _seat_ids(self) -> list[str]:
         return [seat_id(i) for i in range(1, self._seats + 1)]
 
+    def _moderator_entry(self, raw: dict[str, Any]) -> dict[str, Any]:
+        row = raw.get("moderator") if isinstance(raw.get("moderator"), dict) else {}
+        avatar = row.get("avatar") if isinstance(row.get("avatar"), dict) else None
+        return {"id": MODERATOR_ID, "name": MODERATOR_NAME, "avatar": avatar}
+
     def get(self) -> dict[str, Any]:
-        """``{"memory_enabled": bool, "seats": [entry…]}`` with defaults filled in (nothing is written)."""
+        """``{"memory_enabled": bool, "seats": [entry…], "moderator": {id, name, avatar}}`` with defaults filled
+        in (nothing is written).  The moderator only has an avatar to choose (name and texts are fixed)."""
         with self._lock:
             raw = self._read_json()
             stored = raw.get("seats") if isinstance(raw.get("seats"), dict) else {}
@@ -226,10 +234,18 @@ class RosterStore:
                         "memory": self._read_text(f"{sid}.memory.md").strip("\n"),
                     }
                 )
-            return {"memory_enabled": bool(raw.get("memory_enabled", True)), "seats": seats}
+            return {
+                "memory_enabled": bool(raw.get("memory_enabled", True)),
+                "seats": seats,
+                "moderator": self._moderator_entry(raw),
+            }
 
     def entry(self, agent_id: str) -> dict[str, Any]:
-        for row in self.get()["seats"]:
+        """One seat (or the moderator: ``{id, name, avatar}``)."""
+        data = self.get()
+        if agent_id == MODERATOR_ID:
+            return data["moderator"]
+        for row in data["seats"]:
             if row["id"] == agent_id:
                 return row
         raise RosterError(f"没有这个座位：{agent_id}")
@@ -247,11 +263,14 @@ class RosterStore:
                 }
                 for row in data["seats"]
             ],
+            "moderator": data["moderator"],
         }
 
     # --------------------------------------------------------------------------- writing
     def ensure_avatars(self, make_avatar: Any) -> bool:
-        """Give every seat without an avatar one (``make_avatar(seat:int, taken:list[dict]) -> dict``)."""
+        """Give every seat — and the moderator — that has no avatar one
+        (``make_avatar(seat:int, taken:list[dict]) -> dict``; the moderator is seat ``0``, picked last so that
+        it differs from every player)."""
         with self._lock:
             raw = self._read_json()
             seats = raw.get("seats") if isinstance(raw.get("seats"), dict) else {}
@@ -264,6 +283,10 @@ class RosterStore:
                     taken.append(avatar)
                     seats[sid] = {**row, "avatar": avatar}
                     changed = True
+            if self._moderator_entry(raw)["avatar"] is None:
+                avatar = make_avatar(0, taken)
+                raw["moderator"] = {**(raw.get("moderator") if isinstance(raw.get("moderator"), dict) else {}), "avatar": avatar}
+                changed = True
             if changed:
                 raw["seats"] = seats
                 raw.setdefault("memory_enabled", True)
@@ -289,21 +312,33 @@ class RosterStore:
                     raise RosterError(f"名字「{value}」已被 {row['id']} 使用，名字不能重复。")
             self._save_seat_fields(agent_id, name=value)
 
+    def _put_avatar(self, raw: dict[str, Any], agent_id: str, avatar: dict[str, Any]) -> None:
+        """Set the avatar of a seat or of the moderator inside ``raw`` (not yet written)."""
+        if agent_id == MODERATOR_ID:
+            raw["moderator"] = {**(raw.get("moderator") if isinstance(raw.get("moderator"), dict) else {}), "avatar": avatar}
+            return
+        self._check_id(agent_id)
+        seats = raw.get("seats") if isinstance(raw.get("seats"), dict) else {}
+        seats[agent_id] = {**(seats.get(agent_id) or {}), "avatar": avatar}
+        raw["seats"] = seats
+
     def set_avatar(self, agent_id: str, avatar: dict[str, Any]) -> None:
+        """The avatar of a seat or of the moderator (``"moderator"``)."""
         with self._lock:
-            self._check_id(agent_id)
+            if agent_id != MODERATOR_ID:
+                self._check_id(agent_id)
             if not isinstance(avatar, dict) or not avatar:
                 raise RosterError("头像描述无效。")
-            self._save_seat_fields(agent_id, avatar=avatar)
+            raw = self._read_json()
+            self._put_avatar(raw, agent_id, avatar)
+            raw.setdefault("memory_enabled", True)
+            self._write_json(raw)
 
     def set_all_avatars(self, avatars: dict[str, dict[str, Any]]) -> None:
         with self._lock:
             raw = self._read_json()
-            seats = raw.get("seats") if isinstance(raw.get("seats"), dict) else {}
             for agent_id, avatar in avatars.items():
-                self._check_id(agent_id)
-                seats[agent_id] = {**(seats.get(agent_id) or {}), "avatar": avatar}
-            raw["seats"] = seats
+                self._put_avatar(raw, agent_id, avatar)
             raw.setdefault("memory_enabled", True)
             self._write_json(raw)
 
@@ -469,6 +504,8 @@ def reset_roster_store() -> None:
 
 __all__ = [
     "DEFAULT_NAMES",
+    "MODERATOR_ID",
+    "MODERATOR_NAME",
     "RecordTally",
     "RosterError",
     "RosterStore",

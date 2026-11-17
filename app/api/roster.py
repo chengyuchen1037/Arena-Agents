@@ -118,8 +118,9 @@ async def clear_memory(req: ClearRequest | None = None) -> dict[str, Any]:
 
 @router.post("/roster/avatars:regenerate", dependencies=[Depends(require_trusted_client)])
 async def regenerate_all_avatars() -> dict[str, Any]:
+    """New avatars for all twelve seats *and the moderator* -> ``{"seats": [...], "moderator": {id,name,avatar}}``."""
     try:
-        return {"seats": await orchestrator.regenerate_avatars()}
+        return await orchestrator.regenerate_avatars()
     except (RosterError, StorageError, RuntimeError) as exc:
         raise _fail(exc) from exc
 
@@ -136,8 +137,9 @@ async def put_roster_entry(agent_id: str, req: RosterUpdate) -> dict[str, Any]:
 
 @router.post("/roster/{agent_id}/avatar:regenerate", dependencies=[Depends(require_trusted_client)])
 async def regenerate_avatar(agent_id: str) -> dict[str, Any]:
+    """New avatar for one seat, or for the moderator (``agent_id = "moderator"``) -> that entry."""
     try:
-        return (await orchestrator.regenerate_avatars(agent_id))[0]
+        return await orchestrator.regenerate_avatars(agent_id)
     except (RosterError, StorageError, RuntimeError) as exc:
         raise _fail(exc) from exc
 

@@ -220,6 +220,7 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
             model_bindings={a: b.model_copy(deep=True) for a, b in defaults.items() if a in allowed},
             budget=self._load_budget_defaults(),
             memory_enabled=bool(getattr(self, "_memory_enabled_snapshot", True)),
+            moderator_avatar=getattr(self, "_moderator_avatar_snapshot", None),
         )
         self.world, self.clock = world, clock
         self.usage = UsageBook()
@@ -552,6 +553,7 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
             "moderator": {
                 "id": MODERATOR_ID,
                 "name": "主持人",
+                "avatar": s.moderator_avatar,
                 "state": self.agent_state.get(MODERATOR_ID, "sleeping"),
                 "sleep_until": self._sleep_until(MODERATOR_ID),
             },
