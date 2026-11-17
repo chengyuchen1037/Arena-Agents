@@ -90,13 +90,13 @@ def test_update_player_notices_are_ambient_and_public_changes_reach_the_others()
     items = deliveries(world)
 
     own = to(items, "u1", "player.updated")[0].envelope
-    assert (own.kind, own.priority, own.interrupt) == ("notice", "ambient", False)
+    assert (own.kind, own.priority, own.interrupt) == ("notice", "normal", False)
     assert own.payload["player_id"] == "u1" and own.payload["add_tags"] == ["secret", "leader"]
 
     others = [d for d in items if d.target != "u1"]
     assert sorted(d.target for d in others) == ["u2", "u3", "u4"]
     for d in others:
-        assert (d.envelope.kind, d.envelope.priority) == ("notice", "ambient")
+        assert (d.envelope.kind, d.envelope.priority) == ("notice", "normal")
         assert d.envelope.payload == {
             "event": "player.updated",
             "player_id": "u1",
@@ -195,7 +195,7 @@ def test_set_phase_is_public_and_notifies_every_player_quietly():
     items = deliveries(world)
     assert sorted(d.target for d in items) == sorted(PLAYER_IDS)
     for d in items:
-        assert (d.envelope.kind, d.envelope.priority) == ("notice", "ambient")
+        assert (d.envelope.kind, d.envelope.priority) == ("notice", "normal")
         assert d.envelope.payload == {"event": "phase.changed", "text": "第一阶段"}
     assert [e.data for e in events(world, "phase.changed")] == [{"text": "第一阶段"}]
 

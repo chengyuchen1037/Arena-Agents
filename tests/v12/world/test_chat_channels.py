@@ -31,20 +31,20 @@ from .helpers import (
 
 def test_create_channel_records_notifies_and_emits() -> None:
     world = make_world()
-    receipt = new_channel(world, "ops", members=["p02", "p01", "p02"], mode="listen", type_="public", name="广播", keep_queues=True)
-    assert receipt.data == {"channel_id": "ops", "mode": "listen", "members": ["moderator", "p02", "p01"]}
+    receipt = new_channel(world, "ops", members=["N2", "N1", "N2"], mode="listen", type_="public", name="广播", keep_queues=True)
+    assert receipt.data == {"channel_id": "ops", "mode": "listen", "members": ["moderator", "N2", "N1"]}
     channel = world.channel("ops")
     assert (channel.type, channel.mode, channel.name) == ("public", "listen", "广播")
     assert not channel.system and channel.owner is None and channel.free is None and channel.group is None
 
     [entry] = entries(world, "channel.created", channel="ops")
     assert entry.seq == receipt.seq and entry.actor_id == MODERATOR_ID
-    assert entry.visible_to_ids == ["moderator", "p02", "p01"]
+    assert entry.visible_to_ids == ["moderator", "N2", "N1"]
     assert entry.data == channel_view(world, channel)
 
     deliveries, events = flush(world)
-    assert targets(deliveries, "channel.created") == ["p02", "p01"]  # the moderator made it, it needs no notice
-    [env] = envelopes(deliveries, target="p01", event="channel.created")
+    assert targets(deliveries, "channel.created") == ["N2", "N1"]  # the moderator made it, it needs no notice
+    [env] = envelopes(deliveries, target="N1", event="channel.created")
     assert (env.kind, env.priority, env.interrupt, env.channel_id, env.sender) == ("notice", "ambient", False, "ops", "moderator")
     assert env.payload == {"event": "channel.created", "channel_id": "ops", "name": "广播", "mode": "listen", "type": "public"}
     assert [e.type for e in events] == ["channel.created"]
@@ -53,9 +53,9 @@ def test_create_channel_records_notifies_and_emits() -> None:
 
 def test_the_moderator_is_always_first_and_never_duplicated() -> None:
     world = make_world()
-    new_channel(world, "a", members=["moderator", "p03", "p01"])
+    new_channel(world, "a", members=["moderator", "N3", "N1"])
     new_channel(world, "b", members=[])
-    assert world.channel("a").members == ["moderator", "p03", "p01"]
+    assert world.channel("a").members == ["moderator", "N3", "N1"]
     assert world.channel("b").members == ["moderator"]
 
 
@@ -73,8 +73,8 @@ def test_create_channel_rejections_leave_no_trace() -> None:
     seq = world.seq
     again = mod(world, "create_channel", channel_id="c1", name="重复")
     assert again.code == Code.ALREADY_EXISTS and "c1" in again.message
-    assert mod(world, "create_channel", channel_id="dm-p01", name="冒充").code == Code.ALREADY_EXISTS
-    ghost = mod(world, "create_channel", channel_id="c2", name="x", members=["p01", "ghost"])
+    assert mod(world, "create_channel", channel_id="dm-N1", name="冒充").code == Code.ALREADY_EXISTS
+    ghost = mod(world, "create_channel", channel_id="c2", name="x", members=["N1", "ghost"])
     assert ghost.code == Code.UNKNOWN_PLAYER and ghost.data["unknown"] == ["ghost"]
     assert world.channel("c2") is None and world.seq == seq
 
@@ -85,14 +85,14 @@ def test_create_channel_rejections_leave_no_trace() -> None:
 def test_system_dms_are_created_for_every_player() -> None:
     world = ChatWorld(make_spec(), ManualClock(), state=WorldState(players=make_players(3)))
     created = world.chat.create_system_dms()
-    assert [c.id for c in created] == ["dm-p01", "dm-p02", "dm-p03"] == [system_dm_id(p.id) for p in world.state.players]
-    dm = world.channel("dm-p02")
-    assert (dm.type, dm.mode, dm.system, dm.owner) == ("dm", "free", True, "p02")
-    assert dm.members == ["moderator", "p02"] and dm.name == "私聊 · 玩家2"
+    assert [c.id for c in created] == ["dm-N1", "dm-N2", "dm-N3"] == [system_dm_id(p.id) for p in world.state.players]
+    dm = world.channel("dm-N2")
+    assert (dm.type, dm.mode, dm.system, dm.owner) == ("dm", "free", True, "N2")
+    assert dm.members == ["moderator", "N2"] and dm.name == "私聊 · 玩家2"
     assert dm.free is None and dm.group is None and not dm.frozen
     made = entries(world, "channel.created")
     assert [e.actor_id for e in made] == ["engine"] * 3
-    assert made[1].visible_to_ids == ["moderator", "p02"] and made[1].data["system"] is True
+    assert made[1].visible_to_ids == ["moderator", "N2"] and made[1].data["system"] is True
     assert world.drain_outbox() == []  # nobody is told: the DM is infrastructure
     assert [e.type for e in world.drain_events()] == ["channel.created"] * 3
     # idempotent
@@ -102,17 +102,17 @@ def test_system_dms_are_created_for_every_player() -> None:
 
 def test_a_system_dm_can_be_closed_renamed_and_reopened_but_not_reshaped() -> None:
     world = make_world()
-    assert mod(world, "update_channel", channel_id="dm-p01", add_members=["p02"]).code == Code.FORBIDDEN
-    assert mod(world, "update_channel", channel_id="dm-p01", remove_members=["p01"]).code == Code.FORBIDDEN
-    assert mod(world, "update_channel", channel_id="dm-p01", readonly_members=["p01"]).code == Code.FORBIDDEN
-    assert mod(world, "update_channel", channel_id="dm-p01", free_limits={"duration_s": 5}).code == Code.INVALID_PARAMS
-    assert world.channel("dm-p01").members == ["moderator", "p01"]
-    assert mod(world, "update_channel", channel_id="dm-p01", mode="closed", name="惩罚中").ok
-    assert world.channel("dm-p01").mode == "closed" and world.channel("dm-p01").name == "惩罚中"
-    assert mod(world, "update_channel", channel_id="dm-p01", mode="free").ok
-    dm = world.channel("dm-p01")
+    assert mod(world, "update_channel", channel_id="dm-N1", add_members=["N2"]).code == Code.FORBIDDEN
+    assert mod(world, "update_channel", channel_id="dm-N1", remove_members=["N1"]).code == Code.FORBIDDEN
+    assert mod(world, "update_channel", channel_id="dm-N1", readonly_members=["N1"]).code == Code.FORBIDDEN
+    assert mod(world, "update_channel", channel_id="dm-N1", free_limits={"duration_s": 5}).code == Code.INVALID_PARAMS
+    assert world.channel("dm-N1").members == ["moderator", "N1"]
+    assert mod(world, "update_channel", channel_id="dm-N1", mode="closed", name="惩罚中").ok
+    assert world.channel("dm-N1").mode == "closed" and world.channel("dm-N1").name == "惩罚中"
+    assert mod(world, "update_channel", channel_id="dm-N1", mode="free").ok
+    dm = world.channel("dm-N1")
     assert dm.mode == "free" and dm.free is None  # re-opening a DM never turns it into a limited discussion
-    assert speak(world, "p01", "dm-p01", "一" * 10).ok
+    assert speak(world, "N1", "dm-N1", "一" * 10).ok
 
 
 # --------------------------------------------------------------------------- mod.update_channel
@@ -120,52 +120,52 @@ def test_a_system_dm_can_be_closed_renamed_and_reopened_but_not_reshaped() -> No
 
 def test_rename_members_and_readonly_in_one_call() -> None:
     world = make_world()
-    new_channel(world, "c1", members=["p01", "p02", "p03"], mode="free")
+    new_channel(world, "c1", members=["N1", "N2", "N3"], mode="free")
     receipt = mod(
-        world, "update_channel", channel_id="c1", name="新名字", add_members=["p04"], remove_members=["p03"], readonly_members=["p02"]
+        world, "update_channel", channel_id="c1", name="新名字", add_members=["N4"], remove_members=["N3"], readonly_members=["N2"]
     )
     assert receipt.ok
     channel = world.channel("c1")
-    assert channel.name == "新名字" and channel.members == ["moderator", "p01", "p02", "p04"] and channel.readonly == ["p02"]
-    assert receipt.data["changes"] == {"name": "新名字", "added": ["p04"], "removed": ["p03"], "readonly": ["p02"]}
+    assert channel.name == "新名字" and channel.members == ["moderator", "N1", "N2", "N4"] and channel.readonly == ["N2"]
+    assert receipt.data["changes"] == {"name": "新名字", "added": ["N4"], "removed": ["N3"], "readonly": ["N2"]}
     [entry] = entries(world, "channel.updated")
     assert entry.data == {"changes": receipt.data["changes"]}
     # visible to the old and the new members
-    assert entry.visible_to_ids == ["moderator", "p01", "p02", "p03", "p04"]
+    assert entry.visible_to_ids == ["moderator", "N1", "N2", "N3", "N4"]
     deliveries, events = flush(world)
-    assert sorted(targets(deliveries, "channel.updated")) == ["p01", "p02", "p03", "p04"]
-    [env] = envelopes(deliveries, target="p03", event="channel.updated")  # the removed member is told too
+    assert sorted(targets(deliveries, "channel.updated")) == ["N1", "N2", "N3", "N4"]
+    [env] = envelopes(deliveries, target="N3", event="channel.updated")  # the removed member is told too
     assert (env.kind, env.priority, env.interrupt) == ("notice", "ambient", False)
-    assert env.payload["removed"] == ["p03"] and env.payload["added"] == ["p04"] and env.payload["name"] == "新名字"
-    assert ui(events, "channel.updated")[-1]["channel"]["members"] == ["moderator", "p01", "p02", "p04"]
+    assert env.payload["removed"] == ["N3"] and env.payload["added"] == ["N4"] and env.payload["name"] == "新名字"
+    assert ui(events, "channel.updated")[-1]["channel"]["members"] == ["moderator", "N1", "N2", "N4"]
 
 
 def test_update_channel_validation() -> None:
     world = make_world()
-    new_channel(world, "c1", members=["p01", "p02"], mode="free")
+    new_channel(world, "c1", members=["N1", "N2"], mode="free")
     seq = world.seq
     assert mod(world, "update_channel", channel_id="nowhere", name="x").code == Code.UNKNOWN_CHANNEL
     assert mod(world, "update_channel", channel_id="c1", remove_members=["moderator"]).code == Code.FORBIDDEN
     assert mod(world, "update_channel", channel_id="c1", add_members=["ghost"]).code == Code.UNKNOWN_PLAYER
     assert mod(world, "update_channel", channel_id="c1", remove_members=["ghost"]).code == Code.UNKNOWN_PLAYER
-    absent = mod(world, "update_channel", channel_id="c1", remove_members=["p03"])
-    assert absent.code == Code.NOT_MEMBER and absent.data["not_members"] == ["p03"]
-    both = mod(world, "update_channel", channel_id="c1", add_members=["p03"], remove_members=["p03"])
+    absent = mod(world, "update_channel", channel_id="c1", remove_members=["N3"])
+    assert absent.code == Code.NOT_MEMBER and absent.data["not_members"] == ["N3"]
+    both = mod(world, "update_channel", channel_id="c1", add_members=["N3"], remove_members=["N3"])
     assert both.code == Code.INVALID_PARAMS
     assert mod(world, "update_channel", channel_id="c1", readonly_members=["moderator"]).code == Code.FORBIDDEN
     assert mod(world, "update_channel", channel_id="c1", readonly_members=["ghost"]).code == Code.UNKNOWN_PLAYER
-    outside = mod(world, "update_channel", channel_id="c1", readonly_members=["p03"])
-    assert outside.code == Code.NOT_MEMBER and outside.data["not_members"] == ["p03"]
+    outside = mod(world, "update_channel", channel_id="c1", readonly_members=["N3"])
+    assert outside.code == Code.NOT_MEMBER and outside.data["not_members"] == ["N3"]
     # a read-only member must be a member *after* this very call
-    assert mod(world, "update_channel", channel_id="c1", add_members=["p03"], readonly_members=["p03"]).ok
-    assert world.seq > seq and world.channel("c1").readonly == ["p03"]
+    assert mod(world, "update_channel", channel_id="c1", add_members=["N3"], readonly_members=["N3"]).ok
+    assert world.seq > seq and world.channel("c1").readonly == ["N3"]
 
 
 def test_adding_an_existing_member_is_ignored_and_a_no_op_writes_nothing() -> None:
     world = make_world()
-    new_channel(world, "c1", members=["p01"])
+    new_channel(world, "c1", members=["N1"])
     seq = world.seq
-    receipt = mod(world, "update_channel", channel_id="c1", add_members=["p01", "moderator"])
+    receipt = mod(world, "update_channel", channel_id="c1", add_members=["N1", "moderator"])
     assert receipt.ok and receipt.seq is None and "没有需要更新" in receipt.message
     assert mod(world, "update_channel", channel_id="c1", mode="closed", name="频道c1").ok  # same values
     assert world.seq == seq and world.drain_events() == [] and world.drain_outbox() == []
@@ -173,11 +173,11 @@ def test_adding_an_existing_member_is_ignored_and_a_no_op_writes_nothing() -> No
 
 def test_removing_a_member_also_drops_them_from_the_readonly_list() -> None:
     world = make_world()
-    new_channel(world, "c1", members=["p01", "p02"], mode="free")
-    assert mod(world, "update_channel", channel_id="c1", readonly_members=["p02"]).ok
-    receipt = mod(world, "update_channel", channel_id="c1", remove_members=["p02"])
+    new_channel(world, "c1", members=["N1", "N2"], mode="free")
+    assert mod(world, "update_channel", channel_id="c1", readonly_members=["N2"]).ok
+    receipt = mod(world, "update_channel", channel_id="c1", remove_members=["N2"])
     assert receipt.ok and world.channel("c1").readonly == []
-    assert receipt.data["changes"] == {"removed": ["p02"], "readonly": []}
+    assert receipt.data["changes"] == {"removed": ["N2"], "readonly": []}
 
 
 def test_closed_channel_can_become_a_free_discussion_with_limits() -> None:
@@ -189,45 +189,45 @@ def test_closed_channel_can_become_a_free_discussion_with_limits() -> None:
     free = world.channel("c1").free
     assert (free.max_messages_per_member, free.duration_s, free.started_gt) == (1, 100, 0.0)
     assert receipt.data["changes"]["free_limits"]["max_messages_per_member"] == 1
-    assert speak(world, "p01", "c1", "一").ok and speak(world, "p01", "c1", "二").code == Code.QUOTA_EXCEEDED
+    assert speak(world, "N1", "c1", "一").ok and speak(world, "N1", "c1", "二").code == Code.QUOTA_EXCEEDED
 
 
 def test_leaving_free_mode_ends_the_discussion_and_tells_the_writers() -> None:
     world = make_world()
     new_channel(world, "c1", mode="free")
-    assert mod(world, "update_channel", channel_id="c1", readonly_members=["p04"]).ok
-    assert speak(world, "p01", "c1", "一句").ok
+    assert mod(world, "update_channel", channel_id="c1", readonly_members=["N4"]).ok
+    assert speak(world, "N1", "c1", "一句").ok
     flush(world)
     receipt = mod(world, "update_channel", channel_id="c1", mode="listen")
     assert receipt.ok and receipt.data["changes"] == {"mode": {"from": "free", "to": "listen"}}
     assert world.channel("c1").free is None and world.channel("c1").mode == "listen"
     deliveries, _ = flush(world)
-    assert sorted(targets(deliveries, "floor.revoked")) == ["p01", "p02", "p03"]
-    [env] = envelopes(deliveries, target="p01", event="floor.revoked")
+    assert sorted(targets(deliveries, "floor.revoked")) == ["N1", "N2", "N3"]
+    [env] = envelopes(deliveries, target="N1", event="floor.revoked")
     assert env.interrupt and env.priority == "ambient" and env.payload["reason"] == "mode_changed"
-    assert speak(world, "p01", "c1", "还能说").code == Code.CHANNEL_CLOSED
+    assert speak(world, "N1", "c1", "还能说").code == Code.CHANNEL_CLOSED
 
 
 def test_changing_the_mode_of_a_floor_channel_revokes_its_tokens() -> None:
     world = make_world()
     new_channel(world, "c1")
-    open_queue(world, "c1", ["p01", "p02"])
+    open_queue(world, "c1", ["N1", "N2"])
     receipt = mod(world, "update_channel", channel_id="c1", mode="free")
     assert receipt.ok
     channel = world.channel("c1")
     assert channel.group is None and channel.mode == "free" and channel.free is not None
     assert receipt.data["changes"]["mode"] == {"from": "queue", "to": "free"}
     ended = entries(world, "floor.token_ended")
-    assert [(e.data["holder"], e.data["reason"], e.data["cause"]) for e in ended] == [("p01", "revoked", "mode_changed")]
+    assert [(e.data["holder"], e.data["reason"], e.data["cause"]) for e in ended] == [("N1", "revoked", "mode_changed")]
     deliveries, _ = flush(world)
-    assert targets(deliveries, "floor.revoked") == ["p01"]
+    assert targets(deliveries, "floor.revoked") == ["N1"]
     assert not entries(world, "floor.completed")  # a moderator's own change does not wake it
 
 
 def test_a_floor_is_not_started_again_by_a_same_mode_update() -> None:
     world = make_world()
     new_channel(world, "c1")
-    open_turn(world, "c1", ["p01"])
+    open_turn(world, "c1", ["N1"])
     seq = world.seq
     assert mod(world, "update_channel", channel_id="c1", name="改个名").ok
     assert world.channel("c1").group is not None and world.channel("c1").mode == "turn"
@@ -239,68 +239,68 @@ def test_a_floor_is_not_started_again_by_a_same_mode_update() -> None:
 
 def test_removed_members_do_not_see_what_comes_after_but_keep_what_came_before() -> None:
     world = make_world()
-    new_channel(world, "c1", members=["p01", "p02", "p03"], mode="free")
-    assert speak(world, "p01", "c1", "之前").ok
-    assert mod(world, "update_channel", channel_id="c1", remove_members=["p02"]).ok
-    assert speak(world, "p01", "c1", "之后").ok
+    new_channel(world, "c1", members=["N1", "N2", "N3"], mode="free")
+    assert speak(world, "N1", "c1", "之前").ok
+    assert mod(world, "update_channel", channel_id="c1", remove_members=["N2"]).ok
+    assert speak(world, "N1", "c1", "之后").ok
     assert mod(world, "send_message", channel_id="c1", content="主持人也说了").ok
 
     def seen(agent: str) -> list[str]:
         return [e.data["content"] for e in world.entries_visible(agent) if e.type == "message" and e.channel_id == "c1"]
 
-    assert seen("p02") == ["之前"]
-    assert seen("p01") == seen("p03") == seen(MODERATOR_ID) == ["之前", "之后", "主持人也说了"]
+    assert seen("N2") == ["之前"]
+    assert seen("N1") == seen("N3") == seen(MODERATOR_ID) == ["之前", "之后", "主持人也说了"]
     # the removal itself is visible to the removed member (it is a fact about them) ...
-    assert [e.type for e in world.entries_visible("p02") if e.channel_id == "c1"][-1] == "channel.updated"
-    # ... and p02 can no longer write
-    assert speak(world, "p02", "c1", "我还在吗").code == Code.NOT_MEMBER
+    assert [e.type for e in world.entries_visible("N2") if e.channel_id == "c1"][-1] == "channel.updated"
+    # ... and N2 can no longer write
+    assert speak(world, "N2", "c1", "我还在吗").code == Code.NOT_MEMBER
     # visibility of an old entry never changes retroactively
-    assert msgs(world, "c1")[0].visible_to_ids == ["moderator", "p01", "p02", "p03"]
+    assert msgs(world, "c1")[0].visible_to_ids == ["moderator", "N1", "N2", "N3"]
 
 
 def test_added_members_only_see_what_comes_after() -> None:
     world = make_world()
-    new_channel(world, "c1", members=["p01"], mode="free")
-    assert speak(world, "p01", "c1", "早").ok
-    assert mod(world, "update_channel", channel_id="c1", add_members=["p02"]).ok
-    assert speak(world, "p01", "c1", "晚").ok
-    texts = [e.data["content"] for e in world.entries_visible("p02") if e.type == "message"]
+    new_channel(world, "c1", members=["N1"], mode="free")
+    assert speak(world, "N1", "c1", "早").ok
+    assert mod(world, "update_channel", channel_id="c1", add_members=["N2"]).ok
+    assert speak(world, "N1", "c1", "晚").ok
+    texts = [e.data["content"] for e in world.entries_visible("N2") if e.type == "message"]
     assert texts == ["晚"]
-    assert msgs(world, "c1")[0].visible_to_ids == ["moderator", "p01"]
-    assert msgs(world, "c1")[1].visible_to_ids == ["moderator", "p01", "p02"]
+    assert msgs(world, "c1")[0].visible_to_ids == ["moderator", "N1"]
+    assert msgs(world, "c1")[1].visible_to_ids == ["moderator", "N1", "N2"]
 
 
 def test_other_players_never_see_a_dm_but_the_moderator_sees_all() -> None:
     world = make_world()
-    assert speak(world, "p01", "dm-p01", "私密问题").ok
-    assert mod(world, "send_message", channel_id="dm-p02", content="给 p02 的话").ok
+    assert speak(world, "N1", "dm-N1", "私密问题").ok
+    assert mod(world, "send_message", channel_id="dm-N2", content="给 N2 的话").ok
     for pid in PLAYERS:
         visible = [e.data["content"] for e in world.entries_visible(pid) if e.type == "message"]
-        expected = {"p01": ["私密问题"], "p02": ["给 p02 的话"]}.get(pid, [])
+        expected = {"N1": ["私密问题"], "N2": ["给 N2 的话"]}.get(pid, [])
         assert visible == expected, pid
-    assert [e.data["content"] for e in world.entries_visible(MODERATOR_ID) if e.type == "message"] == ["私密问题", "给 p02 的话"]
+    assert [e.data["content"] for e in world.entries_visible(MODERATOR_ID) if e.type == "message"] == ["私密问题", "给 N2 的话"]
 
 
 def test_entries_visible_supports_after_seq_and_limit() -> None:
     world = make_world()
     new_channel(world, "c1", mode="free")
     for i in range(3):
-        assert speak(world, "p01", "c1", f"第{i}句").ok
+        assert speak(world, "N1", "c1", f"第{i}句").ok
     first = msgs(world, "c1")[0]
-    later = world.entries_visible("p02", after_seq=first.seq)
+    later = world.entries_visible("N2", after_seq=first.seq)
     assert [e.type for e in later] == ["message", "message"]
-    newest = world.entries_visible("p02", limit=2)
+    newest = world.entries_visible("N2", limit=2)
     assert [e.data["content"] for e in newest] == ["第1句", "第2句"]
 
 
 def test_floor_entries_are_visible_to_the_channel_members_only() -> None:
     world = make_world()
-    new_channel(world, "c1", members=["p01", "p02"])
-    open_queue(world, "c1", ["p01", "p02"])
-    assert speak(world, "p01", "c1", "x").ok
+    new_channel(world, "c1", members=["N1", "N2"])
+    open_queue(world, "c1", ["N1", "N2"])
+    assert speak(world, "N1", "c1", "x").ok
     for e in entries(world, "floor.", channel="c1", prefix=True):
-        assert e.visible_to_ids == ["moderator", "p01", "p02"], e.type
-    assert not [e for e in world.entries_visible("p03") if e.type.startswith("floor.")]
+        assert e.visible_to_ids == ["moderator", "N1", "N2"], e.type
+    assert not [e for e in world.entries_visible("N3") if e.type.startswith("floor.")]
 
 
 # --------------------------------------------------------------------------- delivery priorities of messages
@@ -308,15 +308,15 @@ def test_floor_entries_are_visible_to_the_channel_members_only() -> None:
 
 def test_system_dm_messages_wake_the_other_side_with_normal_priority() -> None:
     world = make_world()
-    assert speak(world, "p01", "dm-p01", "主持人，我有疑问").ok
+    assert speak(world, "N1", "dm-N1", "主持人，我有疑问").ok
     deliveries, _ = flush(world)
     [env] = envelopes(deliveries, target="moderator")
     assert (env.kind, env.priority, env.interrupt) == ("message", "normal", False)
     assert env.payload["event"] == "message.new" and env.payload["message_kind"] == "speech"
-    assert mod(world, "send_message", channel_id="dm-p01", content="请讲").ok
-    assert mod(world, "announce", channel_id="dm-p01", template_id="notice", params={"text": "已记录"}).ok
+    assert mod(world, "send_message", channel_id="dm-N1", content="请讲").ok
+    assert mod(world, "announce", channel_id="dm-N1", template_id="notice", params={"text": "已记录"}).ok
     deliveries, _ = flush(world)
-    assert [(d.target, d.envelope.priority) for d in deliveries] == [("p01", "normal"), ("p01", "normal")]
+    assert [(d.target, d.envelope.priority) for d in deliveries] == [("N1", "normal"), ("N1", "normal")]
 
 
 def test_messages_in_ordinary_channels_are_ambient_unless_the_discussion_is_free() -> None:
@@ -348,8 +348,8 @@ def test_a_frozen_free_channel_stops_waking_its_members() -> None:
 def test_a_message_is_not_delivered_to_its_own_author() -> None:
     world = make_world()
     new_channel(world, "c1", mode="free")
-    assert speak(world, "p01", "c1", "我说").ok
+    assert speak(world, "N1", "c1", "我说").ok
     deliveries, _ = flush(world)
-    assert "p01" not in {d.target for d in deliveries}
-    assert {d.target for d in deliveries} == {"moderator", "p02", "p03", "p04"}
+    assert "N1" not in {d.target for d in deliveries}
+    assert {d.target for d in deliveries} == {"moderator", "N2", "N3", "N4"}
 

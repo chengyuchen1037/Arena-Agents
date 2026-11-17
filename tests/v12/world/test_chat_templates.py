@@ -32,35 +32,35 @@ def _free_world():
 
 def test_a_player_template_is_rendered_and_recorded_structurally() -> None:
     world = _free_world()
-    receipt = speak_template(world, "p01", "c1", "vote", target="p02", reason="他太安静")
+    receipt = speak_template(world, "N1", "c1", "vote", target="N2", reason="他太安静")
     assert receipt.ok and receipt.truncated is None
     [entry] = msgs(world, "c1")
     assert entry.data["kind"] == "template"
-    assert entry.data["content"] == "我投 玩家2（p02）。他太安静"
+    assert entry.data["content"] == "我投 玩家2（N2）。他太安静"
     assert entry.data["template_id"] == "vote"
-    assert entry.data["params"] == {"target": "p02", "reason": "他太安静"}
+    assert entry.data["params"] == {"target": "N2", "reason": "他太安静"}
     assert entry.data["sender_name"] == "玩家1"
 
 
 def test_optional_params_may_be_left_out() -> None:
     world = _free_world()
-    assert speak_template(world, "p01", "c1", "vote", target="p03").ok
-    assert msgs(world, "c1")[0].data["content"] == "我投 玩家3（p03）。"
-    assert msgs(world, "c1")[0].data["params"] == {"target": "p03"}
+    assert speak_template(world, "N1", "c1", "vote", target="N3").ok
+    assert msgs(world, "c1")[0].data["content"] == "我投 玩家3（N3）。"
+    assert msgs(world, "c1")[0].data["params"] == {"target": "N3"}
 
 
 def test_player_lists_and_enums_and_ints_render() -> None:
     world = _free_world()
-    assert speak_template(world, "p01", "c1", "shout", who=["p01", "p02"], word="yes").ok
-    assert speak_template(world, "p01", "c1", "count", n="3").ok  # a numeric string is accepted
+    assert speak_template(world, "N1", "c1", "shout", who=["N1", "N2"], word="yes").ok
+    assert speak_template(world, "N1", "c1", "count", n="3").ok  # a numeric string is accepted
     texts = [e.data["content"] for e in msgs(world, "c1")]
-    assert texts == ["玩家1（p01）、玩家2（p02） 说：yes", "数到 3"]
+    assert texts == ["玩家1（N1）、玩家2（N2） 说：yes", "数到 3"]
     assert msgs(world, "c1")[1].data["params"] == {"n": 3}
 
 
 def test_text_params_are_truncated_to_their_declared_length() -> None:
     world = _free_world()
-    assert speak_template(world, "p01", "c1", "vote", target="p02", reason="理" * 25).ok
+    assert speak_template(world, "N1", "c1", "vote", target="N2", reason="理" * 25).ok
     entry = msgs(world, "c1")[0]
     assert entry.data["params"]["reason"] == "理" * 10
     assert entry.data["content"].endswith("理" * 10)
@@ -88,14 +88,14 @@ def test_announce_works_where_players_cannot_write() -> None:
     assert world.chat.freeze_channel("frozen1", "ability:x")
     for cid in ("closed1", "listen1", "frozen1"):
         assert mod(world, "announce", channel_id=cid, template_id="notice", params={"text": "通知"}).ok, cid
-        assert speak(world, "p01", cid, "我也想说").code in (Code.CHANNEL_CLOSED, Code.NO_FLOOR)
+        assert speak(world, "N1", cid, "我也想说").code in (Code.CHANNEL_CLOSED, Code.NO_FLOOR)
 
 
 def test_a_template_is_not_truncated_but_still_costs_a_message_and_its_chars() -> None:
     world = make_world()
     new_channel(world, "c1")
-    open_queue(world, "c1", ["p01"])  # 20 chars per message, 50 in total, 2 messages
-    receipt = speak_template(world, "p01", "c1", "long")
+    open_queue(world, "c1", ["N1"])  # 20 chars per message, 50 in total, 2 messages
+    receipt = speak_template(world, "N1", "c1", "long")
     assert receipt.ok and receipt.truncated is None
     text = msgs(world, "c1")[0].data["content"]
     assert len(text) > 20  # longer than the per-message cap and nevertheless intact
@@ -103,26 +103,26 @@ def test_a_template_is_not_truncated_but_still_costs_a_message_and_its_chars() -
     assert token.messages_used == 1 and token.chars_used == len(text)
     assert receipt.floor_left == {"messages": 1, "chars": 50 - len(text), "seconds": 60.0}
     # the free text that follows can only use what is left of the total
-    follow_up = speak(world, "p01", "c1", "字" * 20)
+    follow_up = speak(world, "N1", "c1", "字" * 20)
     assert follow_up.truncated == {"dropped_chars": 20 - (50 - len(text)), "kept_chars": 50 - len(text)}
 
 
 def test_templates_use_up_the_token_like_any_message() -> None:
     world = make_world()
     new_channel(world, "c1")
-    open_queue(world, "c1", ["p01", "p02"])
-    assert speak_template(world, "p01", "c1", "count", n=1).ok
-    assert speak_template(world, "p01", "c1", "count", n=2).ok  # 2nd message: the token is spent
+    open_queue(world, "c1", ["N1", "N2"])
+    assert speak_template(world, "N1", "c1", "count", n=1).ok
+    assert speak_template(world, "N1", "c1", "count", n=2).ok  # 2nd message: the token is spent
     assert entries(world, "floor.token_ended")[0].data["reason"] == "used"
-    assert speak_template(world, "p01", "c1", "count", n=3).code == Code.NO_FLOOR
+    assert speak_template(world, "N1", "c1", "count", n=3).code == Code.NO_FLOOR
 
 
 def test_templates_count_against_the_free_discussion_quota_and_chars() -> None:
     world = _free_world()
     for n in (1, 2, 3):
-        assert speak_template(world, "p01", "c1", "count", n=n).ok
-    assert speak_template(world, "p01", "c1", "count", n=4).code == Code.QUOTA_EXCEEDED
-    assert world.channel("c1").free.counts == {"p01": 3}
+        assert speak_template(world, "N1", "c1", "count", n=n).ok
+    assert speak_template(world, "N1", "c1", "count", n=4).code == Code.QUOTA_EXCEEDED
+    assert world.channel("c1").free.counts == {"N1": 3}
     assert world.channel("c1").free.chars_used == sum(len(e.data["content"]) for e in msgs(world, "c1"))
 
 
@@ -131,7 +131,7 @@ def test_templates_count_against_the_free_discussion_quota_and_chars() -> None:
 
 def test_players_cannot_use_moderator_only_templates() -> None:
     world = _free_world()
-    receipt = speak_template(world, "p01", "c1", "notice", text="我是主持人")
+    receipt = speak_template(world, "N1", "c1", "notice", text="我是主持人")
     assert not receipt.ok and receipt.code == Code.FORBIDDEN
     assert not msgs(world, "c1")
     assert world.channel("c1").free.counts == {}
@@ -139,19 +139,19 @@ def test_players_cannot_use_moderator_only_templates() -> None:
 
 def test_the_moderator_cannot_announce_with_a_players_only_template() -> None:
     world = _free_world()
-    receipt = mod(world, "announce", channel_id="c1", template_id="vote", params={"target": "p01"})
+    receipt = mod(world, "announce", channel_id="c1", template_id="vote", params={"target": "N1"})
     assert not receipt.ok and receipt.code == Code.FORBIDDEN
 
 
 def test_templates_open_to_everybody_work_for_both() -> None:
     world = _free_world()
-    assert speak_template(world, "p01", "c1", "count", n=1).ok
+    assert speak_template(world, "N1", "c1", "count", n=1).ok
     assert mod(world, "announce", channel_id="c1", template_id="count", params={"n": 2}).ok
 
 
 def test_unknown_template_lists_the_usable_ones() -> None:
     world = _free_world()
-    player = speak_template(world, "p01", "c1", "nope")
+    player = speak_template(world, "N1", "c1", "nope")
     assert player.code == Code.UNKNOWN_TEMPLATE
     assert player.data["templates"] == ["vote", "shout", "count", "long"]
     moderator = mod(world, "announce", channel_id="c1", template_id="nope")
@@ -168,10 +168,10 @@ def test_unknown_template_lists_the_usable_ones() -> None:
         ("vote", {}, Code.INVALID_PARAMS),  # missing required target
         ("vote", {"target": "ghost"}, Code.INVALID_TARGET),  # not a player
         ("vote", {"target": "moderator"}, Code.INVALID_TARGET),
-        ("vote", {"target": "p02", "colour": "red"}, Code.INVALID_PARAMS),  # unknown key
+        ("vote", {"target": "N2", "colour": "red"}, Code.INVALID_PARAMS),  # unknown key
         ("shout", {"who": [], "word": "yes"}, Code.INVALID_TARGET),  # an empty player list names nobody
-        ("shout", {"who": ["p01", "ghost"], "word": "yes"}, Code.INVALID_TARGET),
-        ("shout", {"who": ["p01"], "word": "maybe"}, Code.INVALID_PARAMS),  # not in the enum
+        ("shout", {"who": ["N1", "ghost"], "word": "yes"}, Code.INVALID_TARGET),
+        ("shout", {"who": ["N1"], "word": "maybe"}, Code.INVALID_PARAMS),  # not in the enum
         ("count", {"n": 10}, Code.INVALID_PARAMS),  # out of range
         ("count", {"n": 0}, Code.INVALID_PARAMS),
         ("count", {"n": "many"}, Code.INVALID_PARAMS),
@@ -181,7 +181,7 @@ def test_unknown_template_lists_the_usable_ones() -> None:
 def test_parameter_validation_rejects_without_side_effects(template: str, params: dict, code: str) -> None:
     world = _free_world()
     before = world.seq
-    receipt = speak_template(world, "p01", "c1", template, **params)
+    receipt = speak_template(world, "N1", "c1", template, **params)
     assert not receipt.ok and receipt.code == code, receipt
     assert world.seq == before
     assert world.channel("c1").free.counts == {} and world.channel("c1").free.chars_used == 0
@@ -204,13 +204,13 @@ def test_moderator_announcements_are_validated_too() -> None:
 def test_the_floor_check_precedes_the_template_checks() -> None:
     world = make_world()
     new_channel(world, "c1", mode="closed")
-    assert speak_template(world, "p01", "c1", "nope").code == Code.CHANNEL_CLOSED
+    assert speak_template(world, "N1", "c1", "nope").code == Code.CHANNEL_CLOSED
     new_channel(world, "c2")
-    open_queue(world, "c2", ["p02"])
-    assert speak_template(world, "p01", "c2", "count", n=99).code == Code.NO_FLOOR
-    assert speak_template(world, "p01", "nowhere", "count", n=1).code == Code.UNKNOWN_CHANNEL
-    new_channel(world, "c3", members=["p02"], mode="free")
-    assert speak_template(world, "p01", "c3", "count", n=1).code == Code.NOT_MEMBER
+    open_queue(world, "c2", ["N2"])
+    assert speak_template(world, "N1", "c2", "count", n=99).code == Code.NO_FLOOR
+    assert speak_template(world, "N1", "nowhere", "count", n=1).code == Code.UNKNOWN_CHANNEL
+    new_channel(world, "c3", members=["N2"], mode="free")
+    assert speak_template(world, "N1", "c3", "count", n=1).code == Code.NOT_MEMBER
 
 
 def test_templates_are_stale_checked_like_speech() -> None:
@@ -223,6 +223,6 @@ def test_templates_are_stale_checked_like_speech() -> None:
     seen = world.seq
     world.commit("phase.changed", MODERATOR_ID, {"text": "x"}, visible_to="*")
     receipt = submit(
-        world, "p01", "speak_template", {"channel_id": "c1", "template_id": "count", "params": {"n": 1}}, based_on=seen
+        world, "N1", "speak_template", {"channel_id": "c1", "template_id": "count", "params": {"n": 1}}, based_on=seen
     )
     assert receipt.code == Code.STALE

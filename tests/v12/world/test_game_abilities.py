@@ -81,7 +81,7 @@ def test_enable_disable_errors_change_nothing():
     assert mod(world, "enable_ability", ability_id="nope").code == Code.UNKNOWN_ABILITY
     assert mod(world, "disable_ability", ability_id="nope").code == Code.UNKNOWN_ABILITY
     assert mod(world, "enable_ability", ability_id="ping", holders=["ghost"]).code == Code.UNKNOWN_PLAYER
-    assert mod(world, "disable_ability", ability_id="ping", holders=["u1"]).code == Code.INVALID_PARAMS
+    assert mod(world, "disable_ability", ability_id="ping", holders=["ghost"]).code == Code.UNKNOWN_PLAYER
     assert world.seq == seq and world.state.abilities["ping"].enabled is False
 
 

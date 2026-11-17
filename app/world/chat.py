@@ -15,10 +15,17 @@ Where the contract is silent the following (additive) choices were made:
   each holder once;
 * moderator messages never count against any quota, but they do count as activity in a free discussion
   (they reset the silence timer);
-* every limit in ``free_limits`` is an *absolute* cap over the whole discussion (``duration_s`` is
+* ``open_floor`` / ``update_channel`` take ONE ``limits`` object; the keys are checked against the mode
+  (``turn``: TOKEN_LIMIT_KEYS, ``free``: FREE_LIMIT_KEYS) before the values are validated (v0.12.1);
+  ``free_limits`` is only a legacy alias that ``intents.py`` maps to ``limits``;
+* every limit of a free discussion is an *absolute* cap over the whole discussion (``duration_s`` is
   measured from the start, counters never restart; values already exceeded are refused);
-  ``open_floor(mode=free)`` is what restarts a discussion.  Setting ``free_limits`` re-arms every
+  ``open_floor(mode=free)`` is what restarts a discussion.  Setting ``limits`` re-arms every
   advisory and restarts the silence countdown;
+* delivery (contracts §10.1): every envelope wakes its recipient (no ambient level, no debounce); a
+  message reaches everybody who can read the channel except its author; envelopes addressed to one
+  person (``floor.*`` of a token holder, anything in a system DM) are ``direct`` and also reach a player
+  who is out, broadcasts do not (E23);
 * system DMs never use tokens or free-discussion limits: their only limits are ``defaults.dm`` and the
   moderator-controlled ``mode``; they cannot be given a floor (``open_floor`` / ``set_floor_queue``);
 * ``resume_queue`` on a channel without a group but frozen (a free discussion) just lifts the freeze.
@@ -26,12 +33,17 @@ Where the contract is silent the following (additive) choices were made:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
 
 from app.world.core import Handler, WorldCore, WorldModule
+from pydantic import ValidationError
+
 from app.world.intents import (
+    FREE_LIMIT_KEYS,
+    TOKEN_LIMIT_KEYS,
     FloorLimits,
     FreeLimits,
     ModAnnounce,
@@ -41,6 +53,7 @@ from app.world.intents import (
     ModSendMessage,
     ModSetFloorQueue,
     ModUpdateChannel,
+    OpenLimits,
     Pass,
     Speak,
     SpeakTemplate,
@@ -52,14 +65,7 @@ from app.world.types import ENGINE_ID, MODERATOR_ID, Code, Intent, LedgerEntry, 
 logger = logging.getLogger(__name__)
 
 FLOOR_MODES = ("turn", "queue")  # channel modes that are driven by a FloorGroup
-_FREE_LIMIT_FIELDS = (
-    "duration_s",
-    "max_messages_per_member",
-    "max_chars_per_message",
-    "max_chars_total",
-    "debounce_s",
-    "silence_s",
-)
+_FREE_LIMIT_FIELDS = FREE_LIMIT_KEYS  # the settings of a free discussion (FreeState carries exactly these)
 
 
 # --------------------------------------------------------------------------- small helpers
@@ -325,10 +331,12 @@ class ChatModule(WorldModule):
         self.w.emit("floor.changed", channel_id=channel.id, floor=floor_view(self.w, channel))
 
     def _notice(self, targets: list[str], event: str, channel: ChannelState, **payload: Any) -> None:
+        """Tell the members of a channel about a change of the channel (the operator, the moderator, is not
+        told; a player who is out is spared the broadcast)."""
         for target in targets:
             if target != MODERATOR_ID:
                 self.w.deliver(
-                    target, "notice", event, priority="ambient", channel_id=channel.id, sender=MODERATOR_ID, **payload
+                    target, "notice", event, priority="normal", channel_id=channel.id, sender=MODERATOR_ID, **payload
                 )
 
     # ------------------------------------------------------------------ speech ---
@@ -570,8 +578,14 @@ class ChatModule(WorldModule):
             return Receipt.reject(Code.FORBIDDEN, "主持人不能被移出频道。")
         if channel.system and (add or remove or p.readonly_members is not None):
             return Receipt.reject(Code.FORBIDDEN, "系统私聊的成员不能更改（可以用 mode 关闭或重新打开它）。")
-        if channel.system and p.free_limits is not None:
-            return Receipt.reject(Code.INVALID_PARAMS, "系统私聊不使用自由讨论限额，不能设置 free_limits。")
+        free_limits: FreeLimits | None = None
+        if p.limits is not None:
+            if channel.system:
+                return Receipt.reject(Code.INVALID_PARAMS, "系统私聊不使用自由讨论限额，不能设置 limits。")
+            parsed, rejected = self._limits_for("free", p.limits, tool="update_channel")
+            if rejected is not None:
+                return rejected
+            free_limits = parsed  # type: ignore[assignment]
         bad = self._check_players([*add, *remove])
         if bad is not None:
             return bad
@@ -595,10 +609,15 @@ class ChatModule(WorldModule):
         else:
             readonly_after = [m for m in channel.readonly if m in members_after]
         final_mode = p.mode or channel.mode
-        if p.free_limits is not None:
+        if free_limits is not None:
             if final_mode != "free":
-                return Receipt.reject(Code.INVALID_PARAMS, "只有处于自由讨论（mode=free）的频道才能设置 free_limits。")
-            checked = self._check_free_limits(channel, p.free_limits) if channel.mode == "free" else None
+                return Receipt.reject(
+                    Code.INVALID_PARAMS,
+                    "只有处于自由讨论（mode=free）的频道才能设置 limits；这个频道现在不是自由讨论。"
+                    "要开始自由讨论请用 open_floor(mode=free, limits=…)，或同时传 mode=free。",
+                    channel_mode=channel.mode,
+                )
+            checked = self._check_free_limits(channel, free_limits) if channel.mode == "free" else None
             if checked is not None:
                 return checked
 
@@ -623,8 +642,8 @@ class ChatModule(WorldModule):
                 channel.mode = p.mode
                 changes["mode"] = {"from": old_mode, "to": p.mode}
                 if p.mode == "free" and not channel.system:
-                    channel.free = self._new_free(p.free_limits, None)
-                    changes["free_limits"] = {f: getattr(channel.free, f) for f in _FREE_LIMIT_FIELDS}
+                    channel.free = self._new_free(free_limits, None)
+                    changes["limits"] = {f: getattr(channel.free, f) for f in _FREE_LIMIT_FIELDS}
                     floor_touched = True
             if was_frozen:
                 changes["unfrozen"] = True
@@ -648,8 +667,8 @@ class ChatModule(WorldModule):
         channel.readonly = readonly_after
 
         # 3. new limits for a free discussion that keeps running (this re-arms its advisories)
-        if p.free_limits is not None and channel.mode == "free" and channel.free is not None and "free_limits" not in changes:
-            changes["free_limits"] = self._apply_free_limits(channel.free, p.free_limits)
+        if free_limits is not None and channel.mode == "free" and channel.free is not None and "limits" not in changes:
+            changes["limits"] = self._apply_free_limits(channel.free, free_limits)
             floor_touched = True
 
         # 4. removed members lose their tokens (the queue moves on) / their right to write
@@ -669,7 +688,7 @@ class ChatModule(WorldModule):
                 for member in removed:
                     if member in writers_before:
                         self.w.deliver(
-                            member, "floor", "floor.revoked", priority="ambient", interrupt=True,
+                            member, "floor", "floor.revoked", priority="normal", interrupt=True,
                             channel_id=channel.id, sender=MODERATOR_ID, reason="removed",
                         )
                 floor_touched = True
@@ -705,8 +724,62 @@ class ChatModule(WorldModule):
             readonly=list(channel.readonly),
         )
 
+    #: A correct ``limits`` per mode, quoted in the rejection of a key that does not apply.
+    _LIMITS_EXAMPLE: dict[str, dict[str, Any]] = {
+        "turn": {"max_messages": 2, "max_chars_per_message": 300, "duration_s": 90},
+        "free": {"duration_s": 180, "max_messages_per_member": 3, "silence_s": 30},
+    }
+    #: What to say about a key of the *other* mode (the two modes name the per-person quota differently).
+    _OTHER_MODE_HINT: dict[str, str] = {
+        "max_messages": "max_messages（每个令牌的条数）属于 mode=turn，自由讨论里对应的键是 max_messages_per_member",
+        "max_messages_per_member": "max_messages_per_member（每人的条数）属于 mode=free，mode=turn 里对应的键是 max_messages",
+        "silence_s": "silence_s（冷场提醒）只用于 mode=free",
+    }
+
+    def _limits_for(
+        self, mode: str, limits: OpenLimits | None, *, tool: str
+    ) -> tuple[FloorLimits | FreeLimits | None, Receipt | None]:
+        """Contracts §10.1.5: check the keys of the one ``limits`` object against ``mode`` (``turn`` takes
+        ``TOKEN_LIMIT_KEYS``, ``free`` takes ``FREE_LIMIT_KEYS``), then its values with ``FloorLimits`` /
+        ``FreeLimits``.  Returns ``(typed limits | None, rejection | None)``; an empty object is ``None``."""
+        given = limits.model_dump(exclude_none=True) if limits is not None else {}
+        if not given:
+            return None, None
+        allowed = TOKEN_LIMIT_KEYS if mode == "turn" else FREE_LIMIT_KEYS
+        wrong = [key for key in given if key not in allowed]
+        example = self._LIMITS_EXAMPLE[mode]
+        if wrong:
+            hints = "；".join(self._OTHER_MODE_HINT[key] for key in wrong if key in self._OTHER_MODE_HINT)
+            where = "update_channel 的 limits 只用于自由讨论（mode=free）" if tool == "update_channel" else f"mode={mode}"
+            return None, Receipt.reject(
+                Code.INVALID_PARAMS,
+                f"{tool}：limits 里的 {', '.join(wrong)} 不适用于 {where}。mode={mode} 只接受：{', '.join(allowed)}。"
+                + (f"{hints}。" if hints else "")
+                + f"正确示例：limits={json.dumps(example, ensure_ascii=False)}",
+                mode=mode,
+                allowed=list(allowed),
+                rejected=wrong,
+                example=dict(example),
+            )
+        model = FloorLimits if mode == "turn" else FreeLimits
+        try:
+            return model(**given), None
+        except ValidationError as exc:
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+                for err in exc.errors(include_input=False, include_url=False)[:4]
+            )
+            return None, Receipt.reject(
+                Code.INVALID_PARAMS,
+                f"{tool}：limits 的值无效（mode={mode}）：{problems}。mode={mode} 只接受：{', '.join(allowed)}。"
+                f"正确示例：limits={json.dumps(example, ensure_ascii=False)}",
+                mode=mode,
+                allowed=list(allowed),
+                example=dict(example),
+            )
+
     def _check_free_limits(self, channel: ChannelState, limits: FreeLimits) -> Receipt | None:
-        """``free_limits`` are absolute caps over the whole discussion; refuse values already exceeded."""
+        """``limits`` of a free discussion are absolute caps over the whole discussion; refuse values already exceeded."""
         free = channel.free
         if free is None:
             return None
@@ -770,20 +843,20 @@ class ChatModule(WorldModule):
         bad = self._check_holders(channel, holders)
         if bad is not None:
             return bad
+        limits, rejected = self._limits_for(p.mode, p.limits, tool="open_floor")
+        if rejected is not None:
+            return rejected
         if p.mode == "turn":
-            if p.free_limits is not None:
-                return Receipt.reject(Code.INVALID_PARAMS, "mode=turn 请用 limits 设置限额；free_limits 只用于 mode=free。")
-            group, opened = self._open_group(channel, "turn", holders, p.limits, MODERATOR_ID)
+            token_limits = limits if isinstance(limits, FloorLimits) else None
+            group, opened = self._open_group(channel, "turn", holders, token_limits, MODERATOR_ID)
             return Receipt.accept(
                 opened.seq, f"已向 {len(holders)} 名成员授予发言权。", channel_id=channel.id, group_id=group.id,
-                holders=holders, limits=self._token_limits(p.limits),
+                holders=holders, limits=self._token_limits(token_limits),
             )
-        if p.limits is not None:
-            return Receipt.reject(Code.INVALID_PARAMS, "mode=free 请用 free_limits 设置限额；limits 只用于 mode=turn。")
         self._end_activity(channel, "replaced", keep_free=True)
         channel.mode = "free"
         channel.frozen = False
-        channel.free = self._new_free(p.free_limits, holders or None)
+        channel.free = self._new_free(limits if isinstance(limits, FreeLimits) else None, holders or None)
         limits = {f: getattr(channel.free, f) for f in _FREE_LIMIT_FIELDS}
         entry = self.w.commit(
             "floor.opened", MODERATOR_ID,
@@ -873,7 +946,7 @@ class ChatModule(WorldModule):
             payload["position"] = next((i + 1 for i, t in enumerate(group.tokens) if t is token), None)
             payload["total"] = len(group.tokens)
         self.w.deliver(
-            token.holder, "floor", "floor.granted", priority="urgent", channel_id=channel.id, sender=sender, seq=seq,
+            token.holder, "floor", "floor.granted", priority="urgent", direct=True, channel_id=channel.id, sender=sender, seq=seq,
             **payload,
         )
 
@@ -902,19 +975,20 @@ class ChatModule(WorldModule):
                 channel_id=channel.id,
             )
             self.w.deliver(
-                token.holder, "floor", "floor.revoked", priority="ambient", interrupt=True,
+                token.holder, "floor", "floor.revoked", priority="normal", interrupt=True, direct=True,
                 channel_id=channel.id, sender=ENGINE_ID, seq=entry.seq, reason=cause,
             )
         group.completed = True
         channel.group = None
 
     def _end_free(self, channel: ChannelState, cause: str) -> None:
-        """Finish a free discussion (state dropped); the members who could write are told."""
+        """Finish a free discussion (state dropped); the members who could write are told (a member who is
+        out is spared: he has no token, nothing of his is in flight)."""
         writers = _free_writers(channel) if channel.free is not None else []
         channel.free = None
         for member in writers:
             self.w.deliver(
-                member, "floor", "floor.revoked", priority="ambient", interrupt=True,
+                member, "floor", "floor.revoked", priority="normal", interrupt=True,
                 channel_id=channel.id, sender=ENGINE_ID, reason=cause,
             )
 
@@ -943,7 +1017,7 @@ class ChatModule(WorldModule):
         entry = self.w.commit("floor.token_ended", ENGINE_ID, data, channel_id=channel.id)
         if was_active and reason in ("timeout", "revoked"):
             self.w.deliver(
-                token.holder, "floor", "floor.revoked", priority="ambient", interrupt=True,
+                token.holder, "floor", "floor.revoked", priority="normal", interrupt=True, direct=True,
                 channel_id=channel.id, sender=ENGINE_ID, seq=entry.seq, reason=cause or reason,
             )
         if group.mode == "queue" and not any(t.status == "active" for t in group.tokens):
@@ -1007,7 +1081,7 @@ class ChatModule(WorldModule):
         )
         for holder in holders:
             self.w.deliver(
-                holder, "floor", "floor.paused", priority="ambient", interrupt=True,
+                holder, "floor", "floor.paused", priority="normal", interrupt=True, direct=True,
                 channel_id=channel.id, sender=MODERATOR_ID, seq=entry.seq, reason="paused",
             )
         self._emit_floor(channel)
@@ -1090,8 +1164,8 @@ class ChatModule(WorldModule):
             channel_id=channel.id,
         )
         for member in writers:
-            self.w.deliver(
-                member, "floor", "floor.frozen", priority="ambient", interrupt=True,
+            self.w.deliver(  # token holders are addressed personally; free-discussion writers are not (E23)
+                member, "floor", "floor.frozen", priority="normal", interrupt=True, direct=group is not None,
                 channel_id=channel.id, sender=ENGINE_ID, seq=entry.seq, reason=reason,
             )
         self._emit_channel(channel)

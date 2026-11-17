@@ -122,7 +122,7 @@ def random_free_limits(rng: random.Random) -> dict[str, Any] | None:
 
 
 def random_move(rng: random.Random, world: ChatWorld) -> Receipt | None:
-    channel_id = rng.choice([*CHANNELS, "dm-p01", "dm-p02", "nowhere"])
+    channel_id = rng.choice([*CHANNELS, "dm-N1", "dm-N2", "nowhere"])
     actor = rng.choice(PLAYERS)
     kind = rng.choices(
         [
@@ -134,7 +134,7 @@ def random_move(rng: random.Random, world: ChatWorld) -> Receipt | None:
     if kind == "speak":
         return speak(world, actor, channel_id, "字" * rng.randint(1, 45))
     if kind == "template":
-        return speak_template(world, actor, channel_id, rng.choice(["count", "long", "vote", "shout", "nope"]), n=rng.randint(0, 11), target="p03", who=["p01"], word="yes")
+        return speak_template(world, actor, channel_id, rng.choice(["count", "long", "vote", "shout", "nope"]), n=rng.randint(0, 11), target="N3", who=["N1"], word="yes")
     if kind == "pass":
         return do_pass(world, actor, channel_id)
     if kind == "send":

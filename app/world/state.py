@@ -114,6 +114,9 @@ class RequestState(_S):
     opened_seq: int = 0
     reopens: str | None = None
     created_gt: float = 0.0
+    # Set when the request closes / is cancelled: {"reason","tally","leaders","defaulted","missing"}
+    # (``tally`` / ``leaders`` are None for text requests and cancelled ones).
+    result: dict[str, Any] | None = None
 
 
 class TicketState(_S):

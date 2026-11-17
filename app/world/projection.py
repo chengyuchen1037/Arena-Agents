@@ -12,6 +12,7 @@ Nothing here ever includes request *answers*, thoughts or tool calls.
 
 from __future__ import annotations
 
+import copy
 import importlib
 from collections.abc import Iterable
 from typing import Any
@@ -50,12 +51,36 @@ def message_view(entry: LedgerEntry) -> dict[str, Any]:
     }
 
 
+def answer_label(request: RequestState, value: str) -> str:
+    """Display label of an answer value: the option label of a choice request, else the value itself."""
+    for option in request.options:
+        if option.get("id") == value:
+            return str(option.get("label") or value)
+    return value
+
+
 def request_view(world: Any, request: RequestState) -> dict[str, Any]:
-    """``RequestView`` (never contains answers; ``answered_by`` lists real answers in seat order)."""
+    """``RequestView`` (god view, contracts section 10.6).
+
+    ``answers`` lists *every* answer in seat order, sealed requests included: the spectator stream is a
+    god view and the front end filters it per viewpoint (a player only sees his own answer, or all of
+    them when ``share_answers`` and he is a recipient).  ``answered_by`` lists the real (not defaulted)
+    answers; ``result`` is set once the request closed or was cancelled.
+    """
     seconds_left = None
     if request.status == "open" and request.deadline is not None:
         seconds_left = _seconds(request.deadline - float(world.clock.now()))
     answered = [pid for pid, answer in request.answers.items() if not answer.defaulted]
+    answers = [
+        {
+            "player_id": pid,
+            "value": request.answers[pid].value,
+            "label": answer_label(request, request.answers[pid].value),
+            "reason": request.answers[pid].reason,
+            "defaulted": request.answers[pid].defaulted,
+        }
+        for pid in seat_sorted(world, request.answers)
+    ]
     return {
         "id": request.id,
         "kind": request.kind,
@@ -65,7 +90,12 @@ def request_view(world: Any, request: RequestState) -> dict[str, Any]:
         "answered_by": seat_sorted(world, answered),
         "status": request.status,
         "sealed": request.sealed,
+        "share_answers": request.share_answers,
+        "auto_close": request.auto_close,
         "seconds_left": seconds_left,
+        "opened_seq": request.opened_seq,
+        "answers": answers,
+        "result": copy.deepcopy(request.result),
     }
 
 

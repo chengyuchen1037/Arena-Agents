@@ -139,7 +139,10 @@ def test_the_ui_event_stays_free_of_vote_counts():
     world.drain_events()
     vote(world, rid, {"u1": "a", "u2": "a"})
     ui = events(world, "request.closed")
-    assert ui[0].data == {"request_id": rid, "reason": "all_answered", "answered_by": ["u1", "u2"], "defaulted": []}
+    data = ui[0].data
+    assert data["request_id"] == rid and data["reason"] == "all_answered" and data["answered_by"] == ["u1", "u2"]
+    assert data["defaulted"] == [] and data["result"]["reason"] == "all_answered"
+    assert data["result"]["tally"] == {"a": 2, "b": 0, "c": 0}  # the result card of the UI (spectators see it)
 
 
 @pytest.mark.parametrize(

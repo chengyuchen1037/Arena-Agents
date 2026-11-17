@@ -59,7 +59,7 @@ def facts(world: ChatWorld) -> list[tuple]:
 def test_dump_is_plain_json_and_chat_adds_no_extra_state() -> None:
     world = make_world()
     new_channel(world, "c1")
-    open_queue(world, "c1", ["p01", "p02"])
+    open_queue(world, "c1", ["N1", "N2"])
     data = world.dump()
     json.dumps(data)  # must not raise
     assert data["format"] == 1 and data["clock_now"] == 0.0
@@ -70,7 +70,7 @@ def test_dump_is_plain_json_and_chat_adds_no_extra_state() -> None:
 def test_a_restored_world_has_the_same_ledger_and_state() -> None:
     world = make_world()
     new_channel(world, "c1", mode="free")
-    assert speak(world, "p01", "c1", "存档前的话").ok
+    assert speak(world, "N1", "c1", "存档前的话").ok
     restored = roundtrip(world, resume=False)
     assert facts(restored) == facts(world)
     assert [e.ts for e in restored.ledger] == [e.ts for e in world.ledger]
@@ -84,10 +84,10 @@ def test_a_game_saved_while_running_comes_back_paused() -> None:
     assert data["state"]["status"] == "running"
     restored = ChatWorld.restore(data, world.spec, ManualClock(data["clock_now"]))
     assert restored.state.status == "paused" and not restored.running
-    assert speak(restored, "p01", "dm-p01", "不行").code == Code.GAME_NOT_RUNNING
+    assert speak(restored, "N1", "dm-N1", "不行").code == Code.GAME_NOT_RUNNING
     restored.set_running(True, "resume")
     assert [e.data for e in restored.ledger if e.type == "game.status"][-1] == {"status": "running", "reason": "resume"}
-    assert speak(restored, "p01", "dm-p01", "可以了").ok
+    assert speak(restored, "N1", "dm-N1", "可以了").ok
 
 
 # --------------------------------------------------------------------------- floors
@@ -96,14 +96,14 @@ def test_a_game_saved_while_running_comes_back_paused() -> None:
 def test_a_running_queue_resumes_with_the_remaining_time_and_is_redelivered() -> None:
     world = make_world()
     new_channel(world, "c1")
-    open_queue(world, "c1", ["p01", "p02"])
+    open_queue(world, "c1", ["N1", "N2"])
     world.clock.advance(25)
-    assert speak(world, "p01", "c1", "一句").ok
+    assert speak(world, "N1", "c1", "一句").ok
     flush(world)
 
     restored = roundtrip(world)
     deliveries, _ = flush(restored)
-    assert targets(deliveries, "floor.granted") == ["p01"]
+    assert targets(deliveries, "floor.granted") == ["N1"]
     [env] = envelopes(deliveries, event="floor.granted")
     assert env.priority == "urgent" and env.payload["seconds"] == 35.0 and env.payload["position"] == 1
     token = restored.channel("c1").group.tokens[0]
@@ -111,8 +111,8 @@ def test_a_running_queue_resumes_with_the_remaining_time_and_is_redelivered() ->
     assert restored.next_deadline() == 60.0
 
     # the floor logic carries on: the same message budget, the same timeout, the same advancement
-    assert speak(restored, "p01", "c1", "二句").ok  # the last message of p01
-    assert speak(restored, "p01", "c1", "三句").code == Code.NO_FLOOR
+    assert speak(restored, "N1", "c1", "二句").ok  # the last message of N1
+    assert speak(restored, "N1", "c1", "三句").code == Code.NO_FLOOR
     assert restored.channel("c1").group.tokens[1].status == "active"
     restored.clock.advance(60)
     restored.tick()
@@ -123,42 +123,42 @@ def test_a_running_queue_resumes_with_the_remaining_time_and_is_redelivered() ->
 def test_group_ids_keep_counting_after_a_restore() -> None:
     world = make_world()
     new_channel(world, "c1")
-    open_turn(world, "c1", ["p01"])
+    open_turn(world, "c1", ["N1"])
     assert mod(world, "close_floor", channel_id="c1").ok
     restored = roundtrip(world)
-    receipt = open_queue(restored, "c1", ["p02"], keep_queues=True)
+    receipt = open_queue(restored, "c1", ["N2"], keep_queues=True)
     assert receipt.data["group_id"] == "g2"
 
 
 def test_a_paused_queue_stays_paused_across_a_restore() -> None:
     world = make_world()
     new_channel(world, "c1")
-    open_queue(world, "c1", ["p01", "p02"])
+    open_queue(world, "c1", ["N1", "N2"])
     world.clock.advance(10)
     assert mod(world, "pause_queue", channel_id="c1").ok
     flush(world)
     restored = roundtrip(world)
     assert not envelopes(restored.drain_outbox(), event="floor.granted")  # it is paused: nobody holds the floor now
     assert restored.next_deadline() is None
-    assert speak(restored, "p01", "c1", "还在暂停").code == Code.NO_FLOOR
+    assert speak(restored, "N1", "c1", "还在暂停").code == Code.NO_FLOOR
     restored.clock.advance(500)
     restored.tick()
     assert restored.channel("c1").group.tokens[0].remaining == 50.0
     assert mod(restored, "resume_queue", channel_id="c1").ok
     assert restored.channel("c1").group.tokens[0].deadline == restored.clock.now() + 50.0
-    assert speak(restored, "p01", "c1", "恢复了").ok
+    assert speak(restored, "N1", "c1", "恢复了").ok
 
 
 def test_a_frozen_channel_stays_frozen_across_a_restore() -> None:
     world = make_world()
     new_channel(world, "c1")
-    open_queue(world, "c1", ["p01"])
+    open_queue(world, "c1", ["N1"])
     world.chat.freeze_channel("c1", "ability:x")
     restored = roundtrip(world)
     assert restored.channel("c1").frozen
-    assert speak(restored, "p01", "c1", "冻结着").code == Code.NO_FLOOR
+    assert speak(restored, "N1", "c1", "冻结着").code == Code.NO_FLOOR
     assert mod(restored, "resume_queue", channel_id="c1").ok
-    assert speak(restored, "p01", "c1", "解冻了").ok
+    assert speak(restored, "N1", "c1", "解冻了").ok
 
 
 # --------------------------------------------------------------------------- free discussions
@@ -168,7 +168,7 @@ def test_a_free_discussion_keeps_its_counters_and_its_told_advisories() -> None:
     world = make_world()
     new_channel(world, "c1", mode="free")
     for i in range(3):
-        assert speak(world, "p01", "c1", f"第{i}句").ok
+        assert speak(world, "N1", "c1", f"第{i}句").ok
     world.clock.advance(100)
     world.tick()
     told = sorted(e.payload["reason"] for e in envelopes(world.drain_outbox(), event="free.advisory"))
@@ -176,8 +176,8 @@ def test_a_free_discussion_keeps_its_counters_and_its_told_advisories() -> None:
 
     restored = roundtrip(world)
     free = restored.channel("c1").free
-    assert free.counts == {"p01": 3} and free.notified == {"time": True, "silence": True} and free.chars_used == 9
-    assert speak(restored, "p01", "c1", "还想说").code == Code.QUOTA_EXCEEDED
+    assert free.counts == {"N1": 3} and free.notified == {"time": True, "silence": True} and free.chars_used == 9
+    assert speak(restored, "N1", "c1", "还想说").code == Code.QUOTA_EXCEEDED
     flush(restored)
     restored.clock.advance(1000)
     restored.tick()
@@ -208,30 +208,30 @@ def _script() -> list[Callable[[ChatWorld], Any]]:
     return [
         lambda w: new_channel(w, "talk", keep_queues=True),  # 0
         lambda w: new_channel(w, "chat", mode="free", keep_queues=True),
-        lambda w: open_queue(w, "talk", ["p01", "p02", "p03"], keep_queues=True),
-        lambda w: speak(w, "p01", "talk", "我先说一句"),
+        lambda w: open_queue(w, "talk", ["N1", "N2", "N3"], keep_queues=True),
+        lambda w: speak(w, "N1", "talk", "我先说一句"),
         advance(12),
-        lambda w: speak(w, "p01", "talk", "字" * 30),  # truncated, the token is used up
-        lambda w: speak(w, "p02", "talk", "轮到我"),
+        lambda w: speak(w, "N1", "talk", "字" * 30),  # truncated, the token is used up
+        lambda w: speak(w, "N2", "talk", "轮到我"),
         lambda w: mod(w, "pause_queue", channel_id="talk"),
         advance(300),  # the free discussion goes quiet and runs out of time meanwhile
-        lambda w: speak(w, "p02", "talk", "暂停中"),  # 9: refused
+        lambda w: speak(w, "N2", "talk", "暂停中"),  # 9: refused
         lambda w: mod(w, "resume_queue", channel_id="talk"),
         advance(30),
-        lambda w: speak_template(w, "p02", "talk", "count", n=3),  # 12: p02 is done, p03 gets the floor
-        lambda w: speak(w, "p03", "chat", "自由讨论"),
-        lambda w: speak(w, "p04", "chat", "我也说"),
+        lambda w: speak_template(w, "N2", "talk", "count", n=3),  # 12: N2 is done, N3 gets the floor
+        lambda w: speak(w, "N3", "chat", "自由讨论"),
+        lambda w: speak(w, "N4", "chat", "我也说"),
         advance(45),  # silence again
         lambda w: mod(w, "update_channel", channel_id="chat", free_limits={"duration_s": 400}),
         advance(10),
-        lambda w: w.chat.freeze_channel("talk", "ability:x"),  # 18: p03 has 5 seconds left
-        lambda w: speak(w, "p03", "talk", "冻结中"),  # refused
+        lambda w: w.chat.freeze_channel("talk", "ability:x"),  # 18: N3 has 5 seconds left
+        lambda w: speak(w, "N3", "talk", "冻结中"),  # refused
         lambda w: mod(w, "resume_queue", channel_id="talk"),
         advance(3),  # the extended free discussion reaches its new time limit
-        lambda w: do_pass(w, "p03", "talk"),  # the queue is complete: the moderator is woken
-        lambda w: mod(w, "update_channel", channel_id="chat", remove_members=["p04"]),
-        lambda w: speak(w, "p04", "chat", "我被移出了"),  # refused
-        lambda w: open_turn(w, "talk", ["p01", "p04"], keep_queues=True),
+        lambda w: do_pass(w, "N3", "talk"),  # the queue is complete: the moderator is woken
+        lambda w: mod(w, "update_channel", channel_id="chat", remove_members=["N4"]),
+        lambda w: speak(w, "N4", "chat", "我被移出了"),  # refused
+        lambda w: open_turn(w, "talk", ["N1", "N4"], keep_queues=True),
         advance(61),  # both tokens time out
         lambda w: mod(w, "close_floor", channel_id="chat"),
     ]

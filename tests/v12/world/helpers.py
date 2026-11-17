@@ -15,7 +15,7 @@ from app.world.spec import ScenarioSpec
 from app.world.state import PlayerState, WorldState
 from app.world.types import MODERATOR_ID, Delivery, Envelope, Intent, LedgerEntry, Receipt, UiEvent
 
-PLAYERS = ["p01", "p02", "p03", "p04"]
+PLAYERS = ["N1", "N2", "N3", "N4"]
 
 # tiny limits: 2 messages x 20 chars (50 in total) per token, 60 s per token
 BASE_SPEC: dict[str, Any] = {
@@ -28,7 +28,6 @@ BASE_SPEC: dict[str, Any] = {
             "max_messages_per_member": 3,
             "max_chars_per_message": 30,
             "max_chars_total": 100,
-            "debounce_s": 1.5,
             "silence_s": 40,
         },
         "moderator": {"max_chars_per_message": 40},
@@ -108,7 +107,7 @@ class ChatWorld(WorldCore):
 
 
 def make_players(n: int = 4) -> list[PlayerState]:
-    return [PlayerState(id=f"p{i:02d}", seat=str(i), name=f"玩家{i}") for i in range(1, n + 1)]
+    return [PlayerState(id=f"N{i}", seat=str(i), name=f"玩家{i}") for i in range(1, n + 1)]
 
 
 def make_world(
@@ -217,10 +216,10 @@ def open_queue(world: WorldCore, channel_id: str, order: list[str], *, keep_queu
     return receipt
 
 
-def open_free(world: WorldCore, channel_id: str, *, holders: list[str] | None = None, keep_queues: bool = False, **free_limits: Any) -> Receipt:
+def open_free(world: WorldCore, channel_id: str, *, holders: list[str] | None = None, keep_queues: bool = False, **limits: Any) -> Receipt:
     payload: dict[str, Any] = {"channel_id": channel_id, "mode": "free", "holders": holders or []}
-    if free_limits:
-        payload["free_limits"] = free_limits
+    if limits:
+        payload["limits"] = limits
     receipt = ok(mod(world, "open_floor", **payload))
     if not keep_queues:
         flush(world)

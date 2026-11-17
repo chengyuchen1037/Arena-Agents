@@ -64,6 +64,8 @@ def test_open_request_creates_state_entry_deliveries_and_ui_event():
         "to": ["u2", "u1"],
         "duration_s": 30.0,
         "sealed": False,
+        "share_answers": False,
+        "auto_close": "all_answered",
     }
 
     items = deliveries(world)
@@ -78,6 +80,7 @@ def test_open_request_creates_state_entry_deliveries_and_ui_event():
         "options": request.options,
         "seconds": 30.0,
         "sealed": False,
+        "share_answers": False,
     }
     ui = events(world, "request.opened")
     assert len(ui) == 1
@@ -250,6 +253,8 @@ def test_everyone_answering_closes_the_request_immediately_in_seat_order():
         "reason": "all_answered",
         "answered_by": ["u1", "u2", "u3"],
         "defaulted": [],
+        "result": {"reason": "all_answered", "tally": closed_event.data["result"]["tally"], "leaders": closed_event.data["result"]["leaders"],
+                   "defaulted": [], "missing": []},
     }
     assert [e.data["answered_by"] for e in ui if e.type == "request.progress"] == [["u1", "u2", "u3"]]
     assert world.next_deadline() is None
@@ -309,7 +314,7 @@ def test_deadline_closes_the_request_with_missing_players_and_cancels_their_work
     cancelled = [d for d in items if d.envelope.payload.get("event") == "request.cancelled"]
     assert [d.target for d in cancelled] == ["u1", "u3"]  # the one who answered is left alone
     for d in cancelled:
-        assert (d.envelope.kind, d.envelope.priority, d.envelope.interrupt) == ("request", "ambient", True)
+        assert (d.envelope.kind, d.envelope.priority, d.envelope.interrupt) == ("request", "normal", True)
         assert d.envelope.payload == {"event": "request.cancelled", "request_id": rid, "reason": "expired"}
     ui = events(world, "request.closed")
     assert ui[0].data["answered_by"] == ["u2"] and ui[0].data["reason"] == "deadline"
@@ -392,7 +397,7 @@ def test_cancel_request_notifies_every_target_and_interrupts():
     items = deliveries(world)
     assert sorted(d.target for d in items) == ["u1", "u2"]
     for d in items:
-        assert (d.envelope.kind, d.envelope.priority, d.envelope.interrupt) == ("request", "ambient", True)
+        assert (d.envelope.kind, d.envelope.priority, d.envelope.interrupt) == ("request", "normal", True)
         assert d.envelope.payload == {"event": "request.cancelled", "request_id": rid, "reason": "cancelled"}
     assert events(world, "request.closed")[0].data["reason"] == "cancelled"
 

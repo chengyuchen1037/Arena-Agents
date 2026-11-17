@@ -34,7 +34,7 @@ def _world():
 
 def test_freezing_a_queue_stops_the_clock_and_the_floor() -> None:
     world = _world()
-    open_queue(world, "c1", ["p01", "p02"])
+    open_queue(world, "c1", ["N1", "N2"])
     world.clock.advance(20)
     assert world.chat.freeze_channel("c1", "ability:boom") is True
 
@@ -47,7 +47,7 @@ def test_freezing_a_queue_stops_the_clock_and_the_floor() -> None:
     assert frozen.data == {"group_id": "g1", "channel_id": "c1", "reason": "ability:boom"}
 
     deliveries, events = flush(world)
-    assert targets(deliveries, "floor.frozen") == ["p01"]  # only the one who could write; pending p02 hears nothing
+    assert targets(deliveries, "floor.frozen") == ["N1"]  # only the one who could write; pending N2 hears nothing
     [env] = envelopes(deliveries, event="floor.frozen")
     assert (env.kind, env.priority, env.interrupt, env.channel_id) == ("floor", "ambient", True, "c1")
     assert env.payload == {"event": "floor.frozen", "channel_id": "c1", "reason": "ability:boom"}
@@ -55,10 +55,10 @@ def test_freezing_a_queue_stops_the_clock_and_the_floor() -> None:
     assert ui(events, "floor.changed")[-1]["floor"]["paused"] is True
 
     # speak is refused for everybody, also a draft that raced the ability (D25)
-    racing = speak(world, "p01", "c1", "我在思考时被冻结了", based_on=0)
+    racing = speak(world, "N1", "c1", "我在思考时被冻结了", based_on=0)
     assert not racing.ok and racing.code == Code.NO_FLOOR and "冻结" in racing.message
-    assert speak(world, "p02", "c1", "我也不行").code == Code.NO_FLOOR
-    assert do_pass(world, "p01", "c1").code == Code.NO_FLOOR
+    assert speak(world, "N2", "c1", "我也不行").code == Code.NO_FLOOR
+    assert do_pass(world, "N1", "c1").code == Code.NO_FLOOR
     world.clock.advance(1000)
     world.tick()
     assert token.status == "active" and world.next_deadline() is None
@@ -69,7 +69,7 @@ def test_freezing_a_queue_stops_the_clock_and_the_floor() -> None:
 
 def test_freezing_is_idempotent_and_ignores_unknown_channels() -> None:
     world = _world()
-    open_queue(world, "c1", ["p01"])
+    open_queue(world, "c1", ["N1"])
     assert world.chat.freeze_channel("c1", "a") is True
     seq = world.seq
     flush(world)
@@ -80,7 +80,7 @@ def test_freezing_is_idempotent_and_ignores_unknown_channels() -> None:
 
 def test_resume_queue_lifts_the_freeze_and_restores_the_remaining_time() -> None:
     world = _world()
-    open_queue(world, "c1", ["p01", "p02"])
+    open_queue(world, "c1", ["N1", "N2"])
     world.clock.advance(20)
     world.chat.freeze_channel("c1", "ability:x")
     flush(world)
@@ -90,15 +90,15 @@ def test_resume_queue_lifts_the_freeze_and_restores_the_remaining_time() -> None
     assert not channel.frozen and not channel.group.paused
     assert channel.group.tokens[0].deadline == 360.0  # 300 + 20 + the 40 s that were left
     deliveries, events = flush(world)
-    [granted] = envelopes(deliveries, target="p01", event="floor.granted")
+    [granted] = envelopes(deliveries, target="N1", event="floor.granted")
     assert granted.payload["seconds"] == 40.0
     assert ui(events, "channel.updated")[-1]["channel"]["frozen"] is False
-    assert speak(world, "p01", "c1", "冻结解除了").ok
+    assert speak(world, "N1", "c1", "冻结解除了").ok
 
 
 def test_freezing_a_paused_queue_keeps_the_remaining_time_and_tells_nobody_twice() -> None:
     world = _world()
-    open_queue(world, "c1", ["p01", "p02"])
+    open_queue(world, "c1", ["N1", "N2"])
     world.clock.advance(10)
     assert mod(world, "pause_queue", channel_id="c1").ok
     flush(world)
@@ -115,12 +115,12 @@ def test_every_way_of_reorganising_the_floor_lifts_the_freeze() -> None:
         lambda w: mod(w, "close_floor", channel_id="c1"),
         lambda w: mod(w, "update_channel", channel_id="c1", mode="closed"),
         lambda w: mod(w, "update_channel", channel_id="c1", mode="free"),
-        lambda w: mod(w, "open_floor", channel_id="c1", holders=["p02"]),
-        lambda w: mod(w, "set_floor_queue", channel_id="c1", order=["p02"]),
+        lambda w: mod(w, "open_floor", channel_id="c1", holders=["N2"]),
+        lambda w: mod(w, "set_floor_queue", channel_id="c1", order=["N2"]),
         lambda w: mod(w, "resume_queue", channel_id="c1"),
     ):
         world = _world()
-        open_queue(world, "c1", ["p01"])
+        open_queue(world, "c1", ["N1"])
         world.chat.freeze_channel("c1", "ability:x")
         assert action(world).ok
         channel = world.channel("c1")
@@ -133,15 +133,15 @@ def test_every_way_of_reorganising_the_floor_lifts_the_freeze() -> None:
 
 def test_freezing_a_turn_group_notifies_every_active_holder() -> None:
     world = _world()
-    open_turn(world, "c1", ["p01", "p02", "p03"])
-    assert do_pass(world, "p03", "c1").ok  # p03 is done: it can no longer write anyway
+    open_turn(world, "c1", ["N1", "N2", "N3"])
+    assert do_pass(world, "N3", "c1").ok  # N3 is done: it can no longer write anyway
     flush(world)
     world.clock.advance(5)
     assert world.chat.freeze_channel("c1", "ability:x")
     deliveries, _ = flush(world)
-    assert sorted(targets(deliveries, "floor.frozen")) == ["p01", "p02"]
+    assert sorted(targets(deliveries, "floor.frozen")) == ["N1", "N2"]
     assert [t.remaining for t in world.channel("c1").group.tokens[:2]] == [55.0, 55.0]
-    assert speak(world, "p01", "c1", "不行").code == Code.NO_FLOOR
+    assert speak(world, "N1", "c1", "不行").code == Code.NO_FLOOR
 
 
 # --------------------------------------------------------------------------- free discussions and DMs
@@ -150,16 +150,16 @@ def test_freezing_a_turn_group_notifies_every_active_holder() -> None:
 def test_freezing_a_free_discussion_silences_the_players() -> None:
     world = _world()
     open_free(world, "c1")
-    assert mod(world, "update_channel", channel_id="c1", readonly_members=["p04"]).ok
-    assert speak(world, "p01", "c1", "冻结前的一句").ok
+    assert mod(world, "update_channel", channel_id="c1", readonly_members=["N4"]).ok
+    assert speak(world, "N1", "c1", "冻结前的一句").ok
     flush(world)
     assert world.chat.freeze_channel("c1", "ability:x")
     deliveries, _ = flush(world)
-    assert sorted(targets(deliveries, "floor.frozen")) == ["p01", "p02", "p03"]  # not the read-only p04, not the moderator
-    assert speak(world, "p02", "c1", "不行").code == Code.NO_FLOOR
+    assert sorted(targets(deliveries, "floor.frozen")) == ["N1", "N2", "N3"]  # not the read-only N4, not the moderator
+    assert speak(world, "N2", "c1", "不行").code == Code.NO_FLOOR
     assert mod(world, "send_message", channel_id="c1", content="主持人可以").ok
     # still free in nature: the members' quota and statistics are kept for when it resumes
-    assert world.channel("c1").free.counts == {"p01": 1}
+    assert world.channel("c1").free.counts == {"N1": 1}
 
 
 def test_a_frozen_free_discussion_gives_no_advisories_until_it_is_released() -> None:
@@ -181,30 +181,30 @@ def test_a_frozen_free_discussion_gives_no_advisories_until_it_is_released() -> 
 def test_update_channel_mode_free_lifts_a_freeze_without_restarting_the_discussion() -> None:
     world = _world()
     open_free(world, "c1")
-    assert speak(world, "p01", "c1", "一句话").ok
+    assert speak(world, "N1", "c1", "一句话").ok
     world.chat.freeze_channel("c1", "ability:x")
     receipt = mod(world, "update_channel", channel_id="c1", mode="free")
     assert receipt.ok and receipt.data["changes"] == {"unfrozen": True}
-    assert not world.channel("c1").frozen and world.channel("c1").free.counts == {"p01": 1}
-    assert speak(world, "p01", "c1", "又可以说了").ok
+    assert not world.channel("c1").frozen and world.channel("c1").free.counts == {"N1": 1}
+    assert speak(world, "N1", "c1", "又可以说了").ok
 
 
 def test_a_system_dm_can_be_frozen_too() -> None:
     world = make_world()
-    assert world.chat.freeze_channel("dm-p01", "ability:x")
+    assert world.chat.freeze_channel("dm-N1", "ability:x")
     deliveries, _ = flush(world)
-    assert targets(deliveries, "floor.frozen") == ["p01"]
-    assert speak(world, "p01", "dm-p01", "主持人在吗").code == Code.NO_FLOOR
-    assert speak(world, "p02", "dm-p02", "我这里没事").ok
-    assert mod(world, "update_channel", channel_id="dm-p01", mode="free").ok
-    assert speak(world, "p01", "dm-p01", "好了").ok
+    assert targets(deliveries, "floor.frozen") == ["N1"]
+    assert speak(world, "N1", "dm-N1", "主持人在吗").code == Code.NO_FLOOR
+    assert speak(world, "N2", "dm-N2", "我这里没事").ok
+    assert mod(world, "update_channel", channel_id="dm-N1", mode="free").ok
+    assert speak(world, "N1", "dm-N1", "好了").ok
 
 
 def test_views_show_the_freeze() -> None:
     world = _world()
-    open_queue(world, "c1", ["p01"])
+    open_queue(world, "c1", ["N1"])
     world.chat.freeze_channel("c1", "ability:x")
     view = channel_view(world, world.channel("c1"))
     assert view["frozen"] is True and view["floor"]["paused"] is True and view["floor"]["seconds_left"] == 60.0
-    assert floor_view(world, world.channel("c1"))["active"] == "p01"
+    assert floor_view(world, world.channel("c1"))["active"] == "N1"
     assert MODERATOR_ID in view["members"]

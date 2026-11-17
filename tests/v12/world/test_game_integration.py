@@ -119,7 +119,7 @@ def test_ability_freezes_a_running_queue_and_reveals_despite_not_holding_the_flo
     items = world.drain_outbox()
     told = [d for d in items if d.envelope.payload.get("event") == "floor.frozen"]
     assert [d.target for d in told] == [current]  # only the one who could write is interrupted
-    assert (told[0].envelope.priority, told[0].envelope.interrupt) == ("ambient", True)
+    assert (told[0].envelope.priority, told[0].envelope.interrupt) == ("normal", True)
     woken = [d for d in items if d.target == MODERATOR_ID and d.envelope.payload.get("event") == "ability.used"]
     assert [d.envelope.priority for d in woken] == ["urgent"]
 

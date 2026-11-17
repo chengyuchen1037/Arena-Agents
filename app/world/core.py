@@ -222,20 +222,35 @@ class WorldCore:
         kind: str,
         event: str,
         *,
-        priority: str = "ambient",
+        priority: str = "normal",
         channel_id: str | None = None,
         sender: str | None = None,
         seq: int = 0,
         interrupt: bool = False,
+        direct: bool = False,
         payload: dict[str, Any] | None = None,
         **extra: Any,
     ) -> None:
-        """Queue one mailbox delivery.
+        """Queue one mailbox delivery (contracts §10.1).
+
+        Every delivered envelope wakes its target at once (v0.12.1, E1): there is no ambient level, no
+        debounce.  Two rules decide whether an envelope is delivered at all:
+
+        * the **sender never receives the envelope of its own entry**;
+        * a player who is **out** (``ui.out_tags``) only receives ``direct`` envelopes - events addressed
+          to him personally (his floor, his request, a message in his system DM, news about himself).
+          Broadcasts are spared him (E23); he can still read the history with ``entries_visible``.
+          The moderator and ``ENGINE_ID`` are never filtered.
 
         ``payload`` (a ready-made dict, may use any key such as ``kind``) and the keyword ``extra``
         are merged into ``Envelope.payload``; ``event`` and (when given) ``channel_id`` are always
         included in it, so a consumer can read either ``envelope.channel_id`` or ``payload["channel_id"]``.
         """
+        if sender is not None and target == sender:
+            return
+        recipient = self.player(target)
+        if recipient is not None and not direct and self.is_out(recipient):
+            return
         body: dict[str, Any] = {"event": event}
         if channel_id is not None:
             body["channel_id"] = channel_id
@@ -255,35 +270,6 @@ class WorldCore:
     def emit(self, type: str, **data: Any) -> None:  # noqa: A002
         self._events.append(UiEvent(type=type, data=data))
 
-    def message_priority(
-        self, channel: ChannelState, sender: str, recipient: str, kind: str
-    ) -> str:
-        """Wake priority of a new channel message for ``recipient`` (contracts §2.6, ``message.new``).
-
-        Challenges wake the moderator at once; a system DM wakes the other side (normal); a message in a
-        live free discussion is *normal* for every member who could still answer it (not read-only, an
-        allowed writer, quota left) and *ambient* for everybody else, as is everything outside a free
-        discussion (turn / queue floors wake their holders through ``floor.granted`` instead).
-        """
-        if recipient == MODERATOR_ID:
-            if kind == "challenge":
-                return "urgent"
-            if channel.type == "dm" and channel.system and sender != MODERATOR_ID:
-                return "normal"
-            return "ambient"
-        if sender == MODERATOR_ID and channel.type == "dm" and channel.system:
-            return "urgent" if kind == "reply" else "normal"
-        if channel.mode == "free" and not channel.frozen and recipient not in channel.readonly:
-            free = channel.free
-            if free is None:
-                return "normal"
-            # A member who may not write, or who has used up the quota, cannot answer: no need to wake it.
-            if (free.writers is None or recipient in free.writers) and free.counts.get(
-                recipient, 0
-            ) < free.max_messages_per_member:
-                return "normal"
-        return "ambient"
-
     def post_message(
         self,
         channel_id: str,
@@ -296,8 +282,9 @@ class WorldCore:
         truncated: dict[str, int] | None = None,
         extra: dict[str, Any] | None = None,
     ) -> LedgerEntry:
-        """Commit a ``message`` entry in ``channel_id``, fan it out to the members' mailboxes and emit
-        ``message.committed``.  Permission checks are the caller's job."""
+        """Commit a ``message`` entry in ``channel_id``, fan it out to the members' mailboxes (everybody who
+        can read it except the author, see :meth:`deliver`) and emit ``message.committed``.  Permission
+        checks are the caller's job."""
         channel = self.channel(channel_id)
         if channel is None:  # pragma: no cover - caller bug
             raise KeyError(channel_id)
@@ -319,13 +306,12 @@ class WorldCore:
             "challenge": ("challenge", "challenge.opened"),
             "reply": ("challenge", "challenge.resolved"),
         }.get(kind, ("message", "message.new"))
+        # Everybody who can read the channel is woken (not the author); a message in a system DM is
+        # addressed to its owner / the moderator personally, so it reaches a player who is out as well.
+        priority = "urgent" if env_kind == "challenge" else "normal"
         for member in entry.visible_to_ids:
             if member == actor_id:
                 continue
-            priority = self.message_priority(channel, actor_id, member, kind)
-            hint: dict[str, Any] = {}
-            if priority == "normal" and channel.mode == "free" and channel.free is not None:
-                hint["debounce_s"] = channel.free.debounce_s  # the runtime's NORMAL wake delay for this discussion
             self.deliver(
                 member,
                 env_kind,
@@ -334,9 +320,9 @@ class WorldCore:
                 channel_id=channel_id,
                 sender=actor_id,
                 seq=entry.seq,
+                direct=bool(channel.system),
                 message_kind=kind,
                 ticket_id=(extra or {}).get("ticket_id"),
-                **hint,
             )
         self.emit(
             "message.committed",

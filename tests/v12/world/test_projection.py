@@ -113,9 +113,15 @@ def test_request_view_shape_and_progress():
         "answered_by": ["u3"],
         "status": "open",
         "sealed": True,
+        "share_answers": False,
+        "auto_close": "all_answered",
         "seconds_left": 50.0,
+        "opened_seq": world.state.requests[rid].opened_seq,
+        "answers": [{"player_id": "u3", "value": "yes", "label": "同意", "reason": "不该出现", "defaulted": False}],
+        "result": None,
     }
-    assert "不该出现" not in json.dumps(view, ensure_ascii=False)  # never any answer content
+    # v0.12.1: the spectator view is a god view - it carries the answers, even sealed ones (the front end
+    # shows them only to the viewpoints allowed to see them)
 
     world.clock.advance(12.34)
     assert request_view(world, world.state.requests[rid])["seconds_left"] == 37.7
@@ -258,8 +264,8 @@ def test_snapshot_includes_requests_tickets_dashboard_and_the_final_result(chat_
     assert snap["dashboard"]["factions"][0]["name"] == "红队"
     assert (snap["phase"], snap["status"], snap["winner"], snap["summary"]) == ("终局阶段", "finished", "蓝队", "蓝队胜利")
     assert snap["seq"] == world.seq
-    # sealed answers never reach the snapshot
-    assert "绝密理由" not in json.dumps(snap, ensure_ascii=False)
+    # the god snapshot carries every answer (the front end filters per viewpoint)
+    assert snap["requests"][0]["answers"][0]["reason"] == "绝密理由" and snap["requests"][0]["sealed"] is True
 
 
 def test_snapshot_reports_the_game_clock(chat_stub):

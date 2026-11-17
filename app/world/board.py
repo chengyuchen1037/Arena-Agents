@@ -192,6 +192,13 @@ def _channel_block(world: Any, channel: ChannelState, agent_id: str, is_moderato
 # --------------------------------------------------------------------------- the board
 
 
+def _answer_label(request: Any, value: str) -> str:
+    for option in request.options:
+        if option.get("id") == value:
+            return str(option.get("label") or value)
+    return value
+
+
 def _requests_block(world: Any, agent_id: str, is_moderator: bool) -> list[dict[str, Any]]:
     now = float(world.clock.now())
     rows: list[dict[str, Any]] = []
@@ -210,6 +217,19 @@ def _requests_block(world: Any, agent_id: str, is_moderator: bool) -> list[dict[
             "answered": False,
             "to": list(request.to),
         }
+        row["share_answers"] = request.share_answers
+        row["auto_close"] = request.auto_close
+        if request.share_answers:
+            # Everybody involved sees the current answers (they may still change them until it closes).
+            row["answers"] = [
+                {
+                    "player_id": pid,
+                    "value": request.answers[pid].value,
+                    "label": _answer_label(request, request.answers[pid].value),
+                    "reason": request.answers[pid].reason,
+                }
+                for pid in seat_sorted(world, [p for p, a in request.answers.items() if not a.defaulted])
+            ]
         if is_moderator:
             row["answered_by"] = seat_sorted(
                 world, [pid for pid, a in request.answers.items() if not a.defaulted]

@@ -264,14 +264,16 @@ class GameModule(WorldModule):
         event: str,
         payload: dict[str, Any] | None = None,
         *,
-        priority: str = "ambient",
+        priority: str = "normal",
         channel_id: str | None = None,
         sender: str | None = None,
         seq: int = 0,
         interrupt: bool = False,
+        direct: bool = False,
     ) -> None:
         """Queue one envelope.  ``payload`` is passed as a ready-made dict because some §2.6 payload keys
-        (``kind``) collide with the parameter names of ``WorldCore.deliver``."""
+        (``kind``) collide with the parameter names of ``WorldCore.deliver``.  ``direct`` envelopes reach
+        a player who is out too (v0.12.1, E23); everything else is a broadcast they are spared."""
         self.w.deliver(
             target,
             kind,
@@ -281,6 +283,7 @@ class GameModule(WorldModule):
             sender=sender,
             seq=seq,
             interrupt=interrupt,
+            direct=direct,
             payload=payload,
         )
 
@@ -357,9 +360,11 @@ class GameModule(WorldModule):
                 "options": copy.deepcopy(request.options),
                 "seconds": seconds,
                 "sealed": request.sealed,
+                "share_answers": request.share_answers,
             },
             priority="urgent",
             seq=seq,
+            direct=True,
         )
 
     def _open_request(
@@ -373,6 +378,8 @@ class GameModule(WorldModule):
         sealed: bool,
         default: str | None,
         reopens: str | None = None,
+        share_answers: bool = False,
+        auto_close: str = "all_answered",
     ) -> RequestState:
         w = self.w
         request_id = f"r{w.next_counter('request')}"
@@ -384,6 +391,8 @@ class GameModule(WorldModule):
             question=question,
             options=copy.deepcopy(options),
             sealed=sealed,
+            share_answers=share_answers,
+            auto_close=auto_close,  # type: ignore[arg-type]
             default=default,
             deadline=now + duration,
             status="open",
@@ -398,6 +407,8 @@ class GameModule(WorldModule):
             "to": list(to),
             "duration_s": duration,
             "sealed": sealed,
+            "share_answers": share_answers,
+            "auto_close": auto_close,
         }
         if reopens:
             data["reopens"] = reopens
@@ -436,12 +447,20 @@ class GameModule(WorldModule):
             duration=duration,
             sealed=p.sealed,
             default=default,
+            share_answers=p.share_answers,
+            auto_close=p.auto_close,
         )
+        closing = {
+            "all_answered": "全员作答或到期后，你会收到汇总。",
+            "unanimous": "全员作答且答案一致（或到期）后，你会收到汇总；答案不一致时请求会一直开放到截止，收件人可以继续商量并改答。",
+            "deadline": "到期后，你会收到汇总（不会提前关闭）。",
+        }[p.auto_close]
+        sharing = "收件人会实时看到彼此的答案。" if p.share_answers else ""
         return Receipt.accept(
             seq=request.opened_seq,
             message=(
-                f"已向 {len(targets)} 名玩家发出请求 {request.id}（{duration:g} 秒内作答）。"
-                "无需等待：全员作答或到期后，你会收到汇总。"
+                f"已向 {len(targets)} 名玩家发出请求 {request.id}（{duration:g} 秒内作答）。{sharing}"
+                f"无需等待：{closing}"
             ),
             request_id=request.id,
             to=targets,
@@ -478,6 +497,12 @@ class GameModule(WorldModule):
                 return Receipt.reject(Code.INVALID_PARAMS, "回答内容不能为空。")
 
         replaced = actor in request.answers
+        if request.sealed:
+            audience: list[str] = []
+        elif request.share_answers:
+            audience = [MODERATOR_ID, *request.to]
+        else:
+            audience = [MODERATOR_ID, actor]
         entry = w.commit(
             "request.answered",
             actor,
@@ -488,21 +513,54 @@ class GameModule(WorldModule):
                 "reason": p.reason,
                 "replaced": replaced,
             },
-            visible_to=[] if request.sealed else [MODERATOR_ID, actor],
+            visible_to=audience,
         )
         request.answers[actor] = RequestAnswer(value=value, reason=p.reason, defaulted=False, seq=entry.seq)
+        label = self._label(request, value)
         w.emit(
             "request.progress",
             request_id=request.id,
             answered_by=seat_sorted(w, request.answers),
             total=len(request.to),
         )
-        closed = False
-        if all(target in request.answers for target in request.to):
-            self._close_request(request, "all_answered")
-            closed = True
+        # The spectator stream carries every answer (the front end filters by viewpoint with ``visible_to_ids``).
+        w.emit(
+            "request.answer",
+            request_id=request.id,
+            player_id=actor,
+            value=value,
+            label=label,
+            reason=p.reason,
+            visible_to_ids=list(audience),
+        )
+        if request.share_answers:
+            for other in [pid for pid in request.to if pid != actor] + [MODERATOR_ID]:
+                self._deliver(
+                    other,
+                    "request",
+                    "request.answer",
+                    {
+                        "request_id": request.id,
+                        "player_id": actor,
+                        "value": value,
+                        "label": label,
+                        "reason": p.reason,
+                        "replaced": replaced,
+                    },
+                    seq=entry.seq,
+                    direct=True,
+                )
+        close_reason = self._early_close_reason(request)
+        closed = close_reason is not None
+        if close_reason is not None:
+            self._close_request(request, close_reason)
         note = "（已覆盖你之前的回答）" if replaced else ""
-        tail = "请求已收齐并关闭。" if closed else "在请求关闭前你可以再次作答来修改。"
+        if closed:
+            tail = "全员答案一致，请求已关闭。" if close_reason == "unanimous" else "请求已收齐并关闭。"
+        elif request.auto_close == "unanimous" and all(t in request.answers for t in request.to):
+            tail = "全员已作答，但答案不一致，请求继续开放：可以继续商量并改答（最后一次为准）。"
+        else:
+            tail = "在请求关闭前你可以再次作答来修改。" + ("其他收件人看得到你的答案。" if request.share_answers else "")
         return Receipt.accept(
             seq=entry.seq,
             message=f"已记录你对 {request.id} 的回答{note}。{tail}",
@@ -512,6 +570,26 @@ class GameModule(WorldModule):
             replaced=replaced,
             closed=closed,
         )
+
+    @staticmethod
+    def _label(request: RequestState, value: str) -> str:
+        """Display label of an answer: the option label of a choice request, else the value itself."""
+        for option in request.options:
+            if option.get("id") == value:
+                return str(option.get("label") or value)
+        return value
+
+    @staticmethod
+    def _early_close_reason(request: RequestState) -> str | None:
+        """Why the request may close *now* (before its deadline), or ``None`` (``auto_close`` rules)."""
+        if request.auto_close == "deadline":
+            return None
+        if not all(target in request.answers for target in request.to):
+            return None
+        if request.auto_close == "unanimous":
+            values = {request.answers[target].value for target in request.to}
+            return "unanimous" if len(values) == 1 else None
+        return "all_answered"
 
     @staticmethod
     def _tally(request: RequestState) -> tuple[dict[str, int], list[str]]:
@@ -526,7 +604,7 @@ class GameModule(WorldModule):
         return counts, ([option_id for option_id, n in counts.items() if n == top] if top > 0 else [])
 
     def _close_request(self, request: RequestState, reason: str) -> None:
-        """Close an open request (``reason``: ``all_answered`` | ``deadline``).
+        """Close an open request (``reason``: ``all_answered`` | ``unanimous`` | ``deadline``).
 
         Unanswered targets get their ``default`` (marked ``defaulted``) when there is one; the ledger
         entry ``request.closed`` (moderator only) carries every answer in seat order and, for ``choice``
@@ -565,6 +643,13 @@ class GameModule(WorldModule):
         }
         if request.kind == "choice":
             summary["tally"], summary["leaders"] = self._tally(request)
+        request.result = {
+            "reason": reason,
+            "tally": copy.deepcopy(summary.get("tally")),
+            "leaders": copy.deepcopy(summary.get("leaders")),
+            "defaulted": list(defaulted),
+            "missing": list(missing),
+        }
         entry = w.commit("request.closed", ENGINE_ID, copy.deepcopy(summary), visible_to=[MODERATOR_ID])
         self._deliver(
             MODERATOR_ID, "request", "request.closed", copy.deepcopy(summary), priority="urgent", seq=entry.seq
@@ -576,9 +661,9 @@ class GameModule(WorldModule):
                     "request",
                     "request.cancelled",
                     {"request_id": request.id, "reason": "expired"},
-                    priority="ambient",
                     interrupt=True,
                     seq=entry.seq,
+                    direct=True,
                 )
         w.emit(
             "request.closed",
@@ -586,6 +671,7 @@ class GameModule(WorldModule):
             reason=reason,
             answered_by=[pid for pid in ordered if pid in request.answers and not request.answers[pid].defaulted],
             defaulted=list(defaulted),
+            result=copy.deepcopy(request.result),
         )
 
     def on_cancel_request(self, intent: Intent, p: pl.ModRequestRef) -> Receipt:
@@ -597,6 +683,7 @@ class GameModule(WorldModule):
             state = "已被取消" if request.status == "cancelled" else "已经关闭"
             return Receipt.reject(Code.REQUEST_CLOSED, f"请求 {request.id} {state}，无需再取消。")
         request.status = "cancelled"
+        request.result = {"reason": "cancelled", "tally": None, "leaders": None, "defaulted": [], "missing": []}
         entry = w.commit(
             "request.cancelled",
             MODERATOR_ID,
@@ -609,9 +696,9 @@ class GameModule(WorldModule):
                 "request",
                 "request.cancelled",
                 {"request_id": request.id, "reason": "cancelled"},
-                priority="ambient",
                 interrupt=True,
                 seq=entry.seq,
+                direct=True,
             )
         w.emit(
             "request.closed",
@@ -619,6 +706,7 @@ class GameModule(WorldModule):
             reason="cancelled",
             answered_by=seat_sorted(w, [pid for pid, a in request.answers.items() if not a.defaulted]),
             defaulted=[],
+            result=copy.deepcopy(request.result),
         )
         return Receipt.accept(seq=entry.seq, message=f"请求 {request.id} 已取消。", request_id=request.id)
 
@@ -650,6 +738,8 @@ class GameModule(WorldModule):
             sealed=old.sealed,
             default=old.default,
             reopens=old.id,
+            share_answers=old.share_answers,
+            auto_close=old.auto_close,
         )
         return Receipt.accept(
             seq=request.opened_seq,
@@ -742,17 +832,29 @@ class GameModule(WorldModule):
         if p.ability_id not in w.spec.abilities:
             known = "、".join(w.spec.abilities) or "（无）"
             return Receipt.reject(Code.UNKNOWN_ABILITY, f"没有名为 {p.ability_id} 的能力。已知能力：{known}")
-        if p.holders is not None:
-            return Receipt.reject(
-                Code.INVALID_PARAMS,
-                "disable_ability 不接受 holders（它会对所有持有者关闭该能力）；"
-                "若只想让部分玩家可用，请用 enable_ability 并指定 holders。",
-            )
-        self._ability_state(p.ability_id).enabled = False
-        entry = w.commit(
-            "ability.disabled", MODERATOR_ID, {"ability_id": p.ability_id}, visible_to=[MODERATOR_ID]
-        )
-        return Receipt.accept(seq=entry.seq, message=f"能力 {p.ability_id} 已关闭。", ability_id=p.ability_id)
+        state = self._ability_state(p.ability_id)
+        data: dict[str, Any] = {"ability_id": p.ability_id}
+        if p.holders is None:
+            state.enabled = False
+            state.allowed = None
+            message = f"能力 {p.ability_id} 已对所有持有者关闭。"
+        else:
+            rejected = self._check_targets(p.holders)
+            if rejected is not None:
+                return rejected
+            removed = _unique(p.holders)
+            current = list(ability_holders(w, p.ability_id)) if state.allowed is None else list(state.allowed)
+            left = [pid for pid in current if pid not in removed]
+            data["holders"] = list(removed)
+            if left:
+                state.allowed = left
+                message = f"能力 {p.ability_id} 已对 {'、'.join(removed)} 关闭，仍可用：{'、'.join(left)}。"
+            else:
+                state.enabled = False
+                state.allowed = None
+                message = f"能力 {p.ability_id} 已对 {'、'.join(removed)} 关闭，没有人还能使用它（已整体关闭）。"
+        entry = w.commit("ability.disabled", MODERATOR_ID, data, visible_to=[MODERATOR_ID])
+        return Receipt.accept(seq=entry.seq, message=message, ability_id=p.ability_id)
 
     # ---------------------------------------------------------------------- challenges --
     def on_challenge(self, intent: Intent, p: pl.Challenge) -> Receipt:
@@ -878,6 +980,7 @@ class GameModule(WorldModule):
             "player.updated",
             {"player_id": player.id, "add_tags": added, "remove_tags": removed},
             seq=entry.seq,
+            direct=True,  # the subject is told even when this makes (or keeps) him out: his own final notes
         )
 
         public = set(w.spec.setup.public_tags)
