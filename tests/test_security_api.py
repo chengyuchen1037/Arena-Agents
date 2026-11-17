@@ -74,8 +74,8 @@ def test_health_is_unauthenticated_and_minimal(client, monkeypatch):
     monkeypatch.setenv("ARENA_API_TOKEN", TOKEN)
     response = client.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "version": "0.12.0"}
-    assert app.version == "0.12.0"
+    assert response.json() == {"status": "ok", "version": "0.12.1"}
+    assert app.version == "0.12.1"
 
 
 # ------------------------------------------------------------- token auth

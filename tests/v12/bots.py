@@ -33,7 +33,7 @@ def tool_response(calls: list[Call], *, thought: str = "") -> LLMResponse:
 
 
 class BotLlm:
-    """``policies[agent_id](world, agent_id) -> list[Call]``; an empty list becomes ``wait``."""
+    """``policies[agent_id](world, agent_id) -> list[Call]``; an empty list becomes ``sleep``."""
 
     def __init__(self, world: Any, policies: dict[str, Callable[[Any, str], list[Call]]]) -> None:
         self.world = world
@@ -46,7 +46,7 @@ class BotLlm:
         self.calls += 1
         policy = self.policies.get(agent_id)
         calls = policy(self.world, agent_id) if policy else []
-        return tool_response(calls or [("wait", {})], thought="（脚本）")
+        return tool_response(calls or [("sleep", {})], thought="（脚本）")
 
 
 def simple_player(world: Any, me: str) -> list[Call]:

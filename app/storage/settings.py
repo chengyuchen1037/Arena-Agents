@@ -18,21 +18,26 @@ from app.storage.paths import get_data_dir
 _SETTINGS_FILE = "settings.json"
 _SCHEMA_VERSION = 2
 # v0.12.0 named the seats ``p01``..``p12``; v0.12.1 uses ``N1``..``N12``.  Bindings saved under the old
-# names are read as the new ones (the file itself is only rewritten when the user changes the bindings).
+# names are read as the new ones where the game has such a seat (the file itself is only rewritten when the
+# user changes the bindings).
 _LEGACY_ACTOR_ID = re.compile(r"^p(\d{2})$")
 
 
-def migrate_legacy_actor_ids(bindings: dict[str, Any]) -> dict[str, Any]:
-    """``{"p03": b}`` -> ``{"N3": b}``; a seat that already has a binding under its new name keeps it."""
+def migrate_legacy_actor_ids(bindings: dict[str, Any], known_ids: Any) -> dict[str, Any]:
+    """``{"p03": b}`` -> ``{"N3": b}`` for the seats in ``known_ids`` that have no binding under the new name.
+
+    A key that is itself a seat of the game (a custom ``config.yml`` may still use ``p03``) is left alone."""
+    known = set(known_ids)
     migrated: dict[str, Any] = {}
-    legacy: dict[str, Any] = {}
+    renamed: dict[str, Any] = {}
     for actor_id, binding in bindings.items():
         match = _LEGACY_ACTOR_ID.match(actor_id)
-        if match is None:
-            migrated[actor_id] = binding
+        new_id = f"N{int(match.group(1))}" if match else None
+        if new_id is not None and actor_id not in known and new_id in known:
+            renamed[new_id] = binding
         else:
-            legacy[f"N{int(match.group(1))}"] = binding
-    for actor_id, binding in legacy.items():
+            migrated[actor_id] = binding
+    for actor_id, binding in renamed.items():
         migrated.setdefault(actor_id, binding)
     return migrated
 
@@ -147,7 +152,7 @@ class SettingsStore:
 
     def get_default_bindings(self) -> dict[str, ModelBinding]:
         with self._lock:
-            raw_bindings = migrate_legacy_actor_ids(self._read()["default_bindings"])
+            raw_bindings = self._read()["default_bindings"]
             try:
                 return {
                     actor_id: ModelBinding.model_validate(binding)

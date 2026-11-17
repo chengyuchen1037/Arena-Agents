@@ -23,7 +23,7 @@ name: arena-agents
 
 services:
   arena-agents:
-    image: arena-agents:0.12.0
+    image: arena-agents:0.12.1
     build:
       context: .
       dockerfile: Dockerfile

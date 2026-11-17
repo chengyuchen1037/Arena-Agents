@@ -334,7 +334,6 @@ def install(monkeypatch, *, real_stores: bool = False) -> FakeEnv:
     orch = SimpleNamespace(
         llm=llm,
         session=session,
-        set_execution_depth=lambda depth: setattr(orch.session, "execution_depth", depth),
         restored_from_save=False,
         broadcast_state=AsyncMock(return_value=None),
         request_pause=AsyncMock(return_value=session),

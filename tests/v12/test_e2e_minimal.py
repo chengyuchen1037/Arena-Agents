@@ -20,9 +20,9 @@ BASE_CFG: dict[str, Any] = {
     "scenario": {"path": "scenarios/minimal_test.md"},
     "participants": PLAYERS,
     "tag_styles": {},
-    "llm": {"execution_depth": "medium"},
+    "llm": {},
     "knowledge_base": {"docs_dir": "knowledge"},
-    "runtime": {"debounce": 0.2, "tick_interval": 0.05, "watchdog": 30, "llm_timeout_seconds": 10},
+    "runtime": {"tick_interval": 0.05, "watchdog": 30, "llm_timeout_seconds": 10},
 }
 
 

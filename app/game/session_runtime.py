@@ -82,9 +82,16 @@ class SessionRuntimeMixin(WorkspaceRuntimeMixin):
 
         return get_session_store()
 
+    def _known_actor_ids(self) -> set[str]:
+        """The seats a new game will have (``config.yml``), plus the moderator."""
+        return {MODERATOR_ID, *(str(p["id"]) for p in self.cfg.get("participants", []))}
+
     def _load_defaults(self) -> dict[str, ModelBinding]:
         try:
-            return dict(self._settings().get_default_bindings())
+            from app.storage.settings import migrate_legacy_actor_ids
+
+            # bindings saved by v0.12.0 under p01..p12 are the ones of N1..N12 now
+            return migrate_legacy_actor_ids(dict(self._settings().get_default_bindings()), self._known_actor_ids())
         except Exception:  # noqa: BLE001 - settings problems must not block a new game
             logger.warning("Could not load default model bindings", exc_info=True)
             return {}

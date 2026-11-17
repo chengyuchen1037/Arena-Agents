@@ -145,7 +145,9 @@ async def test_a_rename_keeps_the_dealt_identities_and_tells_the_spectators(monk
     assert entry["name"] == "小明" and orch.world.player("N3").name == "小明" and orch.session.participants[2].name == "小明"
     assert {p.id: (p.role if hasattr(p, "role") else None, tuple(p.tags)) for p in orch.world.state.players} == before
     assert RosterStore(orch._roster().data_dir).entry("N3")["name"] == "小明"  # persisted for the next games
-    assert any(e.type == "roster.updated" and {"id": "N3", "name": "小明", "avatar": None} in e.data["participants"] for e in events_of(orch, "roster.updated"))
+    updates = events_of(orch, "roster.updated")
+    assert updates and any(p["id"] == "N3" and p["name"] == "小明" for p in updates[-1].data["participants"])
+    assert all(set(p) == {"id", "name", "avatar"} for p in updates[-1].data["participants"])
     snapshots = events_of(orch, "snapshot")
     assert snapshots and any(p["name"] == "小明" for p in snapshots[-1].data["session"]["participants"])
 
@@ -437,7 +439,8 @@ async def test_the_public_session_has_the_v3_fields_and_no_execution_depth(monke
     assert s["budget"]["state"] == "ok" and s["memory_enabled"] is True and s["review"] == {"available": False, "done": [], "running": False}
     assert s["stall_notice"] == "" and s["moderator"] == {"id": MODERATOR_ID, "name": "主持人", "state": "sleeping", "sleep_until": None}
     first = s["participants"][0]
-    assert (first["id"], first["name"], first["state"], first["sleep_until"], first["avatar"]) == ("N1", "Alice", "sleeping", None, None)
+    assert (first["id"], first["name"], first["state"], first["sleep_until"]) == ("N1", "Alice", "sleeping", None)
+    assert first["avatar"] is None or first["avatar"]["v"] == 1  # a description once the parts library is installed
     assert {"prompt_tokens", "cache_read_tokens", "cache_write_tokens", "completion_tokens", "total_tokens", "cache_hit_rate", "total_cost_usd"} <= set(s["usage_stats"])
 
 

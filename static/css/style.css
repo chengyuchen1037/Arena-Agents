@@ -1119,6 +1119,7 @@ body {
 @media (max-width: 820px) {
   .provider-layout {
     flex-direction: column;
+    align-items: stretch;
   }
   .provider-list-col {
     width: 100%;
@@ -4298,7 +4299,7 @@ html[data-input="touch"] .btn {
 }
 
 html[data-input="touch"] .btn-xs {
-  min-height: 38px;
+  min-height: 40px;
   padding-left: 12px;
   padding-right: 12px;
 }
@@ -4306,6 +4307,19 @@ html[data-input="touch"] .btn-xs {
 html[data-input="touch"] .form-input,
 html[data-input="touch"] .viewpoint-select {
   min-height: 40px;
+}
+
+/* a checkbox is a small target: the whole label row is the tap area */
+html[data-input="touch"] .checkbox-label {
+  min-height: 44px;
+  gap: 10px;
+}
+
+html[data-input="touch"] .checkbox-label input[type="checkbox"],
+html[data-input="touch"] .dropdown-item.check input {
+  flex: none;
+  width: 22px;
+  height: 22px;
 }
 
 /* ==========================================================================
@@ -4755,6 +4769,7 @@ html[data-layout="phone"] .modal-footer .btn {
 
 html[data-layout="phone"] .provider-layout {
   flex-direction: column;
+  align-items: stretch;
 }
 
 html[data-layout="phone"] .provider-list-col {
@@ -4766,7 +4781,7 @@ html[data-layout="phone"] .provider-list {
 }
 
 html[data-layout="phone"] .price-grid {
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 html[data-layout="phone"] .pricing-bar {
@@ -4783,11 +4798,11 @@ html[data-layout="phone"] .pricing-url {
 }
 
 html[data-layout="phone"] .budget-fields {
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
 }
 
 html[data-layout="phone"] .budget-grid {
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 html[data-layout="phone"] .binding-row {
@@ -4853,7 +4868,7 @@ html[data-layout="phone"] .conn-banner {
 
 @media (max-width: 820px) {
   .price-grid {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .budget-fields {
@@ -4936,4 +4951,18 @@ html[data-layout="phone"] .banner-full {
 
 html[data-layout="phone"] .banner-short {
   display: inline;
+}
+
+/* inputs inside grids must be allowed to shrink (an <input> has an intrinsic width of ~20 characters) */
+.price-grid .form-input,
+.budget-fields .form-input,
+.template-row .form-input,
+.binding-row .form-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.price-grid > .form-group,
+.budget-fields > .form-group {
+  min-width: 0;
 }

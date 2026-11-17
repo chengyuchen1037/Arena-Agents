@@ -40,6 +40,7 @@ from app.providers.store import UNSET, get_provider_store
 from app.storage.errors import StorageError
 from app.storage.sessions import get_session_store
 from app.storage.settings import get_default_bindings
+from app.world.types import MODERATOR_ID
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +243,10 @@ def session_bindings() -> dict[str, Any]:
 
 def default_bindings() -> dict[str, Any]:
     try:
-        return dict(get_default_bindings() or {})
+        from app.storage.settings import migrate_legacy_actor_ids
+
+        known = {MODERATOR_ID, *(p.id for p in getattr(orchestrator.session, "participants", []) or [])}
+        return migrate_legacy_actor_ids(dict(get_default_bindings() or {}), known)
     except Exception:  # noqa: BLE001 - settings problems must not break reads
         logger.warning("Could not read default model bindings", exc_info=True)
         return {}
