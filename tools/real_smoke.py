@@ -58,6 +58,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=300.0, help="wall-clock limit in seconds")
     parser.add_argument("--concurrency", type=int, default=0, help="limit of concurrent model calls (0 = unlimited, the engine default)")
     parser.add_argument("--persona", action="store_true", help="give the players the sample personas of this script (written to the scratch roster)")
+    parser.add_argument(
+        "--price-source",
+        action="store_true",
+        help="download the LiteLLM price table and price the bound models with it (in the scratch copy only), so the "
+        "report shows what the provider really bills; also a live test of the price-source feature",
+    )
     parser.add_argument("--keep", action="store_true", help="keep the scratch directory (it holds an encrypted copy of the providers)")
     return parser.parse_args()
 
@@ -145,6 +151,8 @@ async def main() -> int:
     try:
         await orch.startup()
         await orch.new_game()
+        if args.price_source:
+            await apply_price_source(orch)
         issues = orch.refresh_binding_issues()
         if issues:
             print("BINDING ISSUES:", [(i.actor_id, i.message) for i in issues][:5])
@@ -190,6 +198,41 @@ async def main() -> int:
             print("scratch kept at", scratch)
         else:
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+async def apply_price_source(orch) -> None:
+    """Fetch the price table and write its prices into the (scratch) model entries the bindings use."""
+    from app.providers.pricing import get_price_store
+    from app.providers.store import get_provider_store
+
+    prices = get_price_store()
+    status = await prices.refresh()
+    print(f"price table: {status['entries']} models from {status['url']}" + (f" ERROR: {status['error']}" if status["error"] else ""))
+    store = get_provider_store()
+    done: set[tuple[str, str]] = set()
+    for binding in orch.session.model_bindings.values():
+        key = (binding.provider_id, binding.model_id)
+        if key in done:
+            continue
+        done.add(key)
+        provider = store.get_provider(binding.provider_id)
+        match = prices.match(provider, binding.model_id)
+        if match is None:
+            print(f"  no price found for {binding.model_id}: the configured price stays")
+            continue
+        store.update_model(
+            binding.provider_id,
+            binding.model_id,
+            input_price_per_m=match.input_price_per_m,
+            output_price_per_m=match.output_price_per_m,
+            cache_read_price_per_m=match.cache_read_price_per_m,
+            cache_write_price_per_m=match.cache_write_price_per_m,
+            price_source=f"litellm:{match.key}",
+        )
+        print(
+            f"  {binding.model_id}: in ${match.input_price_per_m}/M, cache read ${match.cache_read_price_per_m}/M, "
+            f"cache write ${match.cache_write_price_per_m}/M, out ${match.output_price_per_m}/M  (litellm:{match.key})"
+        )
 
 
 def report(orch, calls, seconds: float) -> None:

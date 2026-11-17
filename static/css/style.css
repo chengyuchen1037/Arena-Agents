@@ -2160,7 +2160,7 @@ body.arena-resizing * {
 }
 
 html[data-input="touch"] {
-  --tap: 44px;
+  --tap: 40px;
 }
 
 @supports (height: 100dvh) {
@@ -2712,6 +2712,17 @@ button,
 
 .pcard-state.st-sleeping {
   opacity: 0.8;
+}
+
+/* wide cards: the state sits on the avatar's lower-right corner (never over the identity tag) */
+html[data-layout="wide"] .pcard-state {
+  top: 37px;
+  right: auto;
+  bottom: auto;
+  left: calc(50% + 7px);
+  width: 19px;
+  height: 19px;
+  font-size: 11px;
 }
 
 @keyframes stPulse {
@@ -4816,4 +4827,63 @@ html[data-layout="phone"] .conn-banner {
   .pcard.flash {
     animation: none !important;
   }
+}
+
+/* ==========================================================================
+   v0.12.1 refinements found in the browser matrix
+   ========================================================================== */
+.participants-grid,
+.board-summary {
+  flex: 0 0 auto;
+}
+
+.banner-short {
+  display: none;
+}
+
+.usage-unit {
+  white-space: pre;
+}
+
+/* readable line length on very wide screens: the feed is a centred column */
+@media (min-width: 1700px) {
+  .feed-records-container {
+    width: 100%;
+    max-width: 1320px;
+    align-self: center;
+  }
+}
+
+/* 1280-1439: keep the top bar at two rows (the unit " Tokens", dividers and the long workspace name go) */
+@media (max-width: 1439px) {
+  html[data-layout="wide"] .usage-unit,
+  html[data-layout="wide"] .topbar-divider {
+    display: none;
+  }
+
+  html[data-layout="wide"] .btn-workspace,
+  html[data-layout="wide"] .topbar .btn-workspace {
+    max-width: 128px;
+  }
+
+  html[data-layout="wide"] .topbar-left,
+  html[data-layout="wide"] .topbar-right {
+    gap: 6px;
+  }
+
+  html[data-layout="wide"] .topbar-main {
+    gap: 6px 10px;
+  }
+}
+
+html[data-layout="phone"] .usage-unit {
+  display: none;
+}
+
+html[data-layout="phone"] .banner-full {
+  display: none;
+}
+
+html[data-layout="phone"] .banner-short {
+  display: inline;
 }

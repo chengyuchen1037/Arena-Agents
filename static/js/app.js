@@ -352,7 +352,13 @@
     if (!elStatusBanner) return;
     const lines = View.statusBanners(s);
     const html = lines
-      .map((l) => `<span class="banner-line banner-${escapeHtml(l.kind)}">${escapeHtml(l.text)}</span>`)
+      .map((l) => {
+        // a phone shows the short sentence (CSS switches by <html data-layout>)
+        const body = l.short
+          ? `<span class="banner-full">${escapeHtml(l.text)}</span><span class="banner-short">${escapeHtml(l.short)}</span>`
+          : escapeHtml(l.text);
+        return `<span class="banner-line banner-${escapeHtml(l.kind)}">${body}</span>`;
+      })
       .join("");
     if (html !== state.lastBannerHtml) {
       state.lastBannerHtml = html;
@@ -402,7 +408,8 @@
     if (elUsageTokensText && elUsageCostText) {
       const u = s.usage_stats || {};
       const total = u.total_tokens > 0 ? u.total_tokens : 0;
-      elUsageTokensText.textContent = Core.formatTokensCount(total);
+      // the number only: the unit " Tokens" is its own element (hidden when the top bar is tight)
+      elUsageTokensText.textContent = Core.formatTokensShort(total);
       elUsageCostText.textContent = `$${Core.sessionCostUsd(u).toFixed(4)}`;
     }
     if (elUsagePill) {

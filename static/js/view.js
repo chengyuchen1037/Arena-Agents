@@ -843,13 +843,15 @@
     const s = session || {};
     const out = [];
     const budget = budgetView(s);
+    // `short` is what a phone shows (the full sentence would take three lines of a narrow screen)
     if (s.status === "paused" && s.pause_reason === "budget") {
+      const reached = budget.state === "reached";
       out.push({
         kind: "budget",
-        text:
-          budget.state === "reached"
-            ? "⛔ 因预算上限暂停：已达到设置的 token / 费用上限。请提高上限（或取消「强制停止」）后点击「继续」。"
-            : "⏸ 因预算上限暂停（上限已调整，用量已低于上限）：可以点击「继续」。",
+        text: reached
+          ? "⛔ 因预算上限暂停：已达到设置的 token / 费用上限。请提高上限（或取消「强制停止」）后点击「继续」。"
+          : "⏸ 因预算上限暂停（上限已调整，用量已低于上限）：可以点击「继续」。",
+        short: reached ? "⛔ 因预算上限暂停：请提高上限后点「继续」" : "⏸ 因预算上限暂停：可以点「继续」",
       });
     } else if (budget.state === "reached") {
       out.push({
@@ -869,11 +871,16 @@
       out.push({
         kind: "finished",
         text: `🏁 对局已结束${winner}${summary}　（可点击「继续」在终局后继续，或「复盘全部」）`,
+        short: `🏁 对局已结束${winner}`,
       });
     } else if (s.status === "paused") {
       if (s.pause_reason === "hold") {
         const reason = s.hold_reason ? `：${s.hold_reason}` : "";
-        out.push({ kind: "hold", text: `⏸ 主持人暂停了对局${reason}。确认后点击「继续」。` });
+        out.push({
+          kind: "hold",
+          text: `⏸ 主持人暂停了对局${reason}。确认后点击「继续」。`,
+          short: `⏸ 主持人暂停了对局${reason}`,
+        });
       } else if (s.pause_reason === "error") {
         out.push({ kind: "error", text: "⚠ 对局因错误暂停，请检查模型绑定后点击「继续」。" });
       } else if (s.pause_reason === "stall") {

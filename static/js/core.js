@@ -1508,14 +1508,19 @@
     return Math.round(n).toLocaleString("en-US");
   }
 
-  /** Top-bar token pill text: "1.5K Tokens" / "2.93M Tokens". */
-  function formatTokensCount(value) {
+  /** Top-bar token pill number without the unit: "1.5K" / "2.93M" / "950". */
+  function formatTokensShort(value) {
     const n = safeNum(value, 0);
     const abs = Math.abs(n);
-    if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B Tokens`;
-    if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M Tokens`;
-    if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}K Tokens`;
-    return `${Math.round(n).toLocaleString("en-US")} Tokens`;
+    if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+    if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+    if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    return `${Math.round(n).toLocaleString("en-US")}`;
+  }
+
+  /** Top-bar token pill text: "1.5K Tokens" / "2.93M Tokens". */
+  function formatTokensCount(value) {
+    return `${formatTokensShort(value)} Tokens`;
   }
 
   /** USD cost with enough digits for tiny per-agent amounts: "$0.0123". */
@@ -1616,6 +1621,7 @@
     // v0.12
     formatCount,
     formatTokensCount,
+    formatTokensShort,
     formatCost,
     formatClockTime,
     escapeHtml,
