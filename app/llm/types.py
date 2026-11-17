@@ -92,14 +92,22 @@ class LLMResponse:
     thought: str = ""
     content: str = ""
     tool_calls: list[ToolCallData] = field(default_factory=list)
+    # v0.12.1: ``prompt_tokens`` is the input that missed the provider's cache; the cached part is reported
+    # separately.  total input of the call = prompt + cache_read + cache_write.
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     finish_reason: str = ""
-    # --- v0.10: which model produced this and what it costs (a snapshot) ---
+    # --- v0.10: which model produced this and what it costs (a snapshot, USD per million tokens) ---
+    # cost = (prompt*input + cache_read*cache_read + cache_write*cache_write + completion*output) / 1e6
+    # (an empty cache price is resolved to the input price before it gets here)
     provider_id: str = ""
     model_id: str = ""
     input_price_per_m: float = 0.0
     output_price_per_m: float = 0.0
+    cache_read_price_per_m: float = 0.0
+    cache_write_price_per_m: float = 0.0
     context_window_tokens: int = 0
     #: Provider-specific blocks needed to resume *this* provider's turn (for
     #: example signed Anthropic thinking blocks). Always carries ``provider_id``,
