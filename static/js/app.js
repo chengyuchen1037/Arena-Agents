@@ -334,6 +334,7 @@
       elFeedViewing.textContent = `视角：${View.viewpointLabel(s, state.viewpoint)}`;
       elFeedViewing.classList.toggle("is-player", state.viewpoint !== View.GOD);
     }
+    if (elSelectViewpoint) elSelectViewpoint.classList.toggle("is-player", state.viewpoint !== View.GOD);
   }
 
   // ---------------------------------------------------------------------------
@@ -369,13 +370,14 @@
         )}">${FLOW_TEXT[t.flow] || ""}</span>`
       : "";
 
+    // Layout (≈64×44): [glyph][id]            [state badge]
+    //                  [main tag chip]        [flow badge]
     return (
       `<div class="${classes.join(" ")}" data-actor="${escapeHtml(t.id)}" title="${escapeHtml(t.title)}">` +
-      `<div class="tile-top">${glyph}<span class="tile-id">${escapeHtml(idText)}</span></div>` +
-      `<button type="button" class="tile-tag ${tagClass}" data-tag-actor="${escapeHtml(t.id)}"` +
+      `<div class="tile-top">${glyph}<span class="tile-id">${escapeHtml(idText)}</span>${stateBadge}</div>` +
+      `<div class="tile-bottom"><button type="button" class="tile-tag ${tagClass}" data-tag-actor="${escapeHtml(t.id)}"` +
       ` aria-haspopup="dialog" aria-expanded="${open ? "true" : "false"}"` +
-      ` title="点击查看 ${escapeHtml(t.id)} 的指标">${escapeHtml(tagText)}</button>` +
-      `${stateBadge}${flowBadge}</div>`
+      ` title="点击查看 ${escapeHtml(t.id)} 的指标">${escapeHtml(tagText)}</button>${flowBadge}</div></div>`
     );
   }
 

@@ -18,6 +18,11 @@ Conventions used throughout (they are part of the contract the runtime / agents 
 * a handler that rejects an intent changes nothing (no counter, no ledger entry, no delivery);
 * sealed request answers are committed with ``visible_to_ids = []`` and only reach the moderator
   inside the ``request.closed`` entry;
+* ``request.closed`` (the entry data and the moderator's envelope payload alike) carries, for ``choice``
+  requests, ``tally`` (votes per option id, defaulted answers included, every option listed in option
+  order) and ``leaders`` (the options with the most votes; none when nobody voted);
+* ``mod.evaluate`` binds ``args`` as variables of the check expression (see :func:`check_eval_args`);
+  a name the expression needs but ``args`` lacks is answered with ``INVALID_PARAMS`` naming it;
 * payload keys of deliveries follow §2.6 exactly (``_deliver`` passes them as ``deliver(payload=...)``
   because a payload key such as ``kind`` cannot be given as a keyword argument).
 """
