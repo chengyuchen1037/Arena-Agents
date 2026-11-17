@@ -134,7 +134,7 @@ class RosterRuntimeMixin:
         were dealt stay exactly as they are) and refresh the session's seats from the roster."""
         seed = self.world.state.rng.seed
         players = self._roster_players()
-        world, clock = self._new_world(self.spec, seed=seed)  # type: ignore[attr-defined]
+        world, clock = self._new_world(self.spec, seed=seed, players=players)  # type: ignore[attr-defined]
         self.world, self.clock = world, clock
         from app.game.session import Participant
 

@@ -2039,13 +2039,15 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
     async def index() -> FileResponse:
         return FileResponse(str(STATIC_DIR / "index.html"))
 
+    parts_bytes = json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode("utf-8") if parts else b""
+
     @app.get("/static/avatar/parts.json")
     async def avatar_parts() -> Response:
-        """The real sprite library when it exists, otherwise the test fixture (so pixel avatars render anyway)."""
-        for path in (PARTS_REAL, PARTS_FIXTURE):
-            if path.exists():
-                return Response(path.read_bytes(), media_type="application/json")
-        raise HTTPException(status_code=404, detail="parts.json not found")
+        """The library the roster's avatar descriptions were generated from (the real one when static/avatar/
+        parts.json existed at start-up, otherwise the test fixture), so that ids and sprites always match."""
+        if not parts_bytes:
+            raise HTTPException(status_code=404, detail="parts.json not found")
+        return Response(parts_bytes, media_type="application/json")
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

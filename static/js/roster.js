@@ -303,7 +303,8 @@
           const one = rv.of(id);
           if (one.state === "done") {
             review = `<div class="detail-review done"><span class="review-badge done">✓ 已复盘</span>` +
-              `<span class="form-hint">战绩与复盘已写入该玩家的记忆（见下方「记忆」）。</span></div>`;
+              `<button type="button" class="btn btn-xs" data-detail-action="show-memory">查看写入的记忆</button>` +
+              `<span class="form-hint">战绩与复盘已写入该玩家的记忆。</span></div>`;
           } else if (one.state === "running") {
             review = `<div class="detail-review"><span class="review-badge running">⏳ 复盘中…</span>${one.message ? `<span class="form-hint">${esc(one.message)}</span>` : ""}</div>`;
           } else {
@@ -666,6 +667,17 @@
         case "review-one":
           if (st.openId && st.openId !== MOD) review([st.openId]);
           break;
+        case "show-memory": {
+          // the review wrote into the memory file: open that editor so the user can read it
+          if (!st.openId) break;
+          const k = keyOf(st.openId, "memory");
+          delete st.drafts[k];
+          st.expanded[k] = true;
+          render({ editors: true });
+          const node = typeof doc.querySelector === "function" ? doc.querySelector(".detail-editor[data-kind='memory']") : null;
+          if (node && typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "nearest" });
+          break;
+        }
         case "bind": {
           const id = st.openId;
           close();
@@ -995,6 +1007,38 @@
     on(el.panel, "click", onPanelClick);
     on(el.panel, "input", onPanelInput);
     on(el.panel, "keydown", onPanelKeydown);
+
+    // the phone drawer: drag the grab handle down to close it
+    const grab = el.panel && typeof el.panel.querySelector === "function" ? el.panel.querySelector(".detail-grab") : null;
+    if (grab) {
+      let startY = null;
+      const dragged = (evt) => Math.max(0, Number(evt && evt.clientY) - startY || 0);
+      on(grab, "pointerdown", (evt) => {
+        startY = Number(evt.clientY);
+        if (typeof grab.setPointerCapture === "function" && evt.pointerId !== undefined) {
+          try {
+            grab.setPointerCapture(evt.pointerId);
+          } catch {
+            /* the pointer is already gone */
+          }
+        }
+      });
+      on(grab, "pointermove", (evt) => {
+        if (startY === null) return;
+        el.panel.style.transition = "none";
+        el.panel.style.transform = `translateY(${dragged(evt)}px)`;
+      });
+      const end = (evt) => {
+        if (startY === null) return;
+        const dy = dragged(evt);
+        startY = null;
+        el.panel.style.transition = "";
+        el.panel.style.transform = "";
+        if (dy > 90) close();
+      };
+      on(grab, "pointerup", end);
+      on(grab, "pointercancel", end);
+    }
     on(el.backdrop, "click", () => close());
     on(el.btnRegenAll, "click", () => regenAll());
     on(el.btnReviewAll, "click", () => review([]));

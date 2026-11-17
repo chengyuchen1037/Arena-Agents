@@ -471,3 +471,19 @@ async def test_pause_reasons_include_budget_and_a_save_keeps_the_limit_and_the_r
     await other.load_session_data(payload)
     assert other.session.budget.max_tokens == 777 and other.session.review_done == ["N1"]
     assert other.session.status == "idle" and len(other._book) == 0  # conversations are never saved
+
+
+@async_test
+async def test_a_finished_review_is_saved_so_a_restart_cannot_review_the_same_game_twice(monkeypatch):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch)
+    orch.llm_port_factory = lambda o: TextLlm("复盘")
+    await orch.start_review()
+    await wait_for(lambda: len(orch.session.review_done) == 4 and not orch._review_running)
+    await wait_for(lambda: any(len(saved.get("review_done", [])) == 4 for saved in orch.session_store.data.values()))
+    saved = next(v for v in orch.session_store.data.values() if len(v.get("review_done", [])) == 4)
+    assert sorted(saved["review_done"]) == sorted(IDS)
+    other = make_orch(monkeypatch)
+    await other.load_session_data(copy.deepcopy(saved))
+    assert other.review_view()["done"] and other.review_view()["available"] is True
+    assert await other.start_review() == []  # nothing left to review

@@ -494,7 +494,8 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
                 },
             )
         )
-        if event_type in {"status_change", "error", "bindings_updated", "budget_updated"}:
+        # (a finished review is part of the save: a restart must not offer to review the same game twice)
+        if event_type in {"status_change", "error", "bindings_updated", "budget_updated", "review_updated"}:
             self.schedule_autosave(event_type)
 
     # ------------------------------------------------------------------ snapshots ---

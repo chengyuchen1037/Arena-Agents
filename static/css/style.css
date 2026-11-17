@@ -3547,10 +3547,22 @@ html[data-layout="wide"] .pcard-state {
 }
 
 .detail-grab {
+  position: relative;
   display: none;
+  height: 28px;
+  margin: -8px -14px 2px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.detail-grab::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  left: 50%;
   width: 44px;
   height: 5px;
-  margin: 0 auto 10px;
+  margin-left: -22px;
   border-radius: 999px;
   background: var(--border-card);
 }
@@ -4965,4 +4977,15 @@ html[data-layout="phone"] .banner-short {
 .price-grid > .form-group,
 .budget-fields > .form-group {
   min-width: 0;
+}
+
+/* dark theme: the sprites have dark outlines; a pale plate behind them keeps the head readable */
+[data-theme="dark"] .avatar-img {
+  border-radius: 7px;
+  background: rgba(203, 213, 225, 0.17);
+}
+
+[data-theme="dark"] .req-avatar,
+[data-theme="dark"] .mod-chip .avatar-img {
+  border-radius: 5px;
 }

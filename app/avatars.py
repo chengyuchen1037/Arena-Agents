@@ -447,11 +447,17 @@ def _dist(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
     return ((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2) ** 0.5
 
 
+#: 脸中间的列（眼镜 / 口罩 / 胡子在这些列上才算“盖在脸上”；耳机的耳罩、耳环在两侧，不算）
+FACE_COLS = (4, 15)
+#: 头顶行（y <= CROWN_ROW 的像素算“盖在头顶的东西”：帽子、冠、耳朵；头带 / 护目镜在额头，不算）
+CROWN_ROW = 4
+
+
 def _acc_kind(front: tuple[tuple[int, int, str], ...]) -> dict[str, int]:
-    """配饰前景的像素在三个行带里各有多少：头顶（<EYE_BAND 起点）、眼带、下半脸。"""
-    top = sum(1 for _x, y, _c in front if y < EYE_BAND[0])
-    eyes = sum(1 for _x, y, _c in front if EYE_BAND[0] <= y < EYE_BAND[1])
-    low = sum(1 for _x, y, _c in front if y >= MOUTH_BAND[0])
+    """配饰前景的像素分布：头顶行、眼睛行带（只数脸中间的列）、下半脸行带（同）。"""
+    top = sum(1 for _x, y, _c in front if y <= CROWN_ROW)
+    eyes = sum(1 for x, y, _c in front if EYE_BAND[0] <= y < EYE_BAND[1] and FACE_COLS[0] <= x <= FACE_COLS[1])
+    low = sum(1 for x, y, _c in front if y >= MOUTH_BAND[0] and FACE_COLS[0] <= x <= FACE_COLS[1])
     return {"top": top, "eyes": eyes, "low": low, "all": len(front)}
 
 

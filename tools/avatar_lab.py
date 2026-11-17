@@ -959,12 +959,657 @@ def build_hair(face_fills: list[PxSet]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------------------------------------------
-# 配饰（占位，稍后展开）
+# 配饰：形状函数组合 + 自动描边 / 明暗。画板 Art 有 front / back 两层；字符可以直接指定：
+#   b/s/l = 配饰色板的基 / 暗 / 亮，w 白（牙齿 / 眼白色）、p 深色（瞳孔色）、m 红褐（嘴色）、x 粉（腮红色）。
+# 描边按整体轮廓自动算（keep 里的透明格——镜片内部、胡子的嘴窗口——不描）。
 # ---------------------------------------------------------------------------------------------------------------
 
 
+class Art:
+    """配饰画板。"""
+
+    def __init__(self) -> None:
+        self.f: PxMap = {}
+        self.b: PxMap = {}
+        self.keep: PxSet = set()
+
+    def put(self, pts: Iterable[Pt], ch: str = "b", *, back: bool = False) -> "Art":
+        target = self.b if back else self.f
+        for p in pts:
+            target[p] = ch
+        return self
+
+    def put_sym(self, pts: Iterable[Pt], ch: str = "b", *, back: bool = False) -> "Art":
+        pts = set(pts)
+        return self.put(pts | mirror(pts), ch, back=back)
+
+    def erase(self, pts: Iterable[Pt]) -> "Art":
+        for p in pts:
+            self.f.pop(p, None)
+            self.b.pop(p, None)
+        return self
+
+
+def _nb4(p: Pt) -> list[Pt]:
+    return [(p[0] + 1, p[1]), (p[0] - 1, p[1]), (p[0], p[1] + 1), (p[0], p[1] - 1)]
+
+
+def finish_acc(art: Art, *, shade: bool = True, rim: bool = False, outline: bool = True) -> tuple[list[str] | None, list[str] | None]:
+    """画板 -> (front 行, back 行)：自动着暗部（下沿 / 右沿）、可选左上轮廓光，再描边。"""
+    f = {p: c for p, c in art.f.items() if 1 <= p[0] <= W - 2 and 1 <= p[1] <= H - 2}
+    b = {p: c for p, c in art.b.items() if 1 <= p[0] <= W - 2 and 1 <= p[1] <= H - 2}
+    whole = set(f) | set(b)
+    if shade:
+        for layer in (f, b):
+            for (x, y), ch in list(layer.items()):
+                if ch != "b":
+                    continue
+                if (x, y + 1) not in whole and (x, y - 1) in whole:
+                    layer[(x, y)] = "s"
+                elif (x + 1, y) not in whole and (x - 1, y) in whole and (x, y - 1) in whole:
+                    layer[(x, y)] = "s"
+                elif rim and x <= 9 and (x, y - 1) not in whole and (x, y + 1) in whole and (x + 1, y) in whole:
+                    layer[(x, y)] = "l"
+    if outline:
+        for p in ring(whole):
+            if p in art.keep or not (0 <= p[0] < W and 0 <= p[1] < H):
+                continue
+            near_front = any(n in f for n in _nb4(p))
+            (f if near_front else b)[p] = "o"
+    return (rows_of(f) if f else None), (rows_of(b) if b else None)
+
+
+# --------------------------------------- 形状小工具 ---------------------------------------
+
+
+def dome(cx: float, cy: float, rx: float, ry: float, ymax: int) -> PxSet:
+    return {p for p in ellipse(cx, cy, rx, ry) if p[1] <= ymax}
+
+
+def span(y: int, x0: int, x1: int) -> PxSet:
+    return {(x, y) for x in range(x0, x1 + 1)}
+
+
+def rows_spans(spec: dict[int, tuple[int, int]]) -> PxSet:
+    out: PxSet = set()
+    for y, (x0, x1) in spec.items():
+        out |= span(y, x0, x1)
+    return out
+
+
+def with_brim(spec: dict[int, tuple[int, int]], brim_y: int, wide: int = 1) -> PxSet:
+    """帽檐：第 brim_y 行最宽（x = wide..19-wide），下一行收窄 1 格。"""
+    return span(brim_y, wide, W - 1 - wide) | span(brim_y + 1, wide + 1, W - 2 - wide)
+
+
+# --------------------------------------- 帽子 ---------------------------------------
+
+
+def acc_wizard(r: Rng, *, bend: int = 0, star: bool = True) -> Art:
+    a = Art()
+    body = {1: (9, 10), 2: (8, 11), 3: (6, 13), 4: (4, 15), 5: (3, 16)}
+    for y in (1, 2):
+        if bend:
+            body[y] = (body[y][0] + bend, body[y][1] + bend)
+    a.put(rows_spans(body), "b")
+    a.put(span(5, 3, 16), "l")  # 帽带
+    a.put(span(6, 1, 18) | span(7, 2, 17), "b")
+    a.put(span(7, 2, 17), "s")
+    if star:
+        a.put({(9 + bend // 2, 3), (10 + bend // 2, 3), (9, 4), (10, 4)}, "w")
+    return a
+
+
+def acc_witch(r: Rng) -> Art:
+    a = Art()
+    body = {1: (10, 11), 2: (9, 12), 3: (7, 12), 4: (5, 14), 5: (4, 15)}
+    a.put(rows_spans(body), "b")
+    a.put(span(5, 4, 15), "s")
+    a.put(span(6, 0 + 1, 18) | span(7, 2, 17), "b")
+    a.put(span(7, 2, 17), "s")
+    a.put(span(6, 8, 11), "l")  # 带扣
+    a.put({(9, 6), (10, 6)}, "w")
+    return a
+
+
+def acc_pirate(r: Rng) -> Art:
+    a = Art()
+    rows = {2: (6, 13), 3: (4, 15), 4: (2, 17), 5: (1, 18), 6: (2, 17)}
+    a.put(rows_spans(rows), "b")
+    a.put(span(6, 2, 17), "s")
+    a.put({(1, 4), (18, 4), (1, 5), (18, 5), (2, 3), (17, 3)}, "b")
+    a.put({(8, 3), (9, 3), (10, 3), (11, 3), (8, 4), (9, 4), (10, 4), (11, 4), (9, 5), (10, 5)}, "w")
+    a.put({(8, 4), (11, 4)}, "p")
+    return a
+
+
+def acc_cap(r: Rng) -> Art:
+    a = Art()
+    a.put(dome(9.5, 6.4, 7.6, 3.6, 6), "b")
+    a.put(span(7, 3, 16) | span(8, 5, 14), "b")
+    a.put(span(7, 3, 16), "l")
+    a.put(span(8, 5, 14), "s")
+    a.put({(9, 2), (10, 2)}, "l")
+    return a
+
+
+def acc_top_hat(r: Rng) -> Art:
+    a = Art()
+    a.put(box(4, 1, 15, 5), "b")
+    a.put(span(5, 4, 15), "l")
+    a.put(span(6, 1, 18) | span(7, 2, 17), "b")
+    a.put(span(7, 2, 17), "s")
+    return a
+
+
+def acc_crown(r: Rng) -> Art:
+    a = Art()
+    a.put(box(3, 5, 16, 6), "b")
+    tops = {3: 3, 4: 4, 5: 4, 6: 2, 7: 4, 8: 3, 9: 1, 10: 1, 11: 3, 12: 4, 13: 2, 14: 4, 15: 4, 16: 3}
+    for x, y0 in tops.items():
+        a.put({(x, y) for y in range(y0, 5)}, "b")
+    a.put(span(6, 3, 16), "s")
+    a.put({(5, 5), (9, 5), (10, 5), (14, 5)}, "x")
+    a.put({(9, 2), (10, 2)}, "l")
+    return a
+
+
+def acc_santa(r: Rng) -> Art:
+    a = Art()
+    a.put(dome(9.5, 5.2, 7.2, 3.4, 5) | strand([(13, 3), (16, 5), (17, 8)], [3, 3]), "b")
+    a.put(span(6, 2, 17) | span(7, 3, 16), "w")
+    a.put(ellipse(17.2, 9.4, 1.6, 1.6), "w")
+    return a
+
+
+def acc_beanie(r: Rng) -> Art:
+    a = Art()
+    a.put(dome(9.5, 6.6, 7.4, 4.6, 5), "b")
+    a.put(span(6, 2, 17) | span(7, 3, 16), "l")
+    for x in range(3, 17, 2):
+        a.put({(x, 6), (x, 7)}, "s")
+    a.put(ellipse(9.5, 1.8, 1.9, 1.5), "l")
+    return a
+
+
+def acc_bucket(r: Rng) -> Art:
+    a = Art()
+    a.put(dome(9.5, 6.0, 6.6, 3.6, 5), "b")
+    a.put(span(5, 3, 16), "s")
+    a.put(span(6, 2, 17) | span(7, 1, 18) | span(8, 3, 16), "b")
+    a.put(span(8, 3, 16), "s")
+    return a
+
+
+def acc_cowboy(r: Rng) -> Art:
+    a = Art()
+    a.put(box(5, 2, 14, 5), "b")
+    a.put({(9, 2), (10, 2)}, "s")
+    a.put(span(5, 5, 14), "s")
+    a.put(span(6, 1, 18) | span(7, 2, 17) | {(1, 5), (2, 5), (17, 5), (18, 5)}, "b")
+    a.put(span(7, 2, 17), "s")
+    return a
+
+
+def acc_chef(r: Rng) -> Art:
+    a = Art()
+    a.put(ellipse(6.4, 3.4, 2.9, 2.6) | ellipse(13.6, 3.4, 2.9, 2.6) | ellipse(9.5, 2.4, 3.2, 2.2) | box(4, 3, 15, 6), "w")
+    a.put(span(6, 4, 15) | span(7, 4, 15), "b")
+    a.put(span(7, 4, 15), "s")
+    a.put({(7, 4), (7, 5), (12, 4), (12, 5)}, "l")
+    return a
+
+
+def acc_knight(r: Rng) -> Art:
+    a = Art()
+    a.put(dome(9.5, 7.0, 7.8, 5.0, 7), "b")
+    a.put(span(7, 2, 17), "s")
+    a.put({(9, y) for y in range(2, 6)} | {(10, y) for y in range(2, 6)}, "l")
+    a.put(box(9, 8, 10, 12), "b")  # 鼻甲
+    a.put(box(2, 8, 3, 10) | box(16, 8, 17, 10), "b")
+    return a
+
+
+def acc_hardhat(r: Rng) -> Art:
+    a = Art()
+    a.put(dome(9.5, 6.6, 7.4, 4.4, 6), "b")
+    a.put(span(7, 1, 18), "b")
+    a.put(span(7, 1, 18), "s")
+    a.put({(9, y) for y in range(2, 6)} | {(10, y) for y in range(2, 6)}, "l")
+    return a
+
+
+def acc_viking(r: Rng) -> Art:
+    a = Art()
+    a.put(dome(9.5, 6.8, 7.4, 4.2, 6), "b")
+    a.put(span(6, 2, 17) | span(7, 3, 16), "l")
+    horn = strand([(3, 5), (2, 3), (1, 1)], [2, 2])
+    a.put(horn | mirror(horn), "w")
+    a.put({(9, 3), (10, 3), (9, 4), (10, 4)}, "l")
+    return a
+
+
+def acc_party(r: Rng) -> Art:
+    a = Art()
+    a.put(poly([(9.5, 0.4), (5.6, 5.5), (13.4, 5.5)]), "b")
+    for y, x in ((3, 8), (4, 7), (5, 6)):
+        a.put({(x, y), (x + 1, y)}, "l")
+    a.put(ellipse(9.5, 1.2, 1.3, 1.0), "w")
+    return a
+
+
+def acc_beret(r: Rng) -> Art:
+    a = Art()
+    a.put(ellipse(10.5, 4.6, 7.2, 2.8), "b")
+    a.put(ellipse(10.0, 3.2, 3.0, 1.0), "l")
+    a.put({(10, 1), (10, 2)}, "s")
+    return a
+
+
+def acc_straw(r: Rng) -> Art:
+    a = Art()
+    a.put(dome(9.5, 6.0, 6.0, 3.2, 5), "b")
+    a.put(span(5, 4, 15), "s")
+    a.put(span(6, 1, 18) | span(7, 1, 18) | span(8, 3, 16), "b")
+    for x in range(2, 18, 3):
+        a.put({(x, 6), (x + 1, 7)}, "l")
+    a.put(span(8, 3, 16), "s")
+    return a
+
+
+# --------------------------------------- 头带 / 发饰 ---------------------------------------
+
+
+def acc_headband(r: Rng) -> Art:
+    a = Art()
+    a.put(span(6, 3, 16) | span(7, 3, 16), "b")
+    a.put(span(7, 3, 16), "s")
+    a.put({(17, 7), (18, 8), (17, 9), (18, 10)}, "b")
+    return a
+
+
+def acc_ninja(r: Rng) -> Art:
+    a = Art()
+    a.put(span(6, 2, 17) | span(7, 2, 17), "b")
+    a.put(span(7, 2, 17), "s")
+    a.put(box(7, 5, 12, 8), "l")
+    a.put({(8, 6), (11, 6), (9, 7), (10, 7)}, "p")
+    a.put({(18, 7), (18, 8), (17, 9), (18, 10)}, "b")
+    return a
+
+
+def acc_bandana(r: Rng) -> Art:
+    a = Art()
+    a.put(dome(9.5, 6.4, 7.8, 4.4, 6) | span(7, 3, 16) | {(5, 8), (7, 8), (9, 8), (11, 8), (13, 8)}, "b")
+    for p in ((6, 4), (9, 3), (12, 4), (8, 6), (14, 6), (4, 6), (10, 5)):
+        a.put({p}, "w")
+    a.put({(17, 7), (18, 8), (17, 9), (18, 9)}, "b")
+    return a
+
+
+def acc_flowers(r: Rng) -> Art:
+    a = Art()
+    a.put(strand([(3, 6), (5, 3), (9, 2), (10, 2), (14, 3), (16, 6)], 1), "b")
+    for cx, cy in ((4, 5), (9, 2), (15, 5)):
+        a.put({(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)}, "x")
+        a.put({(cx, cy)}, "w")
+    return a
+
+
+def acc_bow(r: Rng) -> Art:
+    a = Art()
+    a.put(ellipse(6.6, 3.2, 2.8, 1.9) | ellipse(13.4, 3.2, 2.8, 1.9), "b")
+    a.put(box(9, 2, 10, 4), "s")
+    a.put({(5, 2), (6, 2), (13, 2), (14, 2)}, "l")
+    return a
+
+
+def acc_ribbon(r: Rng) -> Art:
+    a = Art()
+    a.put(ellipse(3.8, 5.2, 1.9, 1.7) | ellipse(7.0, 4.2, 1.9, 1.7), "b")
+    a.put({(5, 5), (5, 4)}, "s")
+    a.put({(3, 4), (7, 3)}, "l")
+    a.put({(4, 7), (4, 8)}, "b")
+    return a
+
+
+def acc_star_clips(r: Rng) -> Art:
+    a = Art()
+    for cx, cy in ((4, 7), (15, 7)):
+        a.put({(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)}, "b")
+        a.put({(cx, cy)}, "l")
+    return a
+
+
+def acc_hairpin(r: Rng) -> Art:
+    a = Art()
+    cx, cy = 14, 6
+    a.put({(cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)}, "b")
+    a.put({(cx, cy)}, "w")
+    return a
+
+
+def acc_headphones(r: Rng) -> Art:
+    a = Art()
+    band = ellipse(9.5, 8.0, 8.6, 7.0) - ellipse(9.5, 8.0, 6.8, 5.2)
+    a.put({p for p in band if p[1] <= 8}, "b")
+    a.put(box(1, 8, 3, 13) | box(16, 8, 18, 13), "b")
+    a.put({(1, 9), (2, 9), (16, 9), (17, 9)}, "l")
+    a.put(box(1, 13, 3, 13) | box(16, 13, 18, 13), "s")
+    return a
+
+
+def acc_goggles(r: Rng) -> Art:
+    a = Art()
+    for cx in (6.0, 13.0):
+        a.put(ellipse(cx, 6.2, 2.9, 2.6), "b")
+        a.put(ellipse(cx, 6.2, 1.8, 1.5), "l")
+    a.put({(7, 5), (14, 5)}, "w")
+    a.put(span(6, 9, 10), "b")
+    a.put({(2, 6), (3, 6), (16, 6), (17, 6)}, "b")
+    return a
+
+
+def acc_antenna(r: Rng) -> Art:
+    a = Art()
+    for x, y0 in ((6, 3), (13, 3)):
+        a.put({(x, y) for y in range(y0, 6)}, "b")
+        a.put(ellipse(x + 0.0, 2.0, 1.3, 1.3), "l")
+    return a
+
+
+def acc_halo(r: Rng) -> Art:
+    a = Art()
+    a.put(span(1, 6, 13) | span(2, 4, 15) | span(3, 6, 13), "l", back=True)
+    a.put(span(2, 4, 15), "b", back=True)
+    return a
+
+
+def acc_horns_devil(r: Rng) -> Art:
+    a = Art()
+    horn = strand([(5, 6), (4, 4), (3, 2)], [2, 2, 1])
+    a.put(horn | mirror(horn), "b")
+    a.put({(4, 4), (15, 4)}, "l")
+    return a
+
+
+def acc_horns_ram(r: Rng) -> Art:
+    a = Art()
+    ring_l = ellipse(3.0, 7.0, 3.0, 3.2) - ellipse(3.6, 7.0, 1.4, 1.5)
+    a.put(ring_l | mirror(ring_l), "b", back=True)
+    return a
+
+
+def acc_antlers(r: Rng) -> Art:
+    a = Art()
+    beam = strand([(5, 5), (4, 3), (3, 1)], [2, 2]) | strand([(4, 3), (2, 3)], 1) | {(6, 4)}
+    a.put(beam | mirror(beam), "b", back=True)
+    return a
+
+
+def acc_bunny(r: Rng) -> Art:
+    a = Art()
+    ear = ellipse(6.4, 3.6, 1.8, 2.9)
+    a.put(ear | mirror(ear), "b")
+    a.put({(6, 2), (6, 3), (6, 4), (13, 2), (13, 3), (13, 4)}, "x")
+    return a
+
+
+def acc_cat_ears(r: Rng) -> Art:
+    a = Art()
+    ear = poly([(3, 5.6), (4, 1.2), (8, 4.6)])
+    a.put(ear | mirror(ear), "b")
+    a.put({(4, 3), (4, 4), (5, 4), (15, 3), (15, 4), (14, 4)}, "x")
+    return a
+
+
+def acc_unicorn(r: Rng) -> Art:
+    a = Art()
+    a.put(poly([(9.5, 0.5), (7.6, 5.4), (11.4, 5.4)]), "b")
+    for y in (3, 5):
+        a.put(span(y, 8, 11), "l")
+    return a
+
+
+def acc_wings(r: Rng) -> Art:
+    a = Art()
+    wing = poly([(3.5, 9.5), (0.8, 5.0), (1.0, 12.5)]) | {(2, 6), (1, 7)}
+    a.put(wing | mirror(wing), "w", back=True)
+    return a
+
+
+# --------------------------------------- 眼镜 / 眼罩 ---------------------------------------
+
+
+def _lens_frame(x0: int) -> tuple[PxSet, PxSet]:
+    """左镜片：外框 x0..x0+5、y 9..13（四角去掉），内部 4×3 留空。"""
+    frame = box(x0, 9, x0 + 5, 13) - {(x0, 9), (x0 + 5, 9), (x0, 13), (x0 + 5, 13)}
+    inner = box(x0 + 1, 10, x0 + 4, 12)
+    return frame - inner, inner
+
+
+def acc_glasses_round(r: Rng) -> Art:
+    a = Art()
+    fl, inner = _lens_frame(4)
+    fr = mirror(fl)
+    a.put(fl | fr, "b")
+    a.keep |= inner | mirror(inner)
+    a.put({(3, 10), (16, 10)}, "b")
+    a.put({(5, 10), (14, 10)}, "w")
+    return a
+
+
+def acc_glasses_square(r: Rng) -> Art:
+    a = Art()
+    frame = box(4, 9, 9, 13) - box(5, 10, 8, 12)
+    a.put(frame | mirror(frame), "b")
+    a.put(span(9, 4, 9) | span(9, 10, 15), "s")
+    a.keep |= box(5, 10, 8, 12) | box(11, 10, 14, 12)
+    a.put({(3, 10), (16, 10)}, "b")
+    return a
+
+
+def acc_sunglasses(r: Rng) -> Art:
+    a = Art()
+    lens = box(4, 10, 8, 12) - {(4, 10)}
+    a.put(lens | mirror(lens), "p")
+    a.put(span(9, 4, 8) | span(9, 11, 15) | {(9, 10), (10, 10), (3, 10), (16, 10)}, "b")
+    a.put({(5, 10), (6, 10), (13, 10), (14, 10)}, "w")
+    return a
+
+
+def acc_monocle(r: Rng) -> Art:
+    a = Art()
+    frame = box(11, 9, 15, 13) - box(12, 10, 14, 12) - {(11, 9), (15, 9), (11, 13), (15, 13)}
+    a.put(frame, "b")
+    a.keep |= box(12, 10, 14, 12)
+    a.put({(15, 14), (15, 15), (16, 16)}, "s")
+    return a
+
+
+def acc_eyepatch(r: Rng) -> Art:
+    a = Art()
+    patch = box(11, 9, 15, 13) - {(11, 9), (15, 9), (11, 13), (15, 13)}
+    a.put(patch, "p")
+    a.put(line(11, 9, 4, 6), "p")
+    a.put({(12, 10), (13, 10)}, "l")
+    return a
+
+
+def acc_visor(r: Rng) -> Art:
+    a = Art()
+    a.put(box(3, 10, 16, 12) - {(3, 10), (16, 10), (3, 12), (16, 12)}, "b")
+    a.put(span(10, 4, 15), "l")
+    a.put({(5, 11), (6, 11), (13, 11), (14, 11)}, "w")
+    return a
+
+
+def acc_hero_mask(r: Rng) -> Art:
+    a = Art()
+    body = box(3, 9, 16, 13) - {(3, 9), (16, 9), (3, 13), (16, 13)}
+    holes = box(5, 10, 8, 12) | box(11, 10, 14, 12)
+    a.put(body - holes, "b")
+    a.keep |= holes
+    a.put(span(13, 4, 15), "s")
+    return a
+
+
+# --------------------------------------- 脸部：胡子 / 口罩 / 装饰 ---------------------------------------
+
+
+def acc_mustache(r: Rng) -> Art:
+    a = Art()
+    a.put(span(13, 6, 13) | {(5, 14), (14, 14), (6, 14), (13, 14)}, "b")
+    a.put({(9, 13), (10, 13)}, "s")
+    return a
+
+
+def acc_beard(r: Rng) -> Art:
+    a = Art()
+    body = box(4, 12, 15, 17) | span(18, 6, 13) | span(11, 3, 4) | span(11, 15, 16)
+    window = box(6, 13, 13, 15)
+    a.put(body - window - {(4, 12), (15, 12)}, "b")
+    a.keep |= window
+    a.put(span(17, 4, 15) | span(18, 6, 13), "s")
+    return a
+
+
+def acc_goatee(r: Rng) -> Art:
+    a = Art()
+    a.put(span(16, 7, 12) | span(17, 7, 12) | span(18, 8, 11), "b")
+    a.put(span(18, 8, 11), "s")
+    return a
+
+
+def acc_mask_surgical(r: Rng) -> Art:
+    a = Art()
+    a.put(box(4, 13, 15, 16) - {(4, 13), (15, 13), (4, 16), (15, 16)}, "l")
+    a.put(span(14, 5, 14) | span(16, 5, 14), "b")
+    a.put({(3, 12), (16, 12), (3, 13), (16, 13)}, "s")
+    return a
+
+
+def acc_scarf(r: Rng) -> Art:
+    a = Art()
+    a.put(box(3, 14, 16, 17) - {(3, 14), (16, 14)}, "b")
+    for x in range(4, 16, 3):
+        a.put({(x, 14), (x, 15), (x, 16), (x, 17)}, "l")
+    a.put(box(14, 17, 16, 18), "b")
+    a.put(span(18, 14, 16), "s")
+    return a
+
+
+def acc_bandage(r: Rng) -> Art:
+    a = Art()
+    a.put(box(12, 13, 14, 14), "w")
+    a.put({(13, 13), (13, 14), (12, 13), (14, 14)}, "s")
+    return a
+
+
+def acc_freckles(r: Rng) -> Art:
+    a = Art()
+    a.put({(5, 13), (7, 13), (6, 14), (12, 13), (14, 13), (13, 14), (6, 12)}, "m")
+    return a
+
+
+def acc_face_paint(r: Rng) -> Art:
+    a = Art()
+    stripe = {(4, 12), (5, 13), (4, 13), (5, 14)}
+    a.put(stripe | mirror(stripe), "b")
+    return a
+
+
+def acc_scar(r: Rng) -> Art:
+    a = Art()
+    a.put({(4, 12), (5, 13), (6, 14)}, "m")
+    a.put({(5, 12), (5, 14)}, "w")
+    return a
+
+
+def acc_earrings(r: Rng) -> Art:
+    a = Art()
+    hoop = ellipse(2.0, 12.6, 1.0, 1.7)
+    a.put(hoop | mirror(hoop), "l")
+    return a
+
+
+def acc_bowtie(r: Rng) -> Art:
+    a = Art()
+    a.put(poly([(6, 16.5), (9, 18), (6, 19.4)]) | poly([(13, 16.5), (10, 18), (13, 19.4)]) | box(9, 17, 10, 18), "b")
+    a.put(box(9, 17, 10, 18), "s")
+    return a
+
+
+def accessory_recipes() -> list[tuple[str, Any, dict[str, Any]]]:
+    """(名字, 构造函数, finish 参数)。顺序固定，编号 a01 起（a00 = 无配饰）。"""
+    hat = dict(rim=True)
+    plain: dict[str, Any] = {}
+    return [
+        ("wizard", acc_wizard, hat),
+        ("wizard_bent", lambda r: acc_wizard(r, bend=1, star=False), hat),
+        ("witch", acc_witch, hat),
+        ("pirate", acc_pirate, hat),
+        ("cap", acc_cap, hat),
+        ("top_hat", acc_top_hat, hat),
+        ("crown", acc_crown, hat),
+        ("santa", acc_santa, hat),
+        ("beanie", acc_beanie, hat),
+        ("bucket", acc_bucket, hat),
+        ("cowboy", acc_cowboy, hat),
+        ("chef", acc_chef, plain),
+        ("knight", acc_knight, hat),
+        ("hardhat", acc_hardhat, hat),
+        ("viking", acc_viking, hat),
+        ("party", acc_party, hat),
+        ("beret", acc_beret, hat),
+        ("straw", acc_straw, hat),
+        ("headband", acc_headband, plain),
+        ("ninja", acc_ninja, plain),
+        ("bandana", acc_bandana, hat),
+        ("flowers", acc_flowers, plain),
+        ("bow", acc_bow, plain),
+        ("ribbon", acc_ribbon, plain),
+        ("star_clips", acc_star_clips, plain),
+        ("hairpin", acc_hairpin, plain),
+        ("headphones", acc_headphones, plain),
+        ("goggles", acc_goggles, plain),
+        ("antenna", acc_antenna, plain),
+        ("halo", acc_halo, plain),
+        ("horns_devil", acc_horns_devil, plain),
+        ("horns_ram", acc_horns_ram, plain),
+        ("antlers", acc_antlers, plain),
+        ("bunny", acc_bunny, plain),
+        ("cat_ears", acc_cat_ears, plain),
+        ("unicorn", acc_unicorn, plain),
+        ("wings", acc_wings, plain),
+        ("glasses_round", acc_glasses_round, plain),
+        ("glasses_square", acc_glasses_square, plain),
+        ("sunglasses", acc_sunglasses, plain),
+        ("monocle", acc_monocle, plain),
+        ("eyepatch", acc_eyepatch, plain),
+        ("visor", acc_visor, plain),
+        ("hero_mask", acc_hero_mask, plain),
+        ("mustache", acc_mustache, plain),
+        ("beard", acc_beard, plain),
+        ("goatee", acc_goatee, plain),
+        ("mask_surgical", acc_mask_surgical, plain),
+        ("scarf", acc_scarf, plain),
+        ("bandage", acc_bandage, dict(outline=False)),
+        ("freckles", acc_freckles, dict(outline=False, shade=False)),
+        ("face_paint", acc_face_paint, dict(outline=False, shade=False)),
+        ("scar", acc_scar, dict(outline=False, shade=False)),
+        ("earrings", acc_earrings, plain),
+        ("bowtie", acc_bowtie, plain),
+    ]
+
+
 def build_accessories(face_fills: list[PxSet]) -> dict[str, Any]:
-    return {"a00": {"back": None, "front": None}}
+    out: dict[str, Any] = {"a00": {"back": None, "front": None}}
+    for name, fn, opts in accessory_recipes():
+        art = fn(part_rng("accessory", len(out)))
+        front, back = finish_acc(art, **opts)
+        out[f"a{len(out):02d}"] = {"back": back, "front": front}
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -1105,7 +1750,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"已写入 {PARTS_PATH}（{PARTS_PATH.stat().st_size / 1024:.0f} KB）")
 
     if args.gallery:
-        for p in write_gallery(parts, args.gallery, scale=min(args.scale, 5), dark=args.dark):
+        for p in write_gallery(parts, args.gallery, scale=args.scale, cols=args.cols or 10, dark=args.dark):
             print("总览图：", p)
     if args.sheet:
         if not args.out:
