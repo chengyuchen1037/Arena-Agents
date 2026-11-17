@@ -1,466 +1,79 @@
 "use strict";
-// Smoke test for static/js/app.js running against a tiny fake DOM.
+// Smoke test for static/js/app.js running against a tiny fake DOM (see harness.js):
+// wiring, startup, auth, SSE reconnect/resume, and the Provider / binding / session dialogs.
+// The v0.12 UI itself (tiles, popover, feed, channel bar, viewpoint) is in test_app_ui.js.
 // Run: node tests/frontend/test_app_smoke.js
 const assert = require("node:assert/strict");
-const fs = require("node:fs");
-const path = require("node:path");
-const vm = require("node:vm");
+const H = require("./harness.js");
 
-const ROOT = path.join(__dirname, "..", "..");
-const Core = require(path.join(ROOT, "static", "js", "core.js"));
-const APP_SRC = fs.readFileSync(path.join(ROOT, "static", "js", "app.js"), "utf8");
-const PROVIDERS_SRC = fs.readFileSync(path.join(ROOT, "static", "js", "providers.js"), "utf8");
-const LAYOUT_SRC = fs.readFileSync(path.join(ROOT, "static", "js", "layout.js"), "utf8");
-const WORKSPACE_SRC = fs.readFileSync(path.join(ROOT, "static", "js", "workspace.js"), "utf8");
-const HTML_SRC = fs.readFileSync(path.join(ROOT, "static", "index.html"), "utf8");
+const { Core, F, SRC, HTML_SRC, resp, target, settle, makeEnv, makeBackend, routeFetch, boot, posts } = H;
 
 const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
-const tick = () => new Promise((r) => setImmediate(r));
-async function settle(n = 15) {
-  for (let i = 0; i < n; i++) await tick();
-}
-
-// ---- fake DOM ---------------------------------------------------------------
-class FakeEl {
-  constructor(tag = "div", id = "") {
-    this.tagName = tag.toUpperCase();
-    this.id = id;
-    this.children = [];
-    this.parentNode = null;
-    this.style = {};
-    this.attrs = {};
-    this.listeners = {};
-    this.textContent = "";
-    this.value = "";
-    this.hidden = false;
-    this.disabled = false;
-    this.checked = true;
-    this.className = "";
-    this.scrollTop = 0;
-    this.scrollHeight = 0;
-    this.clientHeight = 0;
-    this._html = "";
-    this._classes = new Set();
-    const self = this;
-    this.classList = {
-      add: (...c) => c.forEach((x) => self._classes.add(x)),
-      remove: (...c) => c.forEach((x) => self._classes.delete(x)),
-      contains: (c) => self._classes.has(c),
-      toggle: (c, on) => {
-        const want = on === undefined ? !self._classes.has(c) : Boolean(on);
-        if (want) self._classes.add(c);
-        else self._classes.delete(c);
-        return want;
-      },
-    };
-    this.content = { firstElementChild: null };
-  }
-  get innerHTML() {
-    return this._html;
-  }
-  set innerHTML(v) {
-    this._html = String(v);
-    if (this.tagName === "TEMPLATE") {
-      const t = this._html.trim();
-      if (!t) this.content.firstElementChild = null;
-      else {
-        const el = new FakeEl("div");
-        el.outerHTML = t;
-        this.content.firstElementChild = el;
-      }
-    } else {
-      this.children.forEach((c) => (c.parentNode = null));
-      this.children = [];
-    }
-  }
-  get firstChild() {
-    return this.children[0] || null;
-  }
-  get lastElementChild() {
-    return this.children[this.children.length - 1] || null;
-  }
-  get isConnected() {
-    return this.parentNode !== null;
-  }
-  appendChild(n) {
-    if (n.parentNode) n.remove();
-    n.parentNode = this;
-    this.children.push(n);
-    return n;
-  }
-  replaceChild(n, old) {
-    const i = this.children.indexOf(old);
-    old.parentNode = null;
-    n.parentNode = this;
-    this.children[i] = n;
-    return old;
-  }
-  insertBefore(n, ref) {
-    if (n.parentNode) n.remove();
-    n.parentNode = this;
-    const i = ref ? this.children.indexOf(ref) : -1;
-    if (i < 0) this.children.push(n);
-    else this.children.splice(i, 0, n);
-    return n;
-  }
-  remove() {
-    if (this.parentNode) {
-      const i = this.parentNode.children.indexOf(this);
-      if (i >= 0) this.parentNode.children.splice(i, 1);
-      this.parentNode = null;
-    }
-  }
-  addEventListener(t, fn) {
-    (this.listeners[t] = this.listeners[t] || []).push(fn);
-  }
-  removeEventListener(t, fn) {
-    this.listeners[t] = (this.listeners[t] || []).filter((f) => f !== fn);
-  }
-  dispatch(t, evt = {}) {
-    const e = { type: t, target: this, preventDefault() {}, ...evt };
-    (this.listeners[t] || []).slice().forEach((fn) => fn(e));
-  }
-  getAttribute(k) {
-    return this.attrs[k] ?? null;
-  }
-  setAttribute(k, v) {
-    this.attrs[k] = v;
-  }
-  querySelector() {
-    return null;
-  }
-  closest() {
-    return null;
-  }
-  focus() {}
-  click() {}
-}
 
 function ids(src) {
   return new Set([...src.matchAll(/getElementById\("([^"]+)"\)/g)].map((m) => m[1]));
 }
 
-function makeEnv({ fetchImpl, storedToken = "" }) {
-  const els = new Map();
-  const timers = [];
-  let timerId = 0;
-  const rafQueue = [];
-  const toasts = [];
-  const esInstances = [];
-  const storage = new Map(storedToken ? [["arena_api_token", storedToken]] : []);
-
-  const docListeners = {};
-  const winListeners = {};
-  const document = {
-    getElementById(id) {
-      if (!els.has(id)) els.set(id, new FakeEl("div", id));
-      return els.get(id);
-    },
-    createElement(tag) {
-      return new FakeEl(tag);
-    },
-    addEventListener(t, fn) {
-      (docListeners[t] = docListeners[t] || []).push(fn);
-    },
-    removeEventListener(t, fn) {
-      docListeners[t] = (docListeners[t] || []).filter((f) => f !== fn);
-    },
-    dispatchEvent(t, evt = {}) {
-      const e = { type: t, target: this, preventDefault() {}, ...evt };
-      (docListeners[t] || []).slice().forEach((fn) => fn(e));
-      return e;
-    },
-    documentElement: new FakeEl("html"),
-    body: new FakeEl("body"),
-    activeElement: null,
-    currentScript: { src: "http://localhost/arena/static/js/app.js" },
-  };
-
-  class FakeEventSource {
-    constructor(url) {
-      this.url = url;
-      this.closed = false;
-      esInstances.push(this);
-    }
-    close() {
-      this.closed = true;
-    }
-  }
-
-  const sandbox = {
-    console,
-    URL,
-    Blob,
-    CSS: { escape: (s) => s },
-    document,
-    localStorage: {
-      getItem: (k) => (storage.has(k) ? storage.get(k) : null),
-      setItem: (k, v) => storage.set(k, String(v)),
-      removeItem: (k) => storage.delete(k),
-    },
-    EventSource: FakeEventSource,
-    fetch: fetchImpl,
-    location: { search: "", href: "http://localhost/arena/", pathname: "/arena/" },
-    getSelection: () => ({ toString: () => "" }),
-    innerWidth: 1280,
-    innerHeight: 800,
-    addEventListener(t, fn) {
-      (winListeners[t] = winListeners[t] || []).push(fn);
-    },
-    removeEventListener(t, fn) {
-      winListeners[t] = (winListeners[t] || []).filter((f) => f !== fn);
-    },
-    dispatchEvent(t, evt = {}) {
-      const e = { type: t, target: this, ...evt };
-      (winListeners[t] || []).slice().forEach((fn) => fn(e));
-      return e;
-    },
-    requestAnimationFrame: (cb) => {
-      rafQueue.push(cb);
-      return rafQueue.length;
-    },
-    setTimeout: (fn, ms) => {
-      timers.push({ id: ++timerId, fn, ms });
-      return timerId;
-    },
-    clearTimeout: (id) => {
-      const i = timers.findIndex((t) => t.id === id);
-      if (i >= 0) timers.splice(i, 1);
-    },
-    ArenaCore: Core,
-    confirm: () => true,
-  };
-  sandbox.window = sandbox;
-  document.getElementById("toast-container");
-  // capture toasts
-  els.get("toast-container").appendChild = (n) => {
-    toasts.push(n);
-    return n;
-  };
-
-  vm.createContext(sandbox);
-  return {
-    sandbox,
-    els,
-    timers,
-    esInstances,
-    storage,
-    toasts,
-    el: (id) => document.getElementById(id),
-    run: () => {
-      vm.runInContext(LAYOUT_SRC, sandbox, { filename: "layout.js" });
-      vm.runInContext(PROVIDERS_SRC, sandbox, { filename: "providers.js" });
-      vm.runInContext(WORKSPACE_SRC, sandbox, { filename: "workspace.js" });
-      vm.runInContext(APP_SRC, sandbox, { filename: "app.js" });
-    },
-    flushRaf: () => {
-      const q = rafQueue.splice(0);
-      q.forEach((cb) => cb());
-    },
-    runNextTimer: () => {
-      const t = timers.shift();
-      if (t) t.fn();
-      return t;
-    },
-  };
-}
-
-function resp(status, body, ct = "application/json") {
-  const text = typeof body === "string" ? body : JSON.stringify(body);
-  return {
-    status,
-    ok: status >= 200 && status < 300,
-    headers: { get: (k) => (k.toLowerCase() === "content-type" ? ct : null) },
-    text: async () => text,
-  };
-}
-
-const SESSION = {
-  session_id: "s1",
-  title: "T",
-  status: "idle",
-  records: [],
-  participants: [{ id: "p1", seat: 1, name: "Ann'<b>", tags: [] }],
-  channels: [
-    {
-      id: "c1",
-      name: "C",
-      type: "t",
-      status: "open",
-      members: ["p1"],
-      interrupt_quotas: { p1: { player_id: "p1", player_name: "A", used: '<i>', max_count: "2" } },
-    },
-  ],
-  dashboard: {
-    factions: [{ name: "F'", alive: '<img src=x onerror=alert(1)>', total: 3, variant: "x" }],
-    tag_stats: [{ name: "T", count: "<script>", variant: "neutral" }],
-  },
-  usage_stats: { total_tokens: 0, total_cost_usd: 0 },
-  execution_depth: "medium",
-  model_bindings: {
-    moderator: { provider_id: "p1", model_id: "model-x", reasoning_depth: "high", context_window_tokens: 128000 },
-  },
-  binding_issues: [],
-};
-
-function makeBackend(overrides = {}) {
-  const b = {
-    calls: [],
-    providers: [
-      {
-        id: "p1",
-        name: "DeepSeek",
-        protocol: "openai_chat",
-        base_url: "https://api.example.com",
-        api_key_set: true,
-        read_only: false,
-        models: [
-          { id: "model-x", input_price_per_m: 0.5, output_price_per_m: 2, context_window_tokens: 128000 },
-        ],
-      },
-      {
-        id: "p2",
-        name: "Claude",
-        protocol: "anthropic_messages",
-        base_url: "https://api.anthropic.com",
-        api_key_set: true,
-        read_only: false,
-        models: [{ id: "claude-y", input_price_per_m: 3, output_price_per_m: 15, context_window_tokens: 200000 }],
-      },
-      { id: "env", name: "Env", protocol: "openai_chat", base_url: "https://e.com", api_key_set: true, read_only: true, models: [] },
-    ],
-    bindings: SESSION.model_bindings,
-    sessions: [
-      { session_id: "s1", current: true, status: "idle", record_count: 0 },
-      { session_id: "old-1", current: false, status: "paused", record_count: 7 },
-    ],
-    session: SESSION,
-    discovered: ["model-x", "m-new", "other/slash"],
-    workspaces: {
-      enabled: true,
-      current: { id: "w1", name: "Av11WS", path: "D:\\Av11\\WS", status: "ok" },
-      recent: [{ id: "w1", name: "Av11WS", path: "D:\\Av11\\WS" }],
-      default_path: "D:\\Arena-Workspace\\Default",
-      native_picker: true,
-    },
-    requireToken: "",
-    failures: {},
-    ...overrides,
-  };
-  b.fetch = async (url, init) => {
-    const body = init.body ? JSON.parse(init.body) : undefined;
-    const call = { url, method: init.method, body, headers: init.headers };
-    b.calls.push(call);
-    if (b.requireToken && init.headers["X-Arena-Token"] !== b.requireToken) {
-      return resp(401, { detail: "Invalid or missing API token" });
-    }
-    const key = init.method + " " + url.replace(/^\/arena/, "");
-    if (b.failures[key]) return resp(b.failures[key][0], { detail: b.failures[key][1] });
-    const find = (id) => b.providers.find((p) => p.id === id);
-    let m;
-    if (key === "GET /api/state") return resp(200, { session: b.session });
-    if (key === "GET /api/providers") return resp(200, { providers: b.providers });
-    if (key === "POST /api/providers") {
-      const p = { id: "new1", read_only: false, api_key_set: true, models: [], ...body };
-      delete p.api_key;
-      b.providers.push(p);
-      return resp(201, p);
-    }
-    if ((m = key.match(/^PATCH \/api\/providers\/([^/]+)$/))) {
-      Object.assign(find(m[1]), { ...body, api_key: undefined });
-      return resp(200, find(m[1]));
-    }
-    if ((m = key.match(/^DELETE \/api\/providers\/([^/]+)$/))) {
-      b.providers = b.providers.filter((p) => p.id !== m[1]);
-      return resp(200, { ok: true });
-    }
-    if ((m = key.match(/^POST \/api\/providers\/([^/]+)\/discover-models$/))) {
-      return resp(200, { models: b.discovered, existing_models: find(m[1]).models.map((x) => x.id) });
-    }
-    if ((m = key.match(/^(POST|PATCH|DELETE) \/api\/providers\/([^/]+)\/models$/))) {
-      const p = find(m[2]);
-      if (m[1] === "POST") {
-        const e = { id: body.model_id, input_price_per_m: body.input_price_per_m, output_price_per_m: body.output_price_per_m, context_window_tokens: body.context_window_tokens ?? 1000000 };
-        p.models.push(e);
-        return resp(201, e);
-      }
-      if (m[1] === "PATCH") {
-        Object.assign(p.models.find((x) => x.id === body.model_id), body, { id: body.model_id });
-        return resp(200, {});
-      }
-      p.models = p.models.filter((x) => x.id !== body.model_id);
-      return resp(200, { ok: true });
-    }
-    if (key === "GET /api/settings/bindings") {
-      return resp(200, { bindings: b.bindings, providers: b.providers, locked: false, issues: [] });
-    }
-    if (key === "PUT /api/settings/bindings") {
-      b.bindings = body.bindings;
-      return resp(200, { bindings: b.bindings, providers: b.providers });
-    }
-    if (key === "GET /api/sessions") return resp(200, { sessions: b.sessions });
-    if (key === "GET /api/workspaces") return resp(200, b.workspaces);
-    if (key === "POST /api/workspaces/pick-native-folder") {
-      return resp(200, { path: "D:\\Picked\\WS" });
-    }
-    if (key === "POST /api/workspaces/select") {
-      b.lastWorkspaceSelect = body;
-      return resp(200, {
-        workspace: { id: "w9", name: "Next", path: body.path },
-        session: b.session,
-      });
-    }
-    if ((m = key.match(/^DELETE \/api\/sessions\/(.+)$/))) {
-      b.sessions = b.sessions.filter((x) => x.session_id !== decodeURIComponent(m[1]));
-      return resp(200, { ok: true });
-    }
-    if ((m = key.match(/^POST \/api\/sessions\/(.+)\/load$/))) {
-      return resp(200, { ok: true, session: { ...SESSION, session_id: decodeURIComponent(m[1]), status: "paused" } });
-    }
-    return resp(404, { detail: "nf" });
-  };
-  return b;
-}
-
-// legacy helper used by older tests: (calls array, options) -> fetch
-function routeFetch(calls, { requireToken = "" } = {}) {
-  const b = makeBackend({ requireToken });
-  return async (url, init) => {
-    const r = await b.fetch(url, init);
-    calls.push({ url, init });
-    return r;
-  };
-}
-
-// ---- tests ------------------------------------------------------------------
+// ---- wiring --------------------------------------------------------------------
 test("every id used by the frontend modules exists in index.html", () => {
   const htmlIds = new Set([...HTML_SRC.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
-  // These two are optional widgets: app.js null-guards them and index.html
-  // does not currently ship them (pre-existing since v0.8).
-  const optional = new Set(["scenario-name"]);
-  const combined = APP_SRC + PROVIDERS_SRC + LAYOUT_SRC + WORKSPACE_SRC;
-  const missing = [...ids(combined)].filter((i) => !htmlIds.has(i) && !optional.has(i));
+  const combined = SRC.app + SRC.providers + SRC.layout + SRC.workspace;
+  // app.js also reads ids through its `$ = (id) => getElementById(id)` helper
+  const viaHelper = new Set([...SRC.app.matchAll(/\$\("([^"]+)"\)/g)].map((m) => m[1]));
+  const missing = [...new Set([...ids(combined), ...viaHelper])].filter((i) => !htmlIds.has(i));
   assert.deepEqual(missing, []);
 });
 
-test("index.html uses relative asset paths and loads core.js, providers.js, app.js in order", () => {
+test("index.html uses relative asset paths and loads the scripts in dependency order", () => {
   assert.ok(!/(?:src|href)="\/(?:static|api)/.test(HTML_SRC));
-  const c = HTML_SRC.indexOf("static/js/core.js");
-  const p = HTML_SRC.indexOf("static/js/providers.js");
-  const a = HTML_SRC.indexOf("static/js/app.js");
-  const l = HTML_SRC.indexOf("static/js/layout.js");
-  const w = HTML_SRC.indexOf("static/js/workspace.js");
-  assert.ok(c >= 0 && l > c && l < p && p < w && w < a);
+  const order = ["core", "avatar", "store", "view", "layout", "providers", "workspace", "app"].map((n) =>
+    HTML_SRC.indexOf(`static/js/${n}.js`)
+  );
+  assert.ok(order.every((i) => i >= 0), "every script is referenced");
+  assert.deepEqual([...order].sort((a, b) => a - b), order, "scripts load in dependency order");
 });
 
 test("frontend modules have no absolute /api or /static URLs", () => {
-  for (const src of [APP_SRC, PROVIDERS_SRC, LAYOUT_SRC, WORKSPACE_SRC]) {
+  for (const src of [SRC.app, SRC.providers, SRC.layout, SRC.workspace]) {
     assert.ok(!/["'`]\/(api|static)\//.test(src));
   }
 });
 
-test("no token needed: no modal, no header, sub-path prefix, safe numeric rendering", async () => {
+test("v0.11-only UI is gone: card sizes, force pause, tool toggle, fold buttons, streaming, engine stream", () => {
+  for (const gone of [
+    "select-card-size",
+    "btn-force-pause",
+    "chk-show-tools",
+    "btn-reset-default",
+    "btn-expand-all",
+    "btn-collapse-all",
+    "feed-streaming-container",
+    "btn-shuffle-identities",
+    "moderator-status-pill",
+  ]) {
+    assert.ok(!HTML_SRC.includes(gone), `index.html still has ${gone}`);
+    assert.ok(!SRC.app.includes(gone), `app.js still refers to ${gone}`);
+  }
+  for (const gone of ["streaming_draft", "stream_chunk", "interrupt_quotas", "tool_call", "thought_text", "showToolCalls", "level1Expanded"]) {
+    assert.ok(!SRC.app.includes(gone), `app.js still handles ${gone}`);
+  }
+  assert.ok(!SRC.layout.includes("cardSize") && !SRC.layout.includes("CardSize"));
+  for (const gone of ["CARD_SIZES", "normalizeCardSize", "loadCardSize", "saveCardSize"]) {
+    assert.equal(Core[gone], undefined, `core still exports ${gone}`);
+  }
+  // the control buttons that remain
+  for (const id of ["btn-new", "btn-save", "btn-start", "btn-pause", "btn-resume", "btn-import-session"]) {
+    assert.ok(HTML_SRC.includes(`id="${id}"`), `missing #${id}`);
+  }
+  // ... and the v0.12 widgets
+  for (const id of ["select-viewpoint", "request-hints", "status-banner", "metrics-popover", "participants-grid", "channels-list", "feed-records-container"]) {
+    assert.ok(HTML_SRC.includes(`id="${id}"`), `missing #${id}`);
+  }
+});
+
+// ---- startup / auth ----------------------------------------------------------------
+test("no token needed: no modal, no header, sub-path prefix, first SSE connect carries no resume id", async () => {
   const calls = [];
   const env = makeEnv({ fetchImpl: routeFetch(calls) });
   env.run();
@@ -469,12 +82,7 @@ test("no token needed: no modal, no header, sub-path prefix, safe numeric render
 
   assert.deepEqual(
     calls.map((c) => c.url),
-    [
-      "/arena/api/providers",
-      "/arena/api/settings/bindings",
-      "/arena/api/state",
-      "/arena/api/workspaces",
-    ]
+    ["/arena/api/providers", "/arena/api/settings/bindings", "/arena/api/state", "/arena/api/workspaces"]
   );
   assert.ok(calls.every((c) => !("X-Arena-Token" in c.init.headers)));
   assert.notEqual(env.el("token-modal").style.display, "flex");
@@ -482,21 +90,10 @@ test("no token needed: no modal, no header, sub-path prefix, safe numeric render
   // moderator binding shown in the status pill; no legacy config endpoint used
   assert.match(env.el("api-status-label").textContent, /DeepSeek \/ model-x/);
   assert.ok(calls.every((c) => !c.url.endsWith("/api/config/llm")));
+  assert.equal(env.el("app-version").textContent, "v0.12-test"); // the application version, not the session's
 
-  // numeric fields are coerced, never injected
-  const fHtml = env.el("factions-list").innerHTML;
-  assert.ok(!fHtml.includes("<img"));
-  assert.match(fHtml, /0 \/ 3/);
-  assert.ok(fHtml.includes("F&#39;"));
-  assert.ok(!env.el("tag-stats-list").innerHTML.includes("<script"));
-  const side = env.el("channels-list").innerHTML;
-  assert.ok(!side.includes("<i>"));
-  assert.match(side, /\(0\/2\)/);
-  const board = env.el("participants-grid").innerHTML;
-  assert.ok(!board.includes("<b>"));
-  assert.ok(board.includes("&#39;"));
-
-  // SSE is delayed 300ms and uses the prefixed URL without a token
+  // SSE is delayed 300ms and uses the prefixed URL without a token; the first stream always starts
+  // with a snapshot (no last_event_id even though /api/state reported event_id=100)
   env.runNextTimer();
   assert.equal(env.esInstances.length, 1);
   assert.equal(env.esInstances[0].url, "/arena/api/events");
@@ -546,6 +143,7 @@ test("cancelling the token modal leaves a clickable banner and a clear toast", a
   assert.ok(env.el("conn-banner").classList.contains("clickable"));
 });
 
+// ---- SSE reconnect ---------------------------------------------------------------------
 test("SSE reconnect: backoff grows, single timer, banner shown then cleared on recovery", async () => {
   const calls = [];
   const env = makeEnv({ fetchImpl: routeFetch(calls) });
@@ -591,15 +189,77 @@ test("SSE reconnect: backoff grows, single timer, banner shown then cleared on r
   assert.ok(env.timers[0].ms <= 1000);
 });
 
-test("SSE messages are coalesced into one render per frame", async () => {
-  const calls = [];
-  const env = makeEnv({ fetchImpl: routeFetch(calls) });
-  env.run();
+test("SSE resume: a reconnect asks for events after the last received id; replays are skipped", async () => {
+  const { env } = await H.bootLive();
+  const es1 = env.lastEs();
+  es1.onopen();
+  // the snapshot carries its own id (event 500); two live events follow
+  env.sse("snapshot", { session: F.makeSession({ event_id: 500 }) }, 500);
+  env.sse("phase.changed", { text: "第 1 夜" }, 501);
+  env.sse("phase.changed", { text: "第 2 天" }, 502);
+  assert.equal(env.app().state.sseResumeId, 502);
+  assert.equal(env.app().state.lastEventId, 502);
+
+  es1.onerror(); // the stream breaks
   await settle();
-  env.flushRaf();
   env.runNextTimer();
-  const es = env.esInstances[0];
-  const before = env.el("participants-grid").innerHTML;
+  const es2 = env.lastEs();
+  assert.notEqual(es2, es1);
+  // a re-created EventSource would not send Last-Event-ID by itself: the id travels in the URL
+  assert.equal(es2.url, "/arena/api/events?last_event_id=502");
+
+  // the server replays what the client already has (<=502) and then continues (503...)
+  env.sse("phase.changed", { text: "旧事件（重复）" }, 502);
+  env.sse("phase.changed", { text: "更旧的事件" }, 499);
+  assert.equal(env.app().state.session.phase_text, "第 2 天");
+  env.sse("phase.changed", { text: "第 2 天 · 放逐投票" }, 503);
+  assert.equal(env.app().state.session.phase_text, "第 2 天 · 放逐投票");
+  assert.equal(env.app().state.sseResumeId, 503);
+
+  // token + resume id are both carried in the query string
+  env.storage.set("arena_api_token", "tok");
+  es2.onerror();
+  await settle();
+  env.runNextTimer();
+  assert.equal(env.lastEs().url, "/arena/api/events?token=tok&last_event_id=503");
+});
+
+test("a snapshot after a gap replaces the session and resets the resume point (even to a lower id)", async () => {
+  const { env } = await H.bootLive();
+  env.sse("snapshot", { session: F.makeSession({ event_id: 900 }) }, 900);
+  assert.equal(env.app().state.lastEventId, 900);
+  // the server restarted: its ids start over and a snapshot comes first
+  env.sse("snapshot", { session: F.makeSession({ session_id: "after-restart", event_id: 3, status: "paused" }) }, 3);
+  assert.equal(env.app().state.lastEventId, 3);
+  assert.equal(env.app().state.session.session_id, "after-restart");
+  env.sse("phase.changed", { text: "继续" }, 4);
+  assert.equal(env.app().state.session.phase_text, "继续");
+});
+
+test("workspace.changed reloads the page (the whole server context changed)", async () => {
+  const { env } = await H.bootLive();
+  env.sse("snapshot", { session: F.makeSession() }, 10);
+  assert.equal(env.reloads.length, 0);
+  env.sse("workspace.changed", {}, 11);
+  assert.equal(env.reloads.length, 1);
+});
+
+test("SSE error events are toasted; broken payloads never crash the stream", async () => {
+  const { env } = await H.bootLive();
+  env.sse("snapshot", { session: F.makeSession() }, 10);
+  env.sse("error", { message: "模拟后端错误" }, 11);
+  assert.ok(env.toasts.some((t) => /模拟后端错误/.test(t.textContent)));
+  const es = env.lastEs();
+  assert.doesNotThrow(() => es.onmessage({ data: "{not json" }));
+  assert.doesNotThrow(() => es.onmessage({ data: "null" }));
+  assert.doesNotThrow(() => es.onmessage({ data: JSON.stringify({ id: 12, type: "no.such.event", data: { x: 1 } }) }));
+  env.flushRaf();
+  assert.equal(env.app().state.session.session_id, "s-test");
+});
+
+test("SSE events are coalesced into one render per frame", async () => {
+  const { env } = await H.bootLive();
+  env.sse("snapshot", { session: F.makeSession() }, 10);
   let renders = 0;
   Object.defineProperty(env.el("app-title"), "textContent", {
     set() {
@@ -610,56 +270,40 @@ test("SSE messages are coalesced into one render per frame", async () => {
     },
   });
   for (let i = 0; i < 20; i++) {
-    es.onmessage({ data: JSON.stringify({ event: "stream_chunk", session: SESSION }) });
+    env.sse("agent.status", { id: "p01", state: i % 2 ? "thinking" : "acting" }, 11 + i, { flush: false });
   }
-  es.onmessage({ data: JSON.stringify({ event: "state_update", session: SESSION }) });
+  env.sse("phase.changed", { text: "第 2 天" }, 40, { flush: false });
   assert.equal(renders, 0); // nothing rendered synchronously
   env.flushRaf();
-  assert.equal(renders, 1); // one frame, one render (full wins over chunk-only)
-  assert.equal(env.el("participants-grid").innerHTML, before);
+  assert.equal(renders, 1); // one frame, one top-bar paint
 });
 
-test("streaming draft is patched in place, not recreated, on each chunk", async () => {
-  const calls = [];
-  const env = makeEnv({ fetchImpl: routeFetch(calls) });
-  env.run();
+test("an HTTP session that is older than the stream does not roll the store back", async () => {
+  const { env, backend } = await H.bootLive();
+  env.sse("snapshot", { session: F.makeSession({ event_id: 200, status: "running" }) }, 200);
+  env.sse("phase.changed", { text: "第 3 天" }, 205);
+  // the control response was produced at event 201: older than what the stream already delivered
+  backend.controlSession = F.makeSession({ event_id: 201, status: "paused", phase_text: "第 1 天" });
+  env.el("btn-pause").dispatch("click");
+  await settle();
+  assert.equal(env.app().state.session.status, "running"); // SSE is ahead: the stale body is ignored
+  assert.equal(env.app().state.session.phase_text, "第 3 天");
+  // a response at least as new is adopted
+  backend.controlSession = F.makeSession({ event_id: 210, status: "paused", phase_text: "第 3 天 · 暂停" });
+  env.el("btn-pause").dispatch("click");
   await settle();
   env.flushRaf();
-  env.runNextTimer();
-  const es = env.esInstances[0];
-  const draft = (text) => ({
-    ...SESSION,
-    streaming_draft: {
-      actor_id: "p1",
-      actor_name: "A",
-      action_id: "a1",
-      stream: "channel",
-      channel_id: "c1",
-      thought_text: "",
-      content_text: text,
-    },
-  });
-  es.onmessage({ data: JSON.stringify({ event: "stream_chunk", session: draft("he") }) });
-  env.flushRaf();
-  const container = env.el("feed-streaming-container");
-  assert.equal(container.children.length, 1);
-  const card1 = container.children[0];
-  es.onmessage({ data: JSON.stringify({ event: "stream_chunk", session: draft("hello wor") }) });
-  env.flushRaf();
-  assert.equal(container.children.length, 1);
-  assert.equal(container.children[0], card1, "card element must be reused");
-  // draft finished -> removed
-  es.onmessage({ data: JSON.stringify({ event: "state_update", session: SESSION }) });
-  env.flushRaf();
-  assert.equal(container.children.length, 0);
+  assert.equal(env.app().state.session.status, "paused");
+  assert.equal(env.app().state.lastEventId, 210);
 });
 
-test("import clears level1Expanded/level2Expanded and resets on a new session id", async () => {
+// ---- import / non-JSON ---------------------------------------------------------------------
+test("import adopts the imported game (new session id) and toasts", async () => {
   const calls = [];
   const fetchImpl = async (url, init) => {
     calls.push({ url, init });
     if (url.endsWith("/api/session/import")) {
-      return resp(200, { session: { ...SESSION, session_id: "s2" } });
+      return resp(200, { session: F.makeSession({ session_id: "s2", status: "paused" }) });
     }
     return routeFetch([])(url, init);
   };
@@ -670,16 +314,16 @@ test("import clears level1Expanded/level2Expanded and resets on a new session id
   const file = { name: "x.json", text: async () => JSON.stringify({ session: {} }) };
   env.el("file-import-session").dispatch("change", { target: { files: [file], value: "" } });
   await settle();
+  env.flushRaf();
   const imp = calls.find((c) => c.url.endsWith("/api/session/import"));
   assert.ok(imp, "import request sent");
   assert.ok(env.toasts.some((t) => /已成功导入/.test(t.textContent)));
+  assert.equal(env.app().state.session.session_id, "s2");
+  assert.equal(env.app().state.selectedChannel, "all");
 });
 
 test("non-JSON 500 on init does not crash and toasts a clear message", async () => {
-  const fetchImpl = async (url) => {
-    if (url.endsWith("/api/config/llm")) return resp(500, "<html>boom</html>", "text/html");
-    return resp(500, "<html>boom</html>", "text/html");
-  };
+  const fetchImpl = async () => resp(500, "<html>boom</html>", "text/html");
   const env = makeEnv({ fetchImpl });
   env.run();
   await settle();
@@ -688,35 +332,15 @@ test("non-JSON 500 on init does not crash and toasts a clear message", async () 
   assert.ok(!/SyntaxError|Unexpected token/.test(msgs));
 });
 
-// ---- v0.10 ------------------------------------------------------------------
-const target = (map, extra = {}) => ({
-  closest: (sel) => {
-    for (const k of Object.keys(map)) if (sel.includes(k)) return { getAttribute: (a) => map[k][a] ?? null };
-    return null;
-  },
-  getAttribute: () => null,
-  ...extra,
-});
-
-async function boot(overrides) {
-  const backend = makeBackend(overrides);
-  const env = makeEnv({ fetchImpl: backend.fetch });
-  env.run();
-  await settle();
-  env.flushRaf();
-  return { env, backend };
-}
-const posts = (b, method, suffix) =>
-  b.calls.filter((c) => c.method === method && c.url.endsWith(suffix));
-
-test("startup loads providers + bindings; seat cards show model binding; no /config/llm", async () => {
+// ---- v0.10 ------------------------------------------------------------------------------------
+test("startup loads providers + bindings; the moderator binding is shown in the top bar", async () => {
   const { env, backend } = await boot();
   assert.ok(backend.calls.some((c) => c.url.endsWith("/api/providers")));
   assert.ok(backend.calls.some((c) => c.url.endsWith("/api/settings/bindings")));
   assert.ok(!backend.calls.some((c) => c.url.endsWith("/api/config/llm")));
-  const board = env.el("participants-grid").innerHTML;
-  assert.match(board, /card-binding/);
-  assert.match(board, /未绑定/); // p1 has no binding yet
+  assert.match(env.el("api-status-label").textContent, /DeepSeek \/ model-x/);
+  // the tiles themselves carry no model line any more (it lives in the metrics popover / bindings dialog)
+  assert.ok(!env.el("participants-grid").innerHTML.includes("card-binding"));
 });
 
 test("provider modal: protocol options are the three localized labels; read-only provider is locked", async () => {
@@ -881,22 +505,17 @@ test("models: remove sends DELETE with model id in the body (slash-safe); 409 is
   assert.match(env.toasts[env.toasts.length - 1].textContent, /仍被主持人绑定/);
 });
 
-test("bindings: moderator + 12-style player rows, provider change resets model, save PUTs payload", async () => {
-  const session = {
-    ...SESSION,
+test("bindings: moderator + player rows, provider change resets model, save PUTs payload", async () => {
+  const session = F.makeSession({
     status: "paused",
-    participants: [
-      { id: "p01", seat: 1, name: "甲", tags: [] },
-      { id: "p02", seat: 2, name: "乙", tags: [] },
-    ],
-  };
+    participants: F.makeParticipants().slice(0, 2),
+  });
   const { env, backend } = await boot({ session });
   env.el("btn-open-bindings-modal").dispatch("click");
   await settle();
   assert.equal(env.el("bindings-modal").style.display, "flex");
   const html = env.el("bindings-table").innerHTML;
-  assert.equal((html.match(/class="binding-row"/g) || []).length, 3);
-  assert.match(html, /低|low（浅）/);
+  assert.equal((html.match(/class="binding-row/g) || []).length, 3);
   assert.match(html, /xhigh（极深）/);
   assert.ok(!/ disabled/.test(html));
   assert.match(env.el("bindings-lock-hint").textContent, /执行深度/);
@@ -923,7 +542,7 @@ test("bindings: moderator + 12-style player rows, provider change resets model, 
 });
 
 test("bindings: partially filled row is rejected locally; apply-all copies the moderator", async () => {
-  const session = { ...SESSION, status: "idle", participants: [{ id: "p01", seat: 1, name: "甲", tags: [] }] };
+  const session = F.makeSession({ status: "idle", participants: F.makeParticipants().slice(0, 1) });
   const { env, backend } = await boot({ session });
   env.el("btn-open-bindings-modal").dispatch("click");
   await settle();
@@ -942,9 +561,9 @@ test("bindings: partially filled row is rejected locally; apply-all copies the m
   assert.equal(put.body.bindings.p01.model_id, "model-x");
 });
 
-test("bindings are LOCKED while running: controls disabled, save does not send, backend 409 shows", async () => {
-  const session = { ...SESSION, status: "running", participants: [{ id: "p01", seat: 1, name: "甲", tags: [] }] };
-  const { env, backend } = await boot({ session });
+test("bindings are LOCKED while running: controls disabled, save does not send, and unlock live over SSE", async () => {
+  const session = F.makeSession({ status: "running", participants: F.makeParticipants().slice(0, 1) });
+  const { env, backend } = await H.bootLive({ session });
   env.el("btn-open-bindings-modal").dispatch("click");
   await settle();
   const html = env.el("bindings-table").innerHTML;
@@ -965,18 +584,14 @@ test("bindings are LOCKED while running: controls disabled, save does not send, 
   assert.equal(env.el("btn-delete-provider").disabled, true);
   assert.equal(env.el("input-provider-key").disabled, false);
 
-  // when the game pauses the lock is released live
-  const paused = { ...session, status: "paused" };
-  backend.session = paused;
-  const es = (() => { env.runNextTimer(); return env.esInstances[0]; })();
-  es.onmessage({ data: JSON.stringify({ event: "status_change", session: paused }) });
-  env.flushRaf();
+  // when the game pauses the lock is released live: session.updated is merged and providers.js is told
+  env.sse("session.updated", { status: "paused", pause_reason: "user" }, 900);
   assert.equal(env.el("btn-delete-provider").disabled, false);
   assert.equal(env.el("select-provider-protocol").disabled, false);
 });
 
 test("backend 409 on saving bindings is shown as a toast", async () => {
-  const session = { ...SESSION, status: "paused", participants: [] };
+  const session = F.makeSession({ status: "paused", participants: [] });
   const { env, backend } = await boot({ session });
   backend.failures["PUT /api/settings/bindings"] = [409, "对局运行中，不能修改模型绑定"];
   env.el("btn-open-bindings-modal").dispatch("click");
@@ -988,14 +603,13 @@ test("backend 409 on saving bindings is shown as a toast", async () => {
 });
 
 test("restored session shows a notice, never auto-starts, and can be dismissed", async () => {
-  const session = {
-    ...SESSION,
+  const session = F.makeSession({
     status: "paused",
     restored_from_save: true,
     restore_notice: "已恢复上次对局（已暂停）",
     binding_issues: [{ actor_id: "p01", message: "Provider 已被删除" }],
-  };
-  const { env, backend } = await boot({ session });
+  });
+  const { env, backend } = await H.bootLive({ session });
   assert.equal(env.el("restore-notice").hidden, false);
   assert.match(env.el("restore-notice-text").textContent, /已恢复上次对局（已暂停）/);
   assert.match(env.el("restore-notice-text").textContent, /p01（Provider 已被删除）/);
@@ -1003,14 +617,12 @@ test("restored session shows a notice, never auto-starts, and can be dismissed",
   env.el("btn-dismiss-notice").dispatch("click");
   assert.equal(env.el("restore-notice").hidden, true);
   // a fresh, non-restored snapshot keeps it hidden
-  env.runNextTimer();
-  env.esInstances[0].onmessage({ data: JSON.stringify({ event: "state_update", session: { ...session, restored_from_save: false, binding_issues: [] } }) });
-  env.flushRaf();
+  env.sse("snapshot", { session: { ...session, restored_from_save: false, binding_issues: [] } }, 50);
   assert.equal(env.el("restore-notice").hidden, true);
 });
 
 test("/api/state top-level restored=true also raises the notice", async () => {
-  const backend = makeBackend({ session: { ...SESSION, status: "paused" } });
+  const backend = makeBackend({ session: F.makeSession({ status: "paused" }) });
   const orig = backend.fetch;
   backend.fetch = async (url, init) => {
     if (url.endsWith("/api/state")) return resp(200, { restored: true, session: backend.session });
@@ -1049,6 +661,7 @@ test("sessions modal lists, loads and deletes external saves (current one is pro
   assert.ok(backend.calls.some((c) => c.method === "POST" && c.url.endsWith("/api/sessions/s9/load")));
   assert.equal(env.el("sessions-modal").style.display, "none");
   assert.ok(!backend.calls.some((c) => c.url.includes("/control/start")));
+  assert.equal(env.app().state.session.session_id, "s9"); // the loaded game replaced the old one
 });
 
 test("UI keeps thinking depth and execution depth distinct", () => {
@@ -1057,15 +670,30 @@ test("UI keeps thinking depth and execution depth distinct", () => {
   assert.match(HTML_SRC, /思考深度 ≠ 执行深度/);
 });
 
-test("usage cost comes from the server total (price snapshots)", async () => {
-  const session = { ...SESSION, usage_stats: { total_tokens: 1500, total_cost_usd: 0.1234 } };
-  const { env } = await boot({ session });
+test("usage cost comes from the server total (price snapshots) and stays live with agent.metrics", async () => {
+  const session = F.makeSession({ usage_stats: { total_tokens: 1500, prompt_tokens: 1000, completion_tokens: 500, total_cost_usd: 0.1234, by_actor: {}, by_model: {} } });
+  const { env } = await H.bootLive({ session });
   assert.equal(env.el("usage-cost-text").textContent, "$0.1234");
   assert.match(env.el("usage-tokens-text").textContent, /1\.5K/);
+  env.sse("agent.metrics", { id: "p01", calls: 1, prompt_tokens: 1000, completion_tokens: 1000, cost_usd: 0.0766, tool_calls: 2, thinking_rounds: 1, rejections: 0 }, 160);
+  assert.equal(env.el("usage-cost-text").textContent, "$0.2000");
+  assert.match(env.el("usage-tokens-text").textContent, /3\.5K/);
 });
 
-// ---- v0.11: app wiring for layout + workspace --------------------------------
-test("v0.11 app: workspace label, board collapse, card size and workspace modal are wired", async () => {
+test("execution depth: the select posts the chosen depth; the session value is mirrored back", async () => {
+  const { env, backend } = await H.bootLive({ session: F.makeSession({ execution_depth: "high" }) });
+  assert.equal(env.el("select-exec-depth").value, "high");
+  env.el("select-exec-depth").value = "low";
+  env.el("select-exec-depth").dispatch("change");
+  await settle();
+  const post = backend.calls.find((c) => c.url.endsWith("/api/session/execution-depth"));
+  assert.deepEqual(post.body, { execution_depth: "low" });
+  env.sse("session.updated", { execution_depth: "xhigh" }, 170);
+  assert.equal(env.el("select-exec-depth").value, "xhigh");
+});
+
+// ---- v0.11: app wiring for layout + workspace ------------------------------------------------------
+test("v0.11 app: workspace label, board collapse and workspace modal are wired", async () => {
   const { env, backend } = await boot();
   assert.ok(backend.calls.some((c) => c.url.endsWith("/api/workspaces")));
   assert.equal(env.el("workspace-name-label").textContent, "Av11WS");
@@ -1076,11 +704,6 @@ test("v0.11 app: workspace label, board collapse, card size and workspace modal 
   env.el("btn-toggle-board").dispatch("click");
   assert.ok(!env.el("main-container").classList.contains("board-collapsed"));
 
-  env.el("select-card-size").value = "xlarge";
-  env.el("select-card-size").dispatch("change");
-  assert.ok(env.el("participants-grid").classList.contains("card-size-xlarge"));
-  assert.equal(env.storage.get("arena_card_size_v1"), "xlarge");
-
   env.el("btn-open-workspace-modal").dispatch("click");
   await settle(40);
   assert.equal(env.el("workspace-modal").style.display, "flex");
@@ -1089,32 +712,15 @@ test("v0.11 app: workspace label, board collapse, card size and workspace modal 
 });
 
 test("v0.11 app: a successful workspace switch reloads the page (window.location)", async () => {
-  const { env, backend } = await boot();
-  let reloads = 0;
-  env.sandbox.location.reload = () => {
-    reloads += 1;
-  };
+  // switching is refused while a game runs, so start from a fresh (idle) one
+  const { env, backend } = await boot({ session: F.makeSession({ status: "idle" }) });
   env.el("btn-open-workspace-modal").dispatch("click");
   await settle(40);
   env.el("input-workspace-path").value = "D:\\Arena-WS\\Next";
   env.el("btn-switch-workspace").dispatch("click");
   await settle(40);
   assert.equal(backend.lastWorkspaceSelect.path, "D:\\Arena-WS\\Next");
-  assert.equal(reloads, 1);
+  assert.equal(env.reloads.length, 1);
 });
 
-// ---- runner -----------------------------------------------------------------
-(async () => {
-  let failed = 0;
-  for (const [name, fn] of tests) {
-    try {
-      await fn();
-      console.log(`ok   - ${name}`);
-    } catch (e) {
-      failed++;
-      console.log(`FAIL - ${name}\n${e && e.stack ? e.stack : e}`);
-    }
-  }
-  console.log(`\n${tests.length - failed}/${tests.length} passed`);
-  process.exit(failed ? 1 : 0);
-})();
+H.runTests(tests);

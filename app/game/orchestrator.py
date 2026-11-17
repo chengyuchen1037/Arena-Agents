@@ -212,6 +212,7 @@ class GameOrchestrator(SessionRuntimeMixin):
 
     async def shuffle_identities(self) -> GameSession:
         """Re-deal the identities of a game that has not started."""
+        self._ensure_not_switching()  # never swap the world under a workspace switch / without a workspace
         if self.session.status != "idle":
             raise RuntimeError("仅未开始的新对局可以刷新身份；请先新建对局。")
         self.world, self.clock = self._new_world(self.spec)

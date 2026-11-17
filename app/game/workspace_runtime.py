@@ -198,12 +198,16 @@ class WorkspaceRuntimeMixin:
         module = self._ws()
         try:
             current = module.get_active_workspace()
+            changed = False
             if previous is None:
                 if current is not None:
                     module.deactivate_workspace()
+                    changed = True
             elif current is None or not self._same_root(current.root, previous.root):
                 module.activate_workspace(previous)
-            self._clear_store_caches()
+                changed = True
+            if changed:  # nothing was switched (e.g. the target was locked): nothing to clear
+                self._clear_store_caches()
         except Exception as exc:  # noqa: BLE001 - nothing more can be done; surface as degraded
             logger.exception("Rolling back the workspace switch failed")
             self._workspace_failed = True

@@ -455,7 +455,7 @@
       stat(numText(m.rejections), "被拒绝") +
       stat(Core.formatCount(m.promptTokens), "输入 token") +
       stat(Core.formatCount(m.completionTokens), "输出 token") +
-      stat(escapeHtml(Core.formatCost(m.costUsd)), "费用", " pop-stat-wide") +
+      stat(escapeHtml(Core.formatCost(m.costUsd)), "费用（累计）", " pop-stat-wide") +
       `</div>`
     );
   }
@@ -532,21 +532,31 @@
     const sum = View.floorSummary(state.session, ch);
     const active = state.selectedChannel === ch.id;
     const n = unread.byChannel[ch.id] || 0;
+    const attrs =
+      `data-channel="${escapeHtml(ch.id)}" title="${escapeHtml(ch.name)}（${escapeHtml(ch.id)}）"`;
+    if (compact) {
+      // System DMs: one line. The floor chip is only worth showing when the DM is not simply open
+      // (closed as a punishment, frozen, ...): a free DM is the normal case.
+      const chip =
+        sum.icon && sum.kind !== "free"
+          ? `<span class="floor-chip floor-${sum.kind} chip-icon" title="${escapeHtml(sum.text)}">${sum.icon}</span>`
+          : "";
+      return (
+        `<div class="channel-item compact${active ? " active" : ""}${n ? " has-unread" : ""}" ${attrs}>` +
+        `<div class="channel-row-top"><span class="channel-name">${escapeHtml(ch.name)}</span>` +
+        `<span class="channel-flags">${chip}${unreadBadge(n)}</span></div></div>`
+      );
+    }
     const chip = sum.icon
       ? `<span class="floor-chip floor-${sum.kind}" title="${escapeHtml(sum.detail || sum.text)}">${sum.icon} ${escapeHtml(
           sum.text
         )}</span>`
       : "";
     const detail = sum.detail ? `<div class="channel-detail">${escapeHtml(sum.detail)}</div>` : "";
-    const owner = ch.owner ? View.actorLabel(state.session, ch.owner) : "";
-    const meta = compact
-      ? `<span class="channel-members">${escapeHtml(owner)}</span>`
-      : `<span class="channel-members">${numText(ch.members.length)} 人</span>`;
     return (
-      `<div class="channel-item${compact ? " compact" : ""}${active ? " active" : ""}${n ? " has-unread" : ""}"` +
-      ` data-channel="${escapeHtml(ch.id)}" title="${escapeHtml(ch.name)}（${escapeHtml(ch.id)}）">` +
+      `<div class="channel-item${active ? " active" : ""}${n ? " has-unread" : ""}" ${attrs}>` +
       `<div class="channel-row-top"><span class="channel-name">${escapeHtml(ch.name)}</span>${unreadBadge(n)}</div>` +
-      `<div class="channel-meta">${chip}${meta}</div>${detail}</div>`
+      `<div class="channel-meta">${chip}<span class="channel-members">${numText(ch.members.length)} 人</span></div>${detail}</div>`
     );
   }
 
@@ -589,6 +599,17 @@
     }
     for (const ch of groups) html.push(channelItemHtml(ch, unread, false));
 
+    // Challenge tickets are their own group, right below the channels (the system DMs follow).
+    if (tickets.length) {
+      const openCount = tickets.filter((t) => t.status !== "resolved").length;
+      html.push(
+        `<div class="channel-group-title tickets-title">质询工单 <span class="group-count">${numText(
+          tickets.length
+        )}</span>${openCount ? `<span class="ticket-open-count">${numText(openCount)} 待处理</span>` : ""}</div>`
+      );
+      for (const t of tickets) html.push(ticketHtml(t));
+    }
+
     if (dms.length) {
       const selectedIsDm = dms.some((c) => c.id === state.selectedChannel);
       const open = state.dmGroupOpen || selectedIsDm;
@@ -600,16 +621,6 @@
           )}</span>${open ? "" : unreadBadge(dmUnread)}</div>`
       );
       if (open) for (const ch of dms) html.push(channelItemHtml(ch, unread, true));
-    }
-
-    if (tickets.length) {
-      const openCount = tickets.filter((t) => t.status !== "resolved").length;
-      html.push(
-        `<div class="channel-group-title tickets-title">质询工单 <span class="group-count">${numText(
-          tickets.length
-        )}</span>${openCount ? `<span class="ticket-open-count">${numText(openCount)} 待处理</span>` : ""}</div>`
-      );
-      for (const t of tickets) html.push(ticketHtml(t));
     }
 
     const out = html.join("");

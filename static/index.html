@@ -8,38 +8,57 @@
   <link rel="stylesheet" href="static/css/style.css?v=0.12" />
 </head>
 <body>
-  <!-- 顶部导航与控制栏 -->
+  <!-- 顶部导航与控制栏：第一行是主控制，第二行是对局状态（状态 / 阶段 / 请求进度） -->
   <header class="topbar">
-    <div class="topbar-left">
-      <div class="brand-group">
-        <span class="brand-title" id="app-title">Arena-Agents</span>
-        <span class="version-badge" id="app-version"></span>
+    <div class="topbar-main">
+      <div class="topbar-left">
+        <div class="brand-group">
+          <span class="brand-title" id="app-title">Arena-Agents</span>
+          <span class="version-badge" id="app-version"></span>
+        </div>
+
+        <!-- v0.11: 工作文件夹入口（Provider / 模板 / 绑定 / 对局都保存在工作文件夹内） -->
+        <button class="btn btn-workspace" id="btn-open-workspace-modal" title="选择工作文件夹（Provider、模板、模型绑定与对局存档都保存在该文件夹内）">
+          <span class="folder-icon" aria-hidden="true">📁</span>
+          <span class="workspace-name" id="workspace-name-label">工作文件夹</span>
+        </button>
+
+        <button class="btn btn-xs layout-toggle" id="btn-toggle-board" title="折叠/展开参与者看板" aria-pressed="false">
+          <span id="btn-toggle-board-label">折叠看板</span>
+        </button>
+
+        <button class="btn btn-theme" id="btn-theme" title="切换明暗主题" aria-label="切换明暗主题">
+          <span class="theme-icon">◐</span>
+        </button>
+
+        <!-- v0.12: 观战视角（上帝视角 / 某名玩家）。纯前端过滤，切换不会重新请求服务器 -->
+        <label class="viewpoint-picker" for="select-viewpoint"
+               title="观战视角：上帝视角看到全部；选择某名玩家后，只显示该玩家能看到的消息、频道与标签">
+          <span class="viewpoint-icon" aria-hidden="true">👁</span>
+          <select id="select-viewpoint" class="viewpoint-select">
+            <option value="god" selected>上帝视角</option>
+          </select>
+        </label>
       </div>
 
-      <!-- v0.11: 工作文件夹入口（Provider / 模板 / 绑定 / 对局都保存在工作文件夹内） -->
-      <button class="btn btn-workspace" id="btn-open-workspace-modal" title="选择工作文件夹（Provider、模板、模型绑定与对局存档都保存在该文件夹内）">
-        <span class="folder-icon" aria-hidden="true">📁</span>
-        <span class="workspace-name" id="workspace-name-label">工作文件夹</span>
-      </button>
+      <div class="topbar-right">
+        <div class="usage-telemetry-pill" id="usage-telemetry-pill" title="点击打开模型绑定（费用按每次调用的价格快照累加）">
+          <span class="usage-icon">🪙</span>
+          <span id="usage-tokens-text">0 Tokens</span>
+          <span class="usage-sep">&middot;</span>
+          <span class="usage-cost" id="usage-cost-text">$0.0000</span>
+        </div>
+        <span class="topbar-divider"></span>
+        <button class="btn btn-default" id="btn-new" title="重置并开启新对局">新建</button>
+        <button class="btn btn-default" id="btn-save" title="保存并导出当前对局 JSON">保存</button>
+        <span class="topbar-divider"></span>
+        <button class="btn btn-primary-outline" id="btn-start">开始</button>
+        <button class="btn btn-default" id="btn-pause" disabled>暂停</button>
+        <button class="btn btn-resume" id="btn-resume" disabled title="继续对局；对局结束后也可以继续">继续</button>
+      </div>
+    </div>
 
-      <button class="btn btn-xs layout-toggle" id="btn-toggle-board" title="折叠/展开参与者看板" aria-pressed="false">
-        <span id="btn-toggle-board-label">折叠看板</span>
-      </button>
-
-      <button class="btn btn-theme" id="btn-theme" title="切换明暗主题">
-        <span class="theme-icon">◐</span> 主题
-      </button>
-
-      <!-- v0.12: 观战视角（上帝视角 / 某名玩家）。纯前端过滤，切换不会重新请求服务器 -->
-      <label class="viewpoint-picker" for="select-viewpoint"
-             title="观战视角：上帝视角看到全部；选择某名玩家后，只显示该玩家能看到的消息、频道与标签">
-        <span class="viewpoint-icon" aria-hidden="true">👁</span>
-        <span class="viewpoint-label">视角</span>
-        <select id="select-viewpoint" class="viewpoint-select">
-          <option value="god" selected>上帝视角</option>
-        </select>
-      </label>
-
+    <div class="topbar-status">
       <div class="status-pill" id="active-status-pill">
         <span class="status-dot idle" id="active-status-dot"></span>
         <span id="active-status-text">未开始 · 点击「开始」由主持人初始化对局</span>
@@ -51,22 +70,6 @@
 
       <!-- v0.12: 请求进度，例如「🗳 投票中 7/12」 -->
       <div class="request-hints" id="request-hints" aria-live="polite"></div>
-    </div>
-
-    <div class="topbar-right">
-      <div class="usage-telemetry-pill" id="usage-telemetry-pill" title="点击打开模型绑定（费用按每次调用的价格快照累加）">
-        <span class="usage-icon">🪙</span>
-        <span id="usage-tokens-text">0 Tokens</span>
-        <span class="usage-sep">&middot;</span>
-        <span class="usage-cost" id="usage-cost-text">$0.0000</span>
-      </div>
-      <span class="topbar-divider"></span>
-      <button class="btn btn-default" id="btn-new" title="重置并开启新对局">新建</button>
-      <button class="btn btn-default" id="btn-save" title="保存并导出当前对局 JSON">保存</button>
-      <span class="topbar-divider"></span>
-      <button class="btn btn-primary-outline" id="btn-start">开始</button>
-      <button class="btn btn-default" id="btn-pause" disabled>暂停</button>
-      <button class="btn btn-resume" id="btn-resume" disabled title="继续对局；对局结束后也可以继续">继续</button>
     </div>
   </header>
 

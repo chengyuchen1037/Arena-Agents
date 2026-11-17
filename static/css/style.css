@@ -122,22 +122,36 @@ body {
    Topbar
    ========================================================================== */
 .topbar {
-  min-height: 54px;
   flex-shrink: 0;
   background: var(--bg-surface);
   border-bottom: 1px solid var(--border-color);
   display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 18px 7px;
+}
+
+/* row 1: identity + main controls */
+.topbar-main {
+  display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  padding: 5px 18px;
-  gap: 8px 14px;
+  gap: 6px 14px;
+}
+
+/* row 2: status / phase / request progress */
+.topbar-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
 }
 
 .topbar-left {
   display: flex;
   align-items: center;
-  gap: 8px 12px;
+  gap: 8px 10px;
   flex-wrap: wrap;
   min-width: 0;
 }
@@ -1764,6 +1778,38 @@ body.arena-resizing * {
 }
 
 /* ---- top bar additions ---- */
+.topbar .brand-title {
+  font-size: 19px;
+}
+
+.topbar .btn {
+  padding: 5px 13px;
+  font-size: 13.5px;
+}
+
+.topbar .btn-xs {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.topbar .btn-theme {
+  padding: 4px 10px;
+}
+
+.topbar .btn-workspace {
+  max-width: 190px;
+}
+
+.topbar .status-pill,
+.topbar .phase-pill {
+  padding: 4px 14px;
+  font-size: 13.5px;
+}
+
+.topbar .usage-telemetry-pill {
+  padding: 4px 12px;
+}
+
 .status-pill > span:last-child {
   max-width: 340px;
   overflow: hidden;
@@ -2101,7 +2147,7 @@ body.arena-resizing * {
   z-index: 8000;
   left: 8px;
   top: 8px;
-  width: 300px;
+  width: 316px;
   max-width: calc(100vw - 16px);
   padding: 12px 14px 14px;
   background: var(--bg-surface);
@@ -2190,31 +2236,34 @@ body.arena-resizing * {
 
 .pop-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
   margin-top: 10px;
 }
 
 .pop-stat {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  padding: 7px 10px;
+  gap: 0;
+  padding: 5px 9px 6px;
   border: 1px solid var(--border-color);
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--bg-surface);
+  min-width: 0;
 }
 
 .pop-stat-num {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 800;
   color: var(--text-primary);
+  white-space: nowrap;
 }
 
 .pop-stat-label {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-secondary);
+  white-space: nowrap;
 }
 
 .pop-stat-wide {
@@ -2253,7 +2302,19 @@ body.arena-resizing * {
 }
 
 .channel-item.compact {
-  padding: 4px 9px;
+  padding: 3px 9px;
+  border-radius: 8px;
+}
+
+.channel-flags {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+
+.floor-chip.chip-icon {
+  padding: 0 5px;
 }
 
 .channel-row-top {

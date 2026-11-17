@@ -448,7 +448,7 @@
       const summary = s.summary ? ` — ${s.summary}` : "";
       out.push({
         kind: "finished",
-        text: `🏁 对局已结束${winner}${summary}。可点击「继续」在终局后继续。`,
+        text: `🏁 对局已结束${winner}${summary}　（可点击「继续」在终局后继续）`,
       });
     } else if (s.status === "paused") {
       if (s.pause_reason === "hold") {
