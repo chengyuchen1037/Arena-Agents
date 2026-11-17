@@ -52,7 +52,6 @@ llm:
   max_tokens: 8192
   context_window_tokens: 1000000  # DeepSeek 默认 1M 上下文
   timeout_seconds: 120
-  execution_depth: "medium"      # 执行链默认深度档位: low, medium, high, xhigh
 
   # 旧版全局 Token 单价（单位：美元 $ / 1M Tokens）。v0.10 起价格按模型在 Provider 管理里手动填写并
   # 随每次调用快照记账；这里的值仅作为“旧配置迁移”所创建模型的价格，以及无 binding 时的回退。

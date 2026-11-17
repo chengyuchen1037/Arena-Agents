@@ -13,6 +13,7 @@ from .helpers import (
     entries,
     envelopes,
     flush,
+    kill,
     make_world,
     mod,
     msgs,
@@ -20,6 +21,7 @@ from .helpers import (
     open_free,
     open_queue,
     open_turn,
+    revive,
     speak,
     targets,
     ui,
@@ -609,3 +611,62 @@ def test_messages_in_floor_channels_wake_everybody_who_can_read_them(mode: str) 
     assert {d.target for d in deliveries if d.envelope.payload["event"] == "message.new"} == {"moderator", "N2", "N3", "N4"}
     assert {e.priority for e in messages} == {"normal"} and not any(e.interrupt for e in messages)
     assert msgs(world, "c1")[0].visible_to_ids == ["moderator", *PLAYERS]
+
+
+# --------------------------------------------------------------------------- players who are out (E23)
+
+
+def test_a_holder_who_is_out_still_gets_his_floor_and_loses_it_like_anybody() -> None:
+    """Last words: the token is addressed to him personally, so the broadcast filter does not apply."""
+    world = _world()
+    kill(world, "N2")
+    open_queue(world, "c1", ["N2", "N3"], keep_queues=True)
+    deliveries, _ = flush(world)
+    [granted] = envelopes(deliveries, target="N2", event="floor.granted")
+    assert granted.priority == "urgent" and granted.payload["position"] == 1
+    assert speak(world, "N2", "c1", "我的遗言").ok
+    assert do_pass(world, "N2", "c1").ok
+    deliveries, _ = flush(world)
+    assert targets(deliveries, "floor.granted") == ["N3"]  # the queue moves on
+    assert "N2" not in targets(deliveries, "message.new")  # ... and he is not told about what he said himself
+    assert sorted(targets(deliveries, "message.new")) == ["N1", "N3", "N4", "moderator"]
+
+    # a timeout takes the floor away from a dead holder with the same ``floor.revoked`` (it interrupts his work)
+    world.clock.advance(60)
+    world.tick()
+    deliveries, _ = flush(world)
+    assert targets(deliveries, "floor.revoked") == ["N3"]
+    kill(world, "N4")
+    open_turn(world, "c1", ["N4"], keep_queues=True)
+    flush(world)
+    assert mod(world, "pause_queue", channel_id="c1").ok
+    [paused] = envelopes(flush(world)[0], target="N4", event="floor.paused")
+    assert paused.interrupt and paused.priority == "normal"
+    assert mod(world, "resume_queue", channel_id="c1").ok
+    flush(world)
+    assert world.chat.freeze_channel("c1", "ability:x")
+    [frozen] = envelopes(flush(world)[0], target="N4", event="floor.frozen")
+    assert frozen.interrupt
+    assert mod(world, "close_floor", channel_id="c1").ok
+    [revoked] = envelopes(flush(world)[0], target="N4", event="floor.revoked")
+    assert revoked.payload["reason"] == "closed" and revoked.interrupt
+
+
+def test_a_member_who_is_out_is_not_told_that_a_free_discussion_ended() -> None:
+    world = _world()
+    open_free(world, "c1")
+    kill(world, "N3")
+    assert mod(world, "close_floor", channel_id="c1").ok
+    deliveries, _ = flush(world)
+    assert sorted(targets(deliveries, "floor.revoked")) == ["N1", "N2", "N4"]  # a broadcast: he is spared
+
+
+def test_a_player_who_is_revived_is_woken_by_broadcasts_again() -> None:
+    world = _world()
+    open_free(world, "c1")
+    kill(world, "N3")
+    assert speak(world, "N1", "c1", "死者睡着").ok
+    assert "N3" not in targets(flush(world)[0], "message.new")
+    revive(world, "N3")
+    assert speak(world, "N1", "c1", "复活后又能被叫醒").ok
+    assert "N3" in targets(flush(world)[0], "message.new")

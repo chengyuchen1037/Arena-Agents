@@ -64,7 +64,7 @@ async def test_persist_saves_a_full_json_snapshot_and_then_moves_the_pointer(mon
     assert await orch.persist_session("manual") is True
 
     saved = orch.session_store.data[session.session_id]
-    assert saved["schema_version"] == SESSION_SCHEMA_VERSION == 3
+    assert saved["schema_version"] == SESSION_SCHEMA_VERSION == 4
     assert saved["world"]["ledger"] and saved["world"]["state"]["players"]  # the whole game, dealt
     assert saved["scenario_spec"]["id"] == "minimal_test"
     assert saved["model_bindings"]["p01"]["model_id"] == "big"
@@ -274,7 +274,7 @@ async def test_unrecoverable_last_game_keeps_files_and_suppresses_autosave(
     orch._autosave_enabled = True
     orch.settings_store.last_id = "broken-game"
     if failure == "invalid":
-        orch.session_store.data["broken-game"] = {"schema_version": 3, "session_id": "broken-game", "participants": "nope"}
+        orch.session_store.data["broken-game"] = {"schema_version": SESSION_SCHEMA_VERSION, "session_id": "broken-game", "participants": "nope"}
 
     assert await orch._restore_last_session() is None
 
@@ -404,7 +404,7 @@ async def test_importing_a_save_pauses_it_and_applies_default_bindings(monkeypat
     await asyncio.sleep(0.1)
 
     assert orch.session is game and game is not live and game.session_id == "imported1"
-    assert game.schema_version == 3 and game.status == "paused" and not orch.world.running
+    assert game.schema_version == SESSION_SCHEMA_VERSION and game.status == "paused" and not orch.world.running
     assert game.restored_from_save and game.restore_notice == "已导入存档（已暂停）"
     assert game.model_bindings["p01"] == BINDING  # from the user's defaults, no provider created
     assert "imported1" in orch.session_store.data and orch.settings_store.last_id == "imported1"

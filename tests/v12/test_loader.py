@@ -17,7 +17,7 @@ from app.agents.schemas import (
     shared_tool_schemas,
 )
 from app.world.core import WorldCore
-from app.world.intents import MODERATOR_INTENTS, PLAYER_INTENTS
+from app.world.intents import FREE_LIMIT_KEYS, MODERATOR_INTENTS, PLAYER_INTENTS, TOKEN_LIMIT_KEYS
 from app.world.loader import load_scenario_v2, parse_scenario_v2, split_body
 from app.world.render import player_label, render_text, validate_params
 from app.world.spec import ParamSpec, ScenarioError, ScenarioSpec
@@ -596,8 +596,8 @@ def test_manual_ids_exist_in_the_spec(ww: ScenarioSpec) -> None:
 # What the manual may name besides tools, templates, checks, abilities and tool arguments.
 MANUAL_EVENTS = frozenset(
     {
-        "game.started", "game.resumed", "game.continued", "request.closed", "floor.completed", "free.advisory",
-        "ability.used", "challenge.opened", "message.new", "watchdog",
+        "game.started", "game.resumed", "game.continued", "request.closed", "request.answer", "floor.completed",
+        "free.advisory", "timer.elapsed", "ability.used", "challenge.opened", "message.new", "watchdog",
     }
 )
 MANUAL_WORDS = frozenset(
@@ -606,6 +606,8 @@ MANUAL_WORDS = frozenset(
         "code", "message",  # fields of a receipt
         "last_guard",  # an attribute of the guard (see the scenario roles)
         "save",  # an option id of the witch's request
+        "none",  # the "empty" option of the guard's / the wolves' request (and the result of ``wolf_choice``)
+        "unanimous", "deadline", "all_answered",  # values of ``auto_close`` / reasons of ``request.closed``
         "public", "wolf-team",  # channel ids
     }
 )
@@ -613,6 +615,7 @@ MANUAL_WORDS = frozenset(
 
 def test_every_backticked_word_of_the_manual_is_known(ww: ScenarioSpec) -> None:
     arguments = {f for model in [*MODERATOR_INTENTS.values(), *PLAYER_INTENTS.values()] for f in model.model_fields}
+    arguments |= {*TOKEN_LIMIT_KEYS, *FREE_LIMIT_KEYS}  # the keys of ``limits``
     known = {*ALL_TOOLS, *ww.templates, *ww.checks, *ww.abilities, *arguments, *MANUAL_EVENTS, *MANUAL_WORDS}
     attributes = {a for role in ww.setup.roles.values() for a in role.attributes}
     unknown = sorted(
@@ -629,10 +632,10 @@ def test_every_event_the_manual_wakes_up_on_is_rendered_by_the_agents(ww: Scenar
     from app.world.types import Envelope
 
     named = set(re.findall(r"`([a-z]+\.[a-z]+|watchdog)`", ww.manual_text))
-    assert MANUAL_EVENTS <= named and named <= MANUAL_EVENTS | {"request.closed"}
+    assert MANUAL_EVENTS <= named and named <= MANUAL_EVENTS
     namer = Namer(lambda agent_id: agent_id)
     for event in sorted(MANUAL_EVENTS):
-        text = render_wake([Envelope(kind="notice", priority="urgent", payload={"event": event})], [], namer, agent_id=MODERATOR_ID)
+        text = render_wake([Envelope(kind="notice", priority="urgent", payload={"event": event})], namer, agent_id=MODERATOR_ID)
         assert not text.splitlines()[1].startswith(f"- {event}："), f"{event} falls back to the generic rendering"
 
 
@@ -658,6 +661,7 @@ def _free_names(expression: str) -> set[str]:
 def test_evaluate_examples_pass_exactly_the_variables_the_checks_use(ww: ScenarioSpec) -> None:
     expected = {name: _free_names(expr) for name, expr in ww.checks.items()}
     assert expected["speech_order"] == {"start", "direction"} and expected["weighted_vote"] == {"answers", "privileged", "weight"}
+    assert expected["wolf_choice"] == {"answers"} and expected["alive_wolves"] == set()
     seen = set()
     for name, named, _bare in _calls(ww.manual_text):
         if name != "evaluate" or not re.fullmatch(r'"[a-z_]+"', named.get("check_id", "")):
@@ -683,6 +687,71 @@ def test_announce_examples_use_the_declared_template_params(ww: ScenarioSpec) ->
     assert announced == {t for t, spec in ww.templates.items() if spec.users == "moderator"}
 
 
+def test_announcements_go_to_the_right_channels(ww: ScenarioSpec) -> None:
+    """The knife only to the wolves, the check result only to the seer's own DM, everything else to the public."""
+    routes = {"seer_result": r"dm-.+", "wolf_target": "wolf-team", "wolf_empty": "wolf-team"}
+    seen: set[str] = set()
+    for name, named, _bare in _calls(ww.manual_text):
+        if name != "announce":
+            continue
+        tid, channel = named["template_id"].strip('"'), named["channel_id"].strip('"')
+        assert re.fullmatch(routes.get(tid, "public"), channel), f"{tid} is announced in {channel}"
+        seen.add(tid)
+    assert {"seer_result", "wolf_target", "wolf_empty"} <= seen
+
+
+def test_the_limits_in_the_manual_fit_their_mode(ww: ScenarioSpec) -> None:
+    checked = []
+    for name, named, _bare in _calls(ww.manual_text):
+        if name not in ("open_floor", "update_channel", "set_floor_queue") or "limits" not in named:
+            continue
+        mode = named.get("mode", '"turn"').strip('"') if name == "open_floor" else ("free" if name == "update_channel" else "turn")
+        keys, allowed = set(_dict_keys(named["limits"])), set(FREE_LIMIT_KEYS if mode == "free" else TOKEN_LIMIT_KEYS)
+        assert keys and keys <= allowed, f"{name}(mode={mode}): {sorted(keys - allowed)} are no limits of that mode"
+        checked.append((name, mode))
+    assert ("open_floor", "free") in checked  # the wolves' discussion
+    assert not any("free_limits" in text for text in (ww.manual_text, ww.rules_text))
+
+
+def test_the_manual_and_the_moderator_prompt_list_the_keys_of_limits_exactly(ww: ScenarioSpec) -> None:
+    prompt = (ROOT / "prompts" / "moderator.md").read_text(encoding="utf-8")
+    for text, turn_pattern, free_pattern in (
+        (ww.manual_text, r'`mode="turn"` 只接受([^；。]*)', r'`mode="free"` 只接受([^；。]*)'),
+        (prompt, r"`turn` 只接受([^；。]*)", r"`free` 只接受([^；。]*)"),
+    ):
+        turn, free = re.search(turn_pattern, text), re.search(free_pattern, text)
+        assert turn and free
+        assert re.findall(r"`([a-z_]+)`", turn.group(1)) == list(TOKEN_LIMIT_KEYS)
+        assert re.findall(r"`([a-z_]+)`", free.group(1)) == list(FREE_LIMIT_KEYS)
+
+
+@pytest.mark.parametrize("name", ["werewolf_12p", "minimal_test"])
+def test_faction_names_name_every_faction_of_the_roles(name: str) -> None:
+    spec = load_scenario_v2(ROOT / "scenarios" / f"{name}.md")
+    factions = {role.faction for role in spec.setup.roles.values()}
+    assert spec.setup.faction_names and set(spec.setup.faction_names) == factions
+    assert len(set(spec.setup.faction_names.values())) == len(factions)  # two factions never share a name
+
+
+def test_the_winner_texts_of_the_werewolf_manual_are_the_faction_names(ww: ScenarioSpec) -> None:
+    names = set(ww.setup.faction_names.values())
+    assert ww.setup.faction_names == {"wolves": "狼人阵营", "good": "好人阵营"}
+    # what the ``outcome`` check answers is exactly such a name (or "not decided")
+    assert _check(_world(ww, out=tuple(WOLVES)), ww, "outcome") in names
+    assert _check(_world(ww, out=tuple(GODS)), ww, "outcome") in names
+    assert _check(_world(ww), ww, "outcome") not in names
+    used = []
+    for name, named, _bare in _calls(ww.manual_text):
+        if name == "end_game" and re.fullmatch(r'"[^"]+"', named.get("winner", "")):
+            used.append(named["winner"].strip('"'))
+        if name == "announce" and named.get("template_id") == '"game_over"':
+            used += re.findall(r'"winner"\s*:\s*"([^"]+)"', named["params"])
+    assert len(used) == 2 and set(used) <= names
+    assert "winner 填阵营的显示名" in ww.manual_text
+    minimal = load_scenario_v2(ROOT / "scenarios" / "minimal_test.md")
+    assert "winner 填阵营的显示名" in minimal.manual_text
+
+
 # ----------------------------------------------------------------------------- legacy names and prompts
 
 
@@ -695,23 +764,51 @@ def test_no_legacy_tool_names_survive_in_prompts_knowledge_or_scenarios() -> Non
         assert not found, f"{path.relative_to(ROOT)} still mentions {found}"
 
 
+def test_no_text_mentions_the_mechanics_that_v0_12_1_removed() -> None:
+    files = [*(ROOT / "prompts").glob("*.md"), *(ROOT / "knowledge").glob("*.md"), *(ROOT / "scenarios").glob("*.md")]
+    assert len(files) >= 8
+    old_ids = re.compile(r"(?<![A-Za-z0-9_])p(?:0[1-9]|1[0-2])(?![A-Za-z0-9_])")
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        where = path.relative_to(ROOT)
+        assert "debounce" not in text, f"{where}: there is no debounce any more"
+        assert "free_limits" not in text, f"{where}: open_floor / update_channel take one ``limits``"
+        assert "ambient" not in text, where
+        assert not re.search(r"`wait`|\bwait\(", text), f"{where}: the tool is called sleep"
+        assert "你的思考不会被保留" not in text, f"{where}: the conversation is persistent now"
+        assert not old_ids.search(text), f"{where}: the ids are N1..N12 now"
+        assert "SEAT " not in text, where
+
+
 def test_system_prompts_render_with_the_werewolf_scenario(ww: ScenarioSpec) -> None:
     world = FakeWorld(ww)
-    brain = ArenaBrain(world, ww, docs_dir=None, personas={"p1": "冷静而谨慎"})
+    brain = ArenaBrain(world, ww, docs_dir=None, personas={"p1": "冷静而谨慎"}, memories={"p1": "上一局我总被怀疑。"})
     player, moderator = brain.system_prompt("p1"), brain.system_prompt(MODERATOR_ID)
     for text in (player, moderator):
         assert "{{" not in text and "}}" not in text, "unrendered placeholder"
         assert ww.rules_text.strip() in text
+        assert "\n\n\n" not in text  # an empty variable leaves no hole
     assert "Alex" in player and "p1" in player and "冷静而谨慎" in player
+    assert player.startswith("# 你是谁\n\n你是 **p1 Alex**")  # the form models see: ``<id> <name>``
+    # the memory block is for players only (and only when there is a memory)
+    assert "# 你的记忆与经验" in player and "上一局我总被怀疑。" in player and "上一局" not in moderator
+    assert "你的记忆与经验" not in ArenaBrain(world, ww, docs_dir=None).system_prompt("p1")
     # players never see the manual; the moderator does
     assert ww.manual_text.strip() in moderator
     assert ww.manual_text.strip() not in player and "主持人手册" not in player and "《进度》" not in player
-    for must in ("write_note", "speak", "wait", "respond", "NO_FLOOR", "STALE", "challenge_moderator", "truncated"):
+    for must in ("write_note", "speak", "sleep", "respond", "NO_FLOOR", "STALE", "challenge_moderator", "truncated", "compact_context"):
         assert must in player, must
-    for must in ("write_note", "wait", "announce", "open_request", "set_floor_queue", "hold_game", "update_player", "STALE"):
+    for must in ("write_note", "sleep", "announce", "open_request", "set_floor_queue", "hold_game", "update_player", "STALE", "limits", "share_answers", "auto_close"):
         assert must in moderator, must
-    assert "你的思考不会被保留" in player and "你的思考不会被保留" in moderator
-    assert "正文不会发送到任何频道" in player.replace("**", "") or "不会发送到任何频道" in player
+    # the activation model and the persistent conversation (v0.12.1)
+    for text in (player, moderator):
+        assert "每一条新消息唤醒" in text and "被唤醒不等于" in text
+        assert "对话是连续的" in text and "压缩" in text
+        assert "你的思考不会被保留" not in text
+        assert not re.search(r"\bwait\b", text), "the tool is called sleep now"
+    assert "出局后你只会在被直接点名时被唤醒" in player
+    assert "不会发送到任何频道" in player.replace("**", "")
+    assert "sleep(seconds=60)" in moderator and "催促" in moderator
 
 
 def test_system_prompts_render_with_the_minimal_scenario() -> None:
@@ -739,21 +836,27 @@ class _GameClock:
 
 
 class _Table:
-    """The real ``World`` + the real tool executor; ``deliveries`` collects what the moderator is woken with."""
+    """The real ``World`` + the real tool executor.  ``log`` keeps everything the world delivered (what woke
+    whom, v0.12.1: every delivery wakes its recipient), ``inbox`` what the moderator has not looked at yet."""
 
     def __init__(self, spec: ScenarioSpec, seed: int = 3) -> None:
         self.spec = spec
         self.clock = _GameClock()
-        players = [{"id": f"p{i:02d}", "seat": f"SEAT {i:02d}", "name": f"N{i}", "persona": ""} for i in range(1, 13)]
+        players = [{"id": f"N{i}", "seat": str(i), "name": NAMES[i - 1]} for i in range(1, 13)]
         self.world = World.new_game(spec, players, self.clock, seed=seed)
         self.brain = ArenaBrain(self.world, spec, docs_dir=None)
         self.world.set_running(True, "started")
-        self.inbox: list[tuple[str, dict]] = []  # (target, envelope payload) not yet looked at
+        self.log: list[tuple[str, dict]] = []
+        self.inbox: list[tuple[str, dict]] = []
         self._pump()
 
     # -- plumbing
     def _pump(self) -> None:
-        self.inbox += [(d.target, {**d.envelope.payload, "_priority": d.envelope.priority}) for d in self.world.drain_outbox()]
+        for d in self.world.drain_outbox():
+            env = d.envelope
+            item = (d.target, {**env.payload, "_priority": env.priority, "_kind": env.kind, "_interrupt": env.interrupt, "_sender": env.sender})
+            self.log.append(item)
+            self.inbox.append(item)
         self.world.drain_events()
 
     def call(self, agent: str, tool: str, **args: object) -> Receipt:
@@ -780,6 +883,16 @@ class _Table:
         self.world.tick()
         self._pump()
 
+    # -- who was woken by what
+    def mark(self) -> int:
+        return len(self.log)
+
+    def heard(self, target: str, event: str, *, since: int = 0) -> list[dict]:
+        return [p for t, p in self.log[since:] if t == target and p.get("event") == event]
+
+    def who_heard(self, event: str, *, since: int = 0) -> set[str]:
+        return {t for t, p in self.log[since:] if p.get("event") == event}
+
     # -- what the manual keeps asking for
     def ev(self, check: str, **args: object) -> object:
         return self.mod("evaluate", check_id=check, args=args).data["value"]
@@ -805,6 +918,10 @@ class _Table:
         assert len(found) == 1, f"{rid}: the moderator was woken {len(found)} times"
         return found[0]
 
+    def has_closed(self, rid: str) -> bool:
+        """Has the moderator been told that request ``rid`` closed?"""
+        return any(t == MODERATOR_ID and p.get("event") == "request.closed" and p.get("request_id") == rid for t, p in self.inbox)
+
     def woken_by(self, event: str) -> list[dict]:
         found = [p for t, p in self.inbox if t == MODERATOR_ID and p.get("event") == event]
         self.inbox = [(t, p) for t, p in self.inbox if not (t == MODERATOR_ID and p.get("event") == event)]
@@ -828,6 +945,49 @@ class _Table:
         counts = self.ev("counts")
         self.mod("update_dashboard", factions=counts["factions"], tag_stats=counts["tag_stats"])  # type: ignore[index]
 
+    def open_channels(self) -> None:
+        """B steps 3-4 of the manual."""
+        ids = [p.id for p in self.world.state.players]
+        wolves = [p.id for p in self.world.state.players if p.faction == "wolves"]
+        self.mod("create_channel", channel_id="public", name="公共频道", type="public", mode="closed", members=ids)
+        self.mod("create_channel", channel_id="wolf-team", name="狼人阵营", type="group", mode="closed", members=wolves)
+
+    # -- the wolves' round (N2 of the manual)
+    def open_wolf_round(self, night: int = 1) -> tuple[list[str], str]:
+        """N2 steps 1-3: the free discussion of the wolves, the shared "knife" request, the opening message.
+        With a single wolf left: just the request (step 2).  Returns the wolves asked and the request id."""
+        wolves = self.ev("alive_wolves")
+        assert isinstance(wolves, list) and wolves
+        options = [("none", "空刀"), *[(i, self.label(i)) for i in self.alive()]]
+        if len(wolves) == 1:
+            return wolves, self.ask(wolves, f"第 {night} 夜：请选择今晚的刀口（可以自刀，也可以空刀）。", options, duration_s=60)
+        before = self.mark()
+        self.mod(
+            "open_floor", channel_id="wolf-team", mode="free", holders=wolves,
+            limits={"duration_s": 100, "max_messages_per_member": 6, "max_chars_per_message": 300, "max_chars_total": 3000, "silence_s": 40},
+        )
+        assert self.log[before:] == [], "opening a free discussion wakes nobody"
+        rid = self.ask(
+            wolves, f"第 {night} 夜：请和队友商量后选定今晚的刀口", options,
+            share_answers=True, auto_close="unanimous", duration_s=150,
+        )
+        self.mod("send_message", channel_id="wolf-team", content=f"第 {night} 夜：请商议今晚的刀口，并用你的“刀口”请求拍刀。")
+        return wolves, rid
+
+    def close_wolf_round(self, rid: str) -> tuple[str, dict]:
+        """N2 step 7: close the discussion, count (``wolf_choice``), announce in the wolves' channel only."""
+        closed = self.closed(rid)
+        if self.world.channel("wolf-team").mode == "free":
+            self.mod("close_floor", channel_id="wolf-team")
+        answers = [{"player_id": a["player_id"], "value": a["value"]} for a in closed["answers"]]
+        target = self.ev("wolf_choice", answers=answers)
+        assert isinstance(target, str)
+        if target == "none":
+            self.mod("announce", channel_id="wolf-team", template_id="wolf_empty", params={})
+        else:
+            self.mod("announce", channel_id="wolf-team", template_id="wolf_target", params={"target": target})
+        return target, closed
+
 
 def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosion(ww: ScenarioSpec) -> None:
     t = _Table(ww)
@@ -835,13 +995,12 @@ def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosio
     wolves = [p.id for p in t.world.state.players if p.faction == "wolves"]
     guard, seer, witch, hunter, white = (t.one(r) for r in ("guard", "seer", "witch", "hunter", "white_wolf"))
     villagers = t.with_role("villager")
-    plain_wolf = t.with_role("werewolf")[0]
-    assert sorted(wolves) == sorted([*t.with_role("werewolf"), white])
+    plain_wolves = t.with_role("werewolf")
+    assert sorted(wolves) == sorted([*plain_wolves, white])
 
     # ---- B: opening
     t.mod("set_phase", text="准备阶段 · 建立频道")
-    t.mod("create_channel", channel_id="public", name="公共频道", type="public", mode="closed", members=ids)
-    t.mod("create_channel", channel_id="wolf-team", name="狼人阵营", type="group", mode="closed", members=wolves)
+    t.open_channels()
     t.mod("send_message", channel_id="wolf-team", content=f"你们是狼人阵营的队友：{'、'.join(wolves)}。")
     counts = t.ev("counts")
     t.mod("update_dashboard", factions=counts["factions"], tag_stats=counts["tag_stats"])  # type: ignore[index]
@@ -855,29 +1014,73 @@ def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosio
     # ---- N1: guard (protects a villager); the manual stores the choice in the guard's attributes
     victim = villagers[0]
     t.mod("set_phase", text="第 1 夜")
-    rid = t.ask([guard], "第 1 夜：请选择今晚守护的玩家", [("none", "空守"), *[(i, t.label(i)) for i in t.alive() if i != ""]], default="none")
+    rid = t.ask([guard], "第 1 夜：请选择今晚守护的玩家", [("none", "空守"), *[(i, t.label(i)) for i in t.alive()]], default="none")
     t.answer(rid, guard, victim)
     assert t.closed(rid)["answers"][0]["value"] == victim
     t.mod("update_player", player_id=guard, set_attributes={"last_guard": victim})
     assert t.world.player(guard).attributes["last_guard"] == victim
 
-    # ---- N2: the wolves talk, fall silent, the moderator closes the floor and asks the first wolf
-    alive_wolves = t.ev("alive_wolves")
-    assert alive_wolves == wolves
-    t.mod("open_floor", channel_id="wolf-team", mode="free", holders=alive_wolves,
-          free_limits={"duration_s": 180, "max_messages_per_member": 3, "max_chars_total": 1500})
-    t.mod("send_message", channel_id="wolf-team", content="第 1 夜：请商议今晚的刀口。")
-    woken = {target for target, p in t.inbox if p.get("event") == "message.new" and p["_priority"] == "normal"}
-    assert woken == set(wolves)  # opening the discussion woke nobody, the opening message did
-    t.ok(plain_wolf, "speak", channel_id="wolf-team", content="刀守卫保护的人吧。")
-    t.tick(31)  # 30 s of silence
+    # ---- N2: the wolves talk and put their targets down; they disagree, are urged once, argue on, and the
+    #      majority decides at the deadline (the "opening -> knife -> urge -> disagreement -> again -> majority
+    #      -> announcement" of the plan)
+    start = t.mark()
+    W, rid = t.open_wolf_round(night=1)
+    assert W == wolves
+    assert t.who_heard("message.new", since=start) == set(wolves)  # the opening message, and nobody else
+    assert t.who_heard("request.opened", since=start) == set(wolves)
+    t.note(MODERATOR_ID, "进度", "步骤：N2 狼人商议中｜等待：request.closed｜last_call=0")
+    request = t.world.board(white)["requests"][0]
+    assert request["share_answers"] is True and request["auto_close"] == "unanimous" and request["answers"] == []
+    t.ok(plain_wolves[0], "speak", channel_id="wolf-team", content="刀守卫保护的人吧。")
+
+    t.clock.advance(5)
+    knife = t.mark()
+    t.answer(rid, plain_wolves[0], victim)
+    t.answer(rid, plain_wolves[1], victim)
+    t.answer(rid, plain_wolves[2], seer)
+    t.answer(rid, white, witch)
+    # every answer wakes the other wolves and the moderator, at once, and nobody else (``request.answer``)
+    shown = [(target, p) for target, p in t.log[knife:] if p.get("event") == "request.answer"]
+    assert len(shown) == 4 * 4 and {target for target, _ in shown} == {*wolves, MODERATOR_ID}
+    assert all(p["_priority"] == "normal" and p["value"] in (victim, seer, witch) for _, p in shown)
+    assert not any(target == p["player_id"] for target, p in shown)  # nobody is woken by his own answer
+    # the wolves see each other's answers on their boards, the others see nothing of it
+    request = t.world.board(plain_wolves[1])["requests"][0]
+    assert {a["player_id"]: a["value"] for a in request["answers"]} == {
+        plain_wolves[0]: victim, plain_wolves[1]: victim, plain_wolves[2]: seer, white: witch,
+    }
+    assert t.world.board(villagers[1])["requests"] == [] and t.world.board(guard)["requests"] == []
+    assert not t.has_closed(rid)  # not unanimous
+
+    # silence -> the advisory -> the moderator urges once (``last_call=1``)
+    t.tick(36)  # 41 s: 40 s without a word in the channel
     (advisory,) = t.woken_by("free.advisory")
     assert advisory["reason"] == "silence" and advisory["channel_id"] == "wolf-team"
-    t.mod("close_floor", channel_id="wolf-team")
-    first_wolf = t.ev("first_wolf")
-    assert first_wolf == min(wolves)
-    rid = t.ask([first_wolf], "第 1 夜：请代表狼队提交今晚的刀口", [("none", "空刀"), *[(i, t.label(i)) for i in t.alive()]], default="none")
-    t.answer(rid, first_wolf, victim)  # the same villager the guard protects
+    mark = t.mark()
+    t.mod("send_message", channel_id="wolf-team", content="时间到：请尽快统一刀口。最后期限一到就按多数决定。")
+    t.note(MODERATOR_ID, "进度", "步骤：N2 狼人商议中｜等待：request.closed｜last_call=1")
+    assert t.who_heard("message.new", since=mark) == set(wolves)
+
+    # the wolves argue on: one of them changes his mind (the last answer counts), the request stays open
+    t.clock.advance(4)
+    mark = t.mark()
+    t.answer(rid, plain_wolves[2], victim)
+    changed = [p for target, p in t.log[mark:] if target == white and p.get("event") == "request.answer"]
+    assert [(p["player_id"], p["value"], p["replaced"]) for p in changed] == [(plain_wolves[2], victim, True)]
+    assert not t.has_closed(rid)
+    t.tick(55)  # 100 s: the discussion time is up (and the silence since the urge counts again): more advisories
+    late = t.woken_by("free.advisory")
+    assert "time" in {a["reason"] for a in late}  # ... which the manual tells the moderator to ignore (``last_call=1``)
+    t.tick(51)  # 151 s: the last minute of the request is over, it closes by itself
+    target, closed = t.close_wolf_round(rid)
+    assert closed["reason"] == "deadline" and closed["missing"] == [] and len(closed["answers"]) == 4
+    assert target == victim  # 3 of the 4 wolves: the majority
+    note = t.world.ledger[-1]
+    assert note.channel_id == "wolf-team" and note.visible_to_ids == [MODERATOR_ID, *wolves]
+    assert note.data["content"] == f"【刀口】今晚刀口：{player_label(t.world, victim)}。"
+    assert t.world.channel("wolf-team").mode == "closed"
+    public_text = " ".join(e.data["content"] for e in t.world.ledger if e.type == "message" and e.channel_id == "public")
+    assert "刀口" not in public_text  # the knife never reaches the public channel
 
     # ---- N3: seer
     rid = t.ask([seer], "第 1 夜：请选择要查验的玩家", [("skip", "不查验"), *[(i, t.label(i)) for i in t.alive()]], default="skip")
@@ -888,7 +1091,7 @@ def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosio
     assert t.world.ledger[-1].visible_to_ids == [MODERATOR_ID, seer]
     assert "属于狼人阵营" in t.world.ledger[-1].data["content"]
 
-    # ---- N4: witch (both potions available, the wolf target is known): poisons the hunter
+    # ---- N4: witch (both potions available, the target is known): poisons the hunter
     attrs = t.world.player(witch).attributes
     assert (attrs["antidote"], attrs["poison"]) == (1, 1)
     t.mod("send_message", channel_id=f"dm-{witch}", content=f"今晚被狼人袭击的是 {t.label(victim)}。")
@@ -907,7 +1110,7 @@ def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosio
     participants = t.ev("candidates_without", excluded=pending_dead)
     assert hunter not in participants and len(participants) == 11
     rid = t.ask(participants, "是否上警竞选警长？", [("yes", "上警"), ("no", "不上警")], sealed=True, default="no")
-    running = {plain_wolf, seer, villagers[1]}
+    running = {plain_wolves[0], seer, villagers[1]}
     for pid in participants:
         t.answer(rid, pid, "yes" if pid in running else "no")
     answers = t.closed(rid)["answers"]
@@ -917,11 +1120,11 @@ def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosio
     t.mod("announce", channel_id="public", template_id="sheriff_candidates", params={"players": candidates})
     t.mod("enable_ability", ability_id="white_wolf_explode")
     order = t.ev("order_of", members=candidates)
-    assert order == sorted(candidates)
+    assert order == sorted(candidates, key=lambda pid: int(pid[1:]))
     t.mod("set_phase", text="第 1 天 · 警长竞选演说")
     t.mod("set_floor_queue", channel_id="public", order=order)
     t.mod("send_message", channel_id=f"dm-{white}", content="白天发言开始，你的“自爆”技能现已启用。")
-    assert any(target == white and p.get("event") == "message.new" and p["_priority"] == "normal" for target, p in t.inbox)
+    assert t.heard(white, "message.new")[-1]["_priority"] == "normal"
     t.speak_in_turn("public", order, "竞选演说")
     (done,) = t.woken_by("floor.completed")
     assert [r["holder"] for r in done["results"]] == order
@@ -930,12 +1133,12 @@ def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosio
     for pid in candidates:
         t.answer(rid, pid, "quit" if pid == villagers[1] else "stay")
     remaining = [a["player_id"] for a in t.closed(rid)["answers"] if a["value"] == "stay"]
-    assert sorted(remaining) == sorted([plain_wolf, seer])
+    assert sorted(remaining) == sorted([plain_wolves[0], seer])
     t.mod("send_message", channel_id="public", content=f"退水：{villagers[1]}；仍在竞选：{'、'.join(remaining)}")
     t.mod("announce", channel_id="public", template_id="sheriff_candidates", params={"players": remaining})
     rid = t.ask(voters, "警长投票：请在候选人中选一名。", [(i, t.label(i)) for i in remaining], sealed=True)
     for index, pid in enumerate(voters):
-        t.answer(rid, pid, seer if index % 3 else plain_wolf)
+        t.answer(rid, pid, seer if index % 3 else plain_wolves[0])
     vote = t.closed(rid)
     assert len(vote["leaders"]) == 1 and sum(vote["tally"].values()) == len(voters)
     sheriff = vote["leaders"][0]
@@ -948,10 +1151,16 @@ def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosio
     t.mod("set_phase", text="第 1 天 · 公布死讯")
     t.mod("announce", channel_id="public", template_id="death_notice", params={"players": pending_dead})
     t.out(hunter)
+    # the hunter is out: broadcasts no longer wake him, what is addressed to him still does (E23)
+    mark = t.mark()
     t.mod("set_phase", text="第 1 天 · 遗言")
+    assert hunter not in t.who_heard("phase.changed", since=mark) and len(t.who_heard("phase.changed", since=mark)) == 11
     t.mod("set_floor_queue", channel_id="public", order=[hunter])
+    assert t.heard(hunter, "floor.granted", since=mark)  # his last words
     t.speak_in_turn("public", [hunter], "遗言")
     assert len(t.woken_by("floor.completed")) == 1
+    heard_it = t.who_heard("message.new", since=mark)
+    assert hunter not in heard_it and heard_it >= {MODERATOR_ID, *[i for i in ids if i != hunter]}
     assert t.ev("outcome") == "未分胜负"
 
     # ---- D3: the sheriff chooses the direction, the sheriff speaks last
@@ -966,7 +1175,11 @@ def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosio
     t.mod("set_phase", text="第 1 天 · 白天发言")
     t.mod("enable_ability", ability_id="white_wolf_explode")
     t.mod("set_floor_queue", channel_id="public", order=speech)
+    mark = t.mark()
     t.speak_in_turn("public", speech[:2], "发言")
+    # every speech wakes everybody who is alive (and the moderator), except its author
+    first = [target for target, p in t.log[mark:] if p.get("event") == "message.new" and p["_sender"] == speech[0]]
+    assert sorted(first) == sorted([MODERATOR_ID, *[i for i in ids if i not in (hunter, speech[0])]])
     explode = t.ok(white, "use_ability", ability_id="white_wolf_explode", params={"target": seer, "declaration": "我是白狼王。"})
     assert explode.data["uses_left"] == 0
     (used,) = t.woken_by("ability.used")
@@ -1005,11 +1218,13 @@ def test_the_manual_plays_the_vote_the_pk_the_hunter_the_badge_and_the_ending(ww
 
     # ---- D5: sealed vote with an abstain option; the sheriff's 1.5 votes decide, the engine's own count would not
     t.mod("set_phase", text="第 2 天 · 放逐投票")
+    mark = t.mark()
     rid = t.ask(alive, "放逐投票", [("abstain", "弃票"), *[(i, t.label(i)) for i in alive]], sealed=True, default="abstain")
     for_hunter = [sheriff, others[1], others[2]]
     for_rival = [others[3], others[4], others[5]]
     for pid in alive:
         t.answer(rid, pid, hunter if pid in for_hunter else rival if pid in for_rival else "abstain", reason="我的理由，不公布")
+    assert not t.who_heard("request.answer", since=mark)  # a sealed vote: nobody is told about the answers
     closed = t.closed(rid)
     assert closed["leaders"] == ["abstain"]  # 4 abstentions beat 3 + 3: the engine's count is not the verdict
     answers = [{"player_id": a["player_id"], "value": a["value"]} for a in closed["answers"]]
@@ -1018,10 +1233,11 @@ def test_the_manual_plays_the_vote_the_pk_the_hunter_the_badge_and_the_ending(ww
     assert not any("我的理由" in e.data.get("content", "") for e in t.world.ledger if e.type == "message")
 
     # ---- D6: a (forced) tie goes to PK speeches, then the others vote again
-    tied = sorted([hunter, rival])
+    tied = sorted([hunter, rival], key=lambda pid: int(pid[1:]))
     t.mod("announce", channel_id="public", template_id="tie_pk", params={"players": tied})
     t.mod("enable_ability", ability_id="white_wolf_explode")
     order = t.ev("order_of", members=tied)
+    assert order == tied
     t.mod("set_floor_queue", channel_id="public", order=order)
     t.speak_in_turn("public", order, "PK")
     assert len(t.woken_by("floor.completed")) == 1
@@ -1038,7 +1254,9 @@ def test_the_manual_plays_the_vote_the_pk_the_hunter_the_badge_and_the_ending(ww
     t.mod("announce", channel_id="public", template_id="vote_result", params={"summary": "票型：……；得票：……"})
     t.mod("announce", channel_id="public", template_id="death_notice", params={"players": [hunter]})
     t.out(hunter)
+    mark = t.mark()
     rid = t.ask([hunter], "你出局了，可以亮出猎人身份开枪。", [("none", "不开枪"), *[(i, t.label(i)) for i in t.alive()]], default="none")
+    assert t.heard(hunter, "request.opened", since=mark)  # out, and still woken: the request is addressed to him
     t.answer(rid, hunter, sheriff)
     shot = t.closed(rid)["answers"][0]["value"]
     assert shot == sheriff
@@ -1046,7 +1264,9 @@ def test_the_manual_plays_the_vote_the_pk_the_hunter_the_badge_and_the_ending(ww
     t.mod("announce", channel_id="public", template_id="death_notice", params={"players": [shot]})
     t.out(shot)
     heirs = t.alive()
+    mark = t.mark()
     rid = t.ask([sheriff], "你是警长且已出局：请选择警徽的去向。", [("destroy", "撕毁警徽"), *[(i, t.label(i)) for i in heirs]], default="destroy")
+    assert t.heard(sheriff, "request.opened", since=mark)
     t.answer(rid, sheriff, heirs[0])
     heir = t.closed(rid)["answers"][0]["value"]
     t.mod("update_player", player_id=sheriff, remove_tags=["警长"])
@@ -1063,9 +1283,129 @@ def test_the_manual_plays_the_vote_the_pk_the_hunter_the_badge_and_the_ending(ww
     # ---- G: the wolf side is gone -> the good side wins, the moderator announces and ends the game
     t.out(*wolves)
     assert (t.ev("outcome"), t.ev("good_wins")) == ("好人阵营", True)
-    t.mod("announce", channel_id="public", template_id="game_over", params={"winner": "好人阵营", "summary": "所有狼人阵营成员出局。"})
-    t.mod("end_game", winner="好人阵营", summary="所有狼人阵营成员出局。")
+    winner = t.ev("outcome")
+    assert winner in ww.setup.faction_names.values()  # ``end_game(winner=…)``: the display name of the faction
+    t.mod("announce", channel_id="public", template_id="game_over", params={"winner": winner, "summary": "所有狼人阵营成员出局。"})
+    t.mod("end_game", winner=winner, summary="所有狼人阵营成员出局。")
     assert t.world.state.status == "finished" and t.world.state.winner == "好人阵营" and not t.world.running
+
+
+# ----------------------------------------------------------------------------- the wolves' round, variants
+
+
+def _night_table(ww: ScenarioSpec, *, dead_wolves: tuple[int, ...] = ()) -> tuple[_Table, list[str]]:
+    """A table at night with the channels open.  ``dead_wolves`` are positions (by seat) among the 4 wolves of
+    the wolf side (the roles are dealt at random); returns the table and ALL the wolves in seat order."""
+    t = _Table(ww)
+    t.open_channels()
+    wolves = [p.id for p in t.world.state.players if p.faction == "wolves"]
+    if dead_wolves:
+        t.out(*[wolves[i] for i in dead_wolves])
+    t.mod("set_phase", text="第 2 夜")
+    return t, wolves
+
+
+def test_the_wolves_agree_and_the_request_closes_by_itself(ww: ScenarioSpec) -> None:
+    t, wolves = _night_table(ww)
+    W, rid = t.open_wolf_round(night=2)
+    victim, other = t.with_role("villager")[:2]
+    t.answer(rid, wolves[0], other)
+    t.answer(rid, wolves[1], victim)
+    t.answer(rid, wolves[2], victim)
+    assert not t.has_closed(rid)
+    t.answer(rid, wolves[0], victim)  # he gives in ...
+    t.answer(rid, wolves[3], victim)  # ... and the last one agrees: everybody answered, all the same
+    closed = t.closed(rid)  # no ``tick``: it closed the moment the last wolf agreed
+    assert closed["reason"] == "unanimous" and closed["leaders"] == [victim] and t.world.clock.now() == 0
+    assert t.world.state.requests[rid].status == "closed"
+    target, _ = t.close_wolf_round(rid)
+    assert target == victim and t.world.channel("wolf-team").mode == "closed"
+    # nothing is left running: no deadline of the request, no advisory of the discussion
+    t.tick(500)
+    assert t.woken_by("free.advisory") == []
+    assert len(t.woken_by("request.closed")) == 1  # the unanimous close; the deadline did not close it a second time
+
+
+def test_a_tie_between_the_wolves_is_decided_by_the_first_wolf_by_seat(ww: ScenarioSpec) -> None:
+    for first_pick, second_pick in (("A", "B"), ("B", "A")):
+        t, wolves = _night_table(ww)
+        W, rid = t.open_wolf_round(night=2)
+        a, b = t.with_role("villager")[:2]
+        picks = {"A": a, "B": b}
+        # two against two; the wolf who is first by seat (``wolves[0]``) is on the side of ``first_pick``
+        for pid, side in zip(wolves, (first_pick, second_pick, second_pick, first_pick)):
+            t.answer(rid, pid, picks[side])
+        assert not t.has_closed(rid)
+        t.tick(151)
+        target, closed = t.close_wolf_round(rid)
+        assert closed["reason"] == "deadline" and sorted(closed["leaders"]) == sorted([a, b])
+        assert target == picks[first_pick]  # not "a", not "b": the pick of the first wolf
+
+
+def test_the_wolves_say_nothing_and_the_night_has_no_victim(ww: ScenarioSpec) -> None:
+    t, wolves = _night_table(ww)
+    W, rid = t.open_wolf_round(night=2)
+    t.tick(41)
+    assert [a["reason"] for a in t.woken_by("free.advisory")] == ["silence"]
+    t.tick(60)
+    assert [a["reason"] for a in t.woken_by("free.advisory")] == ["time"]
+    t.tick(50)
+    target, closed = t.close_wolf_round(rid)
+    assert closed["reason"] == "deadline" and closed["answers"] == [] and closed["missing"] == wolves
+    assert target == "none"
+    assert t.world.ledger[-1].data["content"] == "【刀口】今晚空刀。"
+    assert t.world.ledger[-1].visible_to_ids == [MODERATOR_ID, *wolves]
+
+
+def test_only_some_of_the_wolves_answer(ww: ScenarioSpec) -> None:
+    t, wolves = _night_table(ww)
+    W, rid = t.open_wolf_round(night=2)
+    victim = t.with_role("seer")[0]
+    t.answer(rid, wolves[1], victim)
+    t.answer(rid, wolves[2], victim)
+    t.tick(151)
+    target, closed = t.close_wolf_round(rid)
+    assert closed["reason"] == "deadline" and closed["missing"] == [wolves[0], wolves[3]]
+    assert target == victim  # nobody defaulted for the silent ones: the answers that exist decide
+
+
+def test_a_single_wolf_is_asked_directly(ww: ScenarioSpec) -> None:
+    t, wolves = _night_table(ww, dead_wolves=(0, 1, 2))
+    assert t.ev("alive_wolves") == [wolves[3]]
+    mark = t.mark()
+    (only,), rid = t.open_wolf_round(night=3)
+    assert t.world.channel("wolf-team").mode == "closed"  # no discussion: there is nobody to talk to
+    assert t.who_heard("request.opened", since=mark) == {only}
+    victim = t.with_role("guard")[0]
+    t.answer(rid, only, victim)
+    target, closed = t.close_wolf_round(rid)
+    assert closed["reason"] == "all_answered" and target == victim
+    # a lone wolf who does not answer in time: an empty kill
+    t2, _ = _night_table(ww, dead_wolves=(0, 1, 2))
+    (only2,), rid2 = t2.open_wolf_round(night=3)
+    t2.tick(61)
+    assert t2.close_wolf_round(rid2)[0] == "none"
+
+
+def test_wolves_who_are_out_sleep_through_the_round_but_can_read_it(ww: ScenarioSpec) -> None:
+    t, wolves = _night_table(ww, dead_wolves=(1,))
+    dead = wolves[1]
+    mark = t.mark()
+    W, rid = t.open_wolf_round(night=2)
+    assert W == [wolves[0], wolves[2], wolves[3]]
+    victim = t.with_role("villager")[0]
+    for pid in W:
+        t.ok(pid, "speak", channel_id="wolf-team", content=f"{pid} 同意刀 {victim}")
+        t.answer(rid, pid, victim)
+    target, closed = t.close_wolf_round(rid)
+    assert closed["reason"] == "unanimous" and target == victim and len(closed["answers"]) == 3
+    # nothing of it reached the dead wolf ...
+    assert [p for target_, p in t.log[mark:] if target_ == dead] == []
+    # ... and he does not need to be asked: he is not a recipient of the request
+    assert dead not in t.world.state.requests[rid].to
+    # but the history is his to read
+    seen = [e.data["content"] for e in t.world.entries_visible(dead) if e.type == "message" and e.channel_id == "wolf-team"]
+    assert any("今晚刀口" in text for text in seen) and any("同意刀" in text for text in seen)
 
 
 # ======================================================================================================
@@ -1078,9 +1418,14 @@ _VARIABLE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 def test_prompt_templates_use_only_the_documented_variables() -> None:
     participant = (ROOT / "prompts" / "participant.md").read_text(encoding="utf-8")
     moderator = (ROOT / "prompts" / "moderator.md").read_text(encoding="utf-8")
-    assert set(_VARIABLE.findall(participant)) == {"name", "seat", "id", "persona", "rules"}
-    assert set(_VARIABLE.findall(moderator)) == {"rules", "manual"}
+    assert set(_VARIABLE.findall(participant)) == {"id", "name", "seat", "persona", "memory_block", "rules"}
+    assert set(_VARIABLE.findall(moderator)) == {"rules", "manual"}  # the moderator has no memory block
     assert participant.count("{{rules}}") == 1 and moderator.count("{{rules}}") == 1 and moderator.count("{{manual}}") == 1
+    assert participant.count("{{memory_block}}") == 1
+    # the memory block is a whole paragraph of its own (it disappears completely when it is empty)
+    lines = participant.splitlines()
+    at = lines.index("{{memory_block}}")
+    assert lines[at - 1] == "" and lines[at + 1] == ""
 
 
 def test_the_prompts_stay_game_agnostic() -> None:
@@ -1099,7 +1444,14 @@ def test_the_config_points_at_files_that_load() -> None:
     for key in ("moderator_system", "participant_system"):
         assert (ROOT / config["prompts"][key]).is_file(), key
     assert (ROOT / config["knowledge_base"]["docs_dir"] / "rules_12p_standard.md").is_file()
-    assert len(config["participants"]) == sum(item.count for item in spec.setup.identity_pool)
+    participants = config["participants"]
+    assert len(participants) == sum(item.count for item in spec.setup.identity_pool)
+    # v0.12.1 (E13): the ids are N1..N12 and are the seat numbers, the names have no number, no persona field
+    assert [p["id"] for p in participants] == [f"N{i}" for i in range(1, 13)]
+    assert [p["seat"] for p in participants] == [str(i) for i in range(1, 13)]
+    assert [p["name"] for p in participants] == NAMES
+    assert len({p["name"] for p in participants}) == 12 and not any(re.search(r"\d", p["name"]) for p in participants)
+    assert all(set(p) == {"id", "seat", "name"} for p in participants)
     tag_styles = set(config["tag_styles"])
     assert {role.tags[0] for role in spec.setup.roles.values()} <= tag_styles
 

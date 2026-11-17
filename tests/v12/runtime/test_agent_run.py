@@ -418,6 +418,53 @@ async def test_a_brain_bug_that_never_goes_away_is_given_up_without_a_loop():
 
 
 @async_test()
+async def test_a_brain_bug_while_merging_loses_nothing_the_agent_is_told_with_the_next_activation():
+    rig = Rig()
+    hold = asyncio.Event()
+    rig.llm.script("a1", Step(hold=hold, resp=speak_resp()), sleep_resp(), sleep_resp())
+    original = rig.brain.inject_message
+    state = {"fail": True}
+
+    def flaky(agent_id, ctx):
+        if state["fail"]:
+            state["fail"] = False
+            raise RuntimeError("inject bug")
+        return original(agent_id, ctx)
+
+    rig.brain.inject_message = flaky  # type: ignore[method-assign]
+    agent = rig.agent()
+    async with running_agent(agent):
+        wake(agent, "m1")
+        await wait_until(lambda: len(rig.llm.calls) == 1)
+        wake(agent, "m2")  # arrives during the call; the merge at the boundary blows up
+        await settle()
+        hold.set()
+        await wait_until(lambda: agent.stats["runs"] == 2, timeout=3)
+    assert agent.stats["failures"] == 0 and agent.stats["activations"] == 2  # the run went on, then the agent woke again
+    assert any("inject bug" in e["message"] for e in rig.trace.of("error", "a1"))
+    last = rig.llm.calls[-1].messages
+    assert last[-1]["content"].startswith("DELTA[a1]") and "#m2" in last[-1]["content"]  # m2 reached the model after all
+    assert labels(rig.brain.injects[-1].reasons) == ["m2"] and agent.pending == []
+
+
+@async_test()
+async def test_a_brain_bug_in_begin_run_is_traced_and_the_run_goes_on():
+    rig = Rig()
+    rig.llm.script("a1", sleep_resp())
+
+    def broken(agent_id):
+        raise RuntimeError("begin bug")
+
+    rig.brain.begin_run = broken  # type: ignore[method-assign]
+    agent = rig.agent()
+    async with running_agent(agent):
+        wake(agent)
+        await wait_until(lambda: agent.stats["runs"] == 1)
+    assert agent.stats["failures"] == 0 and len(rig.llm.calls) == 1
+    assert any("begin bug" in e["message"] for e in rig.trace.of("error", "a1"))
+
+
+@async_test()
 async def test_a_tool_that_raises_becomes_an_error_result_and_the_run_goes_on():
     rig = Rig()
 

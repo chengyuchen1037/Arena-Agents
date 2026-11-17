@@ -509,7 +509,8 @@ class Agent:
         self._run = None
         self._task = None
         self._failures = 0
-        self._cancel_streak = 0
+        if run.end_reason != "nothing":  # an activation that made no model call is no progress: the count stays
+            self._cancel_streak = 0
         self.stats["runs"] += 1
         conv = self.book.get(self.agent_id)
         if conv is not None:
@@ -644,7 +645,7 @@ class Agent:
 
     async def _run_rounds(self, run: _Run) -> None:
         aid, brain = self.agent_id, self.brain
-        brain.begin_run(aid)
+        self._brain_call("begin_run", brain.begin_run, aid)  # per-run bookkeeping: a bug there must not stop the agent
         conv = self._open_conversation(run)
         if conv is None:
             run.end_reason = "nothing"
@@ -737,13 +738,24 @@ class Agent:
 
     # ------------------------------------------------------------ conversation upkeep ---
     def _merge_pending(self, run: _Run, conv: Conversation) -> str | None:
-        """Hand everything that arrived meanwhile to the brain as ONE delta; returns its text, if any."""
-        reasons, self._pending = self._pending, []
-        run.absorb(reasons)
+        """Hand everything that arrived meanwhile to the brain as ONE delta; returns its text, if any.
+
+        If the brain *raises*, nothing is lost: the envelopes go back to the front of ``pending`` (the model
+        simply is not told yet), so the run's end re-activates the agent and the activation path - which
+        retries and finally reports a persistent failure - takes over."""
+        taken, self._pending = self._pending, []
         ctx = WakeContext(
-            agent_id=self.agent_id, kind="inject", gen_id=run.gen, reasons=reasons, after_seq=conv.seen_seq
+            agent_id=self.agent_id, kind="inject", gen_id=run.gen, reasons=list(taken), after_seq=conv.seen_seq
         )
-        result = self._brain_call("inject_message", self.brain.inject_message, self.agent_id, ctx)
+        try:
+            result = self.brain.inject_message(self.agent_id, ctx)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("brain.inject_message failed for %s", self.agent_id)
+            self._trace("error", gen=run.gen, message=f"brain.inject_message failed: {type(exc).__name__}: {exc}")
+            self._pending[:0] = taken
+            return None
+        reasons = taken
+        run.absorb(reasons)
         if not result:
             return None
         text, new_seen = result

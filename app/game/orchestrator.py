@@ -4,6 +4,11 @@ The game itself is a :class:`~app.world.world.World` (rules-agnostic physical la
 :class:`~app.runtime.supervisor.Supervisor` that runs one async agent (actor + worker) per player
 and one for the moderator.  This class wires those together with the model bindings, the encrypted
 save files, the SSE event bus and the HTTP API (``app.api``).
+
+v0.12.1: every message injected into an agent wakes it; token use is managed by the actors (one
+persistent conversation per agent, kept across pause / resume in ``self._book`` and reset for a new
+game, an import or a restore), never by calling the model less.  The user's spending limit and the
+roster (names, avatars, persona, memory) live in :mod:`app.game.roster_runtime`.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from app.agents.brain import ArenaBrain
 from app.config import load_config
 from app.engine.llm import LLMClient
 from app.game.bindings import BindingError
+from app.game.roster_runtime import RosterRuntimeMixin
 from app.game.session import (
     APP_ENGINE_VERSION,
     MODERATOR_ID,
@@ -35,6 +41,7 @@ from app.game.session_runtime import OLD_SAVE_NOTICE, SessionRuntimeMixin
 from app.runtime.agent import Agent, AgentConfig
 from app.runtime.bus import EventBus
 from app.runtime.clock import GameClock
+from app.runtime.conversation import ConversationBook
 from app.runtime.llm_gate import GatedEngineLlm, LlmGate
 from app.runtime.supervisor import Supervisor, SupervisorConfig
 from app.runtime.trace_log import TraceLog
@@ -100,12 +107,15 @@ def load_config_spec(cfg: dict[str, Any]) -> ScenarioSpec:
     return load_scenario_v2(str(path))
 
 
-class GameOrchestrator(SessionRuntimeMixin):
+class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
     # Class-level defaults so partially initialized instances (tests) stay valid.
     _supervisor: Supervisor | None = None
     _reload_deferred: bool = False
     llm_port_factory: Callable[["GameOrchestrator"], Any] | None = None
     demo_mode: bool = False
+    _brain: ArenaBrain | None = None
+    _stall_notice: str = ""
+    _roster_io_suspended: bool = False
 
     def __init__(self) -> None:
         self.cfg = load_config()
@@ -117,11 +127,20 @@ class GameOrchestrator(SessionRuntimeMixin):
         self._tasks: set[asyncio.Task[Any]] = set()
         self._supervisor = None
         self._reload_deferred = False
+        self._book = ConversationBook()
+        self._brain = None
+        self._stall_notice = ""
         self.session: GameSession
         self.world: World
         self.clock: GameClock
         self.usage: UsageBook
-        self._reset_game(default_bindings=None)
+        # The first game is built before the workspace is activated (``startup()``): it must not read or
+        # create roster files in whatever directory is active *now*; ``startup()`` reloads it afterwards.
+        self._roster_io_suspended = True
+        try:
+            self._reset_game(default_bindings=None)
+        finally:
+            self._roster_io_suspended = False
 
     # ------------------------------------------------------------------ config ---
     def _is_active(self) -> bool:
@@ -153,24 +172,32 @@ class GameOrchestrator(SessionRuntimeMixin):
         return True
 
     # ------------------------------------------------------------- game creation ---
-    def _players(self) -> list[dict[str, str]]:
+    def _config_players(self) -> list[dict[str, Any]]:
+        """The seats exactly as ``config.yml`` lists them (defaults; the roster overrides name / avatar / texts)."""
         players = []
-        for item in self.cfg.get("participants", []):
+        for index, item in enumerate(self.cfg.get("participants", []), start=1):
             players.append(
                 {
                     "id": str(item["id"]),
-                    "seat": str(item.get("seat", str(item["id"]).upper())),
-                    "name": str(item["name"]),
+                    "seat": str(item.get("seat", index)),
+                    "name": str(item.get("name") or item["id"]),
                     "persona": str(item.get("persona", "")),
+                    "memory": "",
+                    "avatar": None,
                 }
             )
         return players
 
-    def _new_world(self, spec: ScenarioSpec, seed: int | None = None) -> tuple[World, GameClock]:
+    def _new_world(
+        self, spec: ScenarioSpec, seed: int | None = None, players: list[dict[str, Any]] | None = None
+    ) -> tuple[World, GameClock]:
         clock = GameClock()
         clock.pause()
         world = World.new_game(
-            spec, self._players(), clock, seed=seed if seed is not None else random.SystemRandom().randrange(1, 2**31)
+            spec,
+            players if players is not None else self._roster_players(),
+            clock,
+            seed=seed if seed is not None else random.SystemRandom().randrange(1, 2**31),
         )
         world.drain_outbox()  # nobody is listening yet; the snapshot is built from state
         world.drain_events()
@@ -179,8 +206,8 @@ class GameOrchestrator(SessionRuntimeMixin):
     def _reset_game(self, *, default_bindings: dict[str, Any] | None = None) -> None:
         """Replace the live game with a fresh, idle one (the caller guarantees nothing is running)."""
         self.spec = self.default_spec
-        world, clock = self._new_world(self.spec)
-        players = self._players()
+        players = self._roster_players()
+        world, clock = self._new_world(self.spec, players=players)
         defaults = self._load_defaults() if default_bindings is None else default_bindings
         allowed = {MODERATOR_ID, *(p["id"] for p in players)}
         session = GameSession(
@@ -190,13 +217,23 @@ class GameOrchestrator(SessionRuntimeMixin):
             participants=[Participant(**p) for p in players],
             tag_styles=copy.deepcopy(self.cfg.get("tag_styles") or {}),
             scenario_spec=self.spec.model_dump(mode="json"),
-            execution_depth=str((self.cfg.get("llm") or {}).get("execution_depth", "medium")),  # type: ignore[arg-type]
             model_bindings={a: b.model_copy(deep=True) for a, b in defaults.items() if a in allowed},
+            budget=self._load_budget_defaults(),
+            memory_enabled=bool(getattr(self, "_memory_enabled_snapshot", True)),
         )
         self.world, self.clock = world, clock
         self.usage = UsageBook()
         self.agent_state = {}
+        self._reset_conversations()
         self._set_session(session)
+        self._attach_budget()
+
+    def _reset_conversations(self) -> None:
+        """A new game / import / restore starts with no conversations (the book and the brain are the
+        actors' memory of the *previous* game)."""
+        self._book = ConversationBook()
+        self._brain = None
+        self._stall_notice = ""
 
     async def new_game(self, *, randomize_identities: bool | None = None) -> GameSession:
         """Start a fresh game (identities are always dealt anew)."""
@@ -216,38 +253,58 @@ class GameOrchestrator(SessionRuntimeMixin):
         self._ensure_not_switching()  # never swap the world under a workspace switch / without a workspace
         if self.session.status != "idle":
             raise RuntimeError("仅未开始的新对局可以刷新身份；请先新建对局。")
-        self.world, self.clock = self._new_world(self.spec)
+        self.world, self.clock = self._new_world(self.spec, players=self._session_players())
+        self._reset_conversations()
         await self.broadcast_state("identities_shuffled")
         return self.session
 
+    def _session_players(self) -> list[dict[str, Any]]:
+        """The seats of the *current* game (kept when only the identities are re-dealt)."""
+        return [p.model_dump() for p in self.session.participants]
+
     # ------------------------------------------------------------------ lifecycle ---
-    def _build_runtime(self) -> Supervisor:
+    def _ensure_brain(self, *, fresh: bool) -> ArenaBrain:
+        """The brain of this game.  It is kept across pause / resume (its prompts stay byte-identical, which
+        is what the provider's prompt cache needs); ``fresh`` rebuilds it for a game that is starting, so
+        the persona / memory edits made while it was still idle are taken."""
+        brain = self._brain
+        if fresh or brain is None or brain.world is not self.world:
+            personas = {p.id: p.persona for p in self.session.participants}
+            memories = (
+                {p.id: p.memory for p in self.session.participants if p.memory} if self.session.memory_enabled else {}
+            )
+            brain = self._brain = ArenaBrain(self.world, self.spec, self.cfg, personas=personas, memories=memories)
+        return brain
+
+    def _context_window_of(self, agent_id: str) -> Callable[[], int]:
+        def window() -> int:
+            binding = self.session.get_model_binding(agent_id)
+            return int(getattr(binding, "context_window_tokens", 0) or 0)
+
+        return window
+
+    def _build_runtime(self, *, fresh: bool = False) -> Supervisor:
         rt = self.cfg.get("runtime") or {}
-        gate = LlmGate(
-            max_concurrent=int(rt.get("llm_concurrency", 6)),
-            per_provider=int(rt.get("llm_concurrency_per_provider", 4)),
-        )
         if self.llm_port_factory is not None:
             llm_port = self.llm_port_factory(self)
         else:
+            gate = LlmGate(
+                max_concurrent=int(rt.get("llm_concurrency", 0)),
+                per_provider=int(rt.get("llm_concurrency_per_provider", 0)),
+            )
             llm_port = GatedEngineLlm(
                 self.llm,
                 self.session.get_model_binding,
                 gate,
                 float(rt.get("llm_timeout_seconds", 120)),
             )
-        personas = {p.id: p.persona for p in self.session.participants}
-        brain = ArenaBrain(self.world, self.spec, self.cfg, personas=personas)
+        brain = self._ensure_brain(fresh=fresh)
         trace = TraceLog(self._logs_root(), self.session.session_id)
         self._register_trace_secrets(trace)
         agent_config = AgentConfig(
-            debounce_s=float(rt.get("debounce", 1.5)),
-            execution_depth=self.session.execution_depth,
+            compact_at=float(rt.get("compact_at", 0.6)),
+            trim_at=float(rt.get("trim_at", 0.9)),
         )
-        if isinstance(rt.get("max_rounds"), dict):
-            agent_config.max_rounds = {
-                kind: {str(k): int(v) for k, v in table.items()} for kind, table in rt["max_rounds"].items()
-            }
         self._agent_config = agent_config
         sink = _CallableSink(self._publish)
         agents = [
@@ -261,6 +318,8 @@ class GameOrchestrator(SessionRuntimeMixin):
                 trace,
                 sink,
                 agent_config,
+                book=self._book,
+                context_window=self._context_window_of(agent_id),
             )
             for agent_id in [MODERATOR_ID, *(p.id for p in self.session.participants)]
         ]
@@ -278,6 +337,7 @@ class GameOrchestrator(SessionRuntimeMixin):
             on_stall=self._on_stall,
             usage=self.usage,
             trace=trace,
+            book=self._book,
         )
 
     def _register_trace_secrets(self, trace: TraceLog) -> None:
@@ -304,13 +364,6 @@ class GameOrchestrator(SessionRuntimeMixin):
 
         return get_data_dir() / "logs"
 
-    def set_execution_depth(self, depth: str) -> None:
-        """Change the execution depth; a running game picks it up on its agents' next run."""
-        self.session.execution_depth = depth  # type: ignore[assignment]
-        agent_config = getattr(self, "_agent_config", None)
-        if agent_config is not None:
-            agent_config.execution_depth = depth
-
     async def start_or_resume(self) -> GameSession:
         self._ensure_not_switching()  # also refuses while the workspace is unusable
         if self._is_active():
@@ -318,6 +371,7 @@ class GameOrchestrator(SessionRuntimeMixin):
         self.reload_config()
         # Every actor that will call a model must have a usable binding (never a silent fallback).
         self.ensure_bindings_ready()
+        self._refuse_when_over_budget()
         self._recovery_pending = False
         session = self.session
         reason = {"idle": "started", "finished": "continued"}.get(self.world.state.status, "resumed")
@@ -325,7 +379,8 @@ class GameOrchestrator(SessionRuntimeMixin):
         session.restore_notice = ""
         session.pause_reason = ""
         session.hold_reason = ""
-        self._supervisor = self._build_runtime()
+        self._stall_notice = ""
+        self._supervisor = self._build_runtime(fresh=reason == "started")
         self.clock.resume()
         self.world.set_running(True, reason)
         session.status = "running"
@@ -343,7 +398,7 @@ class GameOrchestrator(SessionRuntimeMixin):
             self.world.set_running(False, why)
         self.clock.pause()
         self._flush_world()
-        self.agent_state = {k: "stopped" for k in self.agent_state}
+        self.agent_state = {k: "sleeping" for k in self.agent_state}  # a stopped game is a sleeping one
 
     def _flush_world(self) -> None:
         """Publish spectator events the world queued while nobody was draining it."""
@@ -358,7 +413,7 @@ class GameOrchestrator(SessionRuntimeMixin):
             session.status = "finished"
         else:
             session.status = "paused"
-            session.pause_reason = why if why in ("user", "hold", "error", "stall") else "user"
+            session.pause_reason = why if why in ("user", "hold", "error", "stall", "budget") else "user"
             session.hold_reason = hold_reason
         await self.broadcast_state("status_change")
         return session
@@ -392,8 +447,11 @@ class GameOrchestrator(SessionRuntimeMixin):
         elif event == "end_game":
             self._spawn(self.pause("finish"))
 
-    def _on_stall(self, reason: str) -> None:
-        self._spawn(self.pause("stall", hold_reason=reason or "对局长时间没有进展，已自动暂停。"))
+    def _on_stall(self, reason: str | None) -> None:
+        """The watchdog found the game silent (``reason``) or saw it move again (``None``).  It never pauses
+        the game: the banner tells the user and the user decides."""
+        self._stall_notice = reason or ""
+        self._spawn(self.broadcast_state("stall_updated"))
 
     def _publish(self, event: UiEvent) -> None:
         if event.type == "agent.status":
@@ -427,12 +485,16 @@ class GameOrchestrator(SessionRuntimeMixin):
                     "restored_from_save": s.restored_from_save,
                     "restore_notice": s.restore_notice,
                     "autosave_error": s.autosave_error,
-                    "execution_depth": s.execution_depth,
                     "title": s.title,
+                    "budget": self.budget_payload(),
+                    "memory_enabled": s.memory_enabled,
+                    "review": self.review_view(),
+                    "stall_notice": self._stall_notice,
+                    "clock": round(float(self.clock.now()), 3),
                 },
             )
         )
-        if event_type in {"status_change", "error", "bindings_updated", "execution_depth_updated"}:
+        if event_type in {"status_change", "error", "bindings_updated", "budget_updated"}:
             self.schedule_autosave(event_type)
 
     # ------------------------------------------------------------------ snapshots ---
@@ -445,9 +507,12 @@ class GameOrchestrator(SessionRuntimeMixin):
         if s.status == "finished":
             winner = self.world.state.winner
             return f"对局已结束{(' · ' + winner + ' 获胜') if winner else ''}（可点击「继续」恢复）"
-        why = {"hold": "主持人暂停了对局", "stall": "对局长时间没有进展，已自动暂停", "error": "运行出错，已暂停"}.get(
-            s.pause_reason, "已暂停"
-        )
+        why = {
+            "hold": "主持人暂停了对局",
+            "stall": "对局长时间没有进展，已暂停",
+            "error": "运行出错，已暂停",
+            "budget": "已达到预算上限，已暂停",
+        }.get(s.pause_reason, "已暂停")
         return f"{why}{('：' + s.hold_reason) if s.hold_reason else ''}"
 
     def public_session(self) -> dict[str, Any]:
@@ -455,8 +520,15 @@ class GameOrchestrator(SessionRuntimeMixin):
         never thoughts or tool calls."""
         s = self.session
         snap = world_snapshot(self.world)
+        avatars = {p.id: p.avatar for p in s.participants}
         participants = [
-            {**p, "state": self.agent_state.get(str(p.get("id")), "idle")} for p in snap.get("players", [])
+            {
+                **p,
+                "avatar": avatars.get(str(p.get("id"))),
+                "state": self.agent_state.get(str(p.get("id")), "sleeping"),
+                "sleep_until": self._sleep_until(str(p.get("id"))),
+            }
+            for p in snap.get("players", [])
         ]
         return {
             "session_id": s.session_id,
@@ -476,7 +548,12 @@ class GameOrchestrator(SessionRuntimeMixin):
             "event_id": self.bus.last_id,
             "clock": snap.get("now", 0.0),
             "participants": participants,
-            "moderator": {"id": MODERATOR_ID, "name": "主持人", "state": self.agent_state.get(MODERATOR_ID, "idle")},
+            "moderator": {
+                "id": MODERATOR_ID,
+                "name": "主持人",
+                "state": self.agent_state.get(MODERATOR_ID, "sleeping"),
+                "sleep_until": self._sleep_until(MODERATOR_ID),
+            },
             "channels": snap.get("channels", []),
             "messages": snap.get("messages", []),
             "requests": snap.get("requests", []),
@@ -491,9 +568,18 @@ class GameOrchestrator(SessionRuntimeMixin):
             "restored_from_save": s.restored_from_save,
             "restore_notice": s.restore_notice,
             "autosave_error": s.autosave_error,
-            "execution_depth": s.execution_depth,
+            "budget": self.budget_payload(),
+            "memory_enabled": s.memory_enabled,
+            "review": self.review_view(),
+            "stall_notice": self._stall_notice,
             "demo": bool(getattr(self, "demo_mode", False)),  # scripted bots, no models
         }
+
+    def _sleep_until(self, agent_id: str) -> float | None:
+        """When a timed ``sleep`` of the agent ends (game-clock seconds), else ``None``."""
+        conversation = self._book.get(agent_id)
+        until = getattr(conversation, "sleep_until", None) if conversation is not None else None
+        return float(until) if isinstance(until, (int, float)) else None
 
     # ---------------------------------------------------------------- persistence ---
     def session_payload(self) -> dict[str, Any]:
@@ -545,7 +631,9 @@ class GameOrchestrator(SessionRuntimeMixin):
         fill_missing_from_defaults(loaded, self._load_defaults())
         self.spec, self.clock, self.world, self.usage = spec, clock, world, usage
         self.agent_state = {}
+        self._reset_conversations()  # conversations are not saved: a restored game starts them from the board
         self._set_session(loaded)
+        self._attach_budget()
         self.refresh_binding_issues()
 
     async def load_session_data(self, data: dict[str, Any]) -> GameSession:

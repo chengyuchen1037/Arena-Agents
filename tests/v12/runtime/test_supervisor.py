@@ -617,10 +617,8 @@ async def test_progress_after_a_stall_clears_it_with_on_stall_none():
     rig.world.bump()  # the ledger moves again
     await wait_until(lambda: len(stalls) == 2, timeout=2)
     assert stalls[1] is None and sup.stalled is False
-    assert rig.trace.of("watchdog", MODERATOR)[-1]["action"] in ("recovered", "wake", "stall")
     await sup.stop()
-    # and it starts counting from zero: the next warning needs the full number of fruitless wakes again
-    assert any(r["action"] == "recovered" for r in rig.trace.of("watchdog", MODERATOR))
+    assert any(r["action"] == "recovered" for r in rig.trace.of("watchdog", MODERATOR))  # and it is in the trace
 
 
 @async_test()

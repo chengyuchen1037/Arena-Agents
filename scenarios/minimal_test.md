@@ -21,6 +21,7 @@ setup:
       attributes: {group: blue}
       brief: 你属于蓝队。目标：让红队全部出局。
   public_tags: [存活, 出局]
+  faction_names: {red: 红队, blue: 蓝队}
 
 defaults:
   floor: {duration_s: 30, max_messages: 1, max_chars_per_message: 120, max_chars_total: 200}
@@ -69,5 +70,5 @@ ui:
 1. 开局：创建公共频道 `public`（成员为全部玩家），`set_phase` 写明阶段。
 2. 发言：用 `set_floor_queue` 按座位顺序让每人发言一次。
 3. 投票：用 `open_request(sealed=true)` 收集投票，关闭后用 `announce` 发布出局公告并 `update_player` 标记出局。
-4. 每次出局后用 `evaluate` 检查胜负，达成条件就 `end_game`。
+4. 每次出局后用 `evaluate` 检查胜负，达成条件就 `end_game`（winner 填阵营的显示名：红队或蓝队）。
 5. 你会被每一条新消息唤醒：等的事还没发生（又一条发言、又一次作答）就直接 `sleep()`，不要重复操作。

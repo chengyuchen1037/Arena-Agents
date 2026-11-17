@@ -61,6 +61,7 @@
     viewpointPref: View.GOD, // what the user chose (kept even while the game has no players yet)
     viewpoint: View.GOD, // effective viewpoint: "god" | player id
     selectedChannel: null, // channel id; null while there is no channel (the default is picked automatically)
+    channelChosen: false, // false: the selection is automatic (public channel, else the first one) and follows new channels
     dmGroupOpen: false,
     ticketPopOpen: false,
     phoneTab: "feed", // phone layout: "feed" | "channels" | "players"
@@ -269,7 +270,11 @@
    * while it is valid, otherwise fall back to the public channel (or the first one).
    */
   function ensureSelectedChannel() {
-    const next = View.normalizeSelectedChannel(state.session, state.viewpoint, state.selectedChannel);
+    // an automatic selection re-evaluates the default every time (the public channel appears after
+    // the game starts: it replaces the first private chat that was selected before)
+    const next = state.channelChosen
+      ? View.normalizeSelectedChannel(state.session, state.viewpoint, state.selectedChannel)
+      : View.defaultChannelId(state.session, state.viewpoint);
     if (next !== state.selectedChannel) {
       state.selectedChannel = next;
       if (next) markChannelRead(next);
@@ -362,7 +367,7 @@
     if (!elModChip) return;
     const t = View.moderatorTile(s, state.viewpoint, { clockNow: clockNow() });
     const html =
-      `${Avatar.imgHtml(MOD, undefined, null, { size: 24, className: "mod-chip-avatar" })}` +
+      `${Avatar.imgHtml(MOD, undefined, null, { size: 20, className: "mod-chip-avatar" })}` +
       `<span class="mod-chip-name">${escapeHtml(t.name)}</span>` +
       (t.state
         ? `<span class="mod-chip-state st-${t.state}" title="${escapeHtml(t.stateTitle)}">${t.stateIcon}</span>`
@@ -530,7 +535,7 @@
     const tipText = `${m.title}${showChip ? `｜${sum.icon} ${sum.text}${sum.detail ? `（${sum.detail}）` : ""}` : ""}`;
     const hue = Avatar.HUES[Avatar.hashString(ch.id) % Avatar.HUES.length];
     const avatar = isDm
-      ? avatarImg(m.avatarId, 32, "chan-avatar-img")
+      ? avatarImg(m.avatarId, 40, "chan-avatar-img")
       : `<span class="chan-glyph" style="--gh:${hue}" aria-hidden="true">${escapeHtml(m.glyph)}</span>`;
     const chip = showChip
       ? `<span class="floor-chip floor-${escapeHtml(sum.kind)}" title="${escapeHtml(sum.detail || sum.text)}">` +
@@ -719,7 +724,7 @@
     const html =
       `<article class="${classes.join(" ")}" data-seq="${numText(m.seq)}"` +
       ` data-from="${escapeHtml(m.from)}"${m.ticket_id ? ` data-ticket-msg="${escapeHtml(m.ticket_id)}"` : ""}>` +
-      `<div class="msg-avatar">${avatarImg(m.from, 32, "msg-avatar-img")}</div>` +
+      `<div class="msg-avatar">${avatarImg(m.from, 40, "msg-avatar-img")}</div>` +
       `<div class="msg-main"><div class="msg-head"><span class="msg-name">${escapeHtml(name)}</span>` +
       `${label}${ticket}<span class="msg-time">${escapeHtml(time)}</span></div>` +
       `<div class="msg-body formatted-text">${body}</div></div></article>`;
@@ -777,6 +782,7 @@
           )
           .join("");
         const notes = [];
+        if (c.result.zeroCount > 0) notes.push(`其余 ${numText(c.result.zeroCount)} 项 0 票`);
         if (c.result.leaders.length) notes.push(`最高：${c.result.leaders.map(escapeHtml).join("、")}`);
         if (c.result.defaulted.length) notes.push(`默认答案：${c.result.defaulted.map(escapeHtml).join("、")}`);
         if (c.result.missing.length) notes.push(`未作答：${c.result.missing.map(escapeHtml).join("、")}`);
@@ -1008,7 +1014,9 @@
     state.viewpointPref = vp;
     state.viewpoint = vp;
     if (persist) saveViewpointPref(vp);
-    state.selectedChannel = View.normalizeSelectedChannel(state.session, vp, state.selectedChannel);
+    state.selectedChannel = state.channelChosen
+      ? View.normalizeSelectedChannel(state.session, vp, state.selectedChannel)
+      : View.defaultChannelId(state.session, vp);
     markChannelRead(state.selectedChannel);
     state.autoScroll = true;
     state.feed.key = ""; // different message set: re-render the feed
@@ -1028,12 +1036,15 @@
     if (key !== prevKey) {
       // A different game: forget selection and unread marks.
       state.selectedChannel = null;
+      state.channelChosen = false;
       resetReadState(next);
     } else if (!state.read.baseline) {
       resetReadState(next);
     }
     state.viewpoint = View.normalizeViewpoint(next, state.viewpointPref);
-    state.selectedChannel = View.normalizeSelectedChannel(next, state.viewpoint, state.selectedChannel);
+    state.selectedChannel = state.channelChosen
+      ? View.normalizeSelectedChannel(next, state.viewpoint, state.selectedChannel)
+      : View.defaultChannelId(next, state.viewpoint);
     if (state.selectedChannel && key !== prevKey) markChannelRead(state.selectedChannel);
     if (rosterUI && rosterUI.openId() && rosterUI.openId() !== MOD && !View.participantOf(next, rosterUI.openId())) {
       rosterUI.close();
@@ -1152,6 +1163,7 @@
   function selectChannel(id) {
     const next = View.normalizeSelectedChannel(state.session, state.viewpoint, id);
     state.selectedChannel = next;
+    state.channelChosen = true;
     markChannelRead(next);
     state.autoScroll = true;
     state.ticketPopOpen = false;
@@ -1270,12 +1282,19 @@
 
   // Click outside the ticket popover closes it; the detail panel / roster menu close themselves (roster.js).
   if (typeof document.addEventListener === "function") {
+    // the event path is computed at dispatch time: a handler that repaints (detaches) the clicked
+    // button must not turn an inside click into an "outside" one
+    const inPath = (evt, selector) => {
+      const path = evt && typeof evt.composedPath === "function" ? evt.composedPath() : [];
+      if (path.length) return path.some((n) => n && typeof n.matches === "function" && n.matches(selector));
+      return Boolean(closestFrom(evt && evt.target, selector));
+    };
     document.addEventListener("click", (evt) => {
-      if (state.ticketPopOpen && !closestFrom(evt.target, "#ticket-pop") && !closestFrom(evt.target, "[data-tickets-toggle]")) {
+      if (state.ticketPopOpen && !inPath(evt, "#ticket-pop") && !inPath(evt, "[data-tickets-toggle]")) {
         state.ticketPopOpen = false;
         renderTicketPop();
       }
-      if (elMoreMenu && !elMoreMenu.hidden && !closestFrom(evt.target, "#more-menu") && !closestFrom(evt.target, "#btn-more")) {
+      if (elMoreMenu && !elMoreMenu.hidden && !inPath(evt, "#more-menu") && !inPath(evt, "#btn-more")) {
         setMoreMenu(false);
       }
     });
@@ -1401,6 +1420,7 @@
     const ok = await control("api/control/new", "已重置为空白未开始对局，点击「开始」由主持人初始化并推进");
     if (ok) {
       state.selectedChannel = null;
+      state.channelChosen = false;
       renderAll(true);
     }
   });
@@ -1459,6 +1479,7 @@
   function handleSessionLoaded(session) {
     adoptHttpSession(session, { force: true });
     state.selectedChannel = null;
+    state.channelChosen = false;
     renderAll(true);
   }
 

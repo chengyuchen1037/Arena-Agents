@@ -349,7 +349,12 @@ class SessionRuntimeMixin(WorkspaceRuntimeMixin):
             report["recovery_error"] = self.recovery_error
         else:
             if report["restored"] is None:
-                # Fresh game: its default bindings must come from the *active* workspace.
+                # Fresh game: its roster (names, avatars, persona, memory), default budget and default
+                # bindings must come from the *active* workspace, which did not exist when it was built.
+                try:
+                    self._reload_fresh_game_from_workspace()
+                except Exception:  # noqa: BLE001 - a roster problem must not stop the application from coming up
+                    logger.warning("Could not load the roster of the workspace", exc_info=True)
                 fill_missing_from_defaults(self.session, self._load_defaults())
             self.refresh_binding_issues()
         self._autosave_enabled = True

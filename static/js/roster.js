@@ -120,6 +120,17 @@
       return node && typeof node.closest === "function" ? node.closest(selector) : null;
     }
 
+    /**
+     * Was the click inside `selector`? Uses the event path computed at dispatch time: a handler may
+     * repaint (and so detach) the clicked button before this one runs, and `closest()` would then
+     * wrongly say "outside".
+     */
+    function inPath(evt, selector) {
+      const path = evt && typeof evt.composedPath === "function" ? evt.composedPath() : [];
+      if (path.length) return path.some((n) => n && typeof n.matches === "function" && n.matches(selector));
+      return Boolean(closestFrom(evt && evt.target, selector));
+    }
+
     function setHtmlIfChanged(node, html, key) {
       if (!node) return;
       if (st[key] === html) return;
@@ -271,6 +282,7 @@
       }
       const m = View.actorMetrics(s, id);
       const bind = bindingText(id);
+      // activity (4 columns), then the four token kinds (4 columns), then the cost
       const grid =
         statHtml(Core.numText(m.activations), "激活次数") +
         statHtml(Core.numText(m.calls), "LLM 调用") +
@@ -278,11 +290,12 @@
         statHtml(Core.numText(m.toolCalls), "工具调用") +
         statHtml(Core.numText(m.rejections), "被拒绝") +
         statHtml(esc(Core.formatPercent(m.cacheHitRate)), "缓存命中率") +
-        statHtml(esc(Core.formatCount(m.promptTokens)), "未命中输入 token") +
-        statHtml(esc(Core.formatCount(m.cacheReadTokens)), "缓存读取 token") +
-        statHtml(esc(Core.formatCount(m.cacheWriteTokens)), "缓存写入 token") +
-        statHtml(esc(Core.formatCount(m.completionTokens)), "输出 token") +
-        statHtml(esc(Core.formatCost(m.costUsd)), "费用（累计）", " pop-stat-wide");
+        statHtml(esc(Core.formatCost(m.costUsd)), "费用（累计）", " pop-stat-span2 pop-stat-cost") +
+        `<div class="pop-caption">token 用量</div>` +
+        statHtml(esc(Core.formatCount(m.promptTokens)), "未命中输入", " pop-tok pop-tok-miss") +
+        statHtml(esc(Core.formatCount(m.cacheReadTokens)), "缓存读取", " pop-tok pop-tok-read") +
+        statHtml(esc(Core.formatCount(m.cacheWriteTokens)), "缓存写入", " pop-tok pop-tok-write") +
+        statHtml(esc(Core.formatCount(m.completionTokens)), "输出", " pop-tok pop-tok-out");
       let review = "";
       if (!isMod) {
         const rv = View.reviewView(s);
@@ -423,12 +436,15 @@
       const vw = Number(win.innerWidth) || 1280;
       const vh = Number(win.innerHeight) || 800;
       const pw = Math.min(el.panel.offsetWidth || 400, vw - 16);
+      // the card is partly lower than the panel is tall: shift the panel up so that all of it is on
+      // screen (it may then cover the card row; the card it belongs to stays highlighted)
+      const ph = Math.min(el.panel.scrollHeight || el.panel.offsetHeight || 480, vh - 16);
       let left = Math.min(Math.max(8, r.left), Math.max(8, vw - pw - 8));
       if (st.openId === MOD) left = Math.min(Math.max(8, r.right - pw), Math.max(8, vw - pw - 8));
-      const top = Math.min(r.bottom + 6, Math.max(8, vh - 240));
+      const top = Math.max(8, Math.min(r.bottom + 6, vh - ph - 8));
       style.left = `${Math.round(left)}px`;
       style.top = `${Math.round(top)}px`;
-      style.maxHeight = `${Math.max(220, Math.round(vh - top - 12))}px`;
+      style.maxHeight = `${Math.max(220, Math.round(vh - top - 8))}px`;
     }
 
     function open(id) {
@@ -978,15 +994,11 @@
     });
     if (typeof doc.addEventListener === "function") {
       doc.addEventListener("click", (evt) => {
-        if (menuOpen() && !closestFrom(evt.target, "#roster-menu") && !closestFrom(evt.target, "#btn-roster-menu")) {
+        if (menuOpen() && !inPath(evt, "#roster-menu") && !inPath(evt, "#btn-roster-menu")) {
           setMenu(false);
         }
         if (!st.openId) return;
-        if (
-          closestFrom(evt.target, "#detail-panel") ||
-          closestFrom(evt.target, "[data-actor]") ||
-          closestFrom(evt.target, "#dialog-modal")
-        ) {
+        if (inPath(evt, "#detail-panel") || inPath(evt, "[data-actor]") || inPath(evt, "#dialog-modal")) {
           return;
         }
         close();

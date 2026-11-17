@@ -190,6 +190,21 @@ class SettingsStore:
             ]
             self._write(payload)
 
+    # v0.12.1: the user's default spending limit (copied into every new game).  It lives in the free-form
+    # ``ui`` dict of the settings, so the settings schema is unchanged.
+    def get_budget_defaults(self) -> dict[str, Any]:
+        with self._lock:
+            raw = self._read()["ui"].get("budget_defaults")
+        return copy.deepcopy(raw) if isinstance(raw, dict) else {}
+
+    def save_budget_defaults(self, budget: dict[str, Any]) -> None:
+        if not isinstance(budget, dict):
+            raise TypeError("budget must be a dict")
+        with self._lock:
+            payload = self._read()
+            payload["ui"] = {**payload["ui"], "budget_defaults": copy.deepcopy(budget)}
+            self._write(payload)
+
     def get_last_session_id(self) -> str | None:
         with self._lock:
             return self._read()["last_session_id"]
@@ -242,6 +257,14 @@ def save_model_templates(templates) -> None:
     get_settings_store().save_model_templates(templates)
 
 
+def get_budget_defaults() -> dict:
+    return get_settings_store().get_budget_defaults()
+
+
+def save_budget_defaults(budget: dict) -> None:
+    get_settings_store().save_budget_defaults(budget)
+
+
 def get_last_session_id() -> str | None:
     return get_settings_store().get_last_session_id()
 
@@ -252,12 +275,14 @@ def set_last_session_id(session_id) -> None:
 
 __all__ = [
     "SettingsStore",
+    "get_budget_defaults",
     "get_default_bindings",
     "get_last_session_id",
     "get_model_templates",
     "get_settings",
     "get_settings_store",
     "reset_settings_store",
+    "save_budget_defaults",
     "save_default_bindings",
     "save_model_templates",
     "set_last_session_id",

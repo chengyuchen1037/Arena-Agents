@@ -38,10 +38,12 @@ def test_keys_that_are_still_read_are_kept(cfg: dict) -> None:
     assert cfg["knowledge_base"]["docs_dir"]
     assert cfg["prompts"]["moderator_system"] and cfg["prompts"]["participant_system"]
     runtime = cfg["runtime"]
-    assert runtime["llm_concurrency"] >= 1 and runtime["debounce"] > 0 and runtime["watchdog"] > 0
-    assert set(runtime["max_rounds"]) == {"player", "moderator"}
-    assert all(set(v) == {"low", "medium", "high", "xhigh"} for v in runtime["max_rounds"].values())
-    assert cfg["llm"]["execution_depth"] in {"low", "medium", "high", "xhigh"}
+    # v0.12.1: the engine saves nothing - no debounce, no round caps, no execution depth; concurrency is unlimited by default
+    assert runtime["llm_concurrency"] == 0 and runtime["llm_concurrency_per_provider"] == 0 and runtime["watchdog"] > 0
+    assert 0 < runtime["compact_at"] < runtime["trim_at"] < 1
+    for gone in ("debounce", "max_rounds", "ambient_cap"):
+        assert gone not in runtime
+    assert "execution_depth" not in cfg["llm"]
     assert cfg["participants"] and cfg["tag_styles"]
 
 

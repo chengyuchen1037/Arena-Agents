@@ -700,9 +700,12 @@
           }))
         : [];
       tallyRows.sort((a, b) => b.count - a.count);
+      // rows without a single vote are folded into "其余 N 项 0 票" (a 12-option vote would be a wall of empty bars)
+      const voted = tallyRows.filter((t) => t.count > 0);
       result = {
         reason: r.reason,
-        tally: tallyRows,
+        tally: voted.length ? voted : tallyRows,
+        zeroCount: voted.length ? tallyRows.length - voted.length : 0,
         leaders: list(r.leaders).map(labelOf),
         defaulted: list(r.defaulted).map((id) => displayName(session, id)),
         missing: list(r.missing).map((id) => displayName(session, id)),
@@ -843,7 +846,10 @@
     if (s.status === "paused" && s.pause_reason === "budget") {
       out.push({
         kind: "budget",
-        text: "⛔ 因预算上限暂停：已达到设置的 token / 费用上限。请提高上限（或取消「强制停止」）后点击「继续」。",
+        text:
+          budget.state === "reached"
+            ? "⛔ 因预算上限暂停：已达到设置的 token / 费用上限。请提高上限（或取消「强制停止」）后点击「继续」。"
+            : "⏸ 因预算上限暂停（上限已调整，用量已低于上限）：可以点击「继续」。",
       });
     } else if (budget.state === "reached") {
       out.push({

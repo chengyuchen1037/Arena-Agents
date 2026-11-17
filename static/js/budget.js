@@ -2,7 +2,7 @@
    Arena-Agents v0.12.1 — token / cost budget dialog (E10, E22)
    Loaded after roster.js and before app.js. Exposes window.ArenaBudgetUI.create(ctx).
 
-   The "⛔ 上限" button next to the top-bar usage pill opens this dialog:
+   The "上限" button next to the top-bar usage pill opens this dialog:
      - token limit and cost limit (both may stay empty = no limit)
      - "达到上限后强制停止" (pause the game when 100 % is reached)
      - the current usage with progress bars and the four token kinds
@@ -105,14 +105,14 @@
         el.usage.innerHTML = usageHtml;
       }
       const u = s.usage_stats || {};
-      const cell = (label, n) =>
-        `<div class="pop-stat"><span class="pop-stat-num">${esc(Core.formatCount(n))}</span><span class="pop-stat-label">${esc(label)}</span></div>`;
+      const cell = (label, n, cls) =>
+        `<div class="pop-stat pop-tok ${cls}"><span class="pop-stat-num">${esc(Core.formatCount(n))}</span><span class="pop-stat-label">${esc(label)}</span></div>`;
       const breakdownHtml =
         `<div class="budget-breakdown-title">token 明细</div><div class="pop-grid budget-grid">` +
-        cell("未命中输入", u.prompt_tokens) +
-        cell("缓存读取", u.cache_read_tokens) +
-        cell("缓存写入", u.cache_write_tokens) +
-        cell("输出", u.completion_tokens) +
+        cell("未命中输入", u.prompt_tokens, "pop-tok-miss") +
+        cell("缓存读取", u.cache_read_tokens, "pop-tok-read") +
+        cell("缓存写入", u.cache_write_tokens, "pop-tok-write") +
+        cell("输出", u.completion_tokens, "pop-tok-out") +
         `</div><div class="form-hint">缓存命中率 ${esc(Core.formatPercent(u.cache_hit_rate))} · 合计 ${esc(Core.formatCount(u.total_tokens))} tokens · ${esc(Core.formatCost(u.total_cost_usd, 4))}</div>`;
       if (el.breakdown && breakdownHtml !== st.lastBreakdownHtml) {
         st.lastBreakdownHtml = breakdownHtml;

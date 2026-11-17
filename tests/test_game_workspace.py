@@ -311,7 +311,7 @@ async def test_switch_saves_current_game_then_restores_the_targets_last_game_pau
     assert env.ws.data[env.root_a]["last"] == old_session.session_id
     assert old_session.session_id not in env.ws.data[target]["sessions"]
     stored = env.ws.data[env.root_a]["sessions"][old_session.session_id]
-    assert stored["schema_version"] == 3 and stored["world"]["state"]["phase"] == "OLD GAME"  # as it was
+    assert stored["schema_version"] == SESSION_SCHEMA_VERSION and stored["world"]["state"]["phase"] == "OLD GAME"  # as it was
     # the target's last game is restored paused, flagged, with its own bindings
     session = env.orch.session
     assert session is result["session"] and session.session_id == saved["session_id"]

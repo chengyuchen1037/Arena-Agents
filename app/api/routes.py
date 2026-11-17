@@ -39,11 +39,6 @@ class NewGameRequest(BaseModel):
     randomize_identities: bool | None = None
 
 
-class ExecutionDepthUpdateRequest(BaseModel):
-    depth: str | None = None
-    execution_depth: str | None = None
-
-
 def _public_session(session: GameSession | None = None) -> dict[str, Any]:
     """PublicSession v2 of the live game (spectator view: no thoughts, no tool calls)."""
     return orchestrator.public_session()
@@ -109,7 +104,6 @@ async def get_llm_config() -> dict[str, Any]:
         "input_price_per_m": None,
         "output_price_per_m": None,
         "context_window_tokens": 1_000_000,
-        "execution_depth": getattr(orchestrator.session, "execution_depth", "medium"),
     }
     binding = provider_api.effective_binding("moderator")
     if binding is not None:
@@ -148,16 +142,6 @@ async def update_llm_config() -> dict[str, Any]:
         status_code=410,
         detail="该接口已移除（v0.10）：请使用 /api/providers 管理 Provider 与模型，使用 /api/settings/bindings 绑定模型。",
     )
-
-
-@router.post("/session/execution-depth")
-async def set_execution_depth(req: ExecutionDepthUpdateRequest) -> dict[str, Any]:
-    depth = (req.execution_depth or req.depth or "").strip().lower()
-    if depth in ("low", "medium", "high", "xhigh"):
-        orchestrator.set_execution_depth(depth)
-        await orchestrator.broadcast_state("execution_depth_updated")
-        return {"ok": True, "execution_depth": orchestrator.session.execution_depth}
-    raise HTTPException(status_code=400, detail="Invalid execution depth. Must be low, medium, high, or xhigh.")
 
 
 @router.get("/events")

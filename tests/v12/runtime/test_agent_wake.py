@@ -460,6 +460,41 @@ async def test_the_third_consecutive_interrupt_is_merged_instead_and_a_normal_en
 
 
 @async_test()
+async def test_an_activation_that_made_no_model_call_does_not_reset_the_starvation_count():
+    rig = Rig()
+    h1, h2, h4 = (asyncio.Event() for _ in range(3))
+    rig.llm.script(
+        "a1",
+        Step(hold=h1, resp=sleep_resp()),  # run 1: cancelled
+        Step(hold=h2, resp=sleep_resp()),  # run 2: cancelled
+        Step(hold=h4, resp=sleep_resp()),  # run 4: a real run (run 3 will not call the model at all)
+        sleep_resp(),
+    )
+    agent = rig.agent()
+    async with running_agent(agent):
+        agent.deliver(urgent("floor.granted", channel_id="pub"))
+        await wait_until(lambda: len(rig.llm.calls) == 1)
+        agent.deliver(revoked("pub"))  # cancellation 1
+        await wait_until(lambda: len(rig.llm.calls) == 2)
+        rig.brain.inject_hook = lambda ctx: None  # the activation after the next cancellation has "nothing to tell"
+        agent.deliver(revoked("pub"))  # cancellation 2
+        await wait_until(lambda: agent.stats["runs"] == 1)  # run 3 was a no-op activation: no model call
+        assert agent.stats["cancels"] == 2 and len(rig.llm.calls) == 2
+        assert rig.trace.of("run_end", "a1")[-1]["reason"] == "nothing"
+        rig.brain.inject_hook = None
+
+        agent.deliver(normal("message.new", channel_id="pub", label="x"))  # run 4: a real run
+        await wait_until(lambda: len(rig.llm.calls) == 3)
+        agent.deliver(revoked("pub"))  # the no-op run was no progress: the guard still holds, this one is merged
+        await settle(8)
+        assert agent.stats["cancels"] == 2 and rig.llm.cancelled == ["a1", "a1"]
+        assert rig.trace.of("inject_instead_of_cancel", "a1")
+        h4.set()
+        await wait_until(lambda: agent.stats["runs"] >= 3)
+    assert events(rig.brain.injects[-1].reasons) == ["floor.revoked"]  # told after run 4, with the next activation
+
+
+@async_test()
 async def test_cancelled_workers_never_leak_tasks():
     rig = Rig()
     h1, h2 = asyncio.Event(), asyncio.Event()

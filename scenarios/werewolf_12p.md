@@ -57,6 +57,8 @@ setup:
       brief: "你是【守卫】，属于好人阵营的神职。每晚主持人会私下请你选择一名存活玩家守护（可以守自己，也可以空守），被守护者免受当晚狼人袭击；不能连续两晚守护同一名玩家（属性 last_guard 是你上一晚守护的人）。注意“同守同救”：你守护的人如果当晚也被女巫解药所救，反而会出局。胜利条件：4 名狼人（含白狼王）全部出局。"
   # 其他玩家（含观战者）能看到的标签；其余标签（身份）只有本人和主持人能看到。
   public_tags: [存活, 出局, 警长]
+  # 阵营的显示名：主持人 end_game(winner=…) 填的文字要和它一致（引擎据此给每位玩家记战绩）。
+  faction_names: {wolves: 狼人阵营, good: 好人阵营}
 
 # ============================================================================
 # 默认限额（主持人可以在单次授予时覆盖）
@@ -355,7 +357,7 @@ ui:
 - **发言队列**：`set_floor_queue(channel_id="public", order=[……])` 按顺序依次把发言权交给每个人（默认每人 1 条、≤ 300 字、120 秒），整轮结束你会被唤醒（`floor.completed`，含每人的结果）。公共发言只用它；它没有内容参数，你也不要用 `send_message` 替玩家开场或点名。
 - **限额 `limits`**：`open_floor` 和 `update_channel` 的限额都写在同一个 `limits` 里，**能写哪些键取决于 `mode`**：`mode="turn"` 只接受 `max_messages`、`max_chars_per_message`、`max_chars_total`、`duration_s`；`mode="free"` 只接受 `duration_s`、`max_messages_per_member`、`max_chars_per_message`、`max_chars_total`、`silence_s`。写了不适用的键会被拒绝（回执会列出该模式接受的键和一个正确示例）。自由讨论的 `duration_s` / `max_chars_total` / `silence_s` 只是提示：到点或用尽时引擎唤醒你（`free.advisory`，每种原因只提示一次），**不会自动关闭**，由你用 `close_floor` 收尾；`update_channel` 的 `limits` 只用于正在进行的自由讨论，数值是“整场”的绝对上限。**开放自由讨论本身不会唤醒任何人**，请随后用 `send_message` 开场。
 - **先更新状态，再开放发言权**：`update_player`、`set_phase` 会让正在思考发言的玩家的草稿作废（STALE）。所以先把这类更新做完，再开放发言权；发言进行中不要调用它们。
-- **能力开关**：`enable_ability(ability_id="……")` / `disable_ability(ability_id="……")` 不带 `holders` 就是对全部持有者生效；带了 `holders=[……]` 只对这些人生效（不能传空列表）。
+- **能力开关**：`enable_ability(ability_id="white_wolf_explode")` / `disable_ability(ability_id="white_wolf_explode")` 不带 `holders` 就是对全部持有者生效；带了 `holders=[……]` 只对这些人生效（不能传空列表）。
 - **检查项**：`evaluate(check_id="speech_order", args={"start":"N7", "direction":"left"})`。args 的键就是表达式里的变量名，每个检查项需要哪些 args 见第十节速查表。结果只是辅助，最终裁决由你做出。
 - **找回信息**：需要重新看某个请求的答案时用 `get_ledger(types=["request.closed"], limit=3)`；要看某个频道最近的内容时加上 `channel_id`。
 - **作答理由保密**：玩家作答时附的 reason 只有你看得到（共享作答的请求除外：收件人互相可见），公布票型时不要带上它。
@@ -563,7 +565,7 @@ ui:
 ## 六、胜负判定 G 与终局
 
 1. 每次出局事件链处理完（以及自爆处理完）都 `evaluate(check_id="outcome")`。想知道是哪个条件满足时，可以分别看 `evaluate(check_id="good_wins")`（所有狼人阵营成员出局）和 `evaluate(check_id="wolves_win")`（神职或平民全部出局）。
-2. 结果是“好人阵营”或“狼人阵营”：`announce(channel_id="public", template_id="game_over", params={"winner":"好人阵营", "summary":"一两句总结"})`，然后 `end_game(winner="好人阵营", summary="……")`。（同时满足双方条件时 `outcome` 已按“好人优先”给出。）
+2. 结果是“好人阵营”或“狼人阵营”：`announce(channel_id="public", template_id="game_over", params={"winner":"好人阵营", "summary":"一两句总结"})`，然后 `end_game(winner="好人阵营", summary="……")`。**winner 填阵营的显示名**（就是 `outcome` 返回的“好人阵营”或“狼人阵营”，不要写别的说法）：引擎靠它给每位玩家记战绩。（同时满足双方条件时 `outcome` 已按“好人优先”给出。）
 3. 结果是“未分胜负”：继续流程。不要靠印象判胜负，一律以 `evaluate` 加你对状态板的核对为准。
 
 ## 七、状态约定
