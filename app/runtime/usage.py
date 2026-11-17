@@ -104,6 +104,14 @@ class UsageBook(BaseModel):
     #: ``hook(agent_id, response)`` after every accounted LLM call (not saved, not compared).
     on_record: Any = Field(default=None, exclude=True, repr=False)
 
+    def __eq__(self, other: object) -> bool:
+        """Two books are equal when their numbers are: the hook (a runtime wire, not data) does not count."""
+        if not isinstance(other, UsageBook):
+            return NotImplemented
+        return self.model_dump() == other.model_dump()
+
+    __hash__ = None  # type: ignore[assignment]  # mutable, like every pydantic model
+
     # ------------------------------------------------------------------- derived --
     @computed_field  # type: ignore[prop-decorator]
     @property

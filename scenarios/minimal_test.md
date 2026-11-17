@@ -24,7 +24,7 @@ setup:
 
 defaults:
   floor: {duration_s: 30, max_messages: 1, max_chars_per_message: 120, max_chars_total: 200}
-  free: {duration_s: 60, max_messages_per_member: 3, max_chars_per_message: 120, max_chars_total: 600, debounce_s: 0.5, silence_s: 20}
+  free: {duration_s: 60, max_messages_per_member: 3, max_chars_per_message: 120, max_chars_total: 600, silence_s: 20}
   request: {duration_s: 30}
   llm: {max_tokens: 4096}
 
@@ -70,3 +70,4 @@ ui:
 2. 发言：用 `set_floor_queue` 按座位顺序让每人发言一次。
 3. 投票：用 `open_request(sealed=true)` 收集投票，关闭后用 `announce` 发布出局公告并 `update_player` 标记出局。
 4. 每次出局后用 `evaluate` 检查胜负，达成条件就 `end_game`。
+5. 你会被每一条新消息唤醒：等的事还没发生（又一条发言、又一次作答）就直接 `sleep()`，不要重复操作。

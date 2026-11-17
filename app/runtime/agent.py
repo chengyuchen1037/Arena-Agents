@@ -656,6 +656,9 @@ class Agent:
 
         while True:  # no round limit: the run ends when the agent sleeps (or has nothing more to do)
             run.rounds = round_idx + 1
+            if round_idx and round_idx % 50 == 0:
+                # (a diagnostic only: the user's token / cost limit is the one brake, see the module docstring)
+                self._trace("long_run", gen=run.gen, rounds=round_idx, epoch=conv.epoch)
             self._set_status("thinking")
             started = _now()
             resp = await self.llm.complete(aid, conv.request_messages(), conv.tools, max_tokens=max_tokens)

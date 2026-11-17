@@ -718,3 +718,49 @@ def test_the_moderator_gets_no_memory_block() -> None:
     world = FakeWorld()
     prompt = ArenaBrain(world, world.spec, docs_dir=None, memories={MODERATOR_ID: "不应出现"}).system_prompt(MODERATOR_ID)
     assert "不应出现" not in prompt
+
+
+# ----------------------------------------------------------------------------- v0.12.1: review / refine prompts
+
+
+def test_the_review_conversation_contains_exactly_what_the_player_saw() -> None:
+    from app.agents.review import REVIEW_MAX_CHARS, build_review_messages
+
+    world = FakeWorld()
+    world.add("message", "p2", {"content": "大家都能看到的话", "kind": "speech", "sender_name": "Blair"}, channel="pub")
+    world.add("message", MODERATOR_ID, {"content": "只有主持人看得到的话", "kind": "speech"}, channel="pub", visible=[MODERATOR_ID])
+    messages = build_review_messages(world, "p1", outcome_text="你的阵营获胜了", role_text="你是甲方", persona="寡言")
+    assert [m["role"] for m in messages] == ["system", "user"]
+    system, user = messages[0]["content"], messages[1]["content"]
+    assert "p1 Alex" in system and "第一人称" in system and str(REVIEW_MAX_CHARS) in system and "你的性格：寡言" in system
+    assert "你的阵营获胜了" in user and "你是甲方" in user and "p2 Blair" in user and "大家都能看到的话" in user
+    assert "只有主持人看得到的话" not in user  # a player never reviews what he could not see
+
+
+def test_the_review_prompt_without_a_persona_has_no_empty_persona_line() -> None:
+    from app.agents.review import build_review_messages
+
+    world = FakeWorld()
+    system = build_review_messages(world, "p1", outcome_text="x", role_text="y")[0]["content"]
+    assert "你的性格" not in system
+
+
+def test_refine_prompts_exist_for_both_kinds_and_refuse_anything_else() -> None:
+    from app.agents.review import build_refine_messages
+
+    persona = build_refine_messages("persona", "  爱说冷笑话  ", name="Alex")
+    assert "性格设定" in persona[0]["content"] and persona[1]["content"] == "（玩家名：Alex）要点：\n爱说冷笑话"
+    memory = build_refine_messages("memory", "上局被 Blair 骗过")
+    assert "对其他玩家的印象" in memory[0]["content"] and "不要编造" in memory[0]["content"]
+    with pytest.raises(ValueError):
+        build_refine_messages("secrets", "x")
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [("  正文  ", "正文"), ("```\n正文\n```", "正文"), ("```markdown\n# 标题\n正文\n```", "# 标题\n正文"), ("", ""), ("字" * 50, "字" * 10)],
+)
+def test_generated_text_is_tidied_and_capped(raw, expected) -> None:
+    from app.agents.review import clean_generated_text
+
+    assert clean_generated_text(raw, limit=10 if raw == "字" * 50 else 1000) == expected

@@ -89,6 +89,10 @@ class SetupSpec(BaseModel):
     # Tags every spectator/player may see on *other* players; every other tag is visible only to
     # its owner and the moderator.
     public_tags: list[str] = Field(default_factory=list)
+    # Optional display names of the factions (``faction id -> "名称"``).  The moderator ends the game with
+    # a free-text winner; the application matches it against these names (and the ids) to tell who won
+    # when it records a finished game in the players' memories.  Without it the outcome stays unknown.
+    faction_names: dict[str, str] = Field(default_factory=dict)
 
 
 class FloorDefaults(BaseModel):

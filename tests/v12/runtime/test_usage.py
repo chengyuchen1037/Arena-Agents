@@ -218,7 +218,9 @@ def test_the_hook_is_neither_saved_nor_compared():
     assert "on_record" not in dumped and "on_record" not in book.snapshot()
     json.dumps(book.snapshot())  # serializable although a hook is attached
     restored = UsageBook.model_validate(dumped)
-    assert restored.on_record is None and restored == UsageBook.model_validate(dumped)
+    assert restored.on_record is None and restored == book  # the numbers are what makes two books equal
+    book.record_llm("a1", priced(1, 1))
+    assert restored != book
 
 
 # ------------------------------------------------------------------------------------ reading

@@ -13,13 +13,13 @@ from app.agents.schemas import (
     MODERATOR_TOOL_INTENTS,
     PLAYER_TOOL_INTENTS,
     SHARED_TOOL_NAMES,
-    WAIT_TOOL,
+    SLEEP_TOOL,
     shared_tool_schemas,
 )
 from app.world.core import WorldCore
 from app.world.intents import MODERATOR_INTENTS, PLAYER_INTENTS
 from app.world.loader import load_scenario_v2, parse_scenario_v2, split_body
-from app.world.render import render_text, validate_params
+from app.world.render import player_label, render_text, validate_params
 from app.world.spec import ParamSpec, ScenarioError, ScenarioSpec
 from app.world.state import PlayerState
 from app.world.types import MODERATOR_ID, Receipt
@@ -123,7 +123,7 @@ def test_missing_and_non_markdown_files(tmp_path: Path) -> None:
 
 
 WEREWOLF = ROOT / "scenarios" / "werewolf_12p.md"
-ALL_TOOLS = {*MODERATOR_TOOL_INTENTS, *PLAYER_TOOL_INTENTS, WAIT_TOOL, *SHARED_TOOL_NAMES}
+ALL_TOOLS = {*MODERATOR_TOOL_INTENTS, *PLAYER_TOOL_INTENTS, SLEEP_TOOL, *SHARED_TOOL_NAMES}
 LEGACY_TOOLS = (
     "grant_speaking_turn", "ask_yes_or_no", "answer_yes_or_no", "request_players_vote", "request_player_speak",
     "request_player_interrupt", "trigger_interrupt", "cast_vote", "request_players_strategic_planning",
@@ -147,16 +147,19 @@ def _pool(spec: ScenarioSpec) -> list[str]:
     return roles
 
 
+NAMES = ["Alice", "Bob", "Carol", "David", "Eve", "Frank", "Grace", "Henry", "Ivy", "Jack", "Kate", "Leo"]
+
+
 def _players(spec: ScenarioSpec, out: frozenset[str] = frozenset()) -> list[PlayerState]:
-    """p01.. in identity-pool order: 3 werewolves, the white wolf, 4 villagers, seer, witch, hunter, guard."""
+    """N1.. in identity-pool order: 3 werewolves, the white wolf, 4 villagers, seer, witch, hunter, guard."""
     players = []
     for index, role_id in enumerate(_pool(spec), start=1):
         role = spec.setup.roles[role_id]
-        pid = f"p{index:02d}"
+        pid = f"N{index}"
         tags = [t for t in role.tags if not (pid in out and t == "存活")] + (["出局"] if pid in out else [])
         players.append(
             PlayerState(
-                id=pid, seat=f"SEAT {index:02d}", name=f"Name{index}", role=role_id, faction=role.faction,
+                id=pid, seat=str(index), name=NAMES[index - 1], role=role_id, faction=role.faction,
                 tags=tags, attributes=dict(role.attributes),
             )
         )
@@ -173,18 +176,18 @@ def _check(world: WorldCore, spec: ScenarioSpec, name: str, **args: object) -> o
     return world.to_plain(world.eval_expr(spec.checks[name], args))
 
 
-ROLE_OF = {f"p{i:02d}": role for i, role in enumerate(
+ROLE_OF = {f"N{i}": role for i, role in enumerate(
     ["werewolf"] * 3 + ["white_wolf"] + ["villager"] * 4 + ["seer", "witch", "hunter", "guard"], start=1)}
-WOLVES = ["p01", "p02", "p03", "p04"]
-VILLAGERS = ["p05", "p06", "p07", "p08"]
-GODS = ["p09", "p10", "p11", "p12"]
+WOLVES = ["N1", "N2", "N3", "N4"]
+VILLAGERS = ["N5", "N6", "N7", "N8"]
+GODS = ["N9", "N10", "N11", "N12"]
 
 
 # ----------------------------------------------------------------------------- structure
 
 
 def test_werewolf_scenario_loads_with_the_expected_setup(ww: ScenarioSpec) -> None:
-    assert (ww.id, ww.schema_version, ww.version) == ("werewolf_12p", 2, "2.0.0")
+    assert (ww.id, ww.schema_version, ww.version) == ("werewolf_12p", 2, "2.1.0")
     assert sum(item.count for item in ww.setup.identity_pool) == 12
     assert {i.role: i.count for i in ww.setup.identity_pool} == {
         "werewolf": 3, "white_wolf": 1, "villager": 4, "seer": 1, "witch": 1, "hunter": 1, "guard": 1,
@@ -204,7 +207,8 @@ def test_werewolf_defaults_and_ui(ww: ScenarioSpec) -> None:
     d = ww.defaults
     assert (d.floor.duration_s, d.floor.max_messages, d.floor.max_chars_per_message, d.floor.max_chars_total) == (120, 1, 300, 600)
     assert (d.free.duration_s, d.free.max_messages_per_member, d.free.max_chars_per_message) == (300, 6, 300)
-    assert (d.free.max_chars_total, d.free.debounce_s, d.free.silence_s) == (2000, 1.5, 30)
+    assert (d.free.max_chars_total, d.free.silence_s) == (2000, 30)
+    assert not hasattr(d.free, "debounce_s")  # v0.12.1: every delivery wakes its recipient at once
     assert d.request.duration_s == 90 and d.llm.max_tokens == 8192
     assert d.dm.max_chars_per_message == 600 and d.moderator.max_chars_per_message == 2000
     assert ww.ui.out_tags == ["出局"] and ww.ui.highlight_tags == ["警长"]
@@ -248,8 +252,8 @@ def test_checks_at_the_start_of_the_game(ww: ScenarioSpec) -> None:
     world = _world(ww)
     assert _check(world, ww, "good_wins") is False and _check(world, ww, "wolves_win") is False
     assert _check(world, ww, "outcome") == "未分胜负"
-    assert _check(world, ww, "candidates") == [f"p{i:02d}" for i in range(1, 13)]
-    assert _check(world, ww, "alive_wolves") == WOLVES and _check(world, ww, "first_wolf") == "p01"
+    assert _check(world, ww, "candidates") == [f"N{i}" for i in range(1, 13)]
+    assert _check(world, ww, "alive_wolves") == WOLVES
     counts = _check(world, ww, "counts")
     assert counts["factions"] == [
         {"name": "狼人阵营", "alive": 4, "total": 4, "variant": "danger"},
@@ -266,7 +270,7 @@ def test_checks_at_the_start_of_the_game(ww: ScenarioSpec) -> None:
 def test_counts_can_be_passed_straight_to_update_dashboard(ww: ScenarioSpec) -> None:
     from app.world.intents import ModUpdateDashboard
 
-    world = _world(ww, out=("p02", "p05", "p11"))
+    world = _world(ww, out=("N2", "N5", "N11"))
     world.state.players[6].tags.append("警长")
     counts = _check(world, ww, "counts")
     ModUpdateDashboard.model_validate(counts)  # exactly the payload of update_dashboard
@@ -278,11 +282,11 @@ def test_counts_can_be_passed_straight_to_update_dashboard(ww: ScenarioSpec) -> 
     "out, good, wolves, outcome",
     [
         ((), False, False, "未分胜负"),
-        (("p01", "p02", "p03"), False, False, "未分胜负"),  # the white wolf is still alive
+        (("N1", "N2", "N3"), False, False, "未分胜负"),  # the white wolf is still alive
         (tuple(WOLVES), True, False, "好人阵营"),
         (tuple(GODS), False, True, "狼人阵营"),  # all gods out: wolves win
         (tuple(VILLAGERS), False, True, "狼人阵营"),  # all villagers out: wolves win
-        (("p09", "p10", "p11"), False, False, "未分胜负"),  # one god left
+        (("N9", "N10", "N11"), False, False, "未分胜负"),  # one god left
         ((*WOLVES, *GODS), True, True, "好人阵营"),  # both conditions at once: the good side wins
     ],
 )
@@ -293,37 +297,38 @@ def test_victory_checks(ww: ScenarioSpec, out: tuple[str, ...], good: bool, wolv
     assert _check(world, ww, "outcome") == outcome
 
 
-def test_wolf_helpers_follow_the_seat_order_and_the_dead(ww: ScenarioSpec) -> None:
-    world = _world(ww, out=("p01",))
-    assert _check(world, ww, "alive_wolves") == ["p02", "p03", "p04"] and _check(world, ww, "first_wolf") == "p02"
+def test_alive_wolves_follow_the_seat_order_and_the_dead(ww: ScenarioSpec) -> None:
+    assert "first_wolf" not in ww.checks  # the wolves no longer send a representative (v0.12.1)
+    world = _world(ww, out=("N1",))
+    assert _check(world, ww, "alive_wolves") == ["N2", "N3", "N4"]
     world = _world(ww, out=tuple(WOLVES))
-    assert _check(world, ww, "alive_wolves") == [] and _check(world, ww, "first_wolf") == ""
+    assert _check(world, ww, "alive_wolves") == []
 
 
 def test_candidates_without_removes_the_pending_dead(ww: ScenarioSpec) -> None:
-    world = _world(ww, out=("p05",))
-    assert _check(world, ww, "candidates") == [i for i in _check(world, ww, "candidates")] and "p05" not in _check(world, ww, "candidates")
-    assert _check(world, ww, "candidates_without", excluded=["p03", "p11"]) == [
-        "p01", "p02", "p04", "p06", "p07", "p08", "p09", "p10", "p12",
+    world = _world(ww, out=("N5",))
+    assert _check(world, ww, "candidates") == [i for i in _check(world, ww, "candidates")] and "N5" not in _check(world, ww, "candidates")
+    assert _check(world, ww, "candidates_without", excluded=["N3", "N11"]) == [
+        "N1", "N2", "N4", "N6", "N7", "N8", "N9", "N10", "N12",
     ]
     assert len(_check(world, ww, "candidates_without", excluded=[])) == 11
 
 
-SEATS = [f"p{i:02d}" for i in range(1, 13)]
+SEATS = [f"N{i}" for i in range(1, 13)]
 
 
 @pytest.mark.parametrize(
     "start, direction, out, expected",
     [
         ("", "left", (), SEATS),
-        ("p07", "left", (), ["p08", "p09", "p10", "p11", "p12", "p01", "p02", "p03", "p04", "p05", "p06", "p07"]),
-        ("p07", "right", (), ["p06", "p05", "p04", "p03", "p02", "p01", "p12", "p11", "p10", "p09", "p08", "p07"]),
-        ("p01", "left", (), SEATS[1:] + ["p01"]),
-        ("p01", "right", (), ["p12", "p11", "p10", "p09", "p08", "p07", "p06", "p05", "p04", "p03", "p02", "p01"]),
-        ("p07", "left", ("p08", "p01"), ["p09", "p10", "p11", "p12", "p02", "p03", "p04", "p05", "p06", "p07"]),
-        ("p07", "right", ("p06", "p12"), ["p05", "p04", "p03", "p02", "p01", "p11", "p10", "p09", "p08", "p07"]),
-        ("", "left", ("p01", "p02"), SEATS[2:]),
-        ("p02", "left", ("p02",), SEATS[0:1] + SEATS[2:]),  # a dead "sheriff" id: plain seat order, nobody last
+        ("N7", "left", (), ["N8", "N9", "N10", "N11", "N12", "N1", "N2", "N3", "N4", "N5", "N6", "N7"]),
+        ("N7", "right", (), ["N6", "N5", "N4", "N3", "N2", "N1", "N12", "N11", "N10", "N9", "N8", "N7"]),
+        ("N1", "left", (), SEATS[1:] + ["N1"]),
+        ("N1", "right", (), ["N12", "N11", "N10", "N9", "N8", "N7", "N6", "N5", "N4", "N3", "N2", "N1"]),
+        ("N7", "left", ("N8", "N1"), ["N9", "N10", "N11", "N12", "N2", "N3", "N4", "N5", "N6", "N7"]),
+        ("N7", "right", ("N6", "N12"), ["N5", "N4", "N3", "N2", "N1", "N11", "N10", "N9", "N8", "N7"]),
+        ("", "left", ("N1", "N2"), SEATS[2:]),
+        ("N2", "left", ("N2",), SEATS[0:1] + SEATS[2:]),  # a dead "sheriff" id: plain seat order, nobody last
     ],
 )
 def test_speech_order(ww: ScenarioSpec, start: str, direction: str, out: tuple[str, ...], expected: list[str]) -> None:
@@ -333,8 +338,8 @@ def test_speech_order(ww: ScenarioSpec, start: str, direction: str, out: tuple[s
 
 def test_order_of_sorts_the_given_members_by_seat(ww: ScenarioSpec) -> None:
     world = _world(ww)
-    assert _check(world, ww, "order_of", members=["p09", "p02", "p05"]) == ["p02", "p05", "p09"]
-    assert _check(world, ww, "order_of", members=["p10", "ghost"]) == ["p10"]
+    assert _check(world, ww, "order_of", members=["N9", "N2", "N5"]) == ["N2", "N5", "N9"]
+    assert _check(world, ww, "order_of", members=["N10", "ghost"]) == ["N10"]
     assert _check(world, ww, "order_of", members=[]) == []
 
 
@@ -344,27 +349,53 @@ def _answers(**votes: str) -> list[dict[str, str]]:
 
 def test_weighted_vote_gives_the_sheriff_one_and_a_half_votes(ww: ScenarioSpec) -> None:
     world = _world(ww)
-    answers = _answers(p01="p05", p02="p05", p03="abstain", p07="p06", p08="p06", p09="p05")
-    result = _check(world, ww, "weighted_vote", answers=answers, privileged=["p07"], weight=1.5)
-    assert result == {"tally": {"p05": 3.0, "p06": 2.5}, "leaders": ["p05"]}
+    answers = _answers(N1="N5", N2="N5", N3="abstain", N7="N6", N8="N6", N9="N5")
+    result = _check(world, ww, "weighted_vote", answers=answers, privileged=["N7"], weight=1.5)
+    assert result == {"tally": {"N5": 3.0, "N6": 2.5}, "leaders": ["N5"]}
     # the sheriff's 1.5 votes decide a close vote
-    close = _answers(p01="p05", p02="p05", p07="p06", p08="p06", p09="p06")
-    assert _check(world, ww, "weighted_vote", answers=close, privileged=["p07"], weight=1.5)["leaders"] == ["p06"]
-    assert _check(world, ww, "weighted_vote", answers=close, privileged=[], weight=1)["leaders"] == ["p06"]
+    close = _answers(N1="N5", N2="N5", N7="N6", N8="N6", N9="N6")
+    assert _check(world, ww, "weighted_vote", answers=close, privileged=["N7"], weight=1.5)["leaders"] == ["N6"]
+    assert _check(world, ww, "weighted_vote", answers=close, privileged=[], weight=1)["leaders"] == ["N6"]
 
 
 def test_weighted_vote_ties_abstentions_and_empty_votes(ww: ScenarioSpec) -> None:
     world = _world(ww)
-    tie = _answers(p01="p05", p02="p05", p03="p06", p04="p06")
+    tie = _answers(N1="N5", N2="N5", N3="N6", N4="N6")
     assert _check(world, ww, "weighted_vote", answers=tie, privileged=[], weight=1) == {
-        "tally": {"p05": 2.0, "p06": 2.0}, "leaders": ["p05", "p06"],
+        "tally": {"N5": 2.0, "N6": 2.0}, "leaders": ["N5", "N6"],
     }
-    nobody = _answers(p01="abstain", p02="abstain")
+    nobody = _answers(N1="abstain", N2="abstain")
     assert _check(world, ww, "weighted_vote", answers=nobody, privileged=[], weight=1) == {"tally": {}, "leaders": []}
     assert _check(world, ww, "weighted_vote", answers=[], privileged=[], weight=1) == {"tally": {}, "leaders": []}
     # the sheriff abstaining adds nothing; a sheriff vote for a rival breaks the tie
-    mixed = _answers(p01="p05", p02="p06", p07="p06")
-    assert _check(world, ww, "weighted_vote", answers=mixed, privileged=["p07"], weight=1.5)["leaders"] == ["p06"]
+    mixed = _answers(N1="N5", N2="N6", N7="N6")
+    assert _check(world, ww, "weighted_vote", answers=mixed, privileged=["N7"], weight=1.5)["leaders"] == ["N6"]
+
+
+def test_wolf_choice_is_the_majority_and_ties_go_to_the_first_wolf_by_seat(ww: ScenarioSpec) -> None:
+    world = _world(ww)
+
+    def choose(**votes: str) -> object:
+        return _check(world, ww, "wolf_choice", answers=_answers(**votes))
+
+    assert choose(N1="N5", N2="N5", N3="N5", N4="N5") == "N5"  # unanimous
+    assert choose(N1="N5", N2="N6", N3="N6", N4="N6") == "N6"  # a majority
+    assert choose(N1="N5", N2="N6", N3="N6", N4="N5") == "N5"  # 2-2: the first wolf by seat decides ...
+    assert choose(N1="N6", N2="N5", N3="N5", N4="N6") == "N6"  # ... whichever of the two options he chose
+    assert choose(N4="N5", N3="N6", N2="N6", N1="N5") == "N5"  # the order of the answers does not matter
+    assert choose(N2="N7", N3="N8", N4="N9") == "N7"  # 1-1-1: the first by seat
+    assert choose(N10="N5", N2="N6") == "N6"  # seats are compared as numbers: N2 comes before N10
+    # an empty kill ("none") is an option like any other
+    assert choose(N1="none", N2="none", N3="N5") == "none"
+    assert choose(N1="none", N2="N5") == "none"
+    assert choose(N1="N5", N2="none", N3="none", N4="N5") == "N5"
+    # not everybody answered: the answers there are decide; nobody answered: an empty kill
+    assert choose(N3="N10") == "N10"
+    assert choose(N1="N5", N3="N6", N4="N6") == "N6"
+    assert choose() == "none"
+    # the engine's own answers carry more keys (reason, defaulted): they are ignored
+    full = [{"player_id": "N2", "value": "N8", "reason": "女巫", "defaulted": False}, {"player_id": "N1", "value": "N8", "reason": "", "defaulted": False}]
+    assert _check(world, ww, "wolf_choice", answers=full) == "N8"
 
 
 def test_checks_reject_missing_variables_clearly(ww: ScenarioSpec) -> None:
@@ -377,8 +408,8 @@ def test_checks_reject_missing_variables_clearly(ww: ScenarioSpec) -> None:
 
 def test_the_ability_holders_follow_the_white_wolf(ww: ScenarioSpec) -> None:
     holders = ww.abilities["white_wolf_explode"].holders
-    assert _world(ww).to_plain(_world(ww).eval_expr(holders)) == ["p04"]
-    dead = _world(ww, out=("p04",))
+    assert _world(ww).to_plain(_world(ww).eval_expr(holders)) == ["N4"]
+    dead = _world(ww, out=("N4",))
     assert dead.to_plain(dead.eval_expr(holders)) == []
     ability = ww.abilities["white_wolf_explode"]
     assert ability.quota == 1 and not ability.enabled and ability.freeze_channels == ["public"]
@@ -391,8 +422,8 @@ def test_the_ability_holders_follow_the_white_wolf(ww: ScenarioSpec) -> None:
 
 def _sample(spec: ParamSpec) -> object:
     return {
-        "player_id": "p01",
-        "player_ids": ["p01", "p02"],
+        "player_id": "N1",
+        "player_ids": ["N1", "N2"],
         "enum": spec.values[0] if spec.values else "",
         "int": spec.min if spec.min is not None else 1,
         "text": "样例文字",
@@ -408,21 +439,27 @@ def test_every_template_renders_a_sample(ww: ScenarioSpec) -> None:
         text = render_text(template.text, clean or {}, template.params, world)
         assert text and "{{" not in text, name
     template = ww.templates["death_notice"]
-    clean, _ = validate_params(template.params, {"players": ["p01", "p02"]}, world)
-    assert render_text(template.text, clean or {}, template.params, world) == "【出局公告】Name1（p01）、Name2（p02） 出局。"
+    clean, _ = validate_params(template.params, {"players": ["N1", "N2"]}, world)
+    text = render_text(template.text, clean or {}, template.params, world)
+    assert text == f"【出局公告】{player_label(world, 'N1')}、{player_label(world, 'N2')} 出局。"
+    assert all(word in text for word in ("N1", "Alice", "N2", "Bob"))  # the id (what tools take) and the name
     seer = ww.templates["seer_result"]
-    clean, _ = validate_params(seer.params, {"target": "p03", "side": "狼人阵营"}, world)
-    assert render_text(seer.text, clean or {}, seer.params, world) == "【查验结果】Name3（p03） 属于狼人阵营。"
+    clean, _ = validate_params(seer.params, {"target": "N3", "side": "狼人阵营"}, world)
+    assert render_text(seer.text, clean or {}, seer.params, world) == f"【查验结果】{player_label(world, 'N3')} 属于狼人阵营。"
+    wolf = ww.templates["wolf_target"]
+    clean, _ = validate_params(wolf.params, {"target": "N5"}, world)
+    assert render_text(wolf.text, clean or {}, wolf.params, world) == f"【刀口】今晚刀口：{player_label(world, 'N5')}。"
+    assert render_text(ww.templates["wolf_empty"].text, {}, {}, world) == "【刀口】今晚空刀。"
     # the side must be one of the two factions
-    assert validate_params(seer.params, {"target": "p03", "side": "平民"}, world)[1] is not None
+    assert validate_params(seer.params, {"target": "N3", "side": "平民"}, world)[1] is not None
 
 
 def test_sensitive_templates_are_moderator_only_and_neutral(ww: ScenarioSpec) -> None:
     moderator = {tid for tid, t in ww.templates.items() if t.users == "moderator"}
     players = {tid for tid, t in ww.templates.items() if t.users in ("players", "any")}
     assert moderator == {
-        "death_notice", "peaceful_night", "vote_result", "no_exile", "tie_pk", "seer_result", "sheriff_candidates",
-        "sheriff", "no_sheriff", "speech_direction", "hunter_shot", "game_over",
+        "death_notice", "peaceful_night", "vote_result", "no_exile", "tie_pk", "seer_result", "wolf_target", "wolf_empty",
+        "sheriff_candidates", "sheriff", "no_sheriff", "speech_direction", "hunter_shot", "game_over",
     }
     assert players == {"vote_declare", "check_report"}
     assert all(ww.templates[t].sensitive for t in moderator) and not any(ww.templates[t].sensitive for t in players)
@@ -496,8 +533,8 @@ def _tool_fields(name: str) -> tuple[set[str], set[str]]:
         model = MODERATOR_INTENTS[MODERATOR_TOOL_INTENTS[name]]
     elif name in PLAYER_TOOL_INTENTS:
         model = PLAYER_INTENTS[PLAYER_TOOL_INTENTS[name]]
-    elif name == WAIT_TOOL:
-        return set(), set()
+    elif name == SLEEP_TOOL:
+        return {"seconds"}, set()
     else:
         params = next(t["function"]["parameters"] for t in shared_tool_schemas() if t["function"]["name"] == name)
         return set(params["properties"]), set(params.get("required", []))
