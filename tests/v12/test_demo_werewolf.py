@@ -81,6 +81,7 @@ def test_a_scripted_werewolf_game_plays_to_the_end(monkeypatch: pytest.MonkeyPat
         assert usage["cache_read_tokens"] > 0 and usage["cache_hit_rate"] > 0.5 and usage["total_cost_usd"] > 0
         assert sum(a["activations"] for a in usage["by_actor"].values()) > 100
         assert {p["state"] for p in public["participants"]} == {"sleeping"} and public["moderator"]["state"] == "sleeping"
+        assert all(a["rejections"] == 0 for a in usage["by_actor"].values())  # the bots play by the rules
 
         # ---- the demo can also review the game and complete a persona / memory -----------------------------
         started = await orch.start_review()

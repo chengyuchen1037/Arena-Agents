@@ -2368,9 +2368,50 @@ button,
   min-height: 46px;
   justify-content: flex-start;
   padding: 0 14px;
+  color: var(--text-primary);
   font-size: 15px;
+  font-weight: 600;
   border-radius: 10px;
   max-width: none;
+}
+
+html[data-layout="phone"] .more-menu-list > .btn,
+html[data-layout="phone"] .more-menu-list > .viewpoint-picker {
+  min-height: 46px;
+}
+
+/* in the menu the buttons say what they are (on the bar they are icons / short labels) */
+.lbl-long {
+  display: none;
+}
+
+.more-menu-list .lbl-short {
+  display: none;
+}
+
+.more-menu-list .lbl-long {
+  display: inline;
+}
+
+.more-menu-list #btn-open-workspace-modal .workspace-name::before {
+  content: "工作文件夹 · ";
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.more-menu-list #btn-open-bindings-modal #api-status-label::before {
+  content: "模型绑定 · ";
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.more-menu-list #btn-open-bindings-modal #api-status-label,
+.more-menu-list #btn-open-workspace-modal .workspace-name {
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .more-menu-list > .viewpoint-picker {
