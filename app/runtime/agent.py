@@ -28,7 +28,8 @@ Wake-up policy (priority is set by the world, see docs/v0.12-contracts.md §2.6)
 
 * ``interrupt`` envelopes cancel the running Worker when their ``channel_id`` / ``payload.request_id``
   matches the run's *focus* (the channels / requests of everything the run consumed).  After a
-  cancellation the Actor restarts only if an urgent / normal envelope is still pending.
+  cancellation the Actor restarts - at once, without debounce - only if an urgent / normal envelope
+  is still pending; otherwise it goes back to idle (a revoked floor does not cost another LLM call).
 * Anti-starvation: after ``starvation_limit`` (2) consecutive cancellations an interrupt is injected
   instead of cancelling, until a run finishes normally.
 * Every run gets a new ``gen_id``; a Worker whose generation is no longer current stops before it

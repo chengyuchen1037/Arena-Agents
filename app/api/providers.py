@@ -24,8 +24,8 @@ from app.api.security import (
     validate_secret,
     verify_api_access,
 )
-from app.engine.orchestrator import orchestrator
-from app.engine.state import SESSION_ID_PATTERN
+from app.game.orchestrator import orchestrator
+from app.game.session import SESSION_ID_PATTERN
 from app.llm.discovery import DiscoveryError, discover_models
 from app.llm.endpoints import EndpointError, build_endpoints, endpoint_preview
 from app.providers.models import (

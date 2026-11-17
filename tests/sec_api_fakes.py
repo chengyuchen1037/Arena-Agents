@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock
 from app.api import providers as provider_api
 from app.api import routes
 from app.api import workspaces as workspace_api
-from app.engine.state import GameSession, Participant
+from app.game.session import GameSession, Participant
 from app.providers.models import (
     ModelBinding,
     ModelEntry,
@@ -26,9 +26,7 @@ SECRET_KEY = "sk-super-secret-value-123456"
 
 
 class BoundSession(GameSession):
-    """GameSession plus the v0.10 binding map (engine-core adds the real field)."""
-
-    model_bindings: dict[str, ModelBinding] = {}
+    """The v0.12 session container (it already carries the binding map)."""
 
 
 class FakeProviderStore:
@@ -313,6 +311,7 @@ class FakeEnv(SimpleNamespace):
 def install(monkeypatch, *, real_stores: bool = False) -> FakeEnv:
     session = BoundSession(
         session_id="sec-test",
+        scenario_spec={"id": "sec-test-scenario", "version": "1"},
         participants=[
             Participant(id="p01", seat="1", name="Alex"),
             Participant(id="p02", seat="2", name="Blair"),
@@ -335,6 +334,7 @@ def install(monkeypatch, *, real_stores: bool = False) -> FakeEnv:
     orch = SimpleNamespace(
         llm=llm,
         session=session,
+        set_execution_depth=lambda depth: setattr(orch.session, "execution_depth", depth),
         restored_from_save=False,
         broadcast_state=AsyncMock(return_value=None),
         request_pause=AsyncMock(return_value=session),
@@ -371,6 +371,11 @@ def install(monkeypatch, *, real_stores: bool = False) -> FakeEnv:
             "changed": True,
         }
 
+    orch.public_session = lambda: {
+        "session_id": orch.session.session_id, "status": orch.session.status, "participants": [],
+        "model_bindings": {}, "binding_issues": [], "messages": [], "channels": [],
+    }
+    orch.session_payload = lambda: orch.session.model_dump(mode="json")
     orch.get_model_binding = get_model_binding
     orch.update_model_bindings = Mock(side_effect=update_model_bindings)
     orch.workspace_payload = Mock(side_effect=workspace_payload)

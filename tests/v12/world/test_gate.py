@@ -364,3 +364,71 @@ def test_tick_is_a_no_op_while_the_game_is_not_running() -> None:
     world.set_running(True, "resume")
     world.tick()
     assert world.channel("c1").group.tokens[0].status == "done"
+
+
+# ----------------------------------------------------------------------- kernel services used by every module
+
+
+def test_deliver_merges_the_payload_and_mirrors_the_channel_id() -> None:
+    world = make_world()
+    world.deliver("p01", "request", "request.opened", payload={"kind": "choice", "question": "？"}, channel_id="c9", seq=4)
+    world.deliver("p02", "notice", "x", priority="urgent", interrupt=True, extra_key=1)
+    first, second = world.drain_outbox()
+    assert first.target == "p01" and first.envelope.channel_id == "c9" and first.envelope.seq == 4
+    assert first.envelope.payload == {"event": "request.opened", "channel_id": "c9", "kind": "choice", "question": "？"}
+    assert (second.envelope.priority, second.envelope.interrupt) == ("urgent", True)
+    assert second.envelope.payload == {"event": "x", "extra_key": 1}  # no channel: no channel_id key
+
+
+def test_commit_audiences() -> None:
+    world = make_world()
+    new_channel(world, "c1", members=["p02", "p01"])
+    assert world.commit("phase.changed", ENGINE_ID, {}, visible_to="*").visible_to_ids == world.everyone()
+    assert world.commit("phase.changed", ENGINE_ID, {}, visible_to="p03").visible_to_ids == ["p03"]  # one id, not letters
+    assert world.commit("phase.changed", ENGINE_ID, {}, visible_to=["p02", "p01", "p02"]).visible_to_ids == ["p02", "p01"]
+    assert world.commit("phase.changed", ENGINE_ID, {}, visible_to=[]).visible_to_ids == []  # god view only
+    assert world.commit("phase.changed", ENGINE_ID, {}, channel_id="c1").visible_to_ids == ["moderator", "p02", "p01"]
+    with pytest.raises(ValueError):
+        world.commit("phase.changed", ENGINE_ID, {})
+    seqs = [e.seq for e in world.ledger]
+    assert seqs == list(range(1, len(seqs) + 1))  # gap-free
+
+
+def test_a_module_that_crashes_in_tick_does_not_stop_the_others() -> None:
+    from app.world.core import WorldModule
+
+    class Broken(WorldModule):
+        name = "broken"
+
+        def tick(self) -> None:
+            raise RuntimeError("module bug")
+
+    world = make_world()
+    world.add_module(Broken(world))
+    new_channel(world, "c1")
+    open_queue(world, "c1", ["p01", "p02"])
+    world.clock.advance(60)
+    world.tick()  # must not raise; the chat module's timeout is still processed
+    assert world.channel("c1").group.tokens[0].status == "done"
+
+
+def _priorities(world) -> dict[str, str]:
+    return {d.target: d.envelope.priority for d in world.drain_outbox()}
+
+
+def test_message_priority_in_system_dms() -> None:
+    world = make_world(n=2)
+    assert speak(world, "p01", "dm-p01", "hi").ok
+    assert _priorities(world) == {"moderator": "normal"}  # a player writing to the moderator
+    assert mod(world, "send_message", channel_id="dm-p01", content="hi").ok
+    assert _priorities(world) == {"p01": "normal"}  # the moderator answering
+
+
+def test_message_priority_elsewhere() -> None:
+    world = make_world(n=2)
+    new_channel(world, "closed1", members=["p01", "p02"], mode="closed")
+    new_channel(world, "free1", members=["p01", "p02"], mode="free")
+    assert mod(world, "send_message", channel_id="closed1", content="hi").ok
+    assert _priorities(world) == {"p01": "ambient", "p02": "ambient"}
+    assert speak(world, "p01", "free1", "hi").ok
+    assert _priorities(world) == {"moderator": "ambient", "p02": "normal"}

@@ -316,16 +316,21 @@ class WorldCore:
         for member in entry.visible_to_ids:
             if member == actor_id:
                 continue
+            priority = self.message_priority(channel, actor_id, member, kind)
+            hint: dict[str, Any] = {}
+            if priority == "normal" and channel.mode == "free" and channel.free is not None:
+                hint["debounce_s"] = channel.free.debounce_s  # the runtime's NORMAL wake delay for this discussion
             self.deliver(
                 member,
                 env_kind,
                 env_event,
-                priority=self.message_priority(channel, actor_id, member, kind),
+                priority=priority,
                 channel_id=channel_id,
                 sender=actor_id,
                 seq=entry.seq,
                 message_kind=kind,
                 ticket_id=(extra or {}).get("ticket_id"),
+                **hint,
             )
         self.emit(
             "message.committed",

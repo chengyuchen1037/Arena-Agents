@@ -292,12 +292,11 @@ class DefaultsTests(unittest.TestCase):
         self.assertEqual(empty.context_window_tokens, DEFAULT_CONTEXT_WINDOW_TOKENS)
         self.assertEqual(empty.context_window_tokens, int(llm_cfg["context_window_tokens"]))
 
-    def test_context_window_default_matches_state_default(self) -> None:
-        from app.engine.state import UsageStats
+    def test_context_window_default_matches_binding_default(self) -> None:
+        from app.game.bindings import context_window_for
+        from app.game.session import GameSession
 
-        self.assertEqual(
-            DEFAULT_CONTEXT_WINDOW_TOKENS, UsageStats.model_fields["context_window_tokens"].default
-        )
+        self.assertEqual(DEFAULT_CONTEXT_WINDOW_TOKENS, context_window_for(GameSession(), None))
 
     def test_blank_env_style_values_fall_back_to_defaults(self) -> None:
         llm = LLMClient({"llm": {"base_url": "", "default_model": "", "api_key": ""}})

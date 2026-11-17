@@ -1,8 +1,11 @@
 /* ==========================================================================
-   Arena-Agents v0.10 Frontend Core (pure helpers, no DOM access)
+   Arena-Agents v0.12 Frontend Core (pure helpers, no DOM access)
    - Loaded before app.js in the browser (exposes window.ArenaCore)
    - Also loadable from Node (module.exports) so tests/frontend/*.js can
      exercise it without a browser.
+   - v0.12: card-size tiers are gone (players are tiny fixed-size tiles);
+     buildEventsUrl() can carry last_event_id for SSE v2 resume; number /
+     time formatting helpers live here.
    ========================================================================== */
 
 (function (root, factory) {
@@ -274,9 +277,26 @@
     return base + rel;
   }
 
-  function buildEventsUrl(prefix, token) {
+  /**
+   * SSE v2 URL. A manually re-created EventSource does not send the browser's
+   * automatic Last-Event-ID header, so the resume point travels as the
+   * ?last_event_id= query parameter (the server accepts both).
+   */
+  function buildEventsUrl(prefix, token, lastEventId) {
     const url = joinUrl(prefix, "api/events");
-    return token ? `${url}?token=${encodeURIComponent(token)}` : url;
+    const params = [];
+    if (token) params.push(`token=${encodeURIComponent(token)}`);
+    const id = Number(lastEventId);
+    if (
+      lastEventId !== undefined &&
+      lastEventId !== null &&
+      lastEventId !== "" &&
+      Number.isFinite(id) &&
+      id > 0
+    ) {
+      params.push(`last_event_id=${Math.floor(id)}`);
+    }
+    return params.length ? `${url}?${params.join("&")}` : url;
   }
 
   // -------------------------------------------------------------------------
@@ -787,11 +807,10 @@
   }
 
   // -------------------------------------------------------------------------
-  // v0.11: layout / card size (DOM-free helpers used by layout.js)
+  // v0.11: layout (DOM-free helpers used by layout.js)
   // -------------------------------------------------------------------------
 
   const LAYOUT_STORAGE_KEY = "arena_layout_v1";
-  const CARD_SIZE_STORAGE_KEY = "arena_card_size_v1";
 
   const LAYOUT_DEFAULTS = Object.freeze({
     boardCollapsed: false,
@@ -808,22 +827,10 @@
     board: Object.freeze({ min: 96, maxRatio: 0.75 }),
   });
 
-  const CARD_SIZES = [
-    { id: "compact", label: "紧凑" },
-    { id: "standard", label: "标准" },
-    { id: "large", label: "大" },
-    { id: "xlarge", label: "超大" },
-  ];
-
   function clampNumber(value, min, max, fallback) {
     const n = typeof value === "number" ? value : Number(value);
     if (!Number.isFinite(n)) return fallback;
     return Math.min(max, Math.max(min, Math.round(n)));
-  }
-
-  function normalizeCardSize(id) {
-    const s = String(id === undefined || id === null ? "" : id).trim();
-    return CARD_SIZES.some((c) => c.id === s) ? s : "standard";
   }
 
   function normalizeLayoutState(raw) {
@@ -877,26 +884,6 @@
       /* storage unavailable: keep the in-memory state only */
     }
     return normalized;
-  }
-
-  function loadCardSize(storage) {
-    try {
-      return normalizeCardSize(
-        storage && storage.getItem ? storage.getItem(CARD_SIZE_STORAGE_KEY) : ""
-      );
-    } catch {
-      return "standard";
-    }
-  }
-
-  function saveCardSize(storage, id) {
-    const size = normalizeCardSize(id);
-    try {
-      if (storage && storage.setItem) storage.setItem(CARD_SIZE_STORAGE_KEY, size);
-    } catch {
-      /* ignore */
-    }
-    return size;
   }
 
   // -------------------------------------------------------------------------
@@ -1164,6 +1151,51 @@
     return info.path || "（远程访问不显示完整路径）";
   }
 
+  // -------------------------------------------------------------------------
+  // v0.12: number / time formatting (top-bar usage pill, metrics popover, feed)
+  // -------------------------------------------------------------------------
+
+  /** 1234 -> "1,234"; 12345 -> "12.3K"; 2_500_000 -> "2.50M" (no unit suffix). */
+  function formatCount(value) {
+    const n = safeNum(value, 0);
+    const abs = Math.abs(n);
+    if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
+    if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+    if (abs >= 10_000) return `${(n / 1_000).toFixed(1)}K`;
+    return Math.round(n).toLocaleString("en-US");
+  }
+
+  /** Top-bar token pill text: "1.5K Tokens" / "2.93M Tokens". */
+  function formatTokensCount(value) {
+    const n = safeNum(value, 0);
+    const abs = Math.abs(n);
+    if (abs >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B Tokens`;
+    if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M Tokens`;
+    if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}K Tokens`;
+    return `${Math.round(n).toLocaleString("en-US")} Tokens`;
+  }
+
+  /** USD cost with enough digits for tiny per-agent amounts: "$0.0123". */
+  function formatCost(value, digits = 4) {
+    const n = safeNum(value, 0);
+    return `$${Math.max(0, n).toFixed(digits)}`;
+  }
+
+  /**
+   * Ledger timestamps are wall-clock ISO-8601 strings (display only).
+   * Returns "HH:MM:SS" in the viewer's local time, or "" when unparsable.
+   */
+  function formatClockTime(ts) {
+    if (ts === undefined || ts === null || ts === "") return "";
+    const d = new Date(ts);
+    if (!Number.isNaN(d.getTime())) {
+      const p = (x) => String(x).padStart(2, "0");
+      return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    }
+    const m = String(ts).match(/(\d{2}:\d{2}:\d{2})/);
+    return m ? m[1] : "";
+  }
+
   return {
     PROTOCOLS,
     REASONING_DEPTHS,
@@ -1190,17 +1222,12 @@
     sessionCostUsd,
     // v0.11
     LAYOUT_STORAGE_KEY,
-    CARD_SIZE_STORAGE_KEY,
     LAYOUT_DEFAULTS,
     PANEL_LIMITS,
-    CARD_SIZES,
-    normalizeCardSize,
     clampNumber,
     normalizeLayoutState,
     loadLayoutState,
     saveLayoutState,
-    loadCardSize,
-    saveCardSize,
     TEMPLATE_SLOTS,
     normalizeTemplates,
     templateRows,
@@ -1216,6 +1243,11 @@
     buildWorkspaceSelectPayload,
     workspaceSwitchBlocked,
     workspacePathDisplay,
+    // v0.12
+    formatCount,
+    formatTokensCount,
+    formatCost,
+    formatClockTime,
     escapeHtml,
     safeNum,
     numText,

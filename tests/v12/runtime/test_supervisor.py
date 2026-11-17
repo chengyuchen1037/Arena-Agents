@@ -590,6 +590,11 @@ async def test_an_actor_that_keeps_crashing_is_given_up_with_an_error_event():
     sup.start()
     await wait_until(lambda: rig.sink.of_type("error"), timeout=3)
     await asyncio.sleep(0.2)  # no third incarnation
+    backlog = len(a1.mailbox)
+    for _ in range(5):  # the dead agent's inbox must not pile up for the rest of the game
+        rig.world.push("a1", ambient("message.new"))
+    await settle()
+    assert len(a1.mailbox) == backlog
     await sup.stop()
     (error,) = rig.sink.of_type("error")
     assert error.data["agent_id"] == "a1" and "a1" in error.data["message"]

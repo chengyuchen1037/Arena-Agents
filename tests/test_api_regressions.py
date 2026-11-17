@@ -7,7 +7,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api import routes
-from app.engine.state import GameSession
+from app.game.session import GameSession
 from sec_api_fakes import SECRET_KEY, bind, install
 
 
@@ -16,35 +16,26 @@ def env(monkeypatch):
     return install(monkeypatch)
 
 
-def test_state_hides_internal_fields_but_save_payload_retains_them(env) -> None:
+def test_state_serves_the_public_session_but_save_payload_retains_the_world(env) -> None:
     async def run_test() -> None:
         session = GameSession(
             session_id="state-save-markers",
-            moderator_messages=[
-                {"role": "user", "content": "MODERATOR_MESSAGES_MARKER"}
-            ],
-            scenario_snapshot={"body": "SCENARIO_SNAPSHOT_MARKER"},
-            prompt_cache={"test": "PROMPT_CACHE_MARKER"},
+            world={"marker": "WORLD_MARKER"},
+            scenario_spec={"id": "x", "version": "1"},
         )
         env.orch.session = session
 
         state = await routes.get_state()
         response = await routes.save_session()
 
-        public_session = state["session"]
-        assert "moderator_messages" not in public_session
-        assert "prompt_cache" not in public_session
-        assert "scenario_snapshot" not in public_session
+        # /state is the spectator view (orchestrator.public_session): no raw world dump inside
+        assert "world" not in state["session"] and "scenario_spec" not in state["session"]
+        assert "WORLD_MARKER" not in json.dumps(state)
 
         assert isinstance(response, routes.JSONResponse)
         response_payload = json.loads(response.body)
         assert "saved_path" not in response_payload
-        saved_session = response_payload["session"]
-        assert saved_session["moderator_messages"] == [
-            {"role": "user", "content": "MODERATOR_MESSAGES_MARKER"}
-        ]
-        assert saved_session["scenario_snapshot"] == {"body": "SCENARIO_SNAPSHOT_MARKER"}
-        assert saved_session["prompt_cache"] == {"test": "PROMPT_CACHE_MARKER"}
+        assert response_payload["session"]["world"] == {"marker": "WORLD_MARKER"}
         env.orch.persist_session.assert_awaited_once_with("manual")
 
     asyncio.run(run_test())

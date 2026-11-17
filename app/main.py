@@ -15,7 +15,7 @@ from app.api.routes import router as api_router
 from app.api.security import warn_if_exposed
 from app.api.workspaces import router as workspaces_router
 from app.config import APP_VERSION, BASE_DIR
-from app.engine.orchestrator import get_orchestrator
+from app.game.orchestrator import get_orchestrator
 from app.storage.errors import StorageError
 
 logger = logging.getLogger(__name__)

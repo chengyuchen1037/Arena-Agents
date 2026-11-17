@@ -503,6 +503,49 @@ class FakeLlm:
             self.in_flight -= 1
 
 
+# --------------------------------------------------------------------------- fake engine client
+
+
+class FakeEngineClient:
+    """Stands in for the engine's ``LLMClient`` behind ``GatedEngineLlm``.
+
+    Answers are scripted per agent; the agent is recognised by the ``SYSTEM[<id>]`` prompt that
+    :class:`FakeBrain` puts first in every conversation.  Every call is recorded with its keywords.
+    """
+
+    def __init__(self, script: dict[str, list[LLMResponse]] | None = None, *, default: LLMResponse | None = None) -> None:
+        self.script: dict[str, deque[LLMResponse]] = {k: deque(v) for k, v in (script or {}).items()}
+        self.default = default or LLMResponse(content="")
+        self.calls: list[dict[str, Any]] = []
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        is_moderator: bool = False,
+        tools: list[dict[str, Any]] | None = None,
+        on_chunk: Any = None,
+        max_tokens_override: int | None = None,
+        binding: Any = None,
+    ) -> LLMResponse:
+        system = str(messages[0].get("content", "")) if messages else ""
+        agent_id = system[len("SYSTEM[") : -1] if system.startswith("SYSTEM[") else system
+        self.calls.append(
+            {
+                "agent_id": agent_id,
+                "messages": messages,
+                "is_moderator": is_moderator,
+                "tools": tools,
+                "on_chunk": on_chunk,
+                "max_tokens_override": max_tokens_override,
+                "binding": binding,
+            }
+        )
+        await asyncio.sleep(0)
+        queue = self.script.get(agent_id)
+        return queue.popleft() if queue else self.default
+
+
 # --------------------------------------------------------------------------- one-stop rig
 
 

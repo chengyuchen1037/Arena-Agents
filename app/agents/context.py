@@ -10,7 +10,8 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-from app.world.types import AgentMemory, Envelope, LedgerEntry
+from app.agents.sanitize import neutralize_untrusted_text as _safe
+from app.world.types import ENGINE_ID, MODERATOR_ID, AgentMemory, Envelope, LedgerEntry
 
 STATUS_ZH = {"idle": "未开始", "running": "进行中", "paused": "已暂停", "finished": "已结束"}
 KIND_ZH = {
@@ -179,7 +180,7 @@ def render_board(board: dict[str, Any], namer: Namer, *, hint: str = "") -> str:
     if tickets:
         lines.append("\n质询工单：")
         for t in tickets:
-            lines.append(f"- {t.get('id')} 来自 {t.get('player_id')}（{t.get('status')}）{t.get('preview') or ''}")
+            lines.append(f"- {t.get('id')} 来自 {t.get('player_id')}（{t.get('status')}）{_safe(str(t.get('preview') or ''))}")
 
     dashboard = board.get("dashboard") or {}
     if dashboard.get("factions") or dashboard.get("tag_stats"):
@@ -206,7 +207,10 @@ def render_entry(entry: LedgerEntry, namer: Namer, *, viewer: str) -> str | None
         elif kind == "reply":
             tag = f"【质询回复{ticket}{('·' + verdict) if verdict else ''}】"
         cut = "（已被截断）" if d.get("truncated") else ""
-        return f"{prefix} [{ch}] {tag}{who}：{d.get('content', '')}{cut}"
+        content = str(d.get("content", ""))
+        if entry.actor_id not in (MODERATOR_ID, ENGINE_ID):
+            content = _safe(content)  # a player's words are data, never structure
+        return f"{prefix} [{ch}] {tag}{who}：{content}{cut}"
     if t == "channel.created":
         return f"{prefix} 〔系统〕频道「{d.get('name', ch)}」已创建（{d.get('type', '')}，成员：{namer.whos(d.get('members'))}）"
     if t == "channel.updated":
@@ -228,7 +232,7 @@ def render_entry(entry: LedgerEntry, namer: Namer, *, viewer: str) -> str | None
         options = "；".join(f"{o.get('id')}={o.get('label') or o.get('id')}" for o in (d.get("options") or []))
         return f"{prefix} 〔请求 {d.get('request_id')}〕{d.get('question', '')}{('（选项：' + options + '）') if options else ''}"
     if t == "request.answered":
-        return f"{prefix} 〔请求 {d.get('request_id')}〕{namer.who(d.get('player_id'))} 作答：{d.get('value')}"
+        return f"{prefix} 〔请求 {d.get('request_id')}〕{namer.who(d.get('player_id'))} 作答：{_safe(str(d.get('value', '')))}"
     if t == "request.closed":
         answers = d.get("answers")
         shown = json.dumps(answers, ensure_ascii=False) if answers is not None else ""

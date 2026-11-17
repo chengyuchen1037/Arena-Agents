@@ -192,6 +192,12 @@ class TraceLog:
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
+    def __del__(self) -> None:  # pragma: no cover - interpreter shutdown / forgotten close()
+        try:
+            self._drop_handle()
+        except Exception:  # noqa: BLE001
+            pass
+
     # ------------------------------------------------------------------ scrubbing --
     def _scrub(self, value: Any, depth: int = 0) -> Any:
         """A JSON-safe, credential-free copy of ``value``."""

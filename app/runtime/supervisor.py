@@ -228,6 +228,9 @@ class Supervisor:
             if agent is None:
                 logger.debug("delivery for unknown agent %r dropped", delivery.target)
                 continue
+            actor = self._actor_tasks.get(delivery.target)
+            if actor is not None and actor.done():
+                continue  # its inbox loop is gone (crashed for good): do not pile envelopes up
             try:
                 agent.deliver(delivery.envelope)
             except Exception:  # noqa: BLE001 - one broken mailbox must not starve the others

@@ -373,3 +373,16 @@ def test_writers_outside_the_allowed_set_are_not_woken() -> None:
     assert {d.target: d.envelope.priority for d in deliveries} == {
         "moderator": "ambient", "p02": "normal", "p03": "ambient", "p04": "ambient",
     }
+
+
+def test_normal_wakes_carry_the_discussions_debounce_hint() -> None:
+    world = _free(debounce_s=2.5)
+    assert speak(world, "p01", "c1", "大家好").ok
+    deliveries, _ = flush(world)
+    by_target = {d.target: d.envelope for d in deliveries}
+    assert by_target["p02"].priority == "normal" and by_target["p02"].payload["debounce_s"] == 2.5
+    assert "debounce_s" not in by_target["moderator"].payload  # ambient: nobody waits for it
+    # a system DM has no discussion settings: the runtime's default debounce applies
+    assert speak(world, "p01", "dm-p01", "私聊").ok
+    [dm] = [d.envelope for d in world.drain_outbox()]
+    assert dm.priority == "normal" and "debounce_s" not in dm.payload

@@ -21,7 +21,6 @@ from .fakes import (
     fast_config,
     llm_resp,
     normal,
-    revoked,
     running_agent,
     settle,
     urgent,

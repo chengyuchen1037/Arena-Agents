@@ -21,8 +21,8 @@ from app.api.security import (
 )
 from app.api.session_io import read_limited_body, validate_import_payload
 from app.config import APP_VERSION
-from app.engine.orchestrator import orchestrator
-from app.engine.state import SESSION_ID_PATTERN, GameSession
+from app.game.orchestrator import SessionLoadError, orchestrator
+from app.game.session import SESSION_ID_PATTERN, GameSession
 from app.providers.models import ModelBinding, ProviderError
 from app.providers.store import get_provider_store
 from app.storage.errors import StorageError
@@ -34,8 +34,6 @@ logger = logging.getLogger(__name__)
 # Origin header on state-changing requests. /api/health lives in app.main.
 router = APIRouter(prefix="/api", dependencies=[Depends(verify_api_access)])
 
-_PUBLIC_SESSION_EXCLUDE = {"moderator_messages", "prompt_cache", "scenario_snapshot"}
-
 
 class NewGameRequest(BaseModel):
     randomize_identities: bool | None = None
@@ -46,8 +44,9 @@ class ExecutionDepthUpdateRequest(BaseModel):
     execution_depth: str | None = None
 
 
-def _public_session(session: GameSession) -> dict[str, Any]:
-    return session.model_dump(exclude=_PUBLIC_SESSION_EXCLUDE)
+def _public_session(session: GameSession | None = None) -> dict[str, Any]:
+    """PublicSession v2 of the live game (spectator view: no thoughts, no tool calls)."""
+    return orchestrator.public_session()
 
 
 def _safe_binding_issues() -> list[dict[str, str]]:
@@ -109,7 +108,7 @@ async def get_llm_config() -> dict[str, Any]:
         "reasoning_effort": "",
         "input_price_per_m": None,
         "output_price_per_m": None,
-        "context_window_tokens": orchestrator.session.usage_stats.context_window_tokens,
+        "context_window_tokens": 1_000_000,
         "execution_depth": getattr(orchestrator.session, "execution_depth", "medium"),
     }
     binding = provider_api.effective_binding("moderator")
@@ -155,7 +154,7 @@ async def update_llm_config() -> dict[str, Any]:
 async def set_execution_depth(req: ExecutionDepthUpdateRequest) -> dict[str, Any]:
     depth = (req.execution_depth or req.depth or "").strip().lower()
     if depth in ("low", "medium", "high", "xhigh"):
-        orchestrator.session.execution_depth = depth
+        orchestrator.set_execution_depth(depth)
         await orchestrator.broadcast_state("execution_depth_updated")
         return {"ok": True, "execution_depth": orchestrator.session.execution_depth}
     raise HTTPException(status_code=400, detail="Invalid execution depth. Must be low, medium, high, or xhigh.")
@@ -163,29 +162,39 @@ async def set_execution_depth(req: ExecutionDepthUpdateRequest) -> dict[str, Any
 
 @router.get("/events")
 async def sse_events(request: Request) -> StreamingResponse:
-    queue = orchestrator.subscribe()
+    """SSE v2: incremental, numbered events with ``Last-Event-ID`` resume (contracts §8.2)."""
+    last = request.headers.get("last-event-id") or request.query_params.get("last_event_id")
+    bus = orchestrator.bus
+    # Subscribe and (if needed) build the snapshot with no ``await`` in between: the snapshot and
+    # the queued events are exactly consecutive.
+    replay, queue = bus.subscribe(last)
+    first = _snapshot_message() if replay is None else None
 
     async def event_generator():
         try:
-            init_payload = json.dumps(
-                {
-                    "event": "initial",
-                    "session": _public_session(orchestrator.session),
-                },
-                ensure_ascii=False,
-            )
-            yield f"data: {init_payload}\n\n"
-
+            if first is not None:
+                yield first
+            else:
+                for event in replay or []:
+                    yield event.sse()
             while True:
                 if await request.is_disconnected():
                     break
                 try:
-                    data = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    yield f"data: {data}\n\n"
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
                 except asyncio.TimeoutError:
                     yield ": heartbeat\n\n"
+                    continue
+                if queue.lost_important:
+                    # A slow client lost a non-superseding event: drop the backlog and resync.
+                    queue.lost_important = False
+                    while not queue.empty():
+                        queue.get_nowait()
+                    yield _snapshot_message()
+                    continue
+                yield event.sse()
         finally:
-            orchestrator.unsubscribe(queue)
+            bus.unsubscribe(queue)
 
     return StreamingResponse(
         event_generator(),
@@ -196,6 +205,12 @@ async def sse_events(request: Request) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _snapshot_message() -> str:
+    body = {"id": orchestrator.bus.last_id, "type": "snapshot", "data": {"session": orchestrator.public_session()}}
+    payload = json.dumps(body, ensure_ascii=False, separators=(",", ":"), default=str)
+    return f"id: {orchestrator.bus.last_id}\ndata: {payload}\n\n"
 
 
 @router.post("/control/new")
@@ -277,7 +292,7 @@ async def save_session() -> JSONResponse:
         content={
             "ok": True,
             "filename": filename,
-            "session": orchestrator.session.model_dump(),
+            "session": orchestrator.session_payload(),
         }
     )
 
