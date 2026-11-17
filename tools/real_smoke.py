@@ -1,8 +1,9 @@
-"""Real-model smoke test for the v0.12 engine (costs API credits — it has a hard call budget).
+"""Real-model smoke test for the v0.12.1 engine (costs API credits — it has a hard call budget).
 
 It plays a *small* game with the models that are bound in a workspace's saved default bindings, and
-prints a compact report (tool usage, rejection codes, token usage).  Nothing is shown from the key
-store; the provider registry is only used by the engine to make the calls.
+prints a compact report: tool usage, rejection codes, the four kinds of tokens, the prompt-cache hit rate,
+how many activations each agent had and how many messages were merged into a running activation.
+Nothing is shown from the key store; the provider registry is only used by the engine to make the calls.
 
 Isolation: the encrypted provider registry and the DPAPI key wrapper are COPIED from ``--from`` into
 a private scratch directory, so the live workspace (which another running instance may hold locked)
@@ -55,7 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--players", type=int, default=4)
     parser.add_argument("--max-calls", type=int, default=60, help="hard budget of LLM calls; the game is paused when reached")
     parser.add_argument("--timeout", type=float, default=300.0, help="wall-clock limit in seconds")
-    parser.add_argument("--depth", default="low", choices=["low", "medium", "high", "xhigh"])
+    parser.add_argument("--concurrency", type=int, default=0, help="limit of concurrent model calls (0 = unlimited, the engine default)")
+    parser.add_argument("--persona", action="store_true", help="give the players the sample personas of this script (written to the scratch roster)")
     parser.add_argument("--keep", action="store_true", help="keep the scratch directory (it holds an encrypted copy of the providers)")
     return parser.parse_args()
 
@@ -93,7 +95,7 @@ async def main() -> int:
     args = parse_args()
     logging.basicConfig(level=logging.WARNING, format="LOG %(levelname)s %(name)s: %(message)s")
     source = Path(args.source).expanduser().resolve()
-    ids = [f"p{i:02d}" for i in range(1, args.players + 1)]
+    ids = [f"N{i}" for i in range(1, args.players + 1)]
     (ROOT / ".demo-data").mkdir(exist_ok=True)
     scratch = prepare_scratch(source, ids)
     os.environ["ARENA_DISABLE_WORKSPACE"] = "1"
@@ -113,11 +115,13 @@ async def main() -> int:
     cfg = load_config()
     cfg["scenario"] = {"path": args.scenario}
     cfg["participants"] = [
-        {"id": pid, "seat": f"S{index}", "name": f"{SEATS[index - 1][0]} {index}", "persona": SEATS[index - 1][1]}
-        for index, pid in enumerate(ids, start=1)
+        {"id": pid, "seat": str(index), "name": SEATS[index - 1][0]} for index, pid in enumerate(ids, start=1)
     ]
-    cfg["llm"] = {**cfg.get("llm", {}), "execution_depth": args.depth}
     orchestrator_module.load_config = lambda *a, **k: copy.deepcopy(cfg)
+    if args.persona:  # personas live in the roster (plain files), exactly like a user's
+        (scratch / "roster").mkdir(exist_ok=True)
+        for index, pid in enumerate(ids, start=1):
+            (scratch / "roster" / f"{pid}.persona.md").write_text(SEATS[index - 1][1] + "\n", encoding="utf-8")
 
     calls = {"n": 0, "errors": collections.Counter()}
 
@@ -135,7 +139,7 @@ async def main() -> int:
 
     orch = GameOrchestrator()
     orch.llm_port_factory = lambda o: Counting(
-        GatedEngineLlm(o.llm, o.session.get_model_binding, LlmGate(max_concurrent=6, per_provider=4), 120.0)
+        GatedEngineLlm(o.llm, o.session.get_model_binding, LlmGate(max_concurrent=args.concurrency, per_provider=0), 120.0)
     )
     started = time.monotonic()
     try:
@@ -145,7 +149,7 @@ async def main() -> int:
         if issues:
             print("BINDING ISSUES:", [(i.actor_id, i.message) for i in issues][:5])
             return 2
-        print(f"scenario={orch.spec.id} players={len(ids)} depth={args.depth} budget={args.max_calls} calls / {args.timeout:.0f}s")
+        print(f"scenario={orch.spec.id} players={len(ids)} budget={args.max_calls} calls / {args.timeout:.0f}s concurrency={args.concurrency or 'unlimited'}")
         models = {f"{b.provider_id[:6]}…/{b.model_id}" for b in orch.session.model_bindings.values()}
         print("models:", ", ".join(sorted(models)))
         await orch.start_or_resume()
@@ -157,7 +161,7 @@ async def main() -> int:
             if elapsed - last_print >= 10:
                 last_print = elapsed
                 deadline = orch.world.next_deadline()
-                busy = [a for a, ag in (orch._supervisor.agents.items() if orch._supervisor else []) if ag.status != "idle"]
+                busy = [a for a, ag in (orch._supervisor.agents.items() if orch._supervisor else []) if ag.status != "sleeping"]
                 print(
                     f"[{elapsed:5.0f}s] status={status} calls={calls['n']} ledger={orch.world.seq} clock={orch.clock.now():.0f}"
                     f" next_deadline={'-' if deadline is None else f'{deadline:.0f}'} busy={busy} phase={orch.world.state.phase!r}"
@@ -193,17 +197,27 @@ def report(orch, calls, seconds: float) -> None:
     usage = orch.usage
     print("\n=== report ===")
     print(f"wall time {seconds:.0f}s | LLM calls {calls['n']} | call errors {dict(calls['errors'])} | ledger entries {world.seq}")
-    print(f"tokens in/out {usage.prompt_tokens}/{usage.completion_tokens} | cost ${usage.total_cost_usd:.4f}")
+    print(
+        f"tokens: uncached input {usage.prompt_tokens} | cache read {usage.cache_read_tokens} | cache write {usage.cache_write_tokens}"
+        f" | output {usage.completion_tokens} | total {usage.total_tokens} | cache hit {usage.cache_hit_rate:.1%} | cost ${usage.total_cost_usd:.4f}"
+    )
     print("status:", orch.session.status, "| winner:", world.state.winner, "| phase:", world.state.phase)
     types = collections.Counter(e.type for e in world.ledger)
     print("ledger:", dict(types.most_common(14)))
     for agent_id, actor in sorted(usage.by_actor.items()):
-        print(f"  {agent_id:10s} calls={actor.calls:3d} tools={actor.tool_calls:3d} think={actor.thinking_rounds:3d} rej={actor.rejections:2d} in={actor.prompt_tokens:6d} out={actor.completion_tokens:5d}")
+        print(
+            f"  {agent_id:10s} act={actor.activations:3d} calls={actor.calls:3d} tools={actor.tool_calls:3d} think={actor.thinking_rounds:3d}"
+            f" rej={actor.rejections:2d} in={actor.prompt_tokens:7d} cached={actor.cache_read_tokens:7d} ({actor.cache_hit_rate:5.1%}) out={actor.completion_tokens:5d}"
+        )
     log_root = Path(os.environ["ARENA_DATA_DIR"]) / "logs" / orch.session.session_id
     files = sorted(log_root.glob("trace-*.jsonl")) if log_root.is_dir() else []
     rejections: collections.Counter[str] = collections.Counter()
     tool_names: collections.Counter[str] = collections.Counter()
     errors: list[str] = []
+    injections: collections.Counter[str] = collections.Counter()
+    merged_reasons = 0
+    later_calls = later_cached = 0  # calls after an agent's first one: they must hit the prompt cache
+    seen_first: set[str] = set()
     for file in files:
         for line in file.read_text(encoding="utf-8").splitlines():
             try:
@@ -215,9 +229,26 @@ def report(orch, calls, seconds: float) -> None:
                 result = str(row.get("result", ""))
                 if '"ok":false' in result:
                     rejections[f"{row.get('name')} -> {result[:150]}"] += 1
+            elif row.get("event") == "inject":
+                injections[str(row.get("kind"))] += 1
+                if row.get("kind") == "merge":
+                    merged_reasons += len(row.get("reasons") or [])
+            elif row.get("event") == "llm_call":
+                agent = str(row.get("agent_id"))
+                if agent in seen_first:
+                    later_calls += 1
+                    later_cached += 1 if int(row.get("cache_read_tokens") or 0) > 0 else 0
+                seen_first.add(agent)
             elif row.get("event") in ("error", "give_up", "retry"):
                 errors.append(f"{row.get('event')}: {str(row.get('message') or row.get('error') or row)[:200]}")
     print("tool usage:", dict(tool_names.most_common(25)))
+    merges = injections.get("merge", 0)
+    print(
+        f"activations {injections.get('activation', 0)} | in-flight merges {merges}"
+        f" (avg {merged_reasons / merges:.1f} messages per merge)" if merges else f"activations {injections.get('activation', 0)} | in-flight merges 0"
+    )
+    if later_calls:
+        print(f"prompt cache: {later_cached}/{later_calls} calls after an agent's first one reported cached input ({later_cached / later_calls:.0%})")
     if rejections:
         print("rejected tool calls:")
         for text, count in rejections.most_common(12):

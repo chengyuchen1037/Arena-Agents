@@ -286,7 +286,7 @@ class RosterRuntimeMixin:
             raise RosterError("请先写下一些要点，再让主持人模型完善。")
         if len(source) > 6000:
             raise RosterError("要点太长了（上限 6000 字）。")
-        if self.session.get_model_binding(MODERATOR_ID) is None:  # type: ignore[attr-defined]
+        if self.session.get_model_binding(MODERATOR_ID) is None and not getattr(self, "demo_mode", False):  # type: ignore[attr-defined]
             raise RosterError("主持人还没有绑定模型，无法完善；请先在“模型绑定”里给主持人选一个模型。")
         messages = build_refine_messages(kind, source, name=entry["name"])
         resp = await self._oneshot_port().complete(MODERATOR_ID, messages, None, max_tokens=REFINE_MAX_TOKENS)

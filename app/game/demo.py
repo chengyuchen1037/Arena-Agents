@@ -9,6 +9,12 @@ The moderator bot follows the scenario's moderator manual in a simplified form (
 witch, dawn, speeches, sealed vote, hunter, white-wolf self-destruct, win check).  It is *not*
 engine code: it knows the scenario's channel / template / ability ids.  Game state lives in the
 bot, so a demo game cannot be resumed after a process restart (the bot then holds the game).
+
+v0.12.1: the bots play by the same rules as real models - every message wakes them, they ``sleep`` when
+there is nothing to do (the moderator with an alarm, ``sleep(seconds)``), the wolves agree on the knife
+through one shared request that closes when they are unanimous, and a one-shot call (post-game review,
+"complete it for me") is answered with text.  Token numbers imitate a persistent conversation with
+prompt caching so the usage panel and the spending limit can be tried without a model.
 """
 
 from __future__ import annotations
@@ -33,8 +39,9 @@ def do(*calls: Call) -> Step:
     return ("do", [c for c in calls if c is not None])
 
 
-def until(predicate: Callable[[Any], bool]) -> Step:
-    return ("until", predicate)
+def until(predicate: Callable[[Any], bool], *, wake_in: float | None = None) -> Step:
+    """Wait for ``predicate(world)``; ``wake_in`` is the alarm (game seconds) the moderator sleeps with meanwhile."""
+    return ("until", (predicate, wake_in))
 
 
 # ------------------------------------------------------------------------------- world helpers
@@ -160,25 +167,27 @@ def moderator_script(w: Any, rng: random.Random) -> Iterator[Step]:
             guard_target = pick if pick != "none" else None
             state["last_guard"] = guard_target
 
+        # The wolves talk freely and agree on the knife through ONE shared request (everybody sees everybody's
+        # current answer and may change it; unanimous -> it closes at once).  Nobody is given a default.
         mark = w.seq
-        t0 = w.clock.now()
         alive_wolves = _faction_ids(w, "wolves")
+        options = [{"id": "none", "label": "空刀"}] + [{"id": i, "label": i} for i in _alive(w)]
         yield do(
             ("open_floor", {"channel_id": "wolf-team", "mode": "free", "holders": [],
-                            "free_limits": {"duration_s": 6, "max_messages_per_member": 1, "max_chars_total": 600}}),
-            ("send_message", {"channel_id": "wolf-team", "content": "狼人们请商议今晚的刀口，每人一句。"}),
+                            "limits": {"duration_s": 40, "max_messages_per_member": 3, "max_chars_total": 1200}}),
+            ("open_request", {"to": alive_wolves, "kind": "choice", "question": f"【狼人刀口】第 {day} 夜：请和队友商量后选定刀口。",
+                              "options": options, "share_answers": True, "auto_close": "unanimous", "duration_s": 45}),
+            ("send_message", {"channel_id": "wolf-team", "content": "狼人们请商议并拍刀；你可以随时改选，大家选得一致，刀口立刻确定。"}),
         )
-        yield until(lambda world, m=mark, t=t0: _elapsed(world, t, 6.0) or
-                    len({e.actor_id for e in _entries(world, "message", m, "wolf-team") if e.actor_id in alive_wolves}) >= len(alive_wolves))
+        yield until(lambda world, m=mark: _closed(world, m, "【狼人刀口】") is not None, wake_in=15.0)
         yield do(("close_floor", {"channel_id": "wolf-team"}))
-
-        mark = w.seq
-        killer = alive_wolves[0]
-        options = [{"id": "none", "label": "空刀"}] + [{"id": i, "label": i} for i in _alive(w)]
-        yield do(("open_request", {"to": [killer], "kind": "choice", "question": f"【狼人刀口】第 {day} 夜请代表狼队提交刀口。",
-                                   "options": options, "duration_s": 25, "default": "none"}))
-        yield until(lambda world, m=mark: _closed(world, m, "【狼人刀口】") is not None)
-        kill = _answers(_closed(w, mark, "【狼人刀口】")).get(killer, "none")
+        picks = [{"player_id": p, "value": v} for p, v in _answers(_closed(w, mark, "【狼人刀口】")).items()]
+        kill = str(w.eval_expr(w.spec.checks["wolf_choice"], {"answers": picks})) if picks else "none"
+        yield do(
+            ("evaluate", {"check_id": "wolf_choice", "args": {"answers": picks}}),
+            ("announce", {"channel_id": "wolf-team", "template_id": "wolf_target", "params": {"target": kill}})
+            if kill != "none" else ("announce", {"channel_id": "wolf-team", "template_id": "wolf_empty", "params": {}}),
+        )
 
         seers = _role_ids(w, "seer")
         if seers:
@@ -255,11 +264,12 @@ def moderator_script(w: Any, rng: random.Random) -> Iterator[Step]:
         yield do(
             ("set_phase", {"text": f"第 {day} 天 · 白天 · 自由讨论"}),
             ("open_floor", {"channel_id": "public", "mode": "free", "holders": [],
-                            "free_limits": {"duration_s": 7, "max_messages_per_member": 1, "max_chars_total": 1500}}),
+                            "limits": {"duration_s": 7, "max_messages_per_member": 1, "max_chars_total": 1500}}),
             ("send_message", {"channel_id": "public", "content": "正式发言结束，进入简短的自由讨论。"}),
         )
         yield until(lambda world, m=mark, t=t0: _elapsed(world, t, 7.0)
-                    or len({e.actor_id for e in _entries(world, "message", m, "public") if e.actor_id in _alive(world)}) >= len(_alive(world)))
+                    or len({e.actor_id for e in _entries(world, "message", m, "public") if e.actor_id in _alive(world)}) >= len(_alive(world)),
+                    wake_in=4.0)
         yield do(("send_message", {"channel_id": "public", "content": "讨论到此为止，请大家投票。"}),
                  ("close_floor", {"channel_id": "public"}))
 
@@ -315,10 +325,13 @@ class ScriptedModerator:
             if kind == "do":
                 self.pending = None
                 return arg
-            if arg(world):
+            predicate, wake_in = arg
+            if predicate(world):
                 self.pending = None
                 continue
-            return []
+            # Nothing to do yet: sleep (with an alarm when the step is time-driven, like a model told to
+            # "check back in 15 seconds"); every new message wakes the moderator before that anyway.
+            return [("sleep", {"seconds": wake_in})] if wake_in else []
 
 
 # -------------------------------------------------------------------------------- player bots
@@ -337,28 +350,62 @@ def _pick(rng: random.Random, options: list[str], default: str | None = None) ->
     return rng.choice(options) if options else (default or "")
 
 
+def _seat(w: Any, player_id: str) -> int:
+    try:
+        return int(str(w.player(player_id).seat))
+    except (TypeError, ValueError, AttributeError):
+        return 10**6
+
+
 class ScriptedPlayer:
     def __init__(self, rng: random.Random) -> None:
         self.rng = rng
         self.challenged = False
+
+    def _knife(self, w: Any, me: str, request: dict[str, Any], others: list[str], wolves: list[str]) -> list[Call] | None:
+        """The wolves' shared request: the front-most wolf proposes, the others follow him (a short line in
+        the wolf channel each time somebody changes his mind); ``None`` = nothing to do."""
+        answers = {a["player_id"]: a["value"] for a in (request.get("answers") or [])}
+        lead = min(wolves, key=lambda p: _seat(w, p))
+        now = answers.get(me)
+        target = answers.get(lead)
+        board = w.board(me)
+        can_talk = any(c.get("id") == "wolf-team" and c.get("can_write") for c in board.get("channels") or [])
+        if me == lead or target is None:
+            if now is not None:
+                return None
+            value = _pick(self.rng, [i for i in others if i not in wolves], "none")
+            line = f"我提议今晚刀 {value}，大家看看？"
+        elif now == target:
+            return None
+        else:
+            value = target
+            line = f"好，我跟 {lead} 的，刀 {value}。" if now is None else f"我改主意了，统一刀 {value}。"
+        calls: list[Call] = [("respond", {"request_id": request["id"], "value": value, "reason": ""})]
+        if can_talk:
+            calls.append(("speak", {"channel_id": "wolf-team", "content": line}))
+        return calls
 
     def __call__(self, w: Any, me: str) -> list[Call]:
         board = w.board(me)
         mine = w.player(me)
         wolves = _faction_ids(w, "wolves")
         for request in board.get("requests") or []:
-            if request.get("answered"):
-                continue
             ids = [o["id"] for o in request.get("options") or []]
             text = str(request.get("question", ""))
             others = [i for i in ids if i not in (me, "none", "abstain", "save", "pass")]
+            if "【狼人刀口】" in text and request.get("share_answers"):
+                knife = self._knife(w, me, request, others, wolves)
+                if knife is not None:
+                    return knife
+                continue
+            if request.get("answered"):
+                continue
             if "【放逐投票】" in text:
                 pool = [i for i in others if i not in wolves] if mine.faction == "wolves" else others
                 if mine.faction != "wolves" and self.rng.random() < 0.55:
                     pool = [i for i in others if i in wolves] or others
                 value = _pick(self.rng, pool, "abstain") if self.rng.random() > 0.08 else "abstain"
-            elif "【狼人刀口】" in text:
-                value = _pick(self.rng, [i for i in others if i not in wolves], "none")
             elif "【女巫】" in text:
                 value = "save" if self.rng.random() < 0.6 else "pass"
             elif "【猎人】" in text:
@@ -387,6 +434,10 @@ class ScriptedPlayer:
 # ------------------------------------------------------------------------------------- the LLM port
 
 
+#: Imitated price list of the demo "model" (USD per million tokens) so the cost counter has something to count.
+DEMO_PRICES = {"input_price_per_m": 0.30, "output_price_per_m": 1.20, "cache_read_price_per_m": 0.03, "cache_write_price_per_m": 0.30}
+
+
 class DemoLlm:
     """:class:`app.runtime.ports.LlmPort` backed by scripted policies (no network, no cost)."""
 
@@ -399,6 +450,26 @@ class DemoLlm:
         for player in world.state.players:
             self.policies[player.id] = ScriptedPlayer(random.Random(self.rng.random()))
         self.calls = 0
+        self._rounds: dict[str, int] = {}  # per agent: how many calls its (imitated) conversation has had
+
+    def _usage(self, agent_id: str) -> tuple[int, int, int]:
+        """``(fresh input, cache read, output)`` of a call in a conversation that grows and is cached."""
+        n = self._rounds[agent_id] = self._rounds.get(agent_id, 0) + 1
+        total = min(24_000, 1_200 + 160 * n + self.rng.randint(0, 300))
+        read = 0 if n == 1 else int(total * self.rng.uniform(0.78, 0.92))
+        return total - read, read, self.rng.randint(40, 260)
+
+    def _text(self, messages: list[dict[str, Any]]) -> str:
+        """The answer of a one-shot call (review / "complete it for me"): plain text, no tools."""
+        system = str(messages[0].get("content", "")) if messages else ""
+        user = str(messages[-1].get("content", "")) if messages else ""
+        if "复盘" in system:
+            return ("（演示）这一局我发言偏保守，关键轮次没有及时表态；对其他玩家的印象：多数人发言平稳，"
+                    "投票与发言基本一致。下次我会更早亮出自己的判断，并留意前后矛盾的人。")
+        notes = user.split("要点：", 1)[-1].strip() or "（无要点）"
+        if "性格设定" in system:
+            return f"你说话{notes}。做决定时先观察再表态，压力大的时候会放慢语速，把话说得更短、更稳。"
+        return f"## 对其他玩家的印象\n- {notes}\n\n## 自己的经验与教训\n- 先听后说，别在信息不足时站队。"
 
     async def complete(
         self, agent_id: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, *, max_tokens: int | None = None
@@ -407,9 +478,20 @@ class DemoLlm:
         if self.delay:  # make the game watchable: "thinking" takes a moment
             top = 1.1 if agent_id == MODERATOR_ID else 0.8
             await asyncio.sleep(self.rng.uniform(0.15, top) * self.delay)
+        fresh, read, out = self._usage(agent_id)
+        common: dict[str, Any] = dict(
+            prompt_tokens=fresh,
+            cache_read_tokens=read,
+            completion_tokens=out,
+            provider_id="demo",
+            model_id="scripted-bot",
+            **DEMO_PRICES,
+        )
+        if tools is None:  # a one-shot call outside the game loop
+            return LLMResponse(content=self._text(messages), finish_reason="stop", **common)
         policy = self.policies.get(agent_id)
         calls = policy(self.world, agent_id) if policy else []
-        calls = calls or [("wait", {})]
+        calls = calls or [("sleep", {})]
         return LLMResponse(
             thought="（演示脚本）按当前状态决定下一步。",
             content="",
@@ -417,15 +499,12 @@ class DemoLlm:
                 ToolCallData(id=f"call_{uuid.uuid4().hex[:10]}", name=name, arguments_json=json.dumps(args, ensure_ascii=False))
                 for name, args in calls
             ],
-            prompt_tokens=self.rng.randint(900, 3200),
-            completion_tokens=self.rng.randint(40, 260),
             finish_reason="tool_calls",
-            provider_id="demo",
-            model_id="scripted-bot",
+            **common,
         )
 
 
-def install_demo(orchestrator: Any, *, delay: float = 1.0) -> None:
+def install_demo(orchestrator: Any, *, delay: float = 1.0, seed: int | None = None) -> None:
     """Switch ``orchestrator`` to scripted agents and relax the model-binding checks."""
     cache: dict[int, DemoLlm] = {}
 
@@ -433,7 +512,7 @@ def install_demo(orchestrator: Any, *, delay: float = 1.0) -> None:
         key = id(orch.world)  # the bot's script state survives pause / resume of the same game
         if key not in cache:
             cache.clear()
-            cache[key] = DemoLlm(orch.world, delay=delay)
+            cache[key] = DemoLlm(orch.world, delay=delay, seed=seed)
         return cache[key]
 
     orchestrator.demo_mode = True
