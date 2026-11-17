@@ -36,6 +36,12 @@ engine shrinks to a game-agnostic "physical layer". See
 - **Plaintext trace log** — thoughts, tool calls and receipts go to `<workspace>/.arena/logs/…`;
   secrets are scrubbed and files roll over at about 20 MB.
 - **Demo mode** — `ARENA_DEMO=1` plays a full game with scripted bots (no model, no cost).
+- **Hardened for real models** — generous per-call token limits (reasoning models count their thinking
+  against them) with a one-shot recovery when a call is cut off, a `wait` guard that reminds a player
+  who still has an unanswered request or holds the floor, moderator-only reference documents hidden from
+  players, and every bound provider key registered with the trace scrubber.
+- **Dev tools** — `tools/dev_server.py` (isolated demo / real-model instances) and `tools/real_smoke.py`
+  (real-model smoke test with a hard call budget and a floor timeline report).
 
 ### Compatibility
 

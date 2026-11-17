@@ -122,6 +122,17 @@ ARENA_DEMO=1 ARENA_DISABLE_WORKSPACE=1 uvicorn app.main:app --host 127.0.0.1 --p
 演示模式用脚本化机器人扮演主持人和 12 名玩家，走真实的引擎、频道、发言权、请求和界面，
 但没有任何网络请求和费用；演示局不支持从存档继续（需要新建对局）。
 
+### 隔离的开发实例与真实模型冒烟
+
+```bash
+# 与你的真实工作区完全隔离的实例（数据在 .demo-data/，已被 git 忽略）
+python tools/dev_server.py --demo --port 8123
+python tools/dev_server.py --copy-providers-from "<工作区>/.arena" --port 8124   # 复制 Provider 与绑定，会调用真实模型并产生费用
+
+# 带硬性调用上限的真实模型冒烟（会产生费用），结束后打印工具使用、被拒绝的调用和发言权时间线
+python tools/real_smoke.py --from "<工作区>/.arena" --scenario scenarios/minimal_test.md --players 4 --max-calls 60
+```
+
 ### Docker Compose
 
 ```bash

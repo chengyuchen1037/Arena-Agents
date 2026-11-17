@@ -142,6 +142,18 @@ Scripted bots play the moderator and the 12 players through the real engine, cha
 requests and UI, with no network traffic and no cost. A demo game cannot be resumed from a save
 (start a new game instead).
 
+### Isolated dev instances and real-model smoke tests
+
+```bash
+# An instance fully isolated from your real workspace (data in .demo-data/, git-ignored)
+python tools/dev_server.py --demo --port 8123
+python tools/dev_server.py --copy-providers-from "<workspace>/.arena" --port 8124   # copies providers + bindings; calls real models and COSTS credits
+
+# A real-model smoke test with a hard call budget (costs credits); prints tool usage,
+# rejected calls and the floor timeline when it ends
+python tools/real_smoke.py --from "<workspace>/.arena" --scenario scenarios/minimal_test.md --players 4 --max-calls 60
+```
+
 ### Run with Docker Compose
 
 ```bash
