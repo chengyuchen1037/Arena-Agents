@@ -4,11 +4,13 @@ from app.storage.paths import get_data_dir
 
 def clear_store_caches() -> None:
     """Clear data-dir singletons without changing crypto test key providers."""
+    from app.providers.pricing import reset_price_store
     from app.providers.store import reset_provider_store
     from app.storage.sessions import reset_session_store
     from app.storage.settings import reset_settings_store
 
     reset_provider_store()
+    reset_price_store()
     reset_session_store()
     reset_settings_store()
 

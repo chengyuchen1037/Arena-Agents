@@ -1,21 +1,26 @@
 /* ==========================================================================
-   Arena-Agents v0.12 — client store for SSE v2 (pure, no DOM access)
+   Arena-Agents v0.12.1 — client store for SSE v2 (pure, no DOM access)
    Exposes window.ArenaStore and module.exports.
 
-   The client keeps ONE object in the shape of PublicSession v2
-   (docs/v0.12-contracts.md §8.1). Every SSE event of §8.2 updates the matching
+   The client keeps ONE object in the shape of PublicSession v3
+   (docs/v0.12-contracts.md §8.1 + §10.6). Every SSE event updates the matching
    part of that object IN PLACE; `snapshot` replaces it as a whole and
    `session.updated` merges top-level fields.
 
-     applyEvent(session, {id, type, data}) -> {
+     applyEvent(session, {id, type, data}, ctx) -> {
        session,        // the (possibly new) session object
        dirty,          // which UI sections must be repainted
        message,        // the committed message (message.committed only)
        flash,          // {actor_id, ability_id} (ability.used only)
        toast,          // text for the user (error events)
+       budgetEvent,    // "warning" | "reached" (budget.warning / budget.reached)
+       rosterChanged,  // true when names / avatars changed (roster.updated)
+       reviewEvent,    // {id, state, message} (review.progress)
        reload,         // true for workspace.changed
        replaced,       // true when the whole session was swapped (snapshot)
      }
+     ctx: {clockNow}  the client's estimate of the game clock; request deadlines are kept as
+                      absolute game-clock values so countdowns survive re-renders.
 
    Nothing here ever receives or stores chain-of-thought or tool-call details:
    the protocol does not carry them.
@@ -35,16 +40,21 @@
   const MAX_MESSAGES = 2000; // same cap as the server snapshot
   const MAX_REQUESTS = 200;
   const MAX_TICKETS = 500;
-  const AGENT_STATES = ["idle", "thinking", "acting", "stopped"];
+  // v0.12.1 (E2): only three states. Older servers' "idle" / "stopped" both mean "not running" => sleeping.
+  const AGENT_STATES = ["thinking", "acting", "sleeping"];
   const DIRTY_KEYS = ["topbar", "board", "channels", "feed", "dashboard", "popover"];
   const METRIC_KEYS = [
+    "activations",
     "calls",
     "prompt_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
     "completion_tokens",
     "cost_usd",
     "tool_calls",
     "thinking_rounds",
     "rejections",
+    "cache_hit_rate",
   ];
   // session.updated never replaces the collections that have their own events.
   const MERGE_PROTECTED = new Set([
@@ -65,6 +75,11 @@
   const num = (v, d = 0) => {
     const n = typeof v === "number" ? v : Number(v);
     return Number.isFinite(n) ? n : d;
+  };
+  const optNum = (v) => {
+    if (v === undefined || v === null || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
   };
   const strList = (v) => (Array.isArray(v) ? v.map((x) => String(x)) : []);
 
@@ -98,22 +113,36 @@
     return item;
   }
 
+  function agentState(v) {
+    return AGENT_STATES.includes(v) ? v : "sleeping";
+  }
+
+  /** Seat number of a participant: the explicit seat, else the number inside the id ("N3" -> 3). */
+  function seatOf(p) {
+    const s = p && p.seat !== "" && p.seat !== undefined && p.seat !== null ? Number(p.seat) : NaN;
+    if (Number.isFinite(s) && s > 0) return s;
+    const m = /(\d+)\s*$/.exec(str(p && p.id));
+    return m ? Number(m[1]) : 0;
+  }
+
   // -------------------------------------------------------------------------
   // normalizers (tolerate partial payloads: a missing field never breaks a render)
   // -------------------------------------------------------------------------
 
   function normalizeParticipant(raw) {
     const p = isObject(raw) ? raw : {};
-    const state = AGENT_STATES.includes(p.state) ? p.state : "idle";
-    return {
+    const out = {
       ...p,
       id: str(p.id),
-      seat: p.seat === undefined || p.seat === null ? "" : p.seat,
       name: str(p.name, str(p.id)),
+      avatar: isObject(p.avatar) ? p.avatar : null,
       tags: strList(p.tags),
       out: Boolean(p.out),
-      state,
+      state: agentState(p.state),
+      sleep_until: optNum(p.sleep_until),
     };
+    out.seat = seatOf(p);
+    return out;
   }
 
   function normalizeModerator(raw) {
@@ -122,7 +151,8 @@
       ...m,
       id: MODERATOR_ID,
       name: str(m.name, "主持人"),
-      state: AGENT_STATES.includes(m.state) ? m.state : "idle",
+      state: agentState(m.state),
+      sleep_until: optNum(m.sleep_until),
     };
   }
 
@@ -185,8 +215,43 @@
     };
   }
 
-  function normalizeRequest(raw) {
+  function normalizeAnswer(raw) {
+    const a = isObject(raw) ? raw : {};
+    const out = {
+      player_id: str(a.player_id),
+      value: a.value === undefined || a.value === null ? "" : a.value,
+      label: str(a.label, a.value === undefined || a.value === null ? "" : str(a.value)),
+      reason: str(a.reason),
+      defaulted: Boolean(a.defaulted),
+    };
+    if (Array.isArray(a.visible_to_ids)) out.visible_to_ids = strList(a.visible_to_ids);
+    return out;
+  }
+
+  function normalizeResult(raw) {
+    if (!isObject(raw)) return null;
+    let tally = null;
+    if (isObject(raw.tally)) {
+      tally = {};
+      for (const k of Object.keys(raw.tally)) tally[k] = num(raw.tally[k], 0);
+    }
+    return {
+      reason: str(raw.reason),
+      tally,
+      leaders: Array.isArray(raw.leaders) ? strList(raw.leaders) : null,
+      defaulted: strList(raw.defaulted),
+      missing: strList(raw.missing),
+    };
+  }
+
+  /**
+   * RequestView (§10.6). `deadline_clock` is the absolute game-clock second the request closes at
+   * (seconds_left + the clock when we learnt it); `answer_changes` counts re-answers seen live.
+   */
+  function normalizeRequest(raw, ctx) {
     const r = isObject(raw) ? raw : {};
+    const secondsLeft = r.seconds_left === undefined || r.seconds_left === null ? null : num(r.seconds_left, 0);
+    const now = ctx && Number.isFinite(Number(ctx.clockNow)) ? Number(ctx.clockNow) : 0;
     return {
       ...r,
       id: str(r.id),
@@ -199,7 +264,15 @@
       answered_by: strList(r.answered_by),
       status: str(r.status, "open"),
       sealed: Boolean(r.sealed),
-      seconds_left: r.seconds_left === undefined || r.seconds_left === null ? null : num(r.seconds_left, 0),
+      share_answers: Boolean(r.share_answers),
+      auto_close: str(r.auto_close, "all_answered") || "all_answered",
+      seconds_left: secondsLeft,
+      deadline_clock: secondsLeft === null ? null : now + secondsLeft,
+      opened_seq: num(r.opened_seq, 0),
+      channel_id: r.channel_id === undefined || r.channel_id === null || r.channel_id === "" ? null : String(r.channel_id),
+      answers: Array.isArray(r.answers) ? r.answers.filter(isObject).map(normalizeAnswer) : [],
+      result: normalizeResult(r.result),
+      answer_changes: isObject(r.answer_changes) ? r.answer_changes : {},
     };
   }
 
@@ -225,6 +298,37 @@
     };
   }
 
+  const BUDGET_STATES = ["ok", "warning", "reached"];
+
+  function normalizeBudget(raw) {
+    const b = isObject(raw) ? raw : {};
+    const pos = (v) => {
+      const n = optNum(v);
+      return n !== null && n > 0 ? n : null;
+    };
+    const used = (v) => Math.max(0, num(v, 0));
+    return {
+      max_tokens: pos(b.max_tokens),
+      max_cost_usd: pos(b.max_cost_usd),
+      force_stop: Boolean(b.force_stop),
+      used_tokens: used(b.used_tokens),
+      used_cost_usd: used(b.used_cost_usd),
+      state: BUDGET_STATES.includes(b.state) ? b.state : "ok",
+    };
+  }
+
+  function normalizeReview(raw, previous) {
+    const r = isObject(raw) ? raw : {};
+    const prev = isObject(previous) ? previous : {};
+    return {
+      available: Boolean(r.available),
+      done: strList(r.done),
+      running: Boolean(r.running),
+      // live per-player progress (review.progress events); a new snapshot starts clean
+      progress: isObject(prev.progress) ? prev.progress : {},
+    };
+  }
+
   /** Coerce the scalar / small-object top-level fields (used after a merge too). */
   function normalizeScalars(s) {
     s.session_id = str(s.session_id);
@@ -237,7 +341,10 @@
     s.active_status_text = str(s.active_status_text);
     s.restore_notice = str(s.restore_notice);
     s.autosave_error = str(s.autosave_error);
+    s.stall_notice = str(s.stall_notice);
     s.restored_from_save = Boolean(s.restored_from_save);
+    s.demo = Boolean(s.demo);
+    s.memory_enabled = s.memory_enabled !== false;
     s.seq = num(s.seq, 0);
     s.event_id = num(s.event_id, 0);
     s.clock = num(s.clock, 0);
@@ -256,12 +363,17 @@
     s.usage_stats = {
       ...u,
       prompt_tokens: num(u.prompt_tokens, 0),
+      cache_read_tokens: num(u.cache_read_tokens, 0),
+      cache_write_tokens: num(u.cache_write_tokens, 0),
       completion_tokens: num(u.completion_tokens, 0),
       total_tokens: num(u.total_tokens, 0),
       total_cost_usd: num(u.total_cost_usd, 0),
+      cache_hit_rate: num(u.cache_hit_rate, 0),
       by_model: isObject(u.by_model) ? u.by_model : {},
       by_actor: isObject(u.by_actor) ? u.by_actor : {},
     };
+    s.budget = normalizeBudget(s.budget);
+    s.review = normalizeReview(s.review, s.review);
     return s;
   }
 
@@ -269,9 +381,11 @@
    * Fill every field the renderers read, tolerate partial payloads (older
    * backends, tests) and drop malformed list items. Mutates and returns `raw`.
    */
-  function normalizeSession(raw) {
+  function normalizeSession(raw, ctx) {
     const s = isObject(raw) ? raw : {};
     normalizeScalars(s);
+    // a request's countdown is relative to the clock of the snapshot unless the caller knows better
+    const reqCtx = ctx && Number.isFinite(Number(ctx.clockNow)) ? ctx : { clockNow: s.clock };
     s.participants = (Array.isArray(s.participants) ? s.participants : [])
       .filter(isObject)
       .map(normalizeParticipant);
@@ -286,7 +400,9 @@
     }
     if (messages.length > MAX_MESSAGES) messages = messages.slice(messages.length - MAX_MESSAGES);
     s.messages = messages;
-    s.requests = (Array.isArray(s.requests) ? s.requests : []).filter(isObject).map(normalizeRequest);
+    s.requests = (Array.isArray(s.requests) ? s.requests : [])
+      .filter(isObject)
+      .map((r) => normalizeRequest(r, reqCtx));
     s.tickets = (Array.isArray(s.tickets) ? s.tickets : []).filter(isObject).map(normalizeTicket);
     s.dashboard = normalizeDashboard(s.dashboard);
     return s;
@@ -328,12 +444,31 @@
   }
 
   // -------------------------------------------------------------------------
-  // event handlers (one per SSE v2 `type`)
+  // event handlers (one per SSE `type`)
   // -------------------------------------------------------------------------
 
+  const clockOf = (res, ctx) =>
+    ctx && Number.isFinite(Number(ctx.clockNow)) ? Number(ctx.clockNow) : num(res.session.clock, 0);
+
+  /** Put the answer of one player into a request (last answer wins) and track re-answers. */
+  function setAnswer(req, answer) {
+    const i = req.answers.findIndex((a) => a.player_id === answer.player_id);
+    if (i >= 0) {
+      const before = req.answers[i];
+      if (String(before.value) !== String(answer.value)) {
+        req.answer_changes = { ...req.answer_changes, [answer.player_id]: num(req.answer_changes[answer.player_id], 0) + 1 };
+      }
+      req.answers[i] = answer;
+    } else {
+      req.answers.push(answer);
+    }
+    if (!req.answered_by.includes(answer.player_id)) req.answered_by.push(answer.player_id);
+  }
+
   const HANDLERS = {
-    snapshot(res, d) {
-      res.session = normalizeSession(isObject(d.session) ? d.session : {});
+    snapshot(res, d, ev, ctx) {
+      const clock = d.session && Number.isFinite(Number(d.session.clock)) ? Number(d.session.clock) : undefined;
+      res.session = normalizeSession(isObject(d.session) ? d.session : {}, clock === undefined ? ctx : { clockNow: clock });
       res.replaced = true;
       res.dirty = newDirty(true);
     },
@@ -359,7 +494,7 @@
       const channel = findById(res.session.channels, d.channel_id);
       if (!channel) return;
       channel.floor = normalizeFloor(d.floor);
-      res.dirty.channels = res.dirty.board = true;
+      res.dirty.channels = true;
     },
 
     "player.updated"(res, d) {
@@ -367,13 +502,16 @@
       if (!p) return;
       if (Array.isArray(d.tags)) p.tags = strList(d.tags);
       if (d.out !== undefined) p.out = Boolean(d.out);
-      res.dirty.board = res.dirty.popover = true;
+      res.dirty.board = res.dirty.popover = res.dirty.dashboard = true;
     },
 
-    "request.opened"(res, d) {
+    "request.opened"(res, d, ev, ctx) {
       if (!isObject(d.request)) return;
-      upsertById(res.session.requests, normalizeRequest(d.request), MAX_REQUESTS);
-      res.dirty.topbar = res.dirty.board = true;
+      const req = normalizeRequest(d.request, { clockNow: clockOf(res, ctx) });
+      // a request that has no ledger position yet is placed right after what the client has seen
+      if (!req.opened_seq) req.opened_seq = res.session.seq;
+      upsertById(res.session.requests, req, MAX_REQUESTS);
+      res.dirty.topbar = res.dirty.feed = true;
     },
 
     "request.progress"(res, d) {
@@ -381,7 +519,14 @@
       if (!r) return;
       if (Array.isArray(d.answered_by)) r.answered_by = strList(d.answered_by);
       if (d.total !== undefined && Number.isFinite(Number(d.total))) r.total = Number(d.total);
-      res.dirty.topbar = res.dirty.board = true;
+      res.dirty.topbar = res.dirty.feed = true;
+    },
+
+    "request.answer"(res, d) {
+      const r = findById(res.session.requests, d.request_id);
+      if (!r || !d.player_id) return;
+      setAnswer(r, normalizeAnswer({ ...d, player_id: d.player_id }));
+      res.dirty.topbar = res.dirty.feed = true;
     },
 
     "request.closed"(res, d) {
@@ -391,7 +536,10 @@
       if (Array.isArray(d.answered_by)) r.answered_by = strList(d.answered_by);
       r.defaulted = strList(d.defaulted);
       r.seconds_left = null;
-      res.dirty.topbar = res.dirty.board = true;
+      r.deadline_clock = null;
+      if (isObject(d.result)) r.result = normalizeResult({ reason: d.reason, ...d.result });
+      else if (!r.result) r.result = normalizeResult({ reason: d.reason, defaulted: d.defaulted });
+      res.dirty.topbar = res.dirty.feed = true;
     },
 
     "challenge.opened"(res, d) {
@@ -438,21 +586,21 @@
         s.pause_reason = "";
         s.hold_reason = "";
       }
-      res.dirty.topbar = res.dirty.board = res.dirty.popover = true;
+      res.dirty.topbar = res.dirty.board = res.dirty.popover = res.dirty.feed = true;
     },
 
     "agent.status"(res, d) {
       const id = str(d.id);
-      const state = AGENT_STATES.includes(d.state) ? d.state : "idle";
+      const state = agentState(d.state);
+      const until = optNum(d.until);
       const s = res.session;
-      if (id === MODERATOR_ID) {
-        s.moderator.state = state;
-      } else {
-        const p = findById(s.participants, id);
-        if (!p) return;
-        p.state = state;
-      }
+      const node = id === MODERATOR_ID ? s.moderator : findById(s.participants, id);
+      if (!node) return;
+      node.state = state;
+      // only a sleeping agent can have a wake-up time
+      node.sleep_until = state === "sleeping" ? until : null;
       res.dirty.board = res.dirty.popover = true;
+      if (id === MODERATOR_ID) res.dirty.topbar = true;
     },
 
     "agent.metrics"(res, d) {
@@ -465,24 +613,91 @@
         if (d[k] !== undefined) next[k] = num(d[k], num(prev[k], 0));
       }
       // Keep the session totals (top-bar pill) live between snapshots: apply the delta.
-      const dp = num(next.prompt_tokens, 0) - num(prev.prompt_tokens, 0);
-      const dc = num(next.completion_tokens, 0) - num(prev.completion_tokens, 0);
-      const dcost = num(next.cost_usd, 0) - num(prev.cost_usd, 0);
+      const delta = (k) => num(next[k], 0) - num(prev[k], 0);
+      const dp = delta("prompt_tokens");
+      const dcr = delta("cache_read_tokens");
+      const dcw = delta("cache_write_tokens");
+      const dc = delta("completion_tokens");
+      const dcost = delta("cost_usd");
       u.prompt_tokens = Math.max(0, num(u.prompt_tokens, 0) + dp);
+      u.cache_read_tokens = Math.max(0, num(u.cache_read_tokens, 0) + dcr);
+      u.cache_write_tokens = Math.max(0, num(u.cache_write_tokens, 0) + dcw);
       u.completion_tokens = Math.max(0, num(u.completion_tokens, 0) + dc);
-      u.total_tokens = Math.max(0, num(u.total_tokens, 0) + dp + dc);
+      u.total_tokens = Math.max(0, num(u.total_tokens, 0) + dp + dcr + dcw + dc);
       u.total_cost_usd = Math.max(0, Math.round((num(u.total_cost_usd, 0) + dcost) * 1e9) / 1e9);
+      const inputSide = u.prompt_tokens + u.cache_read_tokens + u.cache_write_tokens;
+      u.cache_hit_rate = inputSide > 0 ? u.cache_read_tokens / inputSide : 0;
       u.by_actor[id] = next;
       res.dirty.topbar = res.dirty.popover = true;
+    },
+
+    "request.updated"(res, d, ev, ctx) {
+      // forward compatible: a whole RequestView replaces the one we have
+      HANDLERS["request.opened"](res, d, ev, ctx);
+    },
+
+    "budget.updated"(res, d) {
+      if (!isObject(d.budget)) return;
+      res.session.budget = normalizeBudget(d.budget);
+      res.dirty.topbar = true;
+    },
+
+    "budget.warning"(res, d) {
+      HANDLERS["budget.updated"](res, d);
+      res.budgetEvent = "warning";
+    },
+
+    "budget.reached"(res, d) {
+      HANDLERS["budget.updated"](res, d);
+      res.budgetEvent = "reached";
+    },
+
+    "roster.updated"(res, d) {
+      const list = Array.isArray(d.participants) ? d.participants : [];
+      let changed = false;
+      for (const item of list) {
+        if (!isObject(item)) continue;
+        const p = findById(res.session.participants, item.id);
+        if (!p) continue;
+        if (typeof item.name === "string" && item.name !== p.name) {
+          p.name = item.name;
+          changed = true;
+        }
+        if (isObject(item.avatar)) {
+          p.avatar = item.avatar;
+          changed = true;
+        }
+      }
+      res.rosterChanged = true;
+      if (changed || list.length) {
+        res.dirty.board = res.dirty.popover = res.dirty.channels = res.dirty.feed = res.dirty.topbar = true;
+      }
+    },
+
+    "review.progress"(res, d) {
+      const id = str(d.id);
+      if (!id) return;
+      const r = res.session.review;
+      const state = ["running", "done", "error"].includes(d.state) ? d.state : "running";
+      r.progress[id] = { state, message: str(d.message) };
+      if (state === "done" && !r.done.includes(id)) r.done.push(id);
+      r.running = Object.values(r.progress).some((p) => p.state === "running");
+      res.reviewEvent = { id, state, message: str(d.message) };
+      res.dirty.board = res.dirty.popover = true;
     },
 
     "session.updated"(res, d) {
       const s = res.session;
       for (const key of Object.keys(d)) {
-        if (!MERGE_PROTECTED.has(key)) s[key] = d[key];
+        if (MERGE_PROTECTED.has(key)) continue;
+        if (key === "review") {
+          s.review = normalizeReview(d.review, s.review);
+        } else {
+          s[key] = d[key];
+        }
       }
       normalizeScalars(s);
-      res.dirty.topbar = res.dirty.board = res.dirty.popover = true;
+      res.dirty.topbar = res.dirty.board = res.dirty.popover = res.dirty.feed = true;
     },
 
     "workspace.changed"(res) {
@@ -499,19 +714,22 @@
    * Apply one SSE v2 event {id, type, data}. Unknown types are ignored (forward
    * compatible); the input session is mutated in place unless the event is a snapshot.
    */
-  function applyEvent(session, ev) {
+  function applyEvent(session, ev, ctx) {
     const res = {
       session: session || emptySession(),
       dirty: newDirty(false),
       message: null,
       flash: null,
       toast: "",
+      budgetEvent: null,
+      rosterChanged: false,
+      reviewEvent: null,
       reload: false,
       replaced: false,
     };
     if (!isObject(ev)) return res;
     const handler = HANDLERS[str(ev.type)];
-    if (handler) handler(res, isObject(ev.data) ? ev.data : {}, ev);
+    if (handler) handler(res, isObject(ev.data) ? ev.data : {}, ev, ctx || null);
     return res;
   }
 
@@ -566,6 +784,9 @@
     normalizeRequest,
     normalizeTicket,
     normalizeParticipant,
+    normalizeBudget,
+    normalizeReview,
+    seatOf,
     insertMessage,
     isTruncated,
     findById,

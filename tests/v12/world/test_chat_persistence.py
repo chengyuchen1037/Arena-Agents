@@ -222,7 +222,7 @@ def _script() -> list[Callable[[ChatWorld], Any]]:
         lambda w: speak(w, "N3", "chat", "自由讨论"),
         lambda w: speak(w, "N4", "chat", "我也说"),
         advance(45),  # silence again
-        lambda w: mod(w, "update_channel", channel_id="chat", free_limits={"duration_s": 400}),
+        lambda w: mod(w, "update_channel", channel_id="chat", limits={"duration_s": 400}),
         advance(10),
         lambda w: w.chat.freeze_channel("talk", "ability:x"),  # 18: N3 has 5 seconds left
         lambda w: speak(w, "N3", "talk", "冻结中"),  # refused

@@ -22,11 +22,11 @@ from .helpers import (
 # defaults.free in the test scenario: 100 s, 3 messages each, 30 chars each, 100 chars in total, silence 40 s
 
 
-def _free(**free_limits):
+def _free(**limits):
     world = make_world()
     new_channel(world, "c1", mode="free")
-    if free_limits:
-        assert mod(world, "update_channel", channel_id="c1", free_limits=free_limits).ok
+    if limits:
+        assert mod(world, "update_channel", channel_id="c1", limits=limits).ok
         flush(world)
     return world
 
@@ -50,7 +50,8 @@ def test_a_free_channel_starts_with_the_scenario_defaults() -> None:
     new_channel(world, "c1", mode="free")
     free = world.channel("c1").free
     assert (free.duration_s, free.max_messages_per_member, free.max_chars_per_message) == (100, 3, 30)
-    assert (free.max_chars_total, free.debounce_s, free.silence_s) == (100, 1.5, 40)
+    assert (free.max_chars_total, free.silence_s) == (100, 40)
+    assert not hasattr(free, "debounce_s")  # v0.12.1: nobody waits before being woken
     assert free.writers is None and free.counts == {} and free.chars_used == 0 and free.notified == {}
     assert free.started_gt == 12 and free.last_message_gt == 12
 
@@ -236,8 +237,8 @@ def test_new_free_limits_re_arm_every_advisory() -> None:
     assert sorted(a["reason"] for a in _advisories(world)) == ["silence", "time"]
     assert world.channel("c1").free.notified == {"time": True, "silence": True}
     # the limits are absolute (measured from the start): 180 s in total, i.e. 80 s more
-    receipt = mod(world, "update_channel", channel_id="c1", free_limits={"duration_s": 180, "max_messages_per_member": 4})
-    assert receipt.ok and receipt.data["changes"]["free_limits"] == {"duration_s": 180, "max_messages_per_member": 4}
+    receipt = mod(world, "update_channel", channel_id="c1", limits={"duration_s": 180, "max_messages_per_member": 4})
+    assert receipt.ok and receipt.data["changes"]["limits"] == {"duration_s": 180, "max_messages_per_member": 4}
     assert world.channel("c1").free.notified == {}
     world.clock.advance(39)
     world.tick()
@@ -250,34 +251,35 @@ def test_new_free_limits_re_arm_every_advisory() -> None:
     assert [a["reason"] for a in _advisories(world)] == ["time"]
 
 
-def test_free_limits_apply_immediately_to_the_hard_limits() -> None:
+def test_limits_apply_immediately_to_the_hard_limits() -> None:
     world = _free()
     for i in range(3):
         assert speak(world, "N1", "c1", f"第{i}句").ok
     assert speak(world, "N1", "c1", "不行").code == Code.QUOTA_EXCEEDED
-    assert mod(world, "update_channel", channel_id="c1", free_limits={"max_messages_per_member": 5}).ok
+    assert mod(world, "update_channel", channel_id="c1", limits={"max_messages_per_member": 5}).ok
     assert speak(world, "N1", "c1", "现在可以了").ok
-    assert mod(world, "update_channel", channel_id="c1", free_limits={"max_chars_per_message": 3}).ok
+    assert mod(world, "update_channel", channel_id="c1", limits={"max_chars_per_message": 3}).ok
     assert speak(world, "N2", "c1", "一二三四五").truncated == {"dropped_chars": 2, "kept_chars": 3}
 
 
-def test_free_limits_must_not_already_be_exceeded() -> None:
+def test_limits_must_not_already_be_exceeded() -> None:
     world = _free()
     assert speak(world, "N1", "c1", "字" * 30).ok
     world.clock.advance(60)
-    elapsed = mod(world, "update_channel", channel_id="c1", free_limits={"duration_s": 50})
+    elapsed = mod(world, "update_channel", channel_id="c1", limits={"duration_s": 50})
     assert elapsed.code == Code.INVALID_PARAMS and "60" in elapsed.message
-    chars = mod(world, "update_channel", channel_id="c1", free_limits={"max_chars_total": 30})
+    chars = mod(world, "update_channel", channel_id="c1", limits={"max_chars_total": 30})
     assert chars.code == Code.INVALID_PARAMS and "30" in chars.message
     assert world.channel("c1").free.duration_s == 100 and world.channel("c1").free.max_chars_total == 100
 
 
-def test_free_limits_only_make_sense_for_free_channels() -> None:
+def test_limits_only_make_sense_for_free_channels() -> None:
     world = make_world()
     new_channel(world, "c1")  # closed
-    assert mod(world, "update_channel", channel_id="c1", free_limits={"duration_s": 5}).code == Code.INVALID_PARAMS
+    refused = mod(world, "update_channel", channel_id="c1", limits={"duration_s": 5})
+    assert refused.code == Code.INVALID_PARAMS and "不是自由讨论" in refused.message
     # entering free mode at the same time is fine
-    receipt = mod(world, "update_channel", channel_id="c1", mode="free", free_limits={"duration_s": 5, "silence_s": 3})
+    receipt = mod(world, "update_channel", channel_id="c1", mode="free", limits={"duration_s": 5, "silence_s": 3})
     assert receipt.ok
     free = world.channel("c1").free
     assert (free.duration_s, free.silence_s, free.max_messages_per_member) == (5, 3, 3)
@@ -316,7 +318,7 @@ def test_close_floor_ends_the_discussion_and_tells_the_writers() -> None:
     deliveries, events = flush(world)
     assert sorted(targets(deliveries, "floor.revoked")) == ["N1", "N2", "N3"]  # not the read-only N4
     [env] = envelopes(deliveries, target="N1", event="floor.revoked")
-    assert (env.priority, env.interrupt, env.payload["reason"]) == ("ambient", True, "closed")
+    assert (env.priority, env.interrupt, env.payload["reason"]) == ("normal", True, "closed")
     assert ui(events, "floor.changed")[-1]["floor"]["kind"] == "none"
     assert speak(world, "N1", "c1", "还能说吗").code == Code.CHANNEL_CLOSED
     world.clock.advance(1000)
@@ -338,51 +340,52 @@ def test_free_view_reports_progress() -> None:
     assert (view["free"]["max_messages_per_member"], view["free"]["writers"]) == (3, None)
 
 
-def test_a_free_message_wakes_the_other_writers_with_normal_priority() -> None:
+def test_a_free_message_wakes_every_member_who_can_read_it() -> None:
     world = _free()
     assert mod(world, "update_channel", channel_id="c1", readonly_members=["N4"]).ok
     flush(world)
     assert speak(world, "N1", "c1", "大家好").ok
     deliveries, _ = flush(world)
     priority = {d.target: d.envelope.priority for d in deliveries if d.envelope.payload["event"] == "message.new"}
-    assert priority == {"moderator": "ambient", "N2": "normal", "N3": "normal", "N4": "ambient"}
+    # the moderator, the other writers *and* the read-only member: everybody but the author
+    assert priority == {"moderator": "normal", "N2": "normal", "N3": "normal", "N4": "normal"}
 
 
-def test_members_who_cannot_answer_any_more_are_not_woken() -> None:
+def test_members_who_cannot_answer_any_more_are_woken_all_the_same() -> None:
     world = _free()
     for i in range(3):  # N2 uses up its quota
         assert speak(world, "N2", "c1", f"第{i}句").ok
     flush(world)
     assert speak(world, "N1", "c1", "N2 还能回答吗").ok
     deliveries, _ = flush(world)
-    priority = {d.target: d.envelope.priority for d in deliveries}
-    assert priority == {"moderator": "ambient", "N2": "ambient", "N3": "normal", "N4": "normal"}
-    # raising the quota wakes it again
-    assert mod(world, "update_channel", channel_id="c1", free_limits={"max_messages_per_member": 5}).ok
-    flush(world)
-    assert speak(world, "N1", "c1", "再问一次").ok
-    assert {d.target: d.envelope.priority for d in world.drain_outbox()}["N2"] == "normal"
+    assert {d.target: d.envelope.priority for d in deliveries} == {
+        "moderator": "normal", "N2": "normal", "N3": "normal", "N4": "normal",
+    }  # N2 can read it (and see that it cannot answer): no engine-side saving
 
 
-def test_writers_outside_the_allowed_set_are_not_woken() -> None:
+def test_writers_outside_the_allowed_set_are_woken_too() -> None:
     world = make_world()
     new_channel(world, "c1")
     open_free(world, "c1", holders=["N1", "N2"])
-    assert speak(world, "N1", "c1", "只有名单上的人能回答").ok
+    assert speak(world, "N1", "c1", "名单外的人只能听").ok
     deliveries, _ = flush(world)
     assert {d.target: d.envelope.priority for d in deliveries} == {
-        "moderator": "ambient", "N2": "normal", "N3": "ambient", "N4": "ambient",
+        "moderator": "normal", "N2": "normal", "N3": "normal", "N4": "normal",
     }
 
 
-def test_normal_wakes_carry_the_discussions_debounce_hint() -> None:
-    world = _free(debounce_s=2.5)
-    assert speak(world, "N1", "c1", "大家好").ok
+def test_a_frozen_free_channel_still_delivers_the_moderators_words() -> None:
+    world = _free()
+    world.chat.freeze_channel("c1", "ability:x")
+    flush(world)
+    assert mod(world, "send_message", channel_id="c1", content="冻结中的公告").ok
     deliveries, _ = flush(world)
-    by_target = {d.target: d.envelope for d in deliveries}
-    assert by_target["N2"].priority == "normal" and by_target["N2"].payload["debounce_s"] == 2.5
-    assert "debounce_s" not in by_target["moderator"].payload  # ambient: nobody waits for it
-    # a system DM has no discussion settings: the runtime's default debounce applies
+    assert {d.target for d in deliveries} == {"N1", "N2", "N3", "N4"}
+
+
+def test_no_debounce_hint_is_attached_to_any_delivery() -> None:
+    world = _free()
+    assert speak(world, "N1", "c1", "大家好").ok
     assert speak(world, "N1", "dm-N1", "私聊").ok
-    [dm] = [d.envelope for d in world.drain_outbox()]
-    assert dm.priority == "normal" and "debounce_s" not in dm.payload
+    deliveries = world.drain_outbox()
+    assert deliveries and all("debounce_s" not in d.envelope.payload for d in deliveries)

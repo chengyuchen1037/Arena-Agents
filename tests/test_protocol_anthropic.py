@@ -95,13 +95,18 @@ class AnthropicRequestTests(unittest.IsolatedAsyncioTestCase):
     async def test_request_shape(self) -> None:
         request, factory = await self._call(max_tokens_override=9000)
         self.assertEqual(request["model"], "model-a")
-        self.assertEqual(request["system"], "规则")
-        self.assertEqual(request["messages"], [{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
+        # v0.12.1: prompt-cache breakpoints on the system prompt, the last tool and the last message block
+        cache = {"type": "ephemeral"}
+        self.assertEqual(request["system"], [{"type": "text", "text": "规则", "cache_control": cache}])
+        self.assertEqual(
+            request["messages"], [{"role": "user", "content": [{"type": "text", "text": "hi", "cache_control": cache}]}]
+        )
         self.assertTrue(request["stream"])
         self.assertEqual(request["tool_choice"], {"type": "auto"})
         self.assertEqual(
             request["tools"],
-            [{"name": "speak", "description": "发言", "input_schema": TOOLS[0]["function"]["parameters"]}],
+            [{"name": "speak", "description": "发言", "input_schema": TOOLS[0]["function"]["parameters"],
+              "cache_control": cache}],
         )
         self.assertEqual(request["max_tokens"], 9000)
         self.assertEqual(factory.instances[0].init_kwargs["max_retries"], 0)
@@ -235,8 +240,9 @@ class AnthropicStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([(c.id, c.name, c.arguments_json) for c in resp.tool_calls],
                          [("toolu_1", "speak", '{"text":"hi"}')])
         self.assertEqual(resp.finish_reason, "tool_calls")
-        # prompt = fresh input + cache write + cache read
-        self.assertEqual((resp.prompt_tokens, resp.completion_tokens), (115, 33))
+        # v0.12.1: the three input classes are reported separately (fresh input excludes the cache counters)
+        self.assertEqual((resp.prompt_tokens, resp.completion_tokens), (100, 33))
+        self.assertEqual((resp.cache_read_tokens, resp.cache_write_tokens), (5, 10))
         self.assertEqual(resp.provider_private["blocks"], [
             {"type": "thinking", "thinking": "先想", "signature": "SIG"},
             {"type": "redacted_thinking", "data": "RED"},
@@ -364,7 +370,8 @@ class AnthropicStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assistant["content"][0]["signature"], "SIG")
         self.assertEqual(assistant["content"][3]["input"], {"text": "hi"})
         self.assertEqual(second["messages"][2]["content"],
-                         [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "sent"}])
+                         [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "sent",
+                           "cache_control": {"type": "ephemeral"}}])
         self.assertIn("thinking", second)
 
 

@@ -126,6 +126,8 @@ class Target:
     model_id: str
     input_price_per_m: float = 0.0
     output_price_per_m: float = 0.0
+    cache_read_price_per_m: float = 0.0  # resolved: an empty price is the input price
+    cache_write_price_per_m: float = 0.0
     context_window_tokens: int = 1_000_000
     reasoning_depth: str = "high"
     #: Extra request-body fields forwarded verbatim (OpenAI-compatible gateways only).

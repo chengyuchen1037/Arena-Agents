@@ -35,7 +35,8 @@ from app.providers.models import (
     ProviderError,
     ProviderNotFound,
 )
-from app.providers.store import get_provider_store
+from app.providers.pricing import get_price_store
+from app.providers.store import UNSET, get_provider_store
 from app.storage.errors import StorageError
 from app.storage.sessions import get_session_store
 from app.storage.settings import get_default_bindings
@@ -106,10 +107,13 @@ class TemplateApplyRequest(BaseModel):
 
 
 class ModelCreateRequest(BaseModel):
-    # Both prices are required: there is deliberately no default price.
+    # Input and output prices are required: there is deliberately no default price.  The cache prices are
+    # optional (``null`` = billed like an input token); ``price_source`` is decided by the server.
     model_id: str
     input_price_per_m: float = Field(ge=0, le=MAX_PRICE_PER_M, allow_inf_nan=False)
     output_price_per_m: float = Field(ge=0, le=MAX_PRICE_PER_M, allow_inf_nan=False)
+    cache_read_price_per_m: float | None = Field(default=None, ge=0, le=MAX_PRICE_PER_M, allow_inf_nan=False)
+    cache_write_price_per_m: float | None = Field(default=None, ge=0, le=MAX_PRICE_PER_M, allow_inf_nan=False)
     context_window_tokens: int | None = Field(default=None, ge=2000, le=100_000_000)
 
 
@@ -117,6 +121,9 @@ class ModelUpdateRequest(BaseModel):
     model_id: str
     input_price_per_m: float | None = Field(default=None, ge=0, le=MAX_PRICE_PER_M, allow_inf_nan=False)
     output_price_per_m: float | None = Field(default=None, ge=0, le=MAX_PRICE_PER_M, allow_inf_nan=False)
+    # For the cache prices "not sent" (leave alone) and ``null`` (clear: bill like input) differ.
+    cache_read_price_per_m: float | None = Field(default=None, ge=0, le=MAX_PRICE_PER_M, allow_inf_nan=False)
+    cache_write_price_per_m: float | None = Field(default=None, ge=0, le=MAX_PRICE_PER_M, allow_inf_nan=False)
     context_window_tokens: int | None = Field(default=None, ge=2000, le=100_000_000)
 
 
@@ -140,8 +147,33 @@ def serialize_model(model: Any) -> dict[str, Any]:
         "id": model.id,
         "input_price_per_m": model.input_price_per_m,
         "output_price_per_m": model.output_price_per_m,
+        "cache_read_price_per_m": getattr(model, "cache_read_price_per_m", None),
+        "cache_write_price_per_m": getattr(model, "cache_write_price_per_m", None),
         "context_window_tokens": model.context_window_tokens,
+        "price_source": getattr(model, "price_source", "manual"),
     }
+
+
+def _price_source_for(provider: Any, model_id: str, entry: Any) -> str:
+    """``litellm:<key>`` when the stored prices (and window) are exactly what the price table says for this
+    model, otherwise ``manual`` (the user edited them, or there is no table / no match)."""
+    suggestion = get_price_store().match(provider, model_id)
+    if suggestion is None:
+        return "manual"
+    same = (
+        round(float(entry.input_price_per_m), 6) == suggestion.input_price_per_m
+        and round(float(entry.output_price_per_m), 6) == suggestion.output_price_per_m
+        and _same_price(entry.cache_read_price_per_m, suggestion.cache_read_price_per_m)
+        and _same_price(entry.cache_write_price_per_m, suggestion.cache_write_price_per_m)
+        and (suggestion.context_window_tokens is None or entry.context_window_tokens == suggestion.context_window_tokens)
+    )
+    return f"litellm:{suggestion.key}" if same else "manual"
+
+
+def _same_price(left: float | None, right: float | None) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return round(float(left), 6) == round(float(right), 6)
 
 
 def serialize_provider(provider: Any) -> dict[str, Any]:
@@ -491,7 +523,13 @@ async def discover_provider_models(provider_id: str) -> dict[str, Any]:
         ) from exc
     names = [str(m) for m in models][:1000]
     existing = {m.id for m in provider.models}
-    return {"models": names, "existing_models": [m for m in names if m in existing]}
+    # v0.12.1: the price table (when downloaded) suggests prices and a context window per model.
+    store = get_price_store()
+    suggested: dict[str, Any] = {}
+    for name in names:
+        entry = store.match(provider, name)
+        suggested[name] = entry.suggestion() if entry is not None else None
+    return {"models": names, "existing_models": [m for m in names if m in existing], "suggested": suggested}
 
 
 # --------------------------------------------------------------------------
@@ -507,13 +545,19 @@ async def add_provider_model(provider_id: str, req: ModelCreateRequest) -> dict[
     _ensure_writable(provider)
     if any(m.id == model_id for m in provider.models):
         raise HTTPException(status_code=409, detail=f"模型 {model_id} 已存在，请直接编辑它的价格。")
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {
+        "cache_read_price_per_m": req.cache_read_price_per_m,
+        "cache_write_price_per_m": req.cache_write_price_per_m,
+    }
     if req.context_window_tokens is not None:
         kwargs["context_window_tokens"] = req.context_window_tokens
     try:
         entry = get_provider_store().add_model(
             provider_id, model_id, req.input_price_per_m, req.output_price_per_m, **kwargs
         )
+        source = _price_source_for(provider, model_id, entry)
+        if source != entry.price_source:
+            entry = get_provider_store().update_model(provider_id, model_id, price_source=source)
     except (ProviderError, StorageError) as exc:
         raise _http_error(exc) from exc
     return serialize_model(entry)
@@ -531,6 +575,10 @@ async def update_provider_model(provider_id: str, req: ModelUpdateRequest) -> di
         )
         if value is not None
     }
+    # The cache prices accept ``null`` (clear = bill like input), so "sent" is judged by the fields set.
+    for field in ("cache_read_price_per_m", "cache_write_price_per_m"):
+        if field in req.model_fields_set:
+            changes[field] = getattr(req, field)
     if not changes:
         raise HTTPException(status_code=400, detail="没有可修改的字段（价格或上下文窗口）。")
     provider = _get_provider(provider_id)
@@ -541,6 +589,9 @@ async def update_provider_model(provider_id: str, req: ModelUpdateRequest) -> di
     # LLM call carries its own price snapshot and bindings keep their own window.
     try:
         entry = get_provider_store().update_model(provider_id, model_id, **changes)
+        source = _price_source_for(provider, model_id, entry)
+        if source != entry.price_source:
+            entry = get_provider_store().update_model(provider_id, model_id, price_source=source)
     except (ProviderError, StorageError) as exc:
         raise _http_error(exc) from exc
     return serialize_model(entry)

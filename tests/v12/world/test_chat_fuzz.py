@@ -20,9 +20,11 @@ from .helpers import (
     ChatWorld,
     ManualClock,
     do_pass,
+    kill,
     make_world,
     mod,
     new_channel,
+    revive,
     speak,
     speak_template,
 )
@@ -84,6 +86,27 @@ def check_invariants(world: ChatWorld) -> None:
     assert now >= 0
 
 
+DIRECT_EVENTS = frozenset({"floor.granted", "floor.revoked", "floor.paused", "floor.frozen"})
+
+
+def check_deliveries(world: ChatWorld, deliveries: list, where: str) -> None:
+    """The delivery rules of contracts §10.1 that hold for every state of the world."""
+    known = set(world.everyone()) | {ENGINE_ID}
+    for delivery in deliveries:
+        env = delivery.envelope
+        assert delivery.target in known, where
+        assert env.priority in ("urgent", "normal"), where  # there is no ambient level
+        assert "debounce_s" not in env.payload, where
+        if env.sender is not None:
+            assert env.sender != delivery.target, f"{where}: {env.payload['event']} went back to its sender"
+        player = world.player(delivery.target)
+        if player is not None and world.is_out(player):
+            event = env.payload["event"]
+            channel = world.channel(env.channel_id) if env.channel_id else None
+            direct_message = event == "message.new" and channel is not None and channel.system
+            assert event in DIRECT_EVENTS or direct_message, f"{where}: {event} woke {delivery.target}, who is out"
+
+
 def check_after_tick(world: ChatWorld) -> None:
     now = world.clock.now()
     for channel in world.state.channels:
@@ -118,7 +141,19 @@ def random_free_limits(rng: random.Random) -> dict[str, Any] | None:
         "max_chars_total": rng.choice([10, 100, 1000]),
         "silence_s": rng.choice([5, 40]),
     }
-    return {k: v for k, v in options.items() if rng.random() < 0.4}
+    limits = {k: v for k, v in options.items() if rng.random() < 0.4}
+    if rng.random() < 0.1:
+        limits["max_messages"] = 1  # a key of the other mode: must be refused, not applied
+    return limits
+
+
+def random_token_limits(rng: random.Random) -> dict[str, Any] | None:
+    if rng.random() < 0.5:
+        return None
+    limits: dict[str, Any] = {"max_messages": rng.randint(1, 3), "duration_s": rng.choice([5, 30, 90])}
+    if rng.random() < 0.1:
+        limits["silence_s"] = 5  # a key of the other mode
+    return limits
 
 
 def random_move(rng: random.Random, world: ChatWorld) -> Receipt | None:
@@ -127,9 +162,9 @@ def random_move(rng: random.Random, world: ChatWorld) -> Receipt | None:
     kind = rng.choices(
         [
             "speak", "template", "pass", "send", "announce", "turn", "free", "queue", "pause", "resume", "close",
-            "update", "freeze", "tick", "reload",
+            "update", "freeze", "tick", "reload", "kill", "revive",
         ],
-        weights=[22, 6, 8, 3, 2, 6, 4, 8, 3, 4, 3, 10, 2, 12, 1],
+        weights=[22, 6, 8, 3, 2, 6, 4, 8, 3, 4, 3, 10, 2, 12, 1, 3, 2],
     )[0]
     if kind == "speak":
         return speak(world, actor, channel_id, "字" * rng.randint(1, 45))
@@ -143,15 +178,21 @@ def random_move(rng: random.Random, world: ChatWorld) -> Receipt | None:
         return mod(world, "announce", channel_id=channel_id, template_id="notice", params={"text": "公告"})
     if kind == "turn":
         holders = pick(rng, [*PLAYERS, "ghost"], 1, 4)
-        limits = {"max_messages": rng.randint(1, 3), "duration_s": rng.choice([5, 30, 90])} if rng.random() < 0.5 else None
+        limits = random_token_limits(rng)
         return mod(world, "open_floor", channel_id=channel_id, mode="turn", holders=holders, **({"limits": limits} if limits else {}))
     if kind == "free":
         limits = random_free_limits(rng)
-        return mod(world, "open_floor", channel_id=channel_id, mode="free", holders=pick(rng, PLAYERS, 0, 3), **({"free_limits": limits} if limits else {}))
+        return mod(world, "open_floor", channel_id=channel_id, mode="free", holders=pick(rng, PLAYERS, 0, 3), **({"limits": limits} if limits else {}))
     if kind == "queue":
         order = [rng.choice(PLAYERS) for _ in range(rng.randint(1, 5))]
         limits = {"max_messages": rng.randint(1, 3), "duration_s": rng.choice([5, 30, 90])} if rng.random() < 0.5 else None
         return mod(world, "set_floor_queue", channel_id=channel_id, order=order, **({"limits": limits} if limits else {}))
+    if kind == "kill":
+        kill(world, rng.choice(PLAYERS))
+        return None
+    if kind == "revive":
+        revive(world, rng.choice(PLAYERS))
+        return None
     if kind == "pause":
         return mod(world, "pause_queue", channel_id=channel_id)
     if kind == "resume":
@@ -170,7 +211,7 @@ def random_move(rng: random.Random, world: ChatWorld) -> Receipt | None:
             payload["mode"] = rng.choice(["closed", "free", "listen"])
         limits = random_free_limits(rng)
         if limits:
-            payload["free_limits"] = limits
+            payload["limits"] = limits
         if rng.random() < 0.2:
             payload["name"] = "新名字"
         return mod(world, "update_channel", **payload)
@@ -201,8 +242,7 @@ def test_random_sequences_keep_the_world_consistent(seed: int) -> None:
             assert receipt.code != Code.INTERNAL_ERROR, f"seed {seed} step {step}: {receipt.message}"
             codes.add(receipt.code or "OK")
         check_invariants(world)
-        for delivery in world.drain_outbox():
-            assert delivery.target in set(world.everyone()) | {ENGINE_ID}
+        check_deliveries(world, world.drain_outbox(), f"seed {seed} step {step}")
         world.drain_events()
     assert world.ledger  # something happened
 
@@ -210,7 +250,7 @@ def test_random_sequences_keep_the_world_consistent(seed: int) -> None:
 def test_the_fuzz_reaches_most_rejection_codes() -> None:
     """A smoke test of the fuzzer itself: across the seeds it must hit the interesting receipts."""
     seen: set[str] = set()
-    for seed in range(40):
+    for seed in range(120):
         rng = random.Random(seed)
         world = make_world()
         for cid in CHANNELS:

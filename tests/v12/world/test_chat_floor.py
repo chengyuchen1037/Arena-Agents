@@ -131,7 +131,8 @@ def test_open_floor_validation() -> None:
     outsider = mod(world, "open_floor", channel_id="c1", holders=["N1", "N3"])
     assert outsider.code == Code.NOT_MEMBER and outsider.data["not_members"] == ["N3"]
     assert mod(world, "open_floor", channel_id="c1", holders=["moderator"]).code == Code.INVALID_TARGET
-    assert mod(world, "open_floor", channel_id="c1", holders=["N1"], free_limits={"duration_s": 5}).code == Code.INVALID_PARAMS
+    # the keys of ``limits`` must fit the mode (details: test_chat_limits.py)
+    assert mod(world, "open_floor", channel_id="c1", holders=["N1"], limits={"max_messages_per_member": 1}).code == Code.INVALID_PARAMS
     assert (
         mod(world, "open_floor", channel_id="c1", mode="free", holders=["N1"], limits={"max_messages": 1}).code
         == Code.INVALID_PARAMS
@@ -165,7 +166,7 @@ def test_a_new_grant_replaces_the_running_group() -> None:
     assert receipt.data["group_id"] == "g2"
     deliveries, _ = flush(world)
     [revoked] = envelopes(deliveries, event="floor.revoked")
-    assert (revoked.kind, revoked.priority, revoked.interrupt) == ("floor", "ambient", True)
+    assert (revoked.kind, revoked.priority, revoked.interrupt) == ("floor", "normal", True)
     assert revoked.payload == {"event": "floor.revoked", "channel_id": "c1", "reason": "replaced"}
     assert targets(deliveries, "floor.revoked") == ["N1"]  # only the active token holder is told
     assert targets(deliveries, "floor.granted") == ["N3"]
@@ -282,7 +283,7 @@ def test_a_token_times_out_exactly_at_its_deadline() -> None:
     assert world.channel("c1").group.tokens[0].status == "done"
     deliveries, _ = flush(world)
     [revoked] = envelopes(deliveries, target="N1", event="floor.revoked")
-    assert (revoked.kind, revoked.priority, revoked.interrupt) == ("floor", "ambient", True)
+    assert (revoked.kind, revoked.priority, revoked.interrupt) == ("floor", "normal", True)
     assert revoked.payload["reason"] == "timeout" and revoked.channel_id == "c1"
     assert targets(deliveries, "floor.granted") == ["N2"]
     ended = entries(world, "floor.token_ended")[0]
@@ -359,7 +360,7 @@ def test_pause_freezes_the_remaining_time_and_resume_continues_it() -> None:
     deliveries, events = flush(world)
     assert targets(deliveries, "floor.paused") == ["N1"]
     [env] = envelopes(deliveries, event="floor.paused")
-    assert (env.kind, env.priority, env.interrupt) == ("floor", "ambient", True)
+    assert (env.kind, env.priority, env.interrupt) == ("floor", "normal", True)
     assert ui(events, "floor.changed")[-1]["floor"]["paused"] is True
     assert ui(events, "floor.changed")[-1]["floor"]["seconds_left"] == 40.0
 
@@ -464,7 +465,7 @@ def test_close_floor_revokes_the_group_without_waking_the_moderator() -> None:
     assert [(e.data["holder"], e.data["reason"], e.data["cause"]) for e in ended] == [("N1", "revoked", "closed")]
     deliveries, events = flush(world)
     [revoked] = envelopes(deliveries, event="floor.revoked")
-    assert (revoked.priority, revoked.interrupt, revoked.payload["reason"]) == ("ambient", True, "closed")
+    assert (revoked.priority, revoked.interrupt, revoked.payload["reason"]) == ("normal", True, "closed")
     assert targets(deliveries, "floor.revoked") == ["N1"]  # N2 never had the floor
     assert not envelopes(deliveries, target="moderator")
     assert ui(events, "floor.changed")[-1]["floor"]["kind"] == "none"
@@ -599,12 +600,12 @@ def test_channel_view_matches_the_contract_shape() -> None:
 
 
 @pytest.mark.parametrize("mode", ["turn", "queue"])
-def test_messages_in_floor_channels_are_ambient_for_everybody(mode: str) -> None:
+def test_messages_in_floor_channels_wake_everybody_who_can_read_them(mode: str) -> None:
     world = _world()
     (open_turn if mode == "turn" else open_queue)(world, "c1", ["N1"])
     assert speak(world, "N1", "c1", "大家好").ok
     deliveries, _ = flush(world)
     messages = envelopes(deliveries, event="message.new")
     assert {d.target for d in deliveries if d.envelope.payload["event"] == "message.new"} == {"moderator", "N2", "N3", "N4"}
-    assert {e.priority for e in messages} == {"ambient"} and not any(e.interrupt for e in messages)
+    assert {e.priority for e in messages} == {"normal"} and not any(e.interrupt for e in messages)
     assert msgs(world, "c1")[0].visible_to_ids == ["moderator", *PLAYERS]

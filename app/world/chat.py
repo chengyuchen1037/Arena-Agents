@@ -736,26 +736,50 @@ class ChatModule(WorldModule):
         "silence_s": "silence_s（冷场提醒）只用于 mode=free",
     }
 
+    @staticmethod
+    def _value_problem(err: dict[str, Any]) -> str:
+        """One pydantic error of a ``limits`` value as a short Chinese sentence."""
+        name = ".".join(str(part) for part in err["loc"])
+        ctx = err.get("ctx") or {}
+        kind = err.get("type", "")
+        if kind == "less_than_equal":
+            return f"{name} 不能大于 {ctx.get('le')}"
+        if kind == "less_than":
+            return f"{name} 必须小于 {ctx.get('lt')}"
+        if kind == "greater_than_equal":
+            return f"{name} 不能小于 {ctx.get('ge')}"
+        if kind == "greater_than":
+            return f"{name} 必须大于 {ctx.get('gt')}"
+        if kind in ("int_parsing", "int_from_float", "float_parsing"):
+            return f"{name} 必须是数字（整数或小数，视键而定）"
+        return f"{name}：{err.get('msg', '无效')}"
+
     def _limits_for(
         self, mode: str, limits: OpenLimits | None, *, tool: str
     ) -> tuple[FloorLimits | FreeLimits | None, Receipt | None]:
         """Contracts §10.1.5: check the keys of the one ``limits`` object against ``mode`` (``turn`` takes
         ``TOKEN_LIMIT_KEYS``, ``free`` takes ``FREE_LIMIT_KEYS``), then its values with ``FloorLimits`` /
-        ``FreeLimits``.  Returns ``(typed limits | None, rejection | None)``; an empty object is ``None``."""
+        ``FreeLimits``.  Returns ``(typed limits | None, rejection | None)``; an empty object is ``None``.
+
+        A rejection names the mode, lists every key the mode accepts and quotes a correct example, so that
+        a model can fix the call at once."""
         given = limits.model_dump(exclude_none=True) if limits is not None else {}
         if not given:
             return None, None
         allowed = TOKEN_LIMIT_KEYS if mode == "turn" else FREE_LIMIT_KEYS
-        wrong = [key for key in given if key not in allowed]
         example = self._LIMITS_EXAMPLE[mode]
+        tail = f"mode={mode} 只接受：{', '.join(allowed)}。"
+        sample = f"正确示例：limits={json.dumps(example, ensure_ascii=False)}"
+        wrong = [key for key in given if key not in allowed]
         if wrong:
             hints = "；".join(self._OTHER_MODE_HINT[key] for key in wrong if key in self._OTHER_MODE_HINT)
-            where = "update_channel 的 limits 只用于自由讨论（mode=free）" if tool == "update_channel" else f"mode={mode}"
+            if tool == "update_channel":
+                head = f"{tool}：limits 只用于自由讨论（mode=free），其中的 {', '.join(wrong)} 不适用。"
+            else:
+                head = f"{tool}：limits 里的 {', '.join(wrong)} 不适用于 mode={mode}。"
             return None, Receipt.reject(
                 Code.INVALID_PARAMS,
-                f"{tool}：limits 里的 {', '.join(wrong)} 不适用于 {where}。mode={mode} 只接受：{', '.join(allowed)}。"
-                + (f"{hints}。" if hints else "")
-                + f"正确示例：limits={json.dumps(example, ensure_ascii=False)}",
+                head + tail + (f"{hints}。" if hints else "") + sample,
                 mode=mode,
                 allowed=list(allowed),
                 rejected=wrong,
@@ -765,14 +789,12 @@ class ChatModule(WorldModule):
         try:
             return model(**given), None
         except ValidationError as exc:
-            problems = "; ".join(
-                f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
-                for err in exc.errors(include_input=False, include_url=False)[:4]
+            problems = "；".join(
+                self._value_problem(err) for err in exc.errors(include_input=False, include_url=False)[:4]
             )
             return None, Receipt.reject(
                 Code.INVALID_PARAMS,
-                f"{tool}：limits 的值无效（mode={mode}）：{problems}。mode={mode} 只接受：{', '.join(allowed)}。"
-                f"正确示例：limits={json.dumps(example, ensure_ascii=False)}",
+                f"{tool}：limits 的值不合要求（mode={mode}）：{problems}。{tail}{sample}",
                 mode=mode,
                 allowed=list(allowed),
                 example=dict(example),

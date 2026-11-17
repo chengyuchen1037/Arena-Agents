@@ -7,12 +7,15 @@ import pytest
 from app.world.types import ENGINE_ID, MODERATOR_ID, Code, Intent
 
 from .helpers import (
+    PLAYERS,
     flush,
+    kill,
     make_spec,
     make_world,
     mod,
     new_channel,
     open_queue,
+    revive,
     speak,
     submit,
 )
@@ -416,7 +419,29 @@ def _priorities(world) -> dict[str, str]:
     return {d.target: d.envelope.priority for d in world.drain_outbox()}
 
 
-def test_message_priority_in_system_dms() -> None:
+def test_there_is_no_ambient_level_any_more() -> None:
+    world = make_world()
+    with pytest.raises(ValueError):  # pydantic: "ambient" is not a Priority
+        world.deliver("N1", "notice", "x", priority="ambient")
+    assert world.drain_outbox() == []
+    world.deliver("N1", "notice", "x")  # the default wakes at once
+    assert [d.envelope.priority for d in world.drain_outbox()] == ["normal"]
+
+
+def test_messages_wake_everybody_who_can_read_them_except_the_author() -> None:
+    world = make_world(n=3)
+    new_channel(world, "closed1", members=["N1", "N2"], mode="closed")
+    new_channel(world, "listen1", members=["N1", "N2", "N3"], mode="listen")
+    new_channel(world, "free1", members=["N1", "N2"], mode="free")
+    assert mod(world, "send_message", channel_id="closed1", content="hi").ok
+    assert _priorities(world) == {"N1": "normal", "N2": "normal"}  # a closed channel is read all the same
+    assert mod(world, "send_message", channel_id="listen1", content="hi").ok
+    assert _priorities(world) == {"N1": "normal", "N2": "normal", "N3": "normal"}
+    assert speak(world, "N1", "free1", "hi").ok
+    assert _priorities(world) == {"moderator": "normal", "N2": "normal"}  # not the author, not N3 (no member)
+
+
+def test_system_dm_messages_reach_the_other_side_at_once() -> None:
     world = make_world(n=2)
     assert speak(world, "N1", "dm-N1", "hi").ok
     assert _priorities(world) == {"moderator": "normal"}  # a player writing to the moderator
@@ -424,11 +449,71 @@ def test_message_priority_in_system_dms() -> None:
     assert _priorities(world) == {"N1": "normal"}  # the moderator answering
 
 
-def test_message_priority_elsewhere() -> None:
-    world = make_world(n=2)
-    new_channel(world, "closed1", members=["N1", "N2"], mode="closed")
-    new_channel(world, "free1", members=["N1", "N2"], mode="free")
-    assert mod(world, "send_message", channel_id="closed1", content="hi").ok
-    assert _priorities(world) == {"N1": "ambient", "N2": "ambient"}
-    assert speak(world, "N1", "free1", "hi").ok
-    assert _priorities(world) == {"moderator": "ambient", "N2": "normal"}
+def test_the_sender_never_receives_the_envelope_of_its_own_entry() -> None:
+    world = make_world()
+    world.deliver("N1", "message", "message.new", sender="N1")
+    world.deliver("N2", "message", "message.new", sender="N1")
+    world.deliver("moderator", "floor", "floor.completed", sender="moderator")
+    assert [d.target for d in world.drain_outbox()] == ["N2"]
+
+
+def test_a_player_who_is_out_only_receives_direct_envelopes() -> None:
+    world = make_world()
+    kill(world, "N2")
+    world.deliver("N2", "notice", "phase.changed")  # a broadcast: spared
+    world.deliver("N2", "notice", "channel.updated", channel_id="c1")  # a broadcast: spared
+    world.deliver("N2", "floor", "floor.granted", direct=True, priority="urgent")  # addressed to him: delivered
+    world.deliver("N3", "notice", "phase.changed")  # the others are not affected
+    assert [(d.target, d.envelope.payload["event"]) for d in world.drain_outbox()] == [
+        ("N2", "floor.granted"),
+        ("N3", "phase.changed"),
+    ]
+
+
+def test_the_moderator_and_the_engine_are_never_filtered() -> None:
+    world = make_world()
+    kill(world, *PLAYERS)  # everybody is out
+    world.deliver(MODERATOR_ID, "message", "message.new")
+    world.deliver(ENGINE_ID, "notice", "hold_game")
+    assert [d.target for d in world.drain_outbox()] == [MODERATOR_ID, ENGINE_ID]
+
+
+def test_a_revived_player_is_woken_by_broadcasts_again() -> None:
+    world = make_world()
+    new_channel(world, "c1", mode="free")
+    kill(world, "N2")
+    assert speak(world, "N1", "c1", "第一句").ok
+    assert sorted(d.target for d in world.drain_outbox()) == ["N3", "N4", "moderator"]
+    revive(world, "N2")
+    assert speak(world, "N1", "c1", "第二句").ok
+    assert sorted(d.target for d in world.drain_outbox()) == ["N2", "N3", "N4", "moderator"]
+
+
+def test_a_player_who_is_out_can_still_read_the_history() -> None:
+    world = make_world()
+    new_channel(world, "c1", mode="free")
+    kill(world, "N2")
+    assert speak(world, "N1", "c1", "死者也能回看").ok
+    assert [e.data["content"] for e in world.entries_visible("N2") if e.type == "message"] == ["死者也能回看"]
+
+
+def test_messages_in_a_system_dm_are_addressed_to_a_player_who_is_out_too() -> None:
+    world = make_world()
+    kill(world, "N2")
+    assert mod(world, "send_message", channel_id="dm-N2", content="你出局了，请留下遗言").ok  # direct
+    assert speak(world, "N2", "dm-N2", "收到").ok
+    assert [d.target for d in world.drain_outbox()] == ["N2", "moderator"]
+    # ... a message in somebody else's DM never reaches him, of course
+    assert mod(world, "send_message", channel_id="dm-N3", content="x").ok
+    assert [d.target for d in world.drain_outbox()] == ["N3"]
+
+
+def test_a_challenge_style_message_is_urgent_for_the_moderator_only() -> None:
+    world = make_world()
+    world.post_message("dm-N1", "N1", "我要质询", kind="challenge", extra={"ticket_id": "t1"})
+    [wake] = world.drain_outbox()
+    assert (wake.target, wake.envelope.kind, wake.envelope.priority) == (MODERATOR_ID, "challenge", "urgent")
+    assert wake.envelope.payload["event"] == "challenge.opened" and wake.envelope.payload["ticket_id"] == "t1"
+    world.post_message("dm-N1", MODERATOR_ID, "回复", kind="reply", extra={"ticket_id": "t1", "verdict": "rejected"})
+    [answer] = world.drain_outbox()
+    assert (answer.target, answer.envelope.payload["event"]) == ("N1", "challenge.resolved")

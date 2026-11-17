@@ -176,7 +176,7 @@ def test_a_listen_channel_is_heard_by_everybody_but_answered_by_nobody() -> None
     new_channel(world, "radio", mode="listen")
     assert mod(world, "send_message", channel_id="radio", content="广播").ok
     deliveries, _ = flush(world)
-    assert {d.target: d.envelope.priority for d in deliveries} == {pid: "ambient" for pid in PLAYERS}
+    assert {d.target: d.envelope.priority for d in deliveries} == {pid: "normal" for pid in PLAYERS}
     assert speak(world, "N1", "radio", "回应").code == Code.CHANNEL_CLOSED
 
 

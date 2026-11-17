@@ -29,11 +29,16 @@ class ModelEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    input_price_per_m: float
-    output_price_per_m: float
+    input_price_per_m: float  # USD per million tokens that missed the provider's prompt cache
+    output_price_per_m: float  # (reasoning tokens are billed as output)
+    # v0.12.1: cache prices.  ``None`` = "bill it like a normal input token" (resolved by ``price_snapshot``).
+    cache_read_price_per_m: float | None = None
+    cache_write_price_per_m: float | None = None
     context_window_tokens: int = Field(
         default=DEFAULT_CONTEXT_WINDOW_TOKENS, gt=0
     )
+    # Where the prices came from: "manual" or "litellm:<key of the price table>" (informational).
+    price_source: str = "manual"
 
     @field_validator("id")
     @classmethod
@@ -48,6 +53,34 @@ class ModelEntry(BaseModel):
         if not math.isfinite(value) or value < 0:
             raise ValueError("price must be finite and non-negative")
         return value
+
+    @field_validator("cache_read_price_per_m", "cache_write_price_per_m")
+    @classmethod
+    def _validate_cache_price(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("price must be finite and non-negative")
+        return value
+
+    @field_validator("price_source")
+    @classmethod
+    def _validate_source(cls, value: str) -> str:
+        value = (value or "manual").strip()
+        return value[:200] or "manual"
+
+    def price_snapshot(self) -> dict[str, float]:
+        """The four prices as plain numbers (an empty cache price is billed like an input token)."""
+        return {
+            "input_price_per_m": float(self.input_price_per_m),
+            "output_price_per_m": float(self.output_price_per_m),
+            "cache_read_price_per_m": float(
+                self.input_price_per_m if self.cache_read_price_per_m is None else self.cache_read_price_per_m
+            ),
+            "cache_write_price_per_m": float(
+                self.input_price_per_m if self.cache_write_price_per_m is None else self.cache_write_price_per_m
+            ),
+        }
 
 
 class ProviderConfig(BaseModel):

@@ -1,11 +1,13 @@
 /* ==========================================================================
-   Arena-Agents v0.12 — Layout: board / side-panel collapsing and drag resizers.
+   Arena-Agents v0.12.1 — Layout: participant bar collapsing, channel column rail and drag resizers.
    All persistence goes through localStorage (pure normalization helpers live in
    core.js). Loaded after core.js; app.js calls window.ArenaLayout.create() once
    the DOM is available.
 
-   (v0.12: the four player-card size tiers are gone — players are now tiny
-   fixed-size tiles, see static/css/style.css.)
+   v0.12.1: the right-hand "对局状态" column is gone (its numbers are the summary strip of the
+   participant bar).  "Collapsing" the channel column now shrinks it to an avatar rail (names
+   hidden) instead of hiding it; below 1024 px the rail is forced by the stylesheet / the
+   `narrow-layout` class.
 
    Nothing here re-renders the session: it only toggles classes / inline sizes,
    so existing event delegation and the feed's scroll position are untouched.
@@ -13,6 +15,8 @@
 
 (function (root) {
   "use strict";
+
+  const NARROW_MAX = 1023; // below 1024 px the channel column is always an avatar rail
 
   function create(ctx) {
     const opts = ctx || {};
@@ -31,13 +35,10 @@
       boardResizer: $("board-resizer"),
       workspaceGrid: $("workspace-grid"),
       channelsPanel: $("channels-panel"),
-      dashboardPanel: $("dashboard-panel"),
       channelsResizer: $("channels-resizer"),
-      dashboardResizer: $("dashboard-resizer"),
       btnToggleBoard: $("btn-toggle-board"),
       btnToggleBoardLabel: $("btn-toggle-board-label"),
       btnToggleChannels: $("btn-toggle-channels"),
-      btnToggleDashboard: $("btn-toggle-dashboard"),
     };
 
     const state = Core.loadLayoutState(storage);
@@ -104,11 +105,10 @@
       );
     }
 
-    function clampPanelWidth(side, value) {
-      const limits = Core.PANEL_LIMITS[side] || Core.PANEL_LIMITS.left;
-      const other = side === "left" ? state.rightWidth : state.leftWidth;
-      // Keep a usable centre column even on a small viewport.
-      const usable = viewportWidth() - other - 360;
+    function clampPanelWidth(value) {
+      const limits = Core.PANEL_LIMITS.left;
+      // Keep a usable feed column even on a small viewport.
+      const usable = viewportWidth() - 420;
       const max = Math.max(limits.min, Math.min(limits.max, usable));
       return Math.max(limits.min, Math.min(max, Math.round(Number(value) || 0)));
     }
@@ -117,8 +117,8 @@
     // Apply state to the DOM
     // -----------------------------------------------------------------------
     function applyResponsive() {
-      if (!el.workspaceGrid) return;
-      const narrow = viewportWidth() <= 980;
+      if (!el.workspaceGrid) return false;
+      const narrow = viewportWidth() <= NARROW_MAX;
       call(el.workspaceGrid.classList, "toggle", "narrow-layout", narrow);
       return narrow;
     }
@@ -126,13 +126,12 @@
     function updateToggleUi() {
       const bc = Boolean(state.boardCollapsed);
       const lc = Boolean(state.leftCollapsed);
-      const rc = Boolean(state.rightCollapsed);
 
       const boardBtn = el.btnToggleBoard;
       if (boardBtn) {
         if (typeof boardBtn.setAttribute === "function") {
           boardBtn.setAttribute("aria-pressed", bc ? "true" : "false");
-          boardBtn.setAttribute("title", bc ? "展开参与者看板" : "折叠参与者看板");
+          boardBtn.setAttribute("title", bc ? "展开参与者栏" : "折叠参与者栏");
         }
         setText(el.btnToggleBoardLabel, bc ? "展开看板" : "折叠看板");
       }
@@ -141,25 +140,15 @@
       if (leftBtn) {
         if (typeof leftBtn.setAttribute === "function") {
           leftBtn.setAttribute("aria-pressed", lc ? "true" : "false");
-          leftBtn.setAttribute("title", lc ? "展开左侧频道栏" : "折叠左侧频道栏");
+          leftBtn.setAttribute("title", lc ? "展开频道栏（显示名字）" : "收起为头像条");
         }
         setText(leftBtn, lc ? "▶" : "◀");
-      }
-
-      const rightBtn = el.btnToggleDashboard;
-      if (rightBtn) {
-        if (typeof rightBtn.setAttribute === "function") {
-          rightBtn.setAttribute("aria-pressed", rc ? "true" : "false");
-          rightBtn.setAttribute("title", rc ? "展开右侧状态栏" : "折叠右侧状态栏");
-        }
-        setText(rightBtn, rc ? "◀" : "▶");
       }
     }
 
     function apply() {
       const bc = Boolean(state.boardCollapsed);
       const lc = Boolean(state.leftCollapsed);
-      const rc = Boolean(state.rightCollapsed);
 
       if (el.main) call(el.main.classList, "toggle", "board-collapsed", bc);
       if (el.boardSection) {
@@ -171,16 +160,11 @@
 
       if (el.workspaceGrid) {
         call(el.workspaceGrid.classList, "toggle", "left-collapsed", lc);
-        call(el.workspaceGrid.classList, "toggle", "right-collapsed", rc);
       }
       if (el.channelsPanel) {
         el.channelsPanel.style.width = lc ? "" : `${state.leftWidth}px`;
       }
-      if (el.dashboardPanel) {
-        el.dashboardPanel.style.width = rc ? "" : `${state.rightWidth}px`;
-      }
       if (el.channelsResizer) el.channelsResizer.hidden = lc;
-      if (el.dashboardResizer) el.dashboardResizer.hidden = rc;
 
       updateToggleUi();
       applyResponsive();
@@ -191,20 +175,16 @@
       const saved = Core.saveLayoutState(storage, state);
       state.boardCollapsed = saved.boardCollapsed;
       state.leftCollapsed = saved.leftCollapsed;
-      state.rightCollapsed = saved.rightCollapsed;
       state.boardHeight = saved.boardHeight;
       state.leftWidth = saved.leftWidth;
-      state.rightWidth = saved.rightWidth;
     }
 
     function publicState() {
       return {
         boardCollapsed: Boolean(state.boardCollapsed),
         leftCollapsed: Boolean(state.leftCollapsed),
-        rightCollapsed: Boolean(state.rightCollapsed),
         boardHeight: state.boardHeight,
         leftWidth: state.leftWidth,
-        rightWidth: state.rightWidth,
       };
     }
 
@@ -225,13 +205,6 @@
       return state.leftCollapsed;
     }
 
-    function toggleDashboard() {
-      state.rightCollapsed = !state.rightCollapsed;
-      persist();
-      apply();
-      return state.rightCollapsed;
-    }
-
     // -----------------------------------------------------------------------
     // Drag resizing (the drag starts on a separator, continues on the document)
     // -----------------------------------------------------------------------
@@ -243,17 +216,13 @@
       if (kind === "left") {
         return state.leftCollapsed ? 0 : state.leftWidth;
       }
-      if (kind === "right") {
-        return state.rightCollapsed ? 0 : state.rightWidth;
-      }
       return 0;
     }
 
     function beginResize(kind, pos) {
-      if (kind !== "board" && kind !== "left" && kind !== "right") return false;
+      if (kind !== "board" && kind !== "left") return false;
       if (kind === "board" && state.boardCollapsed) return false;
       if (kind === "left" && state.leftCollapsed) return false;
-      if (kind === "right" && state.rightCollapsed) return false;
       active.kind = kind;
       active.startPos = Number(pos) || 0;
       active.startSize = currentSizeOf(kind);
@@ -266,11 +235,8 @@
       const delta = (Number(pos) || 0) - active.startPos;
       if (active.kind === "board") {
         state.boardHeight = clampBoardHeight(active.startSize + delta);
-      } else if (active.kind === "left") {
-        state.leftWidth = clampPanelWidth("left", active.startSize + delta);
       } else {
-        // right panel grows when the separator is dragged left
-        state.rightWidth = clampPanelWidth("right", active.startSize - delta);
+        state.leftWidth = clampPanelWidth(active.startSize + delta);
       }
       apply();
       return true;
@@ -312,16 +278,8 @@
       return state.leftWidth;
     }
 
-    function resetRightWidth() {
-      state.rightWidth = Core.LAYOUT_DEFAULTS.rightWidth;
-      persist();
-      apply();
-      return state.rightWidth;
-    }
-
     function reflowLimits() {
-      state.leftWidth = clampPanelWidth("left", state.leftWidth);
-      state.rightWidth = clampPanelWidth("right", state.rightWidth);
+      state.leftWidth = clampPanelWidth(state.leftWidth);
       if (state.boardHeight != null) state.boardHeight = clampBoardHeight(state.boardHeight);
       apply();
     }
@@ -361,11 +319,9 @@
 
     wireResizer(el.boardResizer, "board", resetBoardHeight);
     wireResizer(el.channelsResizer, "left", resetLeftWidth);
-    wireResizer(el.dashboardResizer, "right", resetRightWidth);
 
     on(el.btnToggleBoard, "click", () => toggleBoard());
     on(el.btnToggleChannels, "click", () => toggleChannels());
-    on(el.btnToggleDashboard, "click", () => toggleDashboard());
 
     if (typeof doc.addEventListener === "function") {
       doc.addEventListener("pointermove", (evt) => {
@@ -389,20 +345,17 @@
       persist,
       toggleBoard,
       toggleChannels,
-      toggleDashboard,
       beginResize,
       moveResize,
       endResize,
       resetBoardHeight,
       resetLeftWidth,
-      resetRightWidth,
       reflowLimits,
       isNarrow: () => Boolean(el.workspaceGrid && el.workspaceGrid.classList.contains("narrow-layout")),
       measureHeight: () => measureHeight(el.boardSection),
-      measureWidth: (which) =>
-        measureWidth(which === "left" ? el.channelsPanel : el.dashboardPanel),
+      measureWidth: () => measureWidth(el.channelsPanel),
     };
   }
 
-  root.ArenaLayout = { create };
+  root.ArenaLayout = { create, NARROW_MAX };
 })(typeof window !== "undefined" ? window : globalThis);

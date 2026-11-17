@@ -265,3 +265,38 @@ async def test_unlimited_gate_and_no_timeout():
     llm = GatedEngineLlm(client, lambda a: binding("p"), gate, timeout_s=None)
     await asyncio.gather(*(llm.complete(f"a{i}", msgs(f"c{i}"), None) for i in range(10)))
     assert client.peak == 10
+
+
+# ------------------------------------------------- v0.12.1: the gate is open unless the user narrows it
+
+
+@async_test()
+async def test_the_default_gate_is_open_nothing_ever_waits():
+    client = FakeClient(delay=0.03)
+    gate = LlmGate()  # no arguments: the defaults are "unlimited" (the gate is for rate limits, not for saving money)
+    assert gate.max_concurrent is None and gate.per_provider is None
+    llm = GatedEngineLlm(client, lambda a: binding("p1" if a < "a5" else "p2"), gate, timeout_s=5)
+    await asyncio.gather(*(llm.complete(f"a{i}", msgs(f"c{i}"), None) for i in range(13)))  # a whole table of agents
+    assert client.peak == 13 and gate.peak == 13 and gate.waiting == 0 and gate.in_flight == 0
+
+
+@async_test()
+async def test_zero_means_unlimited_for_every_limit():
+    # ``config.yml`` says ``llm_concurrency: 0`` / ``llm_concurrency_per_provider: 0``: "no limit"
+    client = FakeClient(delay=0.03)
+    gate = LlmGate(max_concurrent=0, per_provider=0, provider_limits={"fast": 0})
+    agents = {f"a{i}": ("fast" if i % 2 else "slow") for i in range(8)}
+    llm = llm_for(client, agents, gate)
+    await asyncio.gather(*(llm.complete(a, msgs(a), None) for a in agents))
+    assert client.peak == 8 and gate.waiting == 0
+    assert gate.max_concurrent is None and gate.per_provider is None
+
+
+@async_test()
+async def test_a_provider_can_be_limited_while_the_rest_stays_open():
+    client = FakeClient(delay=0.04)
+    gate = LlmGate(max_concurrent=0, per_provider=0, provider_limits={"rate-limited": 2})
+    agents = {f"r{i}": "rate-limited" for i in range(5)} | {f"o{i}": "open" for i in range(5)}
+    llm = llm_for(client, agents, gate)
+    await asyncio.gather(*(llm.complete(a, msgs(a), None) for a in agents))
+    assert client.peak_by_binding["rate-limited"] == 2 and client.peak_by_binding["open"] == 5

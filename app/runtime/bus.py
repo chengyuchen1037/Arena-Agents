@@ -21,10 +21,12 @@ from typing import Any
 from app.world.types import UiEvent
 
 #: Event types that are safe to drop under back-pressure: each one is superseded by the next of its kind.
-ORDINARY_TYPES = frozenset({"agent.status", "agent.metrics", "request.progress"})
+ORDINARY_TYPES = frozenset({"agent.status", "agent.metrics", "request.progress", "budget.updated"})
 
-DEFAULT_RING = 2000
-DEFAULT_QUEUE_SIZE = 512
+# v0.12.1: every message wakes every agent, so ``agent.status`` / ``agent.metrics`` events are far more
+# frequent than before - the ring holds more of them so a short disconnect can still be resumed.
+DEFAULT_RING = 5000
+DEFAULT_QUEUE_SIZE = 1024
 
 
 class BusEvent:

@@ -430,3 +430,61 @@ def estimate_completion_tokens(resp: LLMResponse) -> int:
         + "".join(tc.name + tc.arguments_json for tc in resp.tool_calls)
     )
     return estimate_text_tokens(out_blob)
+
+
+# ----------------------------------------------------------------------------- usage parsing (v0.12.1)
+
+
+def _usage_field(obj: Any, name: str) -> int:
+    """An integer usage counter from an SDK object or a dict, looking into pydantic extras too."""
+    if obj is None:
+        return 0
+    value: Any = None
+    if isinstance(obj, dict):
+        value = obj.get(name)
+    else:
+        value = getattr(obj, name, None)
+        if value is None:
+            extra = getattr(obj, "model_extra", None)
+            if isinstance(extra, dict):
+                value = extra.get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return max(0, int(value))
+
+
+def _usage_child(obj: Any, name: str) -> Any:
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        return obj.get(name)
+    child = getattr(obj, name, None)
+    if child is None:
+        extra = getattr(obj, "model_extra", None)
+        if isinstance(extra, dict):
+            child = extra.get(name)
+    return child
+
+
+def openai_usage_parts(usage: Any, *, details: str = "prompt_tokens_details") -> tuple[int, int]:
+    """``(fresh_input, cache_read)`` of an OpenAI-style usage object.
+
+    OpenAI reports the cached part inside ``prompt_tokens`` (``prompt_tokens_details.cached_tokens``;
+    the Responses API uses ``input_tokens_details.cached_tokens``), DeepSeek reports it as
+    ``prompt_cache_hit_tokens``.  ``fresh_input`` is the part that missed the cache.
+    """
+    total = _usage_field(usage, "prompt_tokens") or _usage_field(usage, "input_tokens")
+    cached = _usage_field(_usage_child(usage, details), "cached_tokens")
+    cached = max(cached, _usage_field(usage, "prompt_cache_hit_tokens"))
+    cached = min(cached, total) if total else cached
+    return max(0, total - cached), cached
+
+
+def anthropic_usage_parts(usage: Any) -> tuple[int, int, int]:
+    """``(fresh_input, cache_read, cache_write)`` of an Anthropic usage object (``input_tokens`` already
+    excludes both cache counters there)."""
+    return (
+        _usage_field(usage, "input_tokens"),
+        _usage_field(usage, "cache_read_input_tokens"),
+        _usage_field(usage, "cache_creation_input_tokens"),
+    )

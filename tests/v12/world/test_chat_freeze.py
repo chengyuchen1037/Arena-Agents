@@ -49,7 +49,7 @@ def test_freezing_a_queue_stops_the_clock_and_the_floor() -> None:
     deliveries, events = flush(world)
     assert targets(deliveries, "floor.frozen") == ["N1"]  # only the one who could write; pending N2 hears nothing
     [env] = envelopes(deliveries, event="floor.frozen")
-    assert (env.kind, env.priority, env.interrupt, env.channel_id) == ("floor", "ambient", True, "c1")
+    assert (env.kind, env.priority, env.interrupt, env.channel_id) == ("floor", "normal", True, "c1")
     assert env.payload == {"event": "floor.frozen", "channel_id": "c1", "reason": "ability:boom"}
     assert ui(events, "channel.updated")[-1]["channel"]["frozen"] is True
     assert ui(events, "floor.changed")[-1]["floor"]["paused"] is True

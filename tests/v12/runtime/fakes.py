@@ -1,18 +1,23 @@
-"""Test doubles and helpers for the runtime tests (no pytest-asyncio: tests are plain functions that
-call :func:`arun` / the :func:`async_test` decorator, which wrap a coroutine in ``asyncio.run``).
+"""Test doubles and helpers for the runtime tests (no pytest-asyncio: tests are plain functions wrapped by
+the :func:`async_test` decorator, which runs the coroutine with ``asyncio.run``).
 
 * :class:`FakeWorld`  implements ``WorldPort`` with scriptable ``submit`` and hand-fed outbox / events.
-* :class:`FakeBrain`  implements ``Brain`` (scriptable start / inject / nudge / tools).
-* :class:`FakeLlm`    implements ``LlmPort`` (scripted responses, delays, errors, holds, cancellation).
+* :class:`FakeBrain`  implements the v0.12.1 ``Brain`` protocol (``begin_run`` / ``reset_conversation`` /
+  FULL ``start_message`` / DELTA ``inject_message`` / nudge / tools).
+* :class:`FakeLlm`    implements ``LlmPort`` (scripted responses, delays, errors, holds, cancellation) and
+  keeps a *deep-copied snapshot* of every request, so tests can compare requests byte for byte.
 * :class:`RecordingSink` / :class:`RecordingTrace` keep what the runtime published / traced.
 
-Times: the runtime uses event-loop time for debounce and watchdog, so tests inject small real values
-(tens of milliseconds); on Windows the loop clock ticks every ~15.6 ms, so assertions are tolerant.
+Times: the runtime has no debounce any more; only retries, the cancel grace period, the supervisor's tick /
+watchdog and the sleep timers use time.  Tests inject small real values (tens of milliseconds); on Windows
+the loop clock ticks every ~15.6 ms, so assertions are tolerant.  Game time (sleep timers, the world's
+deadlines) is a :class:`~app.runtime.clock.ManualClock` that only moves when the test advances it.
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import functools
 import itertools
 import json
@@ -24,6 +29,7 @@ from typing import Any
 from app.llm.types import LLMResponse, ToolCallData
 from app.runtime.agent import Agent, AgentConfig
 from app.runtime.clock import ManualClock
+from app.runtime.conversation import ConversationBook
 from app.runtime.ports import ToolOutcome, WakeContext
 from app.runtime.usage import UsageBook
 from app.world.spec import ScenarioSpec
@@ -88,7 +94,7 @@ def env(
     event: str = "message.new",
     *,
     kind: str = "message",
-    priority: str = "ambient",
+    priority: str = "normal",
     channel_id: str | None = None,
     interrupt: bool = False,
     seq: int = 0,
@@ -116,13 +122,9 @@ def normal(event: str = "message.new", **kw: Any) -> Envelope:
     return env(event, priority="normal", **kw)
 
 
-def ambient(event: str = "message.new", **kw: Any) -> Envelope:
-    return env(event, priority="ambient", **kw)
-
-
 def revoked(channel_id: str, event: str = "floor.revoked") -> Envelope:
-    """The interrupt that takes a floor away (ambient + interrupt, contracts §2.6)."""
-    return env(event, kind="floor", priority="ambient", interrupt=True, channel_id=channel_id, reason="revoked")
+    """The interrupt that takes a floor away (it invalidates work in flight on ``channel_id``)."""
+    return env(event, kind="floor", priority="normal", interrupt=True, channel_id=channel_id, reason="revoked")
 
 
 _call_ids = itertools.count(1)
@@ -134,10 +136,15 @@ def llm_resp(
     thought: str = "",
     prompt_tokens: int = 100,
     completion_tokens: int = 20,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
     provider_id: str = "",
     model_id: str = "",
     input_price_per_m: float = 0.0,
     output_price_per_m: float = 0.0,
+    cache_read_price_per_m: float = 0.0,
+    cache_write_price_per_m: float = 0.0,
+    finish_reason: str | None = None,
 ) -> LLMResponse:
     """An ``LLMResponse`` with tool calls given as ``("name", {args})``."""
     tool_calls: list[ToolCallData] = []
@@ -153,16 +160,50 @@ def llm_resp(
         tool_calls=tool_calls,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        finish_reason="tool_calls" if tool_calls else "stop",
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        finish_reason=finish_reason if finish_reason is not None else ("tool_calls" if tool_calls else "stop"),
         provider_id=provider_id,
         model_id=model_id,
         input_price_per_m=input_price_per_m,
         output_price_per_m=output_price_per_m,
+        cache_read_price_per_m=cache_read_price_per_m,
+        cache_write_price_per_m=cache_write_price_per_m,
     )
 
 
-def wait_resp(**kw: Any) -> LLMResponse:
-    return llm_resp(("wait", {}), **kw)
+def sleep_resp(seconds: float | None = None, **kw: Any) -> LLMResponse:
+    """The model calls ``sleep`` (optionally with a timer): the run ends."""
+    return llm_resp(("sleep", {} if seconds is None else {"seconds": seconds}), **kw)
+
+
+def speak_resp(content: str = "hello", channel_id: str = "pub", **kw: Any) -> LLMResponse:
+    return llm_resp(("speak", {"channel_id": channel_id, "content": content}), **kw)
+
+
+def assert_paired(messages: list[dict[str, Any]]) -> None:
+    """Every assistant tool call has exactly one tool result directly behind its assistant message."""
+    i, n = 0, len(messages)
+    while i < n:
+        message = messages[i]
+        i += 1
+        if message.get("role") == "tool":
+            raise AssertionError(f"orphan tool result at {i - 1}: {message}")
+        calls = message.get("tool_calls") if message.get("role") == "assistant" else None
+        if not calls:
+            continue
+        wanted = [c["id"] for c in calls]
+        got = []
+        while i < n and messages[i].get("role") == "tool":
+            got.append(messages[i].get("tool_call_id"))
+            i += 1
+        if sorted(got) != sorted(wanted):
+            raise AssertionError(f"tool calls {wanted} answered by {got}")
+
+
+def dump(messages: list[dict[str, Any]]) -> list[str]:
+    """Each message as its JSON text (what a provider's prefix cache sees, byte for byte)."""
+    return [json.dumps(m, ensure_ascii=False, sort_keys=False) for m in messages]
 
 
 # --------------------------------------------------------------------------- recording sinks
@@ -182,6 +223,13 @@ class RecordingSink:
 
     def statuses(self, agent_id: str) -> list[str]:
         return [e.data["state"] for e in self.events if e.type == "agent.status" and e.data.get("id") == agent_id]
+
+    def status_events(self, agent_id: str) -> list[tuple[str, Any]]:
+        return [
+            (e.data["state"], e.data.get("until"))
+            for e in self.events
+            if e.type == "agent.status" and e.data.get("id") == agent_id
+        ]
 
 
 class RecordingTrace:
@@ -209,6 +257,7 @@ class FakeWorld:
     * ``submit`` records the intent and answers with ``on_submit(intent)`` (default: accept, ``seq += 1``).
     * ``push`` / ``emit`` queue deliveries / UI events by hand and call the registered notifier.
     * ``seq`` and ``running`` are plain read/write attributes; ``deadline`` is what ``next_deadline`` returns.
+    * ``clock`` is a :class:`ManualClock`: the game clock (sleep timers, deadlines) moves only when advanced.
     """
 
     def __init__(self, clock: ManualClock | None = None, *, running: bool = True) -> None:
@@ -331,14 +380,18 @@ WORLD_TOOLS = frozenset({"speak", "pass", "respond", "announce"})
 def describe(envelope: Envelope) -> str:
     event = envelope.payload.get("event") or envelope.kind
     where = f"@{envelope.channel_id}" if envelope.channel_id else ""
-    return f"{event}{where}"
+    label = envelope.payload.get("label")
+    tag = f"#{label}" if label is not None else ""
+    return f"{event}{where}{tag}"
 
 
 class FakeBrain:
-    """A scriptable ``Brain``.  Everything it is asked is recorded for assertions."""
+    """A scriptable v0.12.1 ``Brain``.  Everything it is asked is recorded for assertions."""
 
     def __init__(self, world: FakeWorld | None = None) -> None:
         self.world = world
+        self.begins: list[str] = []
+        self.resets: list[str] = []
         self.starts: list[WakeContext] = []
         self.injects: list[WakeContext] = []
         self.nudge_calls: list[tuple[str, str, int]] = []
@@ -351,7 +404,7 @@ class FakeBrain:
         self.inject_error: BaseException | None = None
         self.tools = [
             {"type": "function", "function": {"name": name, "description": name, "parameters": {"type": "object", "properties": {}}}}
-            for name in ("speak", "wait", "compact_context")
+            for name in ("speak", "sleep", "compact_context")
         ]
 
     # -- Brain protocol
@@ -361,6 +414,12 @@ class FakeBrain:
     def tool_schemas(self, agent_id: str) -> list[dict[str, Any]]:
         return self.tools
 
+    def begin_run(self, agent_id: str) -> None:
+        self.begins.append(agent_id)
+
+    def reset_conversation(self, agent_id: str) -> None:
+        self.resets.append(agent_id)
+
     def _seen(self) -> int:
         return self.world.seq if self.world is not None else 0
 
@@ -369,7 +428,7 @@ class FakeBrain:
         if self.start_error is not None:
             raise self.start_error
         reasons = ",".join(describe(e) for e in ctx.reasons)
-        return f"START[{agent_id}] gen={ctx.gen_id} reasons=[{reasons}] ambient={len(ctx.ambient)}", self._seen()
+        return f"START[{agent_id}] gen={ctx.gen_id} reasons=[{reasons}]", self._seen()
 
     def inject_message(self, agent_id: str, ctx: WakeContext) -> tuple[str, int] | None:
         self.injects.append(ctx)
@@ -377,10 +436,10 @@ class FakeBrain:
             raise self.inject_error
         if self.inject_hook is not None:
             return self.inject_hook(ctx)
-        if not ctx.reasons and not ctx.ambient:
+        if not ctx.reasons:
             return None
         reasons = ",".join(describe(e) for e in ctx.reasons)
-        return f"INJECT reasons=[{reasons}] ambient={len(ctx.ambient)}", self._seen()
+        return f"DELTA[{agent_id}] after={ctx.after_seq} reasons=[{reasons}]", self._seen()
 
     def no_tool_nudge(self, agent_id: str, content: str, round_idx: int) -> str | None:
         self.nudge_calls.append((agent_id, content, round_idx))
@@ -393,8 +452,8 @@ class FakeBrain:
         handler = self.tool_handlers.get(name)
         if handler is not None:
             return handler(agent_id, args, gen_id=gen_id, seen_seq=seen_seq)
-        if name == "wait":
-            return ToolOutcome(text='{"ok":true}', ends_run=True)
+        if name == "sleep":
+            return ToolOutcome(text='{"ok":true}', ends_run=True, sleep_s=args.get("seconds"))
         if name == "compact_context":
             return ToolOutcome(text='{"ok":true}', rebuild=True, shared=True)
         if self.world is not None and name in WORLD_TOOLS:
@@ -408,6 +467,12 @@ class FakeBrain:
     # -- assertions helpers
     def names(self) -> list[str]:
         return [e["name"] for e in self.executed]
+
+    def starts_of(self, agent_id: str) -> list[WakeContext]:
+        return [c for c in self.starts if c.agent_id == agent_id]
+
+    def injects_of(self, agent_id: str) -> list[WakeContext]:
+        return [c for c in self.injects if c.agent_id == agent_id]
 
 
 # --------------------------------------------------------------------------- fake LLM
@@ -432,11 +497,17 @@ class Step:
 @dataclass
 class LlmCall:
     agent_id: str
-    messages: list[dict[str, Any]]
-    tools: list[dict[str, Any]] | None
+    messages: list[dict[str, Any]]  # a deep copy taken when the call was made
+    tools: list[dict[str, Any]] | None  # ditto
     max_tokens: int | None
     index: int  # 1-based per agent
     started: float
+    paired: bool = True  # every tool call of the request had its result (see ``assert_paired``)
+
+    @property
+    def lines(self) -> list[str]:
+        """The messages as JSON text, for byte-for-byte prefix comparisons."""
+        return dump(self.messages)
 
 
 class FakeLlm:
@@ -469,7 +540,13 @@ class FakeLlm:
     ) -> LLMResponse:
         loop = asyncio.get_running_loop()
         index = len(self.calls_of(agent_id)) + 1
-        call = LlmCall(agent_id, messages, tools, max_tokens, index, loop.time())
+        snapshot = copy.deepcopy(messages)
+        try:
+            assert_paired(snapshot)
+            paired = True
+        except AssertionError:
+            paired = False
+        call = LlmCall(agent_id, snapshot, copy.deepcopy(tools), max_tokens, index, loop.time(), paired)
         self.calls.append(call)
         queue = self.scripts[agent_id]
         item = queue.popleft() if queue else None
@@ -551,7 +628,7 @@ class FakeEngineClient:
 
 @dataclass
 class Rig:
-    """World + brain + llm + sinks + usage for one or several agents."""
+    """World + brain + llm + sinks + usage + conversation book for one or several agents."""
 
     world: FakeWorld = field(default_factory=FakeWorld)
     llm: FakeLlm = field(default_factory=FakeLlm)
@@ -559,11 +636,20 @@ class Rig:
     trace: RecordingTrace = field(default_factory=RecordingTrace)
     brain: FakeBrain = field(init=False)
     usage: UsageBook = field(default_factory=UsageBook)
+    book: ConversationBook = field(default_factory=ConversationBook)
 
     def __post_init__(self) -> None:
         self.brain = FakeBrain(self.world)
 
-    def agent(self, agent_id: str = "a1", kind: str = "player", config: AgentConfig | None = None, **cfg: Any) -> Agent:
+    def agent(
+        self,
+        agent_id: str = "a1",
+        kind: str = "player",
+        config: AgentConfig | None = None,
+        *,
+        context_window: Callable[[], int] | None = None,
+        **cfg: Any,
+    ) -> Agent:
         """An :class:`Agent` wired to this rig with fast timings (override through ``cfg``)."""
         return Agent(
             agent_id,
@@ -575,13 +661,17 @@ class Rig:
             self.trace,
             self.sink,
             config or fast_config(**cfg),
+            book=self.book,
+            context_window=context_window,
         )
+
+    def conversation(self, agent_id: str = "a1") -> Any:
+        return self.book.get(agent_id)
 
 
 def fast_config(**overrides: Any) -> AgentConfig:
     """An :class:`AgentConfig` with test-sized timings."""
     values: dict[str, Any] = {
-        "debounce_s": 0.08,
         "retry_backoff_s": 0.02,
         "retry_backoff_max_s": 0.08,
         "cancel_grace_s": 0.3,
@@ -591,24 +681,14 @@ def fast_config(**overrides: Any) -> AgentConfig:
 
 
 class running_agent:
-    """``async with running_agent(agent):`` runs the Actor loop in a task and stops it cleanly."""
+    """``async with running_agent(agent):`` arms the agent and stops it (awaiting its workers) at the end."""
 
     def __init__(self, agent: Agent) -> None:
         self.agent = agent
-        self.task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> Agent:
         self.agent.activate()
-        self.task = asyncio.get_running_loop().create_task(self.agent.run(), name=f"actor:{self.agent.agent_id}")
-        await settle(2)
         return self.agent
 
     async def __aexit__(self, *exc_info: object) -> None:
         await self.agent.stop()
-        assert self.task is not None
-        done, pending = await asyncio.wait({self.task}, timeout=2.0)
-        if pending:  # pragma: no cover - a hang would be a bug in the actor loop
-            self.task.cancel()
-            await asyncio.gather(self.task, return_exceptions=True)
-            raise AssertionError("actor did not exit after stop()")
-        self.task.result()

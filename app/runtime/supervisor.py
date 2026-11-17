@@ -1,23 +1,26 @@
-"""Supervisor: owns the actor tasks and connects them with the world (contracts §3.3).
+"""Supervisor: starts / stops the agents and connects them with the world (contracts §3.3 and §10.2).
 
-* ``start(initial_wakes)`` spawns one Actor task per agent, delivers the initial wake-ups, asks the
-  world to ``redeliver()`` open work, pumps once and starts the timer poll, the watchdog and the
-  metrics publisher.
-* The *pump* empties ``world.drain_outbox()`` (envelopes go to the target agent's mailbox, the
-  ``ENGINE_ID`` target goes to ``on_engine``) and ``world.drain_events()`` (to the event sink).  It is
-  triggered by the world's notifier through ``loop.call_soon`` (de-duplicated: any number of changes
-  in one loop iteration cost one pump).
-* ``world.tick()`` is polled every ``tick_interval`` real seconds (timers are game-clock based, the
-  world decides what has expired; it is a no-op while paused).
-* The *watchdog* (real time) notices a game that is ``running`` but silent: every agent idle, no
-  timer pending, nothing in any mailbox and no ledger progress for ``watchdog_s`` -> an urgent
-  ``notice/watchdog`` to the moderator; after ``max_watchdog_wakes`` wake-ups without progress
-  ``on_stall(reason)`` is called (the orchestrator pauses the game).
-* ``stop()`` stops polling and pumping first, then stops every agent (cancelling workers) and
-  awaits all tasks: nothing is left running.
+* ``start(initial_wakes)`` arms every agent (their conversations and sleep timers live in the shared
+  :class:`~app.runtime.conversation.ConversationBook` and are kept), delivers the initial wake-ups, asks the
+  world to ``redeliver()`` open work, pumps once and starts the tick loop, the watchdog and the metrics
+  publisher.  Agents are plain event-driven objects: there is no task per agent, only a task per *run*.
+* The *pump* empties ``world.drain_outbox()`` (envelopes go to the target agent, the ``ENGINE_ID`` target
+  goes to ``on_engine``) and ``world.drain_events()`` (to the event sink).  It is triggered by the world's
+  notifier through ``loop.call_soon`` (de-duplicated: any number of changes in one loop iteration cost one
+  pump, and everything delivered to an agent in it is one activation).
+* The *tick loop* polls ``world.tick()`` (game-clock timers: the world decides what expired; it is a no-op
+  while paused) and the agents' sleep timers: an agent whose ``sleep(seconds)`` ran out (game clock, frozen
+  while paused) is woken with a ``timer.elapsed`` notice.
+* The *watchdog* (real time) notices a game that is ``running`` but silent: every agent quiet, no world timer,
+  no moderator timer and no ledger progress for ``watchdog_s`` -> an urgent ``notice/watchdog`` to the
+  moderator (and only to the moderator).  After ``max_watchdog_wakes`` wake-ups without progress
+  ``on_stall(reason)`` is called once; when the ledger advances again, ``on_stall(None)``.  The supervisor
+  never pauses the game itself: the orchestrator shows a warning and the user decides.
+* ``stop()`` stops polling and pumping first, then stops every agent (cancelling workers, publishing
+  ``sleeping``) and awaits every task: nothing is left running.
 
-An exception in one agent, in ``on_engine`` or in ``world.tick()`` is logged and isolated; the
-others keep running.
+An exception in one agent, in ``on_engine`` or in ``world.tick()`` is logged and isolated; the others keep
+running.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.runtime.agent import Agent
+from app.runtime.conversation import ConversationBook
 from app.runtime.ports import EventSink, TraceSink
 from app.world.types import ENGINE_ID, MODERATOR_ID, Envelope, UiEvent
 
@@ -37,13 +41,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SupervisorConfig:
-    tick_interval: float = 0.25  # seconds between ``world.tick()`` polls
+    tick_interval: float = 0.25  # seconds between ``world.tick()`` / sleep-timer polls
     watchdog_s: float = 20.0  # real seconds of silence before the moderator is woken
-    max_watchdog_wakes: int = 3  # wake-ups without progress before ``on_stall``
+    max_watchdog_wakes: int = 3  # fruitless wake-ups before ``on_stall``
     watchdog_poll_s: float | None = None  # None -> min(1.0, watchdog_s / 4)
     metrics_interval_s: float = 1.0  # ``agent.metrics`` is published at most this often per agent
-    stop_grace_s: float = 5.0  # how long ``stop`` waits for an actor task to finish on its own
-    max_actor_restarts: int = 3  # respawns of an actor that crashed (per agent)
+    #: When set, applied to every agent's ``AgentConfig`` at ``start()`` (share of the context window that
+    #: triggers the "please compact" reminder / the emergency trim).
+    compact_at: float | None = None
+    trim_at: float | None = None
 
 
 class _Started:
@@ -67,9 +73,10 @@ class Supervisor:
         on_engine: Callable[[Envelope], None] | None = None,
         config: SupervisorConfig | None = None,
         *,
-        on_stall: Callable[[str], None] | None = None,
+        on_stall: Callable[[str | None], None] | None = None,
         usage: Any = None,
         trace: TraceSink | None = None,
+        book: ConversationBook | None = None,
     ) -> None:
         self.world = world
         self.agents: dict[str, Agent] = (
@@ -81,19 +88,24 @@ class Supervisor:
         self.usage = usage  # anything with ``metrics_for(agent_id) -> dict``; None -> each agent's own sink
         self.trace = trace
         self.config = config or SupervisorConfig()
+        #: The conversations of this game.  The orchestrator keeps one book across pause -> resume (so the
+        #: conversations and sleep timers survive) and resets it for a new game / import / restore.
+        if book is None:
+            first = next(iter(self.agents.values()), None)
+            book = first.book if first is not None else ConversationBook()  # (an empty book is falsy)
+        self.book = book
+        for agent in self.agents.values():
+            agent.book = book
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started = False
         self._stopping = False
         self._stop_done: asyncio.Event | None = None
         self._pump_scheduled = False
-        self._actor_tasks: dict[str, asyncio.Task[None]] = {}
         self._loop_tasks: list[asyncio.Task[None]] = []
-        self._aux_tasks: set[asyncio.Task[None]] = set()
-        self._restarts: dict[str, int] = {}
         self._last_metrics: dict[str, dict[str, Any]] = {}
         self._tick_error_logged = False
-        self.stalled = False  # ``on_stall`` was called and no progress has been seen since
+        self.stalled = False  # ``on_stall(reason)`` was called and no progress has been seen since
 
     # ================================================================ lifecycle ==
     @property
@@ -101,17 +113,17 @@ class Supervisor:
         return self._started and not self._stopping
 
     def start(self, initial_wakes: Mapping[str, list[Envelope]] | None = None) -> _Started:
-        """Start every actor and the background loops (must be called inside the running loop)."""
+        """Arm every agent and start the background loops (must be called inside the running loop)."""
         if self._started or self._stop_done is not None:
             raise RuntimeError("supervisor is already running")
         self._loop = asyncio.get_running_loop()
         self._started = True
         self._stopping = False
         self.stalled = False
-        self._restarts.clear()
         self.world.set_notifier(self._notify)
         for agent in self.agents.values():
-            self._spawn_actor(agent)
+            self._apply_config(agent)
+            agent.activate()
         for agent_id, envelopes in (initial_wakes or {}).items():
             agent = self.agents.get(agent_id)
             if agent is None:
@@ -130,6 +142,12 @@ class Supervisor:
             self._loop.create_task(self._metrics_loop(), name="supervisor:metrics"),
         ]
         return _STARTED
+
+    def _apply_config(self, agent: Agent) -> None:
+        if self.config.compact_at is not None:
+            agent.config.compact_at = self.config.compact_at
+        if self.config.trim_at is not None:
+            agent.config.trim_at = self.config.trim_at
 
     async def stop(self) -> None:
         """Stop polling and pumping, stop every agent and wait until every task has ended."""
@@ -155,19 +173,8 @@ class Supervisor:
         for task in loop_tasks:
             task.cancel()
         await asyncio.gather(*loop_tasks, return_exceptions=True)
-        for task in list(self._aux_tasks):
-            task.cancel()
-        await asyncio.gather(*self._aux_tasks, return_exceptions=True)
-        self._aux_tasks.clear()
-        # Agents: cancel workers, drop buffers, publish ``agent.status = stopped``.
+        # Agents: cancel workers, drop buffers, publish ``agent.status = sleeping`` (the conversations stay).
         await asyncio.gather(*(agent.stop() for agent in self.agents.values()), return_exceptions=True)
-        actor_tasks, self._actor_tasks = list(self._actor_tasks.values()), {}
-        if actor_tasks:
-            _, pending = await asyncio.wait(actor_tasks, timeout=self.config.stop_grace_s)
-            for task in pending:
-                task.cancel()
-            if pending:
-                await asyncio.gather(*pending, return_exceptions=True)
         self._publish_metrics()
         self.pump(final=True)
 
@@ -181,7 +188,7 @@ class Supervisor:
         self.pump(final=not self._started)
 
     def deliver(self, agent_id: str, envelope: Envelope) -> bool:
-        """Put an envelope into one agent's mailbox (orchestrator wake-ups); False for an unknown agent."""
+        """Hand an envelope to one agent (orchestrator wake-ups); False for an unknown agent."""
         agent = self.agents.get(agent_id)
         if agent is None:
             return False
@@ -228,12 +235,9 @@ class Supervisor:
             if agent is None:
                 logger.debug("delivery for unknown agent %r dropped", delivery.target)
                 continue
-            actor = self._actor_tasks.get(delivery.target)
-            if actor is not None and actor.done():
-                continue  # its inbox loop is gone (crashed for good): do not pile envelopes up
             try:
                 agent.deliver(delivery.envelope)
-            except Exception:  # noqa: BLE001 - one broken mailbox must not starve the others
+            except Exception:  # noqa: BLE001 - one broken agent must not starve the others
                 logger.exception("could not deliver to %s", delivery.target)
         try:
             events = self.world.drain_events()
@@ -257,44 +261,6 @@ class Supervisor:
         except Exception:  # noqa: BLE001
             logger.exception("event sink failed for %s", event.type)
 
-    # ================================================================ actors ==
-    def _spawn_actor(self, agent: Agent) -> None:
-        assert self._loop is not None
-        agent.activate()
-        task = self._loop.create_task(agent.run(), name=f"actor:{agent.agent_id}")
-        self._actor_tasks[agent.agent_id] = task
-        task.add_done_callback(lambda finished, a=agent: self._on_actor_done(a, finished))
-
-    def _on_actor_done(self, agent: Agent, task: asyncio.Task[None]) -> None:
-        if task.cancelled():
-            return
-        exc = task.exception()  # always retrieve it
-        if exc is None or self._stopping or self._actor_tasks.get(agent.agent_id) is not task:
-            return
-        logger.error("actor of %s crashed", agent.agent_id, exc_info=exc)
-        restarts = self._restarts.get(agent.agent_id, 0)
-        if restarts >= self.config.max_actor_restarts or self._loop is None:
-            self._publish_event(
-                UiEvent(type="error", data={"message": f"{agent.agent_id} 的收件循环反复崩溃，已停止该参与者。", "agent_id": agent.agent_id})
-            )
-            return
-        self._restarts[agent.agent_id] = restarts + 1
-        helper = self._loop.create_task(self._restart_actor(agent), name=f"restart:{agent.agent_id}")
-        self._aux_tasks.add(helper)
-        helper.add_done_callback(self._aux_tasks.discard)
-
-    async def _restart_actor(self, agent: Agent) -> None:
-        """Rebuild a crashed actor from the world: drop its volatile state, respawn it, redeliver open work."""
-        await agent.stop()
-        if self._stopping:
-            return
-        self._spawn_actor(agent)
-        try:
-            self.world.redeliver()
-        except Exception:  # noqa: BLE001
-            logger.exception("world.redeliver() failed after an actor restart")
-        self.pump()
-
     # ================================================================ polling loops ==
     async def _tick_loop(self) -> None:
         interval = max(0.005, self.config.tick_interval)
@@ -308,14 +274,43 @@ class Supervisor:
                     logger.exception("world.tick() failed")
                     self._publish_event(UiEvent(type="error", data={"message": "世界的计时器处理出错，已记录日志。"}))
             self.pump()
+            self.poll_timers()
+
+    def poll_timers(self) -> int:
+        """Wake every agent whose ``sleep(seconds)`` has run out (game clock); returns how many woke.
+
+        Runs after the pump on purpose: an agent the world just woke has its timer voided already."""
+        try:
+            now = float(self.world.clock.now())
+        except Exception:  # noqa: BLE001 - no usable clock: no timers
+            return 0
+        woken = 0
+        for agent in self.agents.values():
+            try:
+                if agent.timer_due(now) and agent.fire_timer(now):
+                    woken += 1
+            except Exception:  # noqa: BLE001 - one agent's timer must not break the others
+                logger.exception("timer of %s failed", agent.agent_id)
+        return woken
 
     def _system_quiet(self) -> bool:
         if not all(agent.is_quiet() for agent in self.agents.values()):
             return False
+        moderator = self.agents.get(MODERATOR_ID)
+        if moderator is not None and moderator.has_timer:
+            return False  # the moderator chose to wait: that is its plan, not a stall
         try:
             return self.world.next_deadline() is None
         except Exception:  # noqa: BLE001
             return False
+
+    def _call_on_stall(self, reason: str | None) -> None:
+        if self.on_stall is None:
+            return
+        try:
+            self.on_stall(reason)
+        except Exception:  # noqa: BLE001 - the orchestrator's hook must not break the watchdog
+            logger.exception("on_stall failed")
 
     async def _watchdog_loop(self) -> None:
         cfg = self.config
@@ -332,9 +327,12 @@ class Supervisor:
                 seq = self.world.seq
                 if seq != last_seq:  # any ledger progress resets everything
                     last_seq, last_progress, quiet_since, wakes = seq, now, None, 0
-                    self.stalled = False
+                    if self.stalled:
+                        self.stalled = False
+                        self._trace("watchdog", MODERATOR_ID, action="recovered", seq=seq)
+                        self._call_on_stall(None)
                     continue
-                if not self.world.running or self.stalled or not self._system_quiet():
+                if not self.world.running or not self._system_quiet():
                     quiet_since = None
                     if not self.world.running:
                         last_progress = now
@@ -346,13 +344,12 @@ class Supervisor:
                     continue
                 quiet_since = now
                 idle_s = now - last_progress
-                if wakes >= cfg.max_watchdog_wakes:
+                if wakes >= cfg.max_watchdog_wakes and not self.stalled:
+                    # The last wake-up did not help either: warn once (the user decides), keep trying.
                     self.stalled = True
                     reason = f"对局静止：已连续 {wakes} 次唤醒主持人，账本仍无进展（约 {idle_s:.0f} 秒）。"
                     self._trace("watchdog", MODERATOR_ID, action="stall", wakes=wakes, idle_s=round(idle_s, 1), seq=seq)
-                    if self.on_stall is not None:
-                        self.on_stall(reason)
-                    continue
+                    self._call_on_stall(reason)
                 wakes += 1
                 self._trace("watchdog", MODERATOR_ID, action="wake", wakes=wakes, idle_s=round(idle_s, 1), seq=seq)
                 self.deliver(

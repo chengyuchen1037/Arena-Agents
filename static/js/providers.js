@@ -2,6 +2,15 @@
    Arena-Agents v0.10 — Provider / model / binding / session-list UI
    Loaded after core.js and before app.js. Exposes window.ArenaProviderUI.create(ctx).
    ctx: { api, Core, showToast, getSession, onChange }
+
+   v0.12.1 (E11, E12): the Provider dialog gained
+     - the price source (one URL for everything, default: the litellm price table) with
+       "刷新价格表" and its status line  (GET/PUT api/pricing/source, POST api/pricing/refresh)
+     - four prices per model (input = cache miss, cache read, cache write, output; $ / 1M tokens;
+       the two cache prices may stay empty = input price) and the price source of every model
+     - suggestions: "获取模型" brings a `suggested` price set per model; picking a model fills the
+       four prices and the context window, the user may still edit them; no match = empty fields
+       and a hint (GET api/pricing/match for a hand-typed model id)
    ========================================================================== */
 
 (function (root) {
@@ -42,10 +51,19 @@
       modelForm: $("model-form"),
       modelId: $("input-model-id"),
       priceIn: $("input-model-price-in"),
+      priceCacheRead: $("input-model-price-cache-read"),
+      priceCacheWrite: $("input-model-price-cache-write"),
       priceOut: $("input-model-price-out"),
+      priceHint: $("model-price-hint"),
+      btnMatchPrice: $("btn-match-price"),
       ctxWindow: $("input-model-ctx"),
       modelError: $("model-form-error"),
       btnSubmitModel: $("btn-submit-model"),
+
+      pricingUrl: $("input-pricing-url"),
+      pricingStatus: $("pricing-status"),
+      btnSavePricing: $("btn-save-pricing-url"),
+      btnRefreshPricing: $("btn-refresh-pricing"),
 
       bindingsModal: $("bindings-modal"),
       bindingsTable: $("bindings-table"),
@@ -73,11 +91,16 @@
       noticeText: $("restore-notice-text"),
     };
 
+    const DEFAULT_PRICE_HINT = "价格单位：美元 / 1M Tokens。缓存读取、缓存写入留空时按输入价计费。";
+
     const st = {
       providers: [],
       bindings: {}, // server defaults from GET /settings/bindings
       selectedId: null, // provider id | "new" | null
       discovered: [],
+      suggestions: {}, // model id -> price suggestion | null (from "获取模型" / the match endpoint)
+      pricing: Core.normalizePricingSource(null), // price source: url, entries, fetched_at, error
+      pricingBusy: false,
       rows: [],
       sessions: [],
       dismissedNotice: "",

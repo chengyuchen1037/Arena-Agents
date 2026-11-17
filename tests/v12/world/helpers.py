@@ -33,6 +33,7 @@ BASE_SPEC: dict[str, Any] = {
         "moderator": {"max_chars_per_message": 40},
         "dm": {"max_chars_per_message": 25},
     },
+    "ui": {"out_tags": ["出局"]},
     "templates": {
         "notice": {"text": "【公告】{{text}}", "params": {"text": "text(30)"}, "users": "moderator", "sensitive": True},
         "vote": {
@@ -124,6 +125,22 @@ def make_world(
         world.set_running(True, "start")
     flush(world)
     return world
+
+
+def kill(world: WorldCore, *player_ids: str) -> None:
+    """Mark players as out (the ``出局`` tag of ``ui.out_tags``): from now on broadcasts spare them (E23)."""
+    for pid in player_ids:
+        player = world.player(pid)
+        assert player is not None, pid
+        if "出局" not in player.tags:
+            player.tags.append("出局")
+
+
+def revive(world: WorldCore, *player_ids: str) -> None:
+    for pid in player_ids:
+        player = world.player(pid)
+        assert player is not None, pid
+        player.tags = [t for t in player.tags if t != "出局"]
 
 
 def flush(world: WorldCore) -> tuple[list[Delivery], list[UiEvent]]:

@@ -131,8 +131,25 @@ def test_a_slow_subscriber_does_not_affect_a_fast_one():
 
 
 def test_ordinary_types_are_the_self_superseding_ones():
-    assert {"agent.status", "agent.metrics", "request.progress"} <= ORDINARY_TYPES
+    assert {"agent.status", "agent.metrics", "request.progress", "budget.updated"} <= ORDINARY_TYPES
+    # the thresholds are announcements, not running totals: they must never be shed for a status update
     assert "message.committed" not in ORDINARY_TYPES and "game.status" not in ORDINARY_TYPES
+    assert "budget.warning" not in ORDINARY_TYPES and "budget.reached" not in ORDINARY_TYPES
+
+
+def test_a_burst_of_agent_status_events_never_pushes_out_a_message():
+    # v0.12.1: every message wakes every agent, so status chatter is heavy; it is shed first
+    bus = EventBus(queue_size=6)
+    _, queue = bus.subscribe()
+    bus.publish(ev("message.committed", n=1))
+    for n in range(50):
+        bus.publish(ev("agent.status", id=f"a{n}", state="thinking", until=None))
+    bus.publish(ev("message.committed", n=2))
+    got = []
+    while not queue.empty():
+        got.append(queue.get_nowait())
+    assert [e.data["n"] for e in got if e.type == "message.committed"] == [1, 2]
+    assert queue.lost_important is False
 
 
 def test_wire_format_is_sse_without_an_event_field():

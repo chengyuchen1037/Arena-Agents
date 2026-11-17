@@ -1,11 +1,16 @@
 """Concurrency gate and timeout for every LLM call of a game.
 
-Thirteen agents may want a model at the same moment; providers rate-limit and the machine has a
-finite number of sockets.  :class:`LlmGate` bounds the number of concurrent calls globally and per
-provider.  :class:`GatedEngineLlm` adapts the engine's streaming ``LLMClient`` to the runtime's
+v0.12.1: every delivered message wakes every agent that can see it, so thirteen agents may well want a
+model at the same moment.  The gate is **not** a way to save money: by default it is open (``0`` = no
+limit, nothing waits).  It exists for the provider's rate limits - lower ``llm_concurrency`` /
+``llm_concurrency_per_provider`` in ``config.yml`` when a provider answers 429 too often (the client
+retries those with a back-off).
+
+:class:`LlmGate` bounds the number of concurrent calls globally and per provider.
+:class:`GatedEngineLlm` adapts the engine's streaming ``LLMClient`` to the runtime's
 :class:`~app.runtime.ports.LlmPort`: it passes ``on_chunk=None`` (nothing is streamed to the UI, D5),
 resolves the agent's model binding through ``binding_for(agent_id)``, marks the moderator and puts a
-hard ``asyncio.timeout`` around every call.
+hard ``asyncio.timeout`` around every call (reliability: a hung connection must not block an agent).
 
 Cancellation is safe: a cancelled call leaves the ``async with`` blocks, so its slots are released
 immediately.
@@ -21,14 +26,14 @@ from typing import Any
 from app.llm.types import LLMResponse
 from app.world.types import MODERATOR_ID
 
-DEFAULT_MAX_CONCURRENT = 8
-DEFAULT_PER_PROVIDER = 6
+DEFAULT_MAX_CONCURRENT = 0  # 0 / None = unlimited
+DEFAULT_PER_PROVIDER = 0  # 0 / None = unlimited
 DEFAULT_TIMEOUT_S = 300.0
 UNKNOWN_PROVIDER = "default"
 
 
 class LlmGate:
-    """Global and per-provider concurrency limits (``None`` or ``0`` = unlimited)."""
+    """Global and per-provider concurrency limits (``None`` or ``0`` = unlimited, the default)."""
 
     def __init__(
         self,

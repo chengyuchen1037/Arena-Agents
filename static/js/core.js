@@ -392,6 +392,21 @@
     return t.startsWith("{") || t.startsWith("[");
   }
 
+  /** File name out of a Content-Disposition header (filename*=UTF-8''… wins); "" when absent. */
+  function filenameFromDisposition(header) {
+    const h = String(header || "");
+    let m = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/.exec(h);
+    if (m) {
+      try {
+        return decodeURIComponent(m[1].trim());
+      } catch {
+        /* fall through to the plain form */
+      }
+    }
+    m = /filename\s*=\s*"?([^";]+)"?/.exec(h);
+    return m ? m[1].trim() : "";
+  }
+
   /** Read a Response body without ever throwing on malformed/non-JSON content. */
   async function readBody(resp) {
     let ct = "";
@@ -446,17 +461,27 @@
     const prefix = opts.prefix || "";
     const maxAuthAttempts = opts.maxAuthAttempts ?? 5;
 
+    /**
+     * options: {method, body (JSON), headers,
+     *           rawBody + contentType (send bytes as they are, e.g. a zip),
+     *           responseType: "blob" (a successful response is returned as {blob, filename})}
+     */
     async function request(path, options = {}) {
       const method = options.method || "GET";
       const url = joinUrl(prefix, path);
       let body;
-      if (options.body !== undefined && options.body !== null) {
+      let contentType = "";
+      if (options.rawBody !== undefined && options.rawBody !== null) {
+        body = options.rawBody;
+        contentType = options.contentType || "application/octet-stream";
+      } else if (options.body !== undefined && options.body !== null) {
         body = JSON.stringify(options.body);
+        contentType = "application/json";
       }
 
       for (let attempt = 0; ; attempt++) {
         const headers = { ...(options.headers || {}) };
-        if (body !== undefined) headers["Content-Type"] = "application/json";
+        if (body !== undefined) headers["Content-Type"] = contentType;
         const usedToken = getToken();
         if (usedToken) headers["X-Arena-Token"] = usedToken;
 
@@ -467,6 +492,11 @@
           throw new ApiError("无法连接到服务器，请检查网络或服务是否在运行", {
             kind: "network",
           });
+        }
+
+        if (options.responseType === "blob" && resp.ok && typeof resp.blob === "function") {
+          const blob = await resp.blob();
+          return { blob, filename: filenameFromDisposition(resp.headers && resp.headers.get && resp.headers.get("content-disposition")) };
         }
 
         const parsed = await readBody(resp);
@@ -511,6 +541,11 @@
       get: (path, options) => request(path, { ...(options || {}), method: "GET" }),
       post: (path, body, options) =>
         request(path, { ...(options || {}), method: "POST", body }),
+      // v0.12.1: raw bytes (a zip) and binary downloads
+      upload: (path, rawBody, contentType, options) =>
+        request(path, { ...(options || {}), method: "POST", rawBody, contentType }),
+      download: (path, options) =>
+        request(path, { ...(options || {}), method: "GET", responseType: "blob" }),
       put: (path, body, options) =>
         request(path, { ...(options || {}), method: "PUT", body }),
       patch: (path, body, options) =>
@@ -691,7 +726,16 @@
     return exists ? "edit" : "add";
   }
 
-  /** Body for POST (add) / PATCH (edit) of a single model. Prices are mandatory. */
+  /** Optional price (the two cache prices): empty means "bill at the input price" => null. */
+  function validateOptionalPrice(raw, label = "价格") {
+    if (isBlank(raw)) return { ok: true, value: null };
+    return validatePrice(raw, label);
+  }
+
+  /**
+   * Body for POST (add) / PATCH (edit) of a single model (v0.12.1: four prices, $ per 1M tokens).
+   * input (cache miss) and output are mandatory; cache read / write may be empty (null = input price).
+   */
   function buildModelPayload(form) {
     const errors = [];
     const modelId = String(form.model_id || "").trim();
@@ -699,18 +743,326 @@
     else if (hasControlChars(modelId)) errors.push("模型 ID 含有非法控制字符");
     const pin = validatePrice(form.input_price_per_m, "输入价格");
     const pout = validatePrice(form.output_price_per_m, "输出价格");
+    const pcr = validateOptionalPrice(form.cache_read_price_per_m, "缓存读取价格");
+    const pcw = validateOptionalPrice(form.cache_write_price_per_m, "缓存写入价格");
     if (!pin.ok) errors.push(pin.error);
     if (!pout.ok) errors.push(pout.error);
+    if (!pcr.ok) errors.push(pcr.error);
+    if (!pcw.ok) errors.push(pcw.error);
     const ctx = validateContextWindow(form.context_window_tokens);
     if (!ctx.ok) errors.push(ctx.error);
     if (errors.length) return { ok: false, errors };
     const payload = {
       model_id: modelId,
       input_price_per_m: pin.value,
+      cache_read_price_per_m: pcr.value,
+      cache_write_price_per_m: pcw.value,
       output_price_per_m: pout.value,
     };
     if (ctx.value !== undefined) payload.context_window_tokens = ctx.value;
     return { ok: true, payload };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.12.1: price source (E12) and per-model price suggestions
+  // -------------------------------------------------------------------------
+
+  const DEFAULT_PRICING_SOURCE_URL =
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+
+  /** Local "YYYY-MM-DD HH:MM" of an ISO string / epoch seconds / epoch milliseconds ("" when unusable). */
+  function formatDateTime(value) {
+    if (value === undefined || value === null || value === "") return "";
+    let d;
+    if (typeof value === "number" || /^\d+(\.\d+)?$/.test(String(value))) {
+      const n = Number(value);
+      d = new Date(n < 1e11 ? n * 1000 : n);
+    } else {
+      d = new Date(value);
+    }
+    if (Number.isNaN(d.getTime())) return "";
+    const p = (x) => String(x).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  /** GET/PUT /api/pricing/source and POST /api/pricing/refresh -> {url, default_url, fetched_at, entries, error}. */
+  function normalizePricingSource(resp) {
+    const r = resp && typeof resp === "object" && !Array.isArray(resp) ? resp : {};
+    const entries = Number(r.entries);
+    const err = r.error === undefined || r.error === null || r.error === "" ? null : formatDetail(r.error);
+    return {
+      url: typeof r.url === "string" ? r.url : "",
+      default_url:
+        typeof r.default_url === "string" && r.default_url.trim() ? r.default_url : DEFAULT_PRICING_SOURCE_URL,
+      fetched_at: r.fetched_at === undefined || r.fetched_at === null || r.fetched_at === "" ? null : r.fetched_at,
+      entries: Number.isFinite(entries) && entries >= 0 ? Math.floor(entries) : 0,
+      error: err,
+    };
+  }
+
+  /** The source must be an https URL (the server enforces it again, and refuses internal addresses). */
+  function validatePricingSourceUrl(raw) {
+    const s = String(raw === undefined || raw === null ? "" : raw).trim();
+    if (!s) return { ok: false, error: "价格源 URL 不能为空" };
+    if (hasControlChars(s)) return { ok: false, error: "价格源 URL 含有非法控制字符" };
+    let u;
+    try {
+      u = new URL(s);
+    } catch {
+      return { ok: false, error: "价格源 URL 不是有效的 URL" };
+    }
+    if (u.protocol !== "https:") return { ok: false, error: "价格源 URL 必须以 https:// 开头" };
+    if (u.username || u.password) return { ok: false, error: "价格源 URL 不能包含用户名或密码" };
+    return { ok: true, value: s };
+  }
+
+  /** One line for the dialog: "已加载 2,345 条 · 获取于 2026-11-17 05:20" / the error / "尚未获取". */
+  function pricingSourceStatus(info) {
+    const i = normalizePricingSource(info);
+    const when = formatDateTime(i.fetched_at);
+    if (i.error) {
+      return {
+        kind: "error",
+        text: `获取失败：${i.error}${i.entries ? `（仍使用上次的 ${formatCount(i.entries)} 条${when ? `，${when}` : ""}）` : ""}`,
+      };
+    }
+    if (i.entries > 0) {
+      return { kind: "ok", text: `已加载 ${i.entries.toLocaleString("en-US")} 条${when ? ` · 获取于 ${when}` : ""}` };
+    }
+    return { kind: "none", text: "尚未获取价格表：点击「刷新价格表」" };
+  }
+
+  /** A `suggested` object of the model-discovery response / pricing match -> null | numbers (or null) per field. */
+  function normalizeSuggestion(raw) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    if (raw.matched === false) return null;
+    const pick = (k) => {
+      const v = raw[k];
+      if (v === undefined || v === null || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : null;
+    };
+    const out = {
+      input_price_per_m: pick("input_price_per_m"),
+      output_price_per_m: pick("output_price_per_m"),
+      cache_read_price_per_m: pick("cache_read_price_per_m"),
+      cache_write_price_per_m: pick("cache_write_price_per_m"),
+      context_window_tokens: pick("context_window_tokens"),
+      key: typeof raw.key === "string" && raw.key ? raw.key : typeof raw.price_source === "string" ? raw.price_source : "",
+    };
+    // a suggestion without any price is "no match"
+    return out.input_price_per_m === null && out.output_price_per_m === null ? null : out;
+  }
+
+  /**
+   * Suggestions out of the discover-models response. Both shapes are accepted:
+   *   {models: [{id, suggested}, "plain-id"]}   and   {models: [...], suggested: {"<id>": {...}}}
+   * Returns {ids, suggestions: {id: suggestion|null}}.
+   */
+  function parseDiscoveredModels(resp) {
+    const ids = normalizeModelIds(resp);
+    const suggestions = {};
+    const list = Array.isArray(resp) ? resp : resp && Array.isArray(resp.models) ? resp.models : [];
+    for (const m of list) {
+      if (m && typeof m === "object" && m.id !== undefined) {
+        suggestions[String(m.id)] = normalizeSuggestion(m.suggested);
+      }
+    }
+    const map = resp && typeof resp === "object" && resp.suggested && typeof resp.suggested === "object" ? resp.suggested : null;
+    if (map && !Array.isArray(map)) {
+      for (const id of Object.keys(map)) suggestions[id] = normalizeSuggestion(map[id]);
+    }
+    for (const id of ids) if (!(id in suggestions)) suggestions[id] = null;
+    return { ids, suggestions };
+  }
+
+  /** Input values (strings) for the model form out of a suggestion. */
+  function suggestionToForm(s) {
+    const str = (v) => (v === null || v === undefined ? "" : String(v));
+    if (!s) {
+      return { input: "", cacheRead: "", cacheWrite: "", output: "", ctx: "" };
+    }
+    return {
+      input: str(s.input_price_per_m),
+      cacheRead: str(s.cache_read_price_per_m),
+      cacheWrite: str(s.cache_write_price_per_m),
+      output: str(s.output_price_per_m),
+      ctx: str(s.context_window_tokens),
+    };
+  }
+
+  /** "$0.27" / "—" for a price per million tokens (null/undefined => not set). */
+  function formatPrice(v) {
+    if (v === null || v === undefined || v === "") return "—";
+    const n = Number(v);
+    if (!Number.isFinite(n)) return "—";
+    return `$${n >= 100 ? n.toFixed(0) : n >= 1 ? n.toFixed(2).replace(/\.?0+$/, "") : String(Number(n.toPrecision(3)))}`;
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.12.1: token / cost budget (E10)
+  // -------------------------------------------------------------------------
+
+  const BUDGET_WARN_RATIO = 0.8;
+
+  /** GET/PUT /api/budget and PublicSession.budget -> a complete budget object. */
+  function normalizeBudget(raw) {
+    const b = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+    const posInt = (v) => {
+      if (v === undefined || v === null || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+    };
+    const posNum = (v) => {
+      if (v === undefined || v === null || v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    };
+    const used = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) && n >= 0 ? n : 0;
+    };
+    const state = b.state === "warning" || b.state === "reached" ? b.state : "ok";
+    return {
+      max_tokens: posInt(b.max_tokens),
+      max_cost_usd: posNum(b.max_cost_usd),
+      force_stop: Boolean(b.force_stop),
+      used_tokens: used(b.used_tokens),
+      used_cost_usd: used(b.used_cost_usd),
+      state,
+    };
+  }
+
+  /** "ok" | "warning" (>= 80 %) | "reached" (>= 100 %) for the usage against the limits. */
+  function budgetStateOf(budget) {
+    const b = normalizeBudget(budget);
+    const ratio = budgetRatio(b);
+    if (ratio === null) return "ok";
+    return ratio >= 1 ? "reached" : ratio >= BUDGET_WARN_RATIO ? "warning" : "ok";
+  }
+
+  /** Highest used/limit ratio over the limits that are set (null when there is no limit at all). */
+  function budgetRatio(budget) {
+    const b = normalizeBudget(budget);
+    const ratios = [];
+    if (b.max_tokens) ratios.push(b.used_tokens / b.max_tokens);
+    if (b.max_cost_usd) ratios.push(b.used_cost_usd / b.max_cost_usd);
+    return ratios.length ? Math.max(...ratios) : null;
+  }
+
+  /** One input of the budget dialog: "" => no limit (null); otherwise a positive number. */
+  function parseBudgetField(raw, kind) {
+    if (isBlank(raw)) return { ok: true, value: null };
+    const s = String(raw).trim().replace(/[,_\s]/g, "");
+    const label = kind === "cost" ? "费用上限" : "token 上限";
+    if (!/^[+]?(\d+\.?\d*|\.\d+)$/.test(s)) return { ok: false, error: `${label}必须是正数（留空表示不限）` };
+    const n = Number(s);
+    if (!Number.isFinite(n) || n <= 0) return { ok: false, error: `${label}必须大于 0（留空表示不限）` };
+    if (kind === "tokens") {
+      if (!Number.isInteger(n)) return { ok: false, error: "token 上限必须是整数" };
+      if (!Number.isSafeInteger(n)) return { ok: false, error: "token 上限太大" };
+    }
+    return { ok: true, value: n };
+  }
+
+  /** Body for PUT /api/budget out of the dialog's fields. */
+  function buildBudgetPayload(form) {
+    const f = form || {};
+    const errors = [];
+    const tokens = parseBudgetField(f.max_tokens, "tokens");
+    const cost = parseBudgetField(f.max_cost_usd, "cost");
+    if (!tokens.ok) errors.push(tokens.error);
+    if (!cost.ok) errors.push(cost.error);
+    if (errors.length) return { ok: false, errors };
+    return {
+      ok: true,
+      payload: { max_tokens: tokens.value, max_cost_usd: cost.value, force_stop: Boolean(f.force_stop) },
+    };
+  }
+
+  /** "37%" for a ratio (clamped to 0..999). */
+  function formatPercent(ratio, digits = 0) {
+    const n = safeNum(ratio, 0);
+    return `${(Math.min(Math.max(n, 0), 9.99) * 100).toFixed(digits)}%`;
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.12.1: roster (names, avatars, persona, memory)
+  // -------------------------------------------------------------------------
+
+  const NICKNAME_MAX = 20;
+
+  /** Count characters the way the user sees them (an emoji / CJK character is one). */
+  function charLength(s) {
+    return Array.from(String(s === undefined || s === null ? "" : s)).length;
+  }
+
+  /** A nickname: trimmed, 1..20 characters, no control characters, unique among `others` (their names). */
+  function validateNickname(raw, others) {
+    const name = String(raw === undefined || raw === null ? "" : raw).trim();
+    if (!name) return { ok: false, error: "名字不能为空" };
+    if (hasControlChars(name)) return { ok: false, error: "名字含有非法控制字符" };
+    if (charLength(name) > NICKNAME_MAX) return { ok: false, error: `名字最多 ${NICKNAME_MAX} 个字符` };
+    if ((others || []).some((o) => String(o) === name)) return { ok: false, error: `名字「${name}」已被其他玩家使用` };
+    return { ok: true, value: name };
+  }
+
+  /** GET /api/roster -> {memory_enabled, editable, seats: [{seat, id, name, default_name, avatar, persona, memory}]}. */
+  function normalizeRoster(resp) {
+    const r = resp && typeof resp === "object" && !Array.isArray(resp) ? resp : {};
+    const list = Array.isArray(r.seats) ? r.seats : Array.isArray(resp) ? resp : [];
+    const seats = list
+      .filter((s) => s && typeof s === "object" && s.id)
+      .map((s) => ({
+        seat: Number.isFinite(Number(s.seat)) ? Number(s.seat) : 0,
+        id: String(s.id),
+        name: typeof s.name === "string" ? s.name : String(s.id),
+        default_name: typeof s.default_name === "string" ? s.default_name : "",
+        avatar: s.avatar && typeof s.avatar === "object" ? s.avatar : null,
+        persona: typeof s.persona === "string" ? s.persona : "",
+        memory: typeof s.memory === "string" ? s.memory : "",
+      }));
+    return { memory_enabled: r.memory_enabled !== false, editable: r.editable !== false, seats };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.12.1: game clock / sleep labels (agent states)
+  // -------------------------------------------------------------------------
+
+  /** 5 -> "5 秒"; 65 -> "1 分 05 秒"; 3700 -> "1 时 01 分". */
+  function formatSeconds(seconds) {
+    const s = Math.max(0, Math.ceil(safeNum(seconds, 0)));
+    if (s < 60) return `${s} 秒`;
+    if (s < 3600) return `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, "0")} 秒`;
+    return `${Math.floor(s / 3600)} 时 ${String(Math.floor((s % 3600) / 60)).padStart(2, "0")} 分`;
+  }
+
+  /** "m:ss" countdown text for a request card. */
+  function formatCountdown(seconds) {
+    const s = Math.max(0, Math.ceil(safeNum(seconds, 0)));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }
+
+  /**
+   * The game clock "now": the server's clock at the moment we learnt it plus the wall time that has
+   * passed since, but only while the game is running (the game clock stops when paused, D18).
+   * sync: {clock, at (ms), running}
+   */
+  function gameClockNow(sync, nowMs) {
+    const s = sync || {};
+    const base = safeNum(s.clock, 0);
+    if (!s.running) return base;
+    const elapsed = Math.max(0, (safeNum(nowMs, Date.now()) - safeNum(s.at, 0)) / 1000);
+    return base + elapsed;
+  }
+
+  /** Tooltip of a sleeping agent: "等待新消息" or "定时醒来：剩余 12 秒". */
+  function sleepLabel(sleepUntil, clockNow) {
+    if (sleepUntil === null || sleepUntil === undefined || sleepUntil === "" || !Number.isFinite(Number(sleepUntil))) {
+      return "等待新消息";
+    }
+    const left = Number(sleepUntil) - safeNum(clockNow, 0);
+    return left > 0 ? `定时醒来：剩余 ${formatSeconds(left)}` : "即将醒来";
   }
 
   /** Model / depth bindings are locked while a game is running. */
@@ -812,18 +1164,17 @@
 
   const LAYOUT_STORAGE_KEY = "arena_layout_v1";
 
+  // v0.12.1: the right-hand "对局状态" column is gone (its numbers live in the participant bar's
+  // summary strip), and a "collapsed" channel column shrinks to an avatar rail instead of vanishing.
   const LAYOUT_DEFAULTS = Object.freeze({
     boardCollapsed: false,
     leftCollapsed: false,
-    rightCollapsed: false,
     boardHeight: null, // null => natural height (auto)
-    leftWidth: 245,
-    rightWidth: 275,
+    leftWidth: 252,
   });
 
   const PANEL_LIMITS = Object.freeze({
-    left: Object.freeze({ min: 170, max: 640 }),
-    right: Object.freeze({ min: 170, max: 640 }),
+    left: Object.freeze({ min: 190, max: 640 }),
     board: Object.freeze({ min: 96, maxRatio: 0.75 }),
   });
 
@@ -841,12 +1192,6 @@
       PANEL_LIMITS.left.max,
       LAYOUT_DEFAULTS.leftWidth
     );
-    const rightWidth = clampNumber(
-      src.rightWidth,
-      PANEL_LIMITS.right.min,
-      PANEL_LIMITS.right.max,
-      LAYOUT_DEFAULTS.rightWidth
-    );
     const rawBoard = Number(src.boardHeight);
     const boardHeight =
       src.boardHeight === null || src.boardHeight === undefined || !Number.isFinite(rawBoard)
@@ -857,10 +1202,8 @@
     return {
       boardCollapsed: Boolean(src.boardCollapsed),
       leftCollapsed: Boolean(src.leftCollapsed),
-      rightCollapsed: Boolean(src.rightCollapsed),
       boardHeight,
       leftWidth,
-      rightWidth,
     };
   }
 
@@ -1203,6 +1546,7 @@
     normalizeProviders,
     normalizeModelIds,
     validatePrice,
+    validateOptionalPrice,
     validateContextWindow,
     validateBaseUrl,
     buildProviderPayload,
@@ -1243,6 +1587,32 @@
     buildWorkspaceSelectPayload,
     workspaceSwitchBlocked,
     workspacePathDisplay,
+    // v0.12.1
+    DEFAULT_PRICING_SOURCE_URL,
+    formatDateTime,
+    normalizePricingSource,
+    validatePricingSourceUrl,
+    pricingSourceStatus,
+    normalizeSuggestion,
+    parseDiscoveredModels,
+    suggestionToForm,
+    formatPrice,
+    BUDGET_WARN_RATIO,
+    normalizeBudget,
+    budgetStateOf,
+    budgetRatio,
+    parseBudgetField,
+    buildBudgetPayload,
+    formatPercent,
+    NICKNAME_MAX,
+    charLength,
+    validateNickname,
+    normalizeRoster,
+    formatSeconds,
+    formatCountdown,
+    gameClockNow,
+    sleepLabel,
+    filenameFromDisposition,
     // v0.12
     formatCount,
     formatTokensCount,

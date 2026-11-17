@@ -1,15 +1,25 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="light" data-platform="desktop">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#ffffff" />
   <title>Arena-Agents</title>
   <!-- 相对路径：本地 "/" 与子路径反代（如 /arena/）均可用；页面需带结尾斜杠访问 -->
-  <link rel="stylesheet" href="static/css/style.css?v=0.12" />
+  <link rel="stylesheet" href="static/css/style.css?v=0.12.1" />
+  <!-- v0.12.1: 平台检测放在 head 里同步执行，首屏就按设备（手机 / 平板 / 桌面）布局，不会闪一下 -->
+  <script src="static/js/platform.js?v=0.12.1"></script>
+  <script>
+    (function () {
+      var P = window.ArenaPlatform;
+      if (P) P.applyToDocument(document, P.detect(P.readEnvironment(window)));
+    })();
+  </script>
 </head>
 <body>
-  <!-- 顶部导航与控制栏：第一行是主控制，第二行是对局状态（状态 / 阶段 / 请求进度） -->
-  <header class="topbar">
+  <!-- 顶部导航与控制栏：第一行是主控制，第二行是对局状态（状态 / 阶段 / 请求进度 / 主持人）。
+       手机上第一行只保留标题、对局状态和开始/暂停/继续，其余按钮收进「⋯」菜单（app.js 把真实按钮移进菜单）。 -->
+  <header class="topbar" id="topbar">
     <div class="topbar-main">
       <div class="topbar-left">
         <div class="brand-group">
@@ -23,7 +33,7 @@
           <span class="workspace-name" id="workspace-name-label">工作文件夹</span>
         </button>
 
-        <button class="btn btn-xs layout-toggle" id="btn-toggle-board" title="折叠/展开参与者看板" aria-pressed="false">
+        <button class="btn btn-xs layout-toggle" id="btn-toggle-board" title="折叠/展开参与者栏" aria-pressed="false">
           <span id="btn-toggle-board-label">折叠看板</span>
         </button>
 
@@ -32,8 +42,8 @@
         </button>
 
         <!-- v0.12: 观战视角（上帝视角 / 某名玩家）。纯前端过滤，切换不会重新请求服务器 -->
-        <label class="viewpoint-picker" for="select-viewpoint"
-               title="观战视角：上帝视角看到全部；选择某名玩家后，只显示该玩家能看到的消息、频道与标签">
+        <label class="viewpoint-picker" id="viewpoint-picker" for="select-viewpoint"
+               title="观战视角：上帝视角看到全部；选择某名玩家后，只显示该玩家能看到的消息、频道、标签与请求">
           <span class="viewpoint-icon" aria-hidden="true">👁</span>
           <select id="select-viewpoint" class="viewpoint-select">
             <option value="god" selected>上帝视角</option>
@@ -42,11 +52,15 @@
       </div>
 
       <div class="topbar-right">
-        <div class="usage-telemetry-pill" id="usage-telemetry-pill" title="点击打开模型绑定（费用按每次调用的价格快照累加）">
-          <span class="usage-icon">🪙</span>
-          <span id="usage-tokens-text">0 Tokens</span>
-          <span class="usage-sep">&middot;</span>
-          <span class="usage-cost" id="usage-cost-text">$0.0000</span>
+        <!-- v0.12.1: token / 费用统计，旁边是「上限」按钮；80% 变黄，100% 变红 -->
+        <div class="usage-group" id="usage-group">
+          <div class="usage-telemetry-pill" id="usage-telemetry-pill" data-budget="ok" title="点击打开模型绑定（费用按每次调用的价格快照累加）">
+            <span class="usage-icon">🪙</span>
+            <span id="usage-tokens-text">0 Tokens</span>
+            <span class="usage-sep">&middot;</span>
+            <span class="usage-cost" id="usage-cost-text">$0.0000</span>
+          </div>
+          <button class="btn btn-xs btn-budget" id="btn-open-budget-modal" title="设置本局的 token / 费用上限">⛔ 上限</button>
         </div>
         <span class="topbar-divider"></span>
         <button class="btn btn-default" id="btn-new" title="重置并开启新对局">新建</button>
@@ -55,10 +69,11 @@
         <button class="btn btn-primary-outline" id="btn-start">开始</button>
         <button class="btn btn-default" id="btn-pause" disabled>暂停</button>
         <button class="btn btn-resume" id="btn-resume" disabled title="继续对局；对局结束后也可以继续">继续</button>
+        <button class="btn btn-more" id="btn-more" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu" title="更多操作">⋯</button>
       </div>
     </div>
 
-    <div class="topbar-status">
+    <div class="topbar-status" id="topbar-status">
       <div class="status-pill" id="active-status-pill">
         <span class="status-dot idle" id="active-status-dot"></span>
         <span id="active-status-text">未开始 · 点击「开始」由主持人初始化对局</span>
@@ -70,10 +85,18 @@
 
       <!-- v0.12: 请求进度，例如「🗳 投票中 7/12」 -->
       <div class="request-hints" id="request-hints" aria-live="polite"></div>
+
+      <!-- v0.12.1: 主持人不占卡片位，是状态行末尾的小芯片（点击看详情） -->
+      <button type="button" class="mod-chip" id="mod-chip" data-actor="moderator" title="主持人" aria-haspopup="dialog"></button>
+    </div>
+
+    <!-- 手机：「⋯」菜单（里面是被移进来的真实按钮；回到宽屏时会放回原位） -->
+    <div class="more-menu" id="more-menu" role="menu" hidden>
+      <div class="more-menu-list" id="more-menu-list"></div>
     </div>
   </header>
 
-  <!-- v0.12: 暂停原因（主持人 hold）/ 出错 / 终局提示 -->
+  <!-- v0.12: 暂停原因（主持人 hold / 预算）/ 出错 / 停滞 / 终局提示 -->
   <div class="status-banner" id="status-banner" role="status" hidden></div>
 
   <!-- 恢复/绑定提示条（仅在需要时显示，不会自动开始对局） -->
@@ -83,32 +106,32 @@
     <button class="btn btn-xs" id="btn-dismiss-notice">知道了</button>
   </div>
 
-  <!-- 主体容器 -->
-  <main class="main-container" id="main-container">
-    <!-- 上半部分：参与者（极简玩家块，约 64×44） -->
+  <!-- 主体容器；手机上 data-phone-tab 决定显示哪一块（信息流 / 频道 / 玩家） -->
+  <main class="main-container" id="main-container" data-phone-tab="feed">
+    <!-- 上半部分：参与者栏（12 张玩家卡片 + 末尾的阵营摘要条） -->
     <section class="board-section" id="board-section">
-      <div class="board-header">
+      <div class="board-header" id="board-header">
         <div class="board-header-left">
           <h2 class="section-title">参与者</h2>
-          <span class="board-legend" id="board-legend"
-                title="图案由座位确定：形状 × 颜色 × 纹理。点击标签查看该 Agent 的工具调用 / 思考次数与 token 消耗。">
-            点击标签看指标 · 💭 思考 · ⚡ 执行 · 🎤 发言权 · ✋ 等待作答 · ▪ 已停止
-          </span>
-        </div>
-        <div class="board-header-right">
-          <!-- 执行深度选择档位 (v0.6) -->
-          <div class="exec-depth-picker" title="执行深度 = 每次唤醒内玩家 Agent 的最大「模型调用 → 工具」轮数（主持人更多）。注意：这不是模型的“思考深度”，思考深度请在「模型绑定」中按角色设置。">
-            <span class="depth-icon">⚡</span>
-            <label for="select-exec-depth" class="exec-depth-label">执行深度:</label>
-            <select id="select-exec-depth" class="exec-depth-select">
-              <option value="low">Low (浅度)</option>
-              <option value="medium" selected>Medium (标准)</option>
-              <option value="high">High (深度)</option>
-              <option value="xhigh">XHigh (极深)</option>
-            </select>
+          <button class="btn btn-xs" id="btn-regen-all-avatars" title="重新生成全部玩家的头像（仅对局未开始时可用）">🎲 重新生成全部头像</button>
+          <div class="menu-wrap">
+            <button class="btn btn-xs" id="btn-roster-menu" aria-haspopup="true" aria-expanded="false" aria-controls="roster-menu"
+                    title="名册：导出 / 导入 / 清除全部记忆，设置本局是否加载记忆">名册 ▾</button>
+            <div class="dropdown" id="roster-menu" role="menu" hidden>
+              <button type="button" class="dropdown-item" id="btn-roster-export" role="menuitem" data-roster-action="export">导出全部记忆（.zip）</button>
+              <button type="button" class="dropdown-item" id="btn-roster-import" role="menuitem" data-roster-action="import">导入记忆包…</button>
+              <button type="button" class="dropdown-item danger" id="btn-roster-clear" role="menuitem" data-roster-action="clear">清除全部记忆…</button>
+              <label class="dropdown-item check" title="关闭后，本局的系统提示词不包含记忆段（记忆文件本身不受影响）">
+                <input type="checkbox" id="chk-memory-enabled" />
+                <span>本局加载记忆</span>
+              </label>
+            </div>
           </div>
-
+          <button class="btn btn-xs btn-primary-outline" id="btn-review-all" hidden title="对局结束后，让每名玩家复盘本局并写入自己的记忆">复盘全部</button>
+        </div>
+        <div class="board-header-right" id="board-header-right">
           <input type="file" id="file-import-session" accept=".json" style="display: none" />
+          <input type="file" id="file-import-memory" accept=".zip,application/zip" style="display: none" />
           <button class="btn btn-xs" id="btn-import-session" title="导入已保存的对局 JSON 文件">导入存档</button>
           <button class="btn btn-xs" id="btn-open-sessions-modal" title="查看/删除保存在服务端外部数据目录的对局存档">会话</button>
           <button class="btn btn-xs" id="btn-open-bindings-modal" title="为主持人与每位玩家选择 Provider / 模型 / 思考深度">
@@ -119,24 +142,27 @@
         </div>
       </div>
 
-      <!-- 由 JS 渲染：主持人 + 12 名玩家的极简块 -->
+      <!-- 由 JS 渲染：12 张玩家卡片（编号 · 像素头像 · 昵称 · 身份；点击打开详情） -->
       <div class="participants-grid" id="participants-grid"></div>
+
+      <!-- 上帝视角：阵营摘要「狼 2/4 · 神 4/4 · 民 3/4 · 警长 Grace」 -->
+      <div class="board-summary" id="board-summary" hidden></div>
     </section>
 
-    <!-- 看板与下方工作区之间的横向拖动条（双击恢复默认高度） -->
+    <!-- 参与者栏与下方工作区之间的横向拖动条（双击恢复默认高度） -->
     <div class="row-resizer" id="board-resizer" role="separator" aria-orientation="horizontal"
-         title="拖动调整看板高度，双击恢复默认高度"></div>
+         title="拖动调整参与者栏高度，双击恢复默认高度"></div>
 
-    <!-- 下半部分：三栏工作区（频道 / 信息流 / 对局状态） -->
+    <!-- 下半部分：频道栏 / 信息流 -->
     <section class="workspace-grid" id="workspace-grid">
-      <!-- 左栏：频道列表 -->
+      <!-- 左栏：频道列表（窄屏收缩为头像条） -->
       <aside class="channels-panel" id="channels-panel">
         <div class="panel-header">
           <h3 class="panel-title">频道</h3>
-          <button class="btn btn-xs panel-toggle" id="btn-toggle-channels" title="折叠/展开左侧频道栏" aria-pressed="false">◀</button>
+          <button class="btn btn-xs panel-toggle" id="btn-toggle-channels" title="收起为头像条 / 展开频道栏" aria-pressed="false">◀</button>
         </div>
         <div class="channels-list" id="channels-list">
-          <!-- 由 JS 渲染：全部 / 频道（发言权状态、未读数）/ 私聊 / 质询工单 -->
+          <!-- 由 JS 渲染：公共 / 群聊（发言权状态、未读数）/ 质询工单 / 私聊（只写对方昵称，不同底色） -->
         </div>
       </aside>
 
@@ -144,12 +170,12 @@
       <div class="col-resizer" id="channels-resizer" role="separator" aria-orientation="vertical"
            title="拖动调整频道栏宽度，双击恢复默认宽度"></div>
 
-      <!-- 中栏：信息流（只显示发言，整条到达后一次渲染） -->
-      <section class="feed-panel">
+      <!-- 中栏：信息流（发言 + 请求卡片，整条渲染） -->
+      <section class="feed-panel" id="feed-panel">
         <div class="panel-header feed-header">
           <div class="feed-header-left">
             <h3 class="panel-title">信息流</h3>
-            <span class="feed-channel-label" id="feed-channel-label">频道: 全部记录</span>
+            <span class="feed-channel-label" id="feed-channel-label"></span>
           </div>
           <div class="feed-header-right">
             <span class="feed-viewing" id="feed-viewing">视角：上帝视角</span>
@@ -160,39 +186,22 @@
           <div id="feed-records-container" class="feed-records-container"></div>
         </div>
       </section>
-
-      <!-- 右栏宽度拖动条（双击恢复默认宽度） -->
-      <div class="col-resizer" id="dashboard-resizer" role="separator" aria-orientation="vertical"
-           title="拖动调整状态栏宽度，双击恢复默认宽度"></div>
-
-      <!-- 右栏：对局状态 -->
-      <aside class="dashboard-panel" id="dashboard-panel">
-        <div class="panel-header">
-          <h3 class="panel-title">对局状态</h3>
-          <button class="btn btn-xs panel-toggle" id="btn-toggle-dashboard" title="折叠/展开右侧状态栏" aria-pressed="false">▶</button>
-        </div>
-        <div class="dashboard-content">
-          <div class="stat-card">
-            <div class="stat-card-title">阵营</div>
-            <div class="stat-rows" id="factions-list">
-              <!-- 由主持人调用 update_dashboard 动态写入 -->
-            </div>
-          </div>
-
-          <div class="stat-card">
-            <div class="stat-card-title">标签统计</div>
-            <div class="stat-rows" id="tag-stats-list">
-              <!-- 由主持人调用 update_dashboard 动态写入 -->
-            </div>
-          </div>
-
-          <div class="isolation-note">
-            可见性只由频道决定：消息写入时是频道成员的人才能看到它。观战视角只是前端的过滤，思维链与工具调用只写入服务端日志，这里不展示。
-          </div>
-        </div>
-      </aside>
     </section>
   </main>
+
+  <!-- 手机：底部标签栏（信息流 / 频道 / 玩家） -->
+  <nav class="tabbar" id="tabbar" role="tablist" aria-label="视图切换">
+    <button type="button" class="tab-btn active" role="tab" aria-selected="true" data-tab="feed">
+      <span class="tab-icon" aria-hidden="true">💬</span><span class="tab-label">信息流</span>
+    </button>
+    <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="channels">
+      <span class="tab-icon" aria-hidden="true">#</span><span class="tab-label">频道</span>
+      <span class="tab-badge" id="tab-badge-channels" hidden></span>
+    </button>
+    <button type="button" class="tab-btn" role="tab" aria-selected="false" data-tab="players">
+      <span class="tab-icon" aria-hidden="true">👥</span><span class="tab-label">玩家</span>
+    </button>
+  </nav>
 
   <!-- Provider 管理弹窗 -->
   <div class="modal-backdrop" id="provider-modal" style="display: none">
@@ -201,6 +210,19 @@
         <span class="modal-title">Provider 管理</span>
         <button class="btn btn-xs" id="btn-close-provider-modal">✕</button>
       </div>
+
+      <!-- v0.12.1: 价格源（全局一个）。拉取模型后按模型 id 自动匹配四个价格和上下文窗口 -->
+      <div class="pricing-bar" id="pricing-bar">
+        <div class="pricing-bar-row">
+          <label class="form-label" for="input-pricing-url">价格源 URL</label>
+          <input type="text" class="form-input pricing-url" id="input-pricing-url" spellcheck="false"
+                 placeholder="https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json" />
+          <button type="button" class="btn btn-xs" id="btn-save-pricing-url" title="保存价格源 URL">保存</button>
+          <button type="button" class="btn btn-xs btn-primary-outline" id="btn-refresh-pricing" title="由服务端重新拉取价格表">刷新价格表</button>
+        </div>
+        <div class="pricing-bar-status form-hint" id="pricing-status">价格源状态读取中…</div>
+      </div>
+
       <div class="modal-body provider-layout">
         <div class="provider-list-col">
           <div class="provider-list" id="provider-list"></div>
@@ -265,18 +287,31 @@
             <form id="model-form" autocomplete="off">
               <div class="form-group">
                 <label class="form-label" for="input-model-id">模型 ID（从上方单选，或手动输入）</label>
-                <input type="text" class="form-input" id="input-model-id" placeholder="模型 ID" />
+                <div class="model-id-row">
+                  <input type="text" class="form-input" id="input-model-id" placeholder="模型 ID" />
+                  <button type="button" class="btn btn-xs" id="btn-match-price" title="按价格源自动匹配该模型的四个价格和上下文窗口">自动匹配价格</button>
+                </div>
               </div>
-              <div class="form-row-two">
+              <!-- v0.12.1: 四个价格（美元 / 百万 token）；缓存两项留空 = 按输入价计 -->
+              <div class="price-grid">
                 <div class="form-group">
-                  <label class="form-label" for="input-model-price-in">输入价格 ($ / 1M Tokens，必填)</label>
+                  <label class="form-label" for="input-model-price-in">输入（未命中缓存）</label>
                   <input type="text" inputmode="decimal" class="form-input" id="input-model-price-in" placeholder="必填" />
                 </div>
                 <div class="form-group">
-                  <label class="form-label" for="input-model-price-out">输出价格 ($ / 1M Tokens，必填)</label>
+                  <label class="form-label" for="input-model-price-cache-read">缓存读取</label>
+                  <input type="text" inputmode="decimal" class="form-input" id="input-model-price-cache-read" placeholder="留空=按输入价" />
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="input-model-price-cache-write">缓存写入</label>
+                  <input type="text" inputmode="decimal" class="form-input" id="input-model-price-cache-write" placeholder="留空=按输入价" />
+                </div>
+                <div class="form-group">
+                  <label class="form-label" for="input-model-price-out">输出</label>
                   <input type="text" inputmode="decimal" class="form-input" id="input-model-price-out" placeholder="必填" />
                 </div>
               </div>
+              <div class="form-hint" id="model-price-hint">价格单位：美元 / 1M Tokens。缓存读取、缓存写入留空时按输入价计费。</div>
               <div class="form-group">
                 <label class="form-label" for="input-model-ctx">上下文窗口 (Tokens，可选，留空使用后端默认)</label>
                 <input type="text" inputmode="numeric" class="form-input" id="input-model-ctx" placeholder="可选" />
@@ -294,7 +329,7 @@
   <div class="modal-backdrop" id="bindings-modal" style="display: none">
     <div class="modal-card modal-wide">
       <div class="modal-header">
-        <span class="modal-title">模型绑定（思考深度 ≠ 执行深度）</span>
+        <span class="modal-title">模型绑定</span>
         <button class="btn btn-xs" id="btn-close-bindings-modal">✕</button>
       </div>
       <div class="modal-body">
@@ -332,6 +367,55 @@
         <button class="btn btn-xs" id="btn-bindings-apply-all" title="把主持人的 Provider / 模型 / 思考深度复制到所有玩家">主持人设置应用到全部玩家</button>
         <button class="btn btn-default" id="btn-cancel-bindings">关闭</button>
         <button class="btn btn-primary-outline" id="btn-save-bindings">保存绑定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.12.1: token / 费用上限弹窗（GET/PUT /api/budget） -->
+  <div class="modal-backdrop" id="budget-modal" style="display: none">
+    <div class="modal-card">
+      <div class="modal-header">
+        <span class="modal-title">token / 费用上限</span>
+        <button class="btn btn-xs" id="btn-close-budget-modal" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="budget-usage" id="budget-usage"></div>
+        <div class="budget-fields">
+          <div class="form-group">
+            <label class="form-label" for="input-budget-tokens">token 上限（留空 = 不限）</label>
+            <input type="text" inputmode="numeric" class="form-input" id="input-budget-tokens" placeholder="例如 2000000" autocomplete="off" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="input-budget-cost">费用上限（美元，留空 = 不限）</label>
+            <input type="text" inputmode="decimal" class="form-input" id="input-budget-cost" placeholder="例如 5" autocomplete="off" />
+          </div>
+        </div>
+        <label class="checkbox-label" for="chk-budget-force-stop">
+          <input type="checkbox" id="chk-budget-force-stop" />
+          <span>达到上限后强制停止（暂停对局；提高上限或取消勾选后才能继续）</span>
+        </label>
+        <div class="form-hint">按本局计：新建对局后用量从 0 开始；终局后继续、手动复盘的用量也计入本局。达到 80% 提醒，达到 100% 时勾选了就暂停，没勾选只提醒。</div>
+        <div class="budget-breakdown" id="budget-breakdown"></div>
+        <div class="form-error" id="budget-form-error" hidden></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-default" id="btn-cancel-budget">关闭</button>
+        <button class="btn btn-primary-outline" id="btn-save-budget">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.12.1: 通用确认对话框（导入记忆包预览、清除全部记忆、完善草稿…由 roster.js 填充内容） -->
+  <div class="modal-backdrop" id="dialog-modal" style="display: none">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+      <div class="modal-header">
+        <span class="modal-title" id="dialog-title">确认</span>
+        <button class="btn btn-xs" id="btn-close-dialog" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body" id="dialog-body"></div>
+      <div class="modal-footer">
+        <button class="btn btn-default" id="btn-dialog-cancel">取消</button>
+        <button class="btn btn-primary-outline" id="btn-dialog-ok">确定</button>
       </div>
     </div>
   </div>
@@ -439,16 +523,27 @@
   <!-- 轻提示 Toast -->
   <div class="toast-container" id="toast-container"></div>
 
-  <!-- v0.12: 玩家指标浮层（点击玩家块上的 tag 打开）。放在网格之外，重渲染不会把它冲掉 -->
-  <div class="metrics-popover" id="metrics-popover" role="dialog" aria-label="玩家指标" hidden></div>
+  <!-- 长按（触屏）/ 悬停时显示的名字提示（频道头像条等只有头像的地方） -->
+  <div class="touch-tip" id="touch-tip" role="tooltip" hidden></div>
 
-  <script src="static/js/core.js?v=0.12"></script>
-  <script src="static/js/avatar.js?v=0.12"></script>
-  <script src="static/js/store.js?v=0.12"></script>
-  <script src="static/js/view.js?v=0.12"></script>
-  <script src="static/js/layout.js?v=0.12"></script>
-  <script src="static/js/providers.js?v=0.12"></script>
-  <script src="static/js/workspace.js?v=0.12"></script>
-  <script src="static/js/app.js?v=0.12"></script>
+  <!-- v0.12.1: 玩家详情：桌面 / 平板是贴着卡片的浮层，手机是底部抽屉。放在网格之外，重渲染不会把它冲掉 -->
+  <div class="detail-backdrop" id="detail-backdrop" hidden></div>
+  <div class="detail-panel" id="detail-panel" role="dialog" aria-label="玩家详情" hidden>
+    <div class="detail-grab" aria-hidden="true"></div>
+    <div class="detail-head" id="detail-head"></div>
+    <div class="detail-live" id="detail-live"></div>
+    <div class="detail-editors" id="detail-editors"></div>
+  </div>
+
+  <script src="static/js/core.js?v=0.12.1"></script>
+  <script src="static/js/avatar.js?v=0.12.1"></script>
+  <script src="static/js/store.js?v=0.12.1"></script>
+  <script src="static/js/view.js?v=0.12.1"></script>
+  <script src="static/js/layout.js?v=0.12.1"></script>
+  <script src="static/js/providers.js?v=0.12.1"></script>
+  <script src="static/js/roster.js?v=0.12.1"></script>
+  <script src="static/js/budget.js?v=0.12.1"></script>
+  <script src="static/js/workspace.js?v=0.12.1"></script>
+  <script src="static/js/app.js?v=0.12.1"></script>
 </body>
 </html>
