@@ -238,6 +238,7 @@ def render_entry(entry: LedgerEntry, namer: Namer, *, viewer: str) -> str | None
         shown = json.dumps(answers, ensure_ascii=False) if answers is not None else ""
         return (
             f"{prefix} 〔请求 {d.get('request_id')} 已关闭（{d.get('reason')}）〕答案：{shown}"
+            f"{_tally_text(d)}"
             f"{('；使用默认：' + _ids(d.get('defaulted'))) if d.get('defaulted') else ''}"
             f"{('；未作答：' + _ids(d.get('missing'))) if d.get('missing') else ''}"
         )
@@ -326,6 +327,34 @@ def render_wake(reasons: list[Envelope], ambient: list[Envelope], namer: Namer, 
     return "\n".join(lines)
 
 
+def _tally_text(data: dict[str, Any]) -> str:
+    """Engine-computed vote count of a closed choice request (``tally`` / ``leaders``)."""
+    tally = data.get("tally")
+    if not tally:
+        return ""
+    counts = "、".join(f"{option} {count} 票" for option, count in tally.items())
+    leaders = data.get("leaders") or []
+    lead = f"；得票最高：{_ids(leaders)}" if leaders else "；无人得票"
+    return f"；计票：{counts}{lead}"
+
+
+_REVOKE_REASONS = {
+    "timeout": "已超时",
+    "closed": "主持人关闭了发言",
+    "replaced": "被新的发言安排取代",
+    "mode_changed": "频道模式被修改",
+    "removed": "你已被移出该频道",
+    "paused": "队列已暂停",
+}
+
+
+def _revoke_reason(reason: Any) -> str:
+    text = str(reason or "")
+    if text.startswith("ability:"):
+        return f"能力 {text.split(':', 1)[1]} 被发动，频道冻结，等待主持人裁决"
+    return _REVOKE_REASONS.get(text, text)
+
+
 def _wake_line(env: Envelope, namer: Namer) -> str:
     event = str(env.payload.get("event", ""))
     p = env.payload
@@ -344,7 +373,7 @@ def _wake_line(env: Envelope, namer: Namer) -> str:
         )
     if event in ("floor.revoked", "floor.paused", "floor.frozen"):
         label = {"floor.revoked": "被收回", "floor.paused": "被暂停", "floor.frozen": "被冻结"}[event]
-        return f"你在 {ch} 的发言权{label}（{p.get('reason', '')}）。"
+        return f"你在 {ch} 的发言权{label}（{_revoke_reason(p.get('reason'))}）。"
     if event == "floor.completed":
         return f"{ch} 的发言权已全部结束：{json.dumps(p.get('results'), ensure_ascii=False)[:300]}。"
     if event == "free.advisory":
@@ -354,7 +383,10 @@ def _wake_line(env: Envelope, namer: Namer) -> str:
         options = "；".join(f"{o.get('id')}={o.get('label') or o.get('id')}" for o in (p.get("options") or []))
         return f"你收到请求 {p.get('request_id')}：{p.get('question', '')}{('（选项：' + options + '）') if options else ''}，{_secs(p.get('seconds'))} 内作答（respond）。"
     if event == "request.closed":
-        return f"请求 {p.get('request_id')} 已关闭（{p.get('reason')}）。答案：{json.dumps(p.get('answers'), ensure_ascii=False)}；默认：{_ids(p.get('defaulted'))}；未作答：{_ids(p.get('missing'))}。"
+        return (
+            f"请求 {p.get('request_id')} 已关闭（{p.get('reason')}）。答案：{json.dumps(p.get('answers'), ensure_ascii=False)}"
+            f"{_tally_text(p)}；默认：{_ids(p.get('defaulted'))}；未作答：{_ids(p.get('missing'))}。"
+        )
     if event == "request.cancelled":
         return f"请求 {p.get('request_id')} 已{('过期' if p.get('reason') == 'expired' else '取消')}，不必再作答。"
     if event == "ability.used":

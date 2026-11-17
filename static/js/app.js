@@ -1,23 +1,30 @@
 /* ==========================================================================
-   Arena-Agents v0.11 Frontend Controller
-   (Executable Markdown Scenarios · Game-Agnostic Runtime)
-   Pure helpers live in core.js (window.ArenaCore).
+   Arena-Agents v0.12 Frontend Controller
+   (async agents · SSE v2 · minimal player tiles · speech-only feed)
+
+   Pure logic lives in
+     core.js    escaping / API client / formatting
+     avatar.js  deterministic glyphs (shape x colour x texture)
+     store.js   SSE v2 event application on a PublicSession v2 object
+     view.js    viewpoint filtering, tiles, floor status, unread, banners
+   This file wires them to the DOM.
+
+   What is NOT here any more (v0.11 -> v0.12): streaming drafts, chain-of-thought
+   and tool-call cards, expand/collapse controls, the moderator "engine stream".
    ========================================================================== */
 
 (() => {
   const Core = window.ArenaCore;
+  const Avatar = window.ArenaAvatar;
+  const Store = window.ArenaStore;
+  const View = window.ArenaView;
   if (!Core) {
     throw new Error("core.js 未加载：请确认 static/js/core.js 可访问");
   }
-  const {
-    escapeHtml,
-    numText,
-    safeNum,
-    stripMarkdownForPreview,
-    renderFormattedText,
-    renderFormattedBlocks,
-    boundedSet,
-  } = Core;
+  if (!Avatar || !Store || !View) {
+    throw new Error("avatar.js / store.js / view.js 未加载：请确认 static/js 下的脚本可访问");
+  }
+  const { escapeHtml, numText } = Core;
 
   // URL prefix the app is served under (supports sub-path reverse proxies).
   const SCRIPT_SRC = document.currentScript && document.currentScript.src;
@@ -30,29 +37,43 @@
   })();
 
   const TOKEN_KEY = "arena_api_token";
+  const VIEWPOINT_KEY = "arena_viewpoint_v1";
+  const MESSAGE_HTML_CACHE_MAX = 5000;
+  const FLASH_MS = 3000;
   let providerUI = null; // v0.10 provider/binding/session-list UI (providers.js)
-  let layoutUI = null; // v0.11 collapse/resize/card-size UI (layout.js)
+  let layoutUI = null; // v0.11 collapse/resize UI (layout.js)
   let workspaceUI = null; // v0.11 workspace (工作文件夹) UI (workspace.js)
-  const MAX_EXPAND_ENTRIES = 5000;
 
   const state = {
-    session: null,
-    selectedChannel: "all", // "engine" | "all" | channel.id
-    showToolCalls: true,
-    level1Expanded: new Map(), // action_id -> boolean (Level 1 action card, default true)
-    level2Expanded: new Map(), // record_id -> boolean (Level 2 subitem: message default true, thought/tool default false)
+    session: Store.emptySession(), // PublicSession v2, updated in place by SSE events
+    loaded: false, // a first session (HTTP or SSE) has arrived
+    sessionKey: null,
+    viewpointPref: View.GOD, // what the user chose (kept even while the game has no players yet)
+    viewpoint: View.GOD, // effective viewpoint: "god" | player id
+    selectedChannel: "all", // "all" | channel.id
+    openActorId: null, // metrics popover (kept in state so re-renders never lose it)
+    dmGroupOpen: false,
     autoScroll: true,
+    read: { baseline: 0, all: 0, seqs: {} }, // unread watermarks per channel
+    flash: new Map(), // actor id -> expiry (ms): briefly highlights a tile (ability.used)
+    // SSE
     sse: null,
     sseAttempt: 0,
     sseTimer: null,
     sseConnected: false,
-    lastChannelsSig: "",
-    lastRecordsSig: "",
+    lastEventId: 0, // highest event id reflected in state.session
+    sseResumeId: 0, // last id received over the stream (resume point for reconnects)
+    appVersion: "",
+    // render caches (skip DOM writes when nothing changed)
     lastBoardHtml: null,
-    appVersion: "", // application version from /api/state (not the restored session's version)
+    lastChannelsHtml: null,
+    lastViewpointHtml: null,
+    lastHintsHtml: null,
+    lastBannerHtml: null,
     lastDashboardSig: null,
-    sessionKey: null,
-    draftNodes: new Map(), // draft key -> { el, sig }
+    lastPopoverHtml: null,
+    feed: { key: "", count: 0, lastSeq: 0 },
+    msgHtml: new Map(),
   };
 
   // ---------------------------------------------------------------------------
@@ -101,52 +122,50 @@
     return api.post(path, body);
   }
 
-  // DOM Elements
-  const elAppTitle = document.getElementById("app-title");
-  const elAppVersion = document.getElementById("app-version");
-  const elScenarioName = document.getElementById("scenario-name");
-  const elBtnTheme = document.getElementById("btn-theme");
-  const elStatusDot = document.getElementById("active-status-dot");
-  const elStatusText = document.getElementById("active-status-text");
-  const elPhasePill = document.getElementById("phase-pill");
+  // ---------------------------------------------------------------------------
+  // DOM elements
+  // ---------------------------------------------------------------------------
 
-  const elSelectExecDepth = document.getElementById("select-exec-depth");
-  const elUsagePill = document.getElementById("usage-telemetry-pill");
-  const elUsageTokensText = document.getElementById("usage-tokens-text");
-  const elUsageCostText = document.getElementById("usage-cost-text");
+  const $ = (id) => document.getElementById(id);
+  const elAppTitle = $("app-title");
+  const elAppVersion = $("app-version");
+  const elBtnTheme = $("btn-theme");
+  const elStatusDot = $("active-status-dot");
+  const elStatusText = $("active-status-text");
+  const elPhasePill = $("phase-pill");
+  const elRequestHints = $("request-hints");
+  const elStatusBanner = $("status-banner");
+  const elSelectViewpoint = $("select-viewpoint");
+  const elFeedViewing = $("feed-viewing");
 
-  const elModeratorStatusPill = document.getElementById("moderator-status-pill");
-  const elModeratorStatusText = document.getElementById("moderator-status-text");
+  const elSelectExecDepth = $("select-exec-depth");
+  const elUsagePill = $("usage-telemetry-pill");
+  const elUsageTokensText = $("usage-tokens-text");
+  const elUsageCostText = $("usage-cost-text");
 
-  const elBtnNew = document.getElementById("btn-new");
-  const elBtnSave = document.getElementById("btn-save");
-  const elBtnStart = document.getElementById("btn-start");
-  const elBtnPause = document.getElementById("btn-pause");
-  const elBtnResume = document.getElementById("btn-resume");
-  const elBtnForcePause = document.getElementById("btn-force-pause");
-  const elBtnShuffle = document.getElementById("btn-shuffle-identities");
+  const elBtnNew = $("btn-new");
+  const elBtnSave = $("btn-save");
+  const elBtnStart = $("btn-start");
+  const elBtnPause = $("btn-pause");
+  const elBtnResume = $("btn-resume");
 
-  const elParticipantsGrid = document.getElementById("participants-grid");
-  const elChannelsList = document.getElementById("channels-list");
-  const elFeedChannelLabel = document.getElementById("feed-channel-label");
-  const elChkShowTools = document.getElementById("chk-show-tools");
-  const elBtnResetDefault = document.getElementById("btn-reset-default");
-  const elBtnExpandAll = document.getElementById("btn-expand-all");
-  const elBtnCollapseAll = document.getElementById("btn-collapse-all");
-  const elFeedList = document.getElementById("feed-list");
-  const elFeedRecordsContainer = document.getElementById("feed-records-container");
-  const elFeedStreamingContainer = document.getElementById("feed-streaming-container");
+  const elParticipantsGrid = $("participants-grid");
+  const elChannelsList = $("channels-list");
+  const elFeedChannelLabel = $("feed-channel-label");
+  const elFeedList = $("feed-list");
+  const elFeedRecords = $("feed-records-container");
+  const elPopover = $("metrics-popover");
 
-  const elFactionsList = document.getElementById("factions-list");
-  const elTagStatsList = document.getElementById("tag-stats-list");
-  const elToastContainer = document.getElementById("toast-container");
+  const elFactionsList = $("factions-list");
+  const elTagStatsList = $("tag-stats-list");
+  const elToastContainer = $("toast-container");
 
-  const elConnBanner = document.getElementById("conn-banner");
-  const elTokenModal = document.getElementById("token-modal");
-  const elTokenForm = document.getElementById("token-form");
-  const elTokenInput = document.getElementById("input-api-token");
-  const elTokenMessage = document.getElementById("token-modal-message");
-  const elBtnCancelToken = document.getElementById("btn-cancel-token");
+  const elConnBanner = $("conn-banner");
+  const elTokenModal = $("token-modal");
+  const elTokenForm = $("token-form");
+  const elTokenInput = $("input-api-token");
+  const elTokenMessage = $("token-modal-message");
+  const elBtnCancelToken = $("btn-cancel-token");
 
   function showToast(msg) {
     const toast = document.createElement("div");
@@ -162,877 +181,556 @@
     }, 3200);
   }
 
-  function renderToolCallContent(rec) {
-    if (!rec || rec.kind !== "tool_call" || !rec.tool_name) {
-      return renderFormattedText(rec ? rec.content : "");
-    }
-    const argsStr = JSON.stringify(rec.tool_args || {}, null, 2);
-    const resRaw = (rec.tool_result || "").trim();
-    let resHtml = "";
-    if (resRaw.startsWith("{") || resRaw.startsWith("[")) {
-      try {
-        const parsed = JSON.parse(resRaw);
-        resHtml = `<pre class="fmt-pre"><code>${escapeHtml(
-          JSON.stringify(parsed, null, 2)
-        )}</code></pre>`;
-      } catch {
-        resHtml = renderFormattedText(resRaw);
-      }
-    } else {
-      resHtml = renderFormattedText(resRaw);
-    }
-    return `
-      <div class="tool-detail-grid">
-        <div class="tool-detail-row">
-          <span class="tool-detail-label">调用参数</span>
-          <pre class="fmt-pre tool-args-pre"><code>${escapeHtml(argsStr)}</code></pre>
-        </div>
-        ${
-          resRaw
-            ? `<div class="tool-detail-row">
-                <span class="tool-detail-label">返回结果</span>
-                <div class="tool-detail-result">${resHtml}</div>
-              </div>`
-            : ""
-        }
-      </div>
-    `;
-  }
+  const cssEscape = (value) =>
+    typeof CSS !== "undefined" && CSS && typeof CSS.escape === "function"
+      ? CSS.escape(String(value))
+      : String(value).replace(/["\\]/g, "\\$&");
 
-  function getBadgeVariantClass(badge) {
-    if (!badge) return "";
-    const b = String(badge);
-    if (b.includes("战略") || b.includes("规划") || b.includes("复盘")) {
-      return "badge-strategic";
-    }
-    if (b.includes("问讯") || b.includes("私聊")) {
-      return "badge-inquiry";
-    }
-    if (b.includes("自爆") || b.includes("插话")) {
-      return "badge-interrupt";
-    }
-    if (b.includes("投票")) {
-      return "badge-vote";
-    }
-    return "";
-  }
-
-  // Cost is accumulated server-side from each call's price snapshot (v0.10):
-  // changing a price later never rewrites history.
-  function computeSessionUsage(s) {
-    const u = s.usage_stats || {};
-    if (typeof u.total_tokens === "number" && u.total_tokens > 0) {
-      return { totalTokens: u.total_tokens, costUsd: Core.sessionCostUsd(u) };
-    }
-    return { totalTokens: 0, costUsd: Core.sessionCostUsd(u) };
+  /** event.target.closest that tolerates text nodes and the node-test stubs. */
+  function closestFrom(target, selector) {
+    let node = target;
+    // A text node has no closest(): walk up to its element.
+    if (node && typeof node.closest !== "function" && node.parentElement) node = node.parentElement;
+    return node && typeof node.closest === "function" ? node.closest(selector) : null;
   }
 
   // ---------------------------------------------------------------------------
-  // Rendering Functions
+  // Per-game UI state (unread watermarks, selection)
   // ---------------------------------------------------------------------------
 
-  function ensureValidSelectedChannel(s) {
-    if (state.selectedChannel === "all" || state.selectedChannel === "engine") {
-      return;
-    }
-    const exists = (s.channels || []).some((ch) => ch.id === state.selectedChannel);
-    if (!exists) {
-      state.selectedChannel = "all";
-    }
+  function lastMessageSeq(session) {
+    const m = session.messages;
+    return m.length ? m[m.length - 1].seq : 0;
   }
 
-  function renderAll(force = false) {
+  function resetReadState(session) {
+    // History that exists when a game is loaded counts as read.
+    state.read = { baseline: lastMessageSeq(session), all: 0, seqs: {} };
+  }
+
+  function markChannelRead(channelId) {
     const s = state.session;
-    if (!s) return;
-    ensureValidSelectedChannel(s);
-    renderTopbar(s);
-    renderParticipantsBoard(s);
-    renderChannelsSidebar(s, force);
-    renderFeed(s, force);
-    renderDashboard(s);
-  }
-
-  function renderStreamChunkOnly(s) {
-    if (!s) return;
-    renderTopbar(s);
-    updateParticipantHighlightsInPlace(s);
-    updateEngineChannelWorkingState(s);
-    renderStreamingDraft(s);
-    if (state.autoScroll) {
-      elFeedList.scrollTop = elFeedList.scrollHeight;
-    }
-  }
-
-  // Coalesce bursts of SSE events into at most one render per animation frame.
-  // A pending full render always wins over a stream-chunk-only render.
-  const renderQueue = { handle: null, full: false, force: false, stream: false };
-
-  function scheduleRender(kind, force = false) {
-    if (kind === "full") {
-      renderQueue.full = true;
-      renderQueue.force = renderQueue.force || force;
+    if (channelId === "all") {
+      state.read.all = Math.max(state.read.all, View.latestSeq(s, "all"));
     } else {
-      renderQueue.stream = true;
+      state.read.seqs[channelId] = Math.max(
+        state.read.seqs[channelId] || 0,
+        View.latestSeq(s, channelId)
+      );
     }
-    if (renderQueue.handle !== null) return;
-    const run = () => {
-      renderQueue.handle = null;
-      const full = renderQueue.full;
-      const force = renderQueue.force;
-      const stream = renderQueue.stream;
-      renderQueue.full = renderQueue.force = renderQueue.stream = false;
-      if (!state.session) return;
-      try {
-        if (full) renderAll(force);
-        else if (stream) renderStreamChunkOnly(state.session);
-      } catch (e) {
-        console.error("Render failed", e);
-      }
-    };
-    renderQueue.handle =
-      typeof window.requestAnimationFrame === "function"
-        ? window.requestAnimationFrame(run)
-        : window.setTimeout(run, 16);
   }
 
-  // Single entry point for every new session snapshot (SSE or API response).
-  // Resets per-game UI state when a different game is loaded.
-  function setSession(s) {
-    if (!s) return;
-    const key = s.session_id || null;
-    const prevCount = state.session && state.session.records ? state.session.records.length : 0;
-    const newCount = s.records ? s.records.length : 0;
-    if (
-      state.session &&
-      (key !== state.sessionKey || newCount < prevCount)
-    ) {
-      resetExpandState();
+  function onMessageSeen(msg) {
+    // A message that arrives in the channel being read (or while "all" is shown) is not unread.
+    if (state.selectedChannel === "all") {
+      state.read.all = Math.max(state.read.all, msg.seq);
+    } else if (msg.channel_id === state.selectedChannel) {
+      state.read.seqs[msg.channel_id] = Math.max(state.read.seqs[msg.channel_id] || 0, msg.seq);
     }
-    state.sessionKey = key;
-    state.session = s;
-    if (providerUI) providerUI.onSession(s);
-    if (workspaceUI) workspaceUI.onSession(s);
   }
 
-  function resetExpandState() {
-    state.level1Expanded.clear();
-    state.level2Expanded.clear();
-    state.lastRecordsSig = "";
+  function flashActor(info) {
+    if (!info || !info.actor_id) return;
+    state.flash.set(info.actor_id, Date.now() + FLASH_MS);
+    const s = state.session;
+    showToast(
+      `⚡ ${View.displayName(s, info.actor_id)}（${info.actor_id}）发动了能力${
+        info.ability_id ? `：${info.ability_id}` : ""
+      }`
+    );
+    setTimeout(() => {
+      state.flash.delete(info.actor_id);
+      scheduleRender({ board: true });
+    }, FLASH_MS);
   }
 
-  function formatTokensCount(num) {
-    if (typeof num !== "number" || isNaN(num)) return "0 Tokens";
-    if (num >= 1_000_000_000) {
-      return `${(num / 1_000_000_000).toFixed(2)}B Tokens`;
+  // ---------------------------------------------------------------------------
+  // Rendering: top bar
+  // ---------------------------------------------------------------------------
+
+  function renderViewpointSelect(s) {
+    if (!elSelectViewpoint) return;
+    const options = View.viewpointOptions(s);
+    const html = options
+      .map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.label)}</option>`)
+      .join("");
+    if (html !== state.lastViewpointHtml) {
+      state.lastViewpointHtml = html;
+      elSelectViewpoint.innerHTML = html;
     }
-    if (num >= 1_000_000) {
-      return `${(num / 1_000_000).toFixed(2)}M Tokens`;
-    }
-    if (num >= 1_000) {
-      return `${(num / 1_000).toFixed(1)}K Tokens`;
-    }
-    return `${num.toLocaleString()} Tokens`;
+    if (elSelectViewpoint.value !== state.viewpoint) elSelectViewpoint.value = state.viewpoint;
   }
 
-  function renderTopbar(s) {
+  function renderRequestHints(s) {
+    if (!elRequestHints) return;
+    const hints = View.requestHints(s, state.viewpoint);
+    const shown = hints.slice(0, 3);
+    let html = shown
+      .map(
+        (h) =>
+          `<span class="req-pill" title="${escapeHtml(h.question)}${
+            h.sealed ? "（密封：关闭前不公开答案）" : ""
+          }"><span class="req-icon" aria-hidden="true">${h.icon}</span>${escapeHtml(
+            h.label
+          )} <strong>${numText(h.answered)}/${numText(h.total)}</strong></span>`
+      )
+      .join("");
+    if (hints.length > shown.length) {
+      html += `<span class="req-pill req-more">+${numText(hints.length - shown.length)}</span>`;
+    }
+    if (html !== state.lastHintsHtml) {
+      state.lastHintsHtml = html;
+      elRequestHints.innerHTML = html;
+    }
+  }
+
+  function renderBanner(s) {
+    if (!elStatusBanner) return;
+    const lines = View.statusBanners(s);
+    const html = lines
+      .map((l) => `<span class="banner-line banner-${escapeHtml(l.kind)}">${escapeHtml(l.text)}</span>`)
+      .join("");
+    if (html !== state.lastBannerHtml) {
+      state.lastBannerHtml = html;
+      elStatusBanner.innerHTML = html;
+      elStatusBanner.className = `status-banner${lines.length ? ` banner-${lines[0].kind}` : ""}`;
+    }
+    elStatusBanner.hidden = lines.length === 0;
+  }
+
+  function renderTopbar() {
+    const s = state.session;
     elAppTitle.textContent = s.title || "Arena-Agents";
-    const ver = state.appVersion || s.engine_version || s.version || "";
-    if (elAppVersion) {
-      elAppVersion.textContent = ver;
-    }
-    if (elScenarioName) {
-      elScenarioName.textContent = s.scenario_name || ver;
-    }
-    elStatusText.textContent = s.active_status_text || "等待开局";
-    elPhasePill.textContent = s.phase_text || "未开始";
+    const ver = state.appVersion || s.version || "";
+    if (elAppVersion) elAppVersion.textContent = ver;
 
-    if (
-      elSelectExecDepth &&
-      s.execution_depth &&
-      document.activeElement !== elSelectExecDepth
-    ) {
+    elStatusText.textContent = View.statusText(s);
+    if (elStatusText.setAttribute) elStatusText.setAttribute("title", View.statusText(s));
+    elPhasePill.textContent = s.phase_text || "未开始";
+    elStatusDot.className = `status-dot ${View.statusDotClass(s)}`;
+
+    if (elSelectExecDepth && s.execution_depth && document.activeElement !== elSelectExecDepth) {
       elSelectExecDepth.value = s.execution_depth;
     }
 
-    // Update top-right Token & Cost ($) telemetry (auto convert to M and B units)
+    // Top-right token & cost telemetry (the cost is accumulated server-side per call).
     if (elUsageTokensText && elUsageCostText) {
-      const usage = computeSessionUsage(s);
-      elUsageTokensText.textContent = formatTokensCount(usage.totalTokens);
-      elUsageCostText.textContent = `$${usage.costUsd.toFixed(4)}`;
+      const u = s.usage_stats || {};
+      const total = u.total_tokens > 0 ? u.total_tokens : 0;
+      elUsageTokensText.textContent = Core.formatTokensCount(total);
+      elUsageCostText.textContent = `$${Core.sessionCostUsd(u).toFixed(4)}`;
     }
 
-    elStatusDot.className = "status-dot";
-    if (s.status === "running" || s.active_actor_id || s.moderator_active) {
-      elStatusDot.classList.add("active");
-    } else if (s.status === "paused") {
-      elStatusDot.classList.add("paused");
-    } else {
-      elStatusDot.classList.add("idle");
+    // Start only on a fresh game; Resume also works after the game finished (D8).
+    const ctl = View.controlState(s);
+    elBtnStart.disabled = !ctl.start;
+    elBtnPause.disabled = !ctl.pause;
+    elBtnResume.disabled = !ctl.resume;
+
+    renderViewpointSelect(s);
+    renderRequestHints(s);
+    renderBanner(s);
+    if (elFeedViewing) {
+      elFeedViewing.textContent = `视角：${View.viewpointLabel(s, state.viewpoint)}`;
+      elFeedViewing.classList.toggle("is-player", state.viewpoint !== View.GOD);
     }
-
-    // Moderator status pill in the top-right of the board
-    if (elModeratorStatusPill && elModeratorStatusText) {
-      const rawStatus = s.moderator_status || "待命 · 等待开局";
-      const cleanStatus = rawStatus.replace(/^主持人[:：]\s*/, "");
-      elModeratorStatusText.textContent = cleanStatus;
-      if (s.moderator_active) {
-        elModeratorStatusPill.classList.add("active");
-      } else {
-        elModeratorStatusPill.classList.remove("active");
-      }
-    }
-
-    const isRunning = s.status === "running";
-    const isPaused = s.status === "paused";
-
-    elBtnStart.disabled = isRunning || (isPaused && s.records && s.records.length > 0);
-    elBtnPause.disabled = !isRunning;
-    elBtnResume.disabled = !isPaused;
-    elBtnForcePause.disabled = !isRunning && !s.active_actor_id && !s.moderator_active;
-    if (elBtnShuffle) elBtnShuffle.disabled = isRunning;
   }
 
-  // Short "Provider / model · depth" label for a seat card (v0.10 bindings).
-  function bindingLabelFor(s, actorId) {
-    const b = (s.model_bindings && s.model_bindings[actorId]) || null;
-    const providers = providerUI ? providerUI.getProviders() : [];
-    if (b && providers.length === 0) return `${b.model_id || "未绑定"} · ${b.reasoning_depth || "high"}`;
-    return Core.bindingSummary(b, providers);
+  // ---------------------------------------------------------------------------
+  // Rendering: player tiles (≈64×44)
+  // ---------------------------------------------------------------------------
+
+  const BADGE_TEXT = { thinking: "💭", acting: "⚡", stopped: "" };
+  const FLOW_TEXT = { floor: "🎤", waiting: "✋" };
+
+  function tileHtml(t) {
+    const classes = ["tile"];
+    if (t.isModerator) classes.push("tile-moderator");
+    if (t.out) classes.push("out");
+    if (t.viewing) classes.push("viewing");
+    if (t.state) classes.push(`st-${t.state}`);
+    if (t.flow) classes.push(`flow-${t.flow}`);
+    if (state.flash.has(t.id)) classes.push("flash");
+    const open = state.openActorId === t.id;
+    if (open) classes.push("popover-open");
+
+    const glyph = Avatar.glyphHtml(t.id, t.seat, { size: 20 });
+    const idText = t.isModerator ? "MOD" : t.id;
+    const tagText = t.mainTag || "—";
+    const tagClass = t.mainTag ? `tag-${t.variant || "neutral"}` : "tag-empty";
+    const stateBadge = t.state
+      ? `<span class="tile-badge badge-${t.state}" title="${escapeHtml(
+          View.STATE_LABELS[t.state] || ""
+        )}">${BADGE_TEXT[t.state] || ""}</span>`
+      : "";
+    const flowBadge = t.flow
+      ? `<span class="tile-badge badge-${t.flow}" title="${escapeHtml(
+          View.FLOW_LABELS[t.flow] || ""
+        )}">${FLOW_TEXT[t.flow] || ""}</span>`
+      : "";
+
+    return (
+      `<div class="${classes.join(" ")}" data-actor="${escapeHtml(t.id)}" title="${escapeHtml(t.title)}">` +
+      `<div class="tile-top">${glyph}<span class="tile-id">${escapeHtml(idText)}</span></div>` +
+      `<button type="button" class="tile-tag ${tagClass}" data-tag-actor="${escapeHtml(t.id)}"` +
+      ` aria-haspopup="dialog" aria-expanded="${open ? "true" : "false"}"` +
+      ` title="点击查看 ${escapeHtml(t.id)} 的指标">${escapeHtml(tagText)}</button>` +
+      `${stateBadge}${flowBadge}</div>`
+    );
   }
 
-  function renderParticipantsBoard(s) {
-    const tagStyles = s.tag_styles || {};
-    const html = (s.participants || [])
-      .map((p) => {
-        const leftTags = [];
-        const rightTags = [];
-        let grayOut = false;
-
-        const tags = p.tags || [];
-        if (tags.length === 0) {
-          leftTags.push(`<span class="tag-badge muted">待主持人分配</span>`);
-        } else {
-          tags.forEach((tag) => {
-            const st = tagStyles[tag] || { slot: "right", variant: "neutral" };
-            if (st.gray_out_card) grayOut = true;
-            const badgeHtml = `<span class="tag-badge ${escapeHtml(
-              st.variant || "neutral"
-            )}">${escapeHtml(tag)}</span>`;
-            if (st.slot === "left") {
-              leftTags.push(badgeHtml);
-            } else {
-              rightTags.push(badgeHtml);
-            }
-          });
-        }
-
-        const isWorking = Boolean(p.generating || p.active_stage);
-        const stageText = p.active_stage || (p.generating ? "思考中" : "");
-        const cardClasses = ["player-card"];
-        if (isWorking) cardClasses.push("generating");
-        if (grayOut) cardClasses.push("grayed-out");
-
-        return `
-          <div class="${cardClasses.join(" ")}" data-player-id="${escapeHtml(p.id)}">
-            <div class="card-top-row">
-              <span>${escapeHtml(p.seat)} &middot; ${escapeHtml(p.id)}</span>
-              <span class="card-generating-label">${
-                isWorking ? escapeHtml(stageText) : ""
-              }</span>
-            </div>
-            <div class="card-name">${escapeHtml(p.name)}</div>
-            <div class="card-binding" data-bind-actor="${escapeHtml(p.id)}" title="点击设置此玩家的模型与思考深度">${escapeHtml(
-              bindingLabelFor(s, p.id)
-            )}</div>
-            <div class="card-tags-row">
-              <div class="tags-slot-left">${leftTags.join("")}</div>
-              <div class="tags-slot-right">${rightTags.join("")}</div>
-            </div>
-          </div>
-        `;
-      })
-      .join("");
-
-    // Skip the DOM write when nothing changed (keeps hover/selection, saves work).
+  function renderBoard() {
+    const s = state.session;
+    const tiles = View.boardTiles(s, state.viewpoint);
+    const html = tiles.map(tileHtml).join("");
+    // Skip the DOM write when nothing changed (keeps hover / focus, saves work).
     if (html !== state.lastBoardHtml) {
       state.lastBoardHtml = html;
       elParticipantsGrid.innerHTML = html;
     }
+    if (state.openActorId) positionPopover();
   }
 
-  elParticipantsGrid.addEventListener("click", (evt) => {
-    const node = evt.target && evt.target.closest ? evt.target.closest(".card-binding[data-bind-actor]") : null;
-    if (node && providerUI) providerUI.openBindings(node.getAttribute("data-bind-actor"));
-  });
+  // ---------------------------------------------------------------------------
+  // Rendering: metrics popover (outside the grid; opened id lives in `state`)
+  // ---------------------------------------------------------------------------
 
-  function updateParticipantHighlightsInPlace(s) {
-    (s.participants || []).forEach((p) => {
-      const card = elParticipantsGrid.querySelector(
-        `.player-card[data-player-id="${CSS.escape(p.id)}"]`
-      );
-      if (!card) return;
-      const isWorking = Boolean(p.generating || p.active_stage);
-      const stageText = p.active_stage || (p.generating ? "思考中" : "");
-      const labelEl = card.querySelector(".card-generating-label");
-      const labelText = isWorking ? stageText : "";
-      if (
-        card.classList.contains("generating") !== isWorking ||
-        (labelEl && labelEl.textContent !== labelText)
-      ) {
-        // DOM now diverges from the last full render; force the next one to rewrite it.
-        state.lastBoardHtml = null;
-      }
-      card.classList.toggle("generating", isWorking);
-      if (labelEl && labelEl.textContent !== labelText) {
-        labelEl.textContent = labelText;
-      }
-    });
+  function bindingText(s, actorId) {
+    const b = providerUI ? providerUI.getBindingsFor(actorId) : (s.model_bindings || {})[actorId];
+    if (!b) return "未绑定";
+    const providers = providerUI ? providerUI.getProviders() : [];
+    if (providers.length === 0) return `${b.model_id || "未绑定"} · ${b.reasoning_depth || "high"}`;
+    return Core.bindingSummary(b, providers);
   }
 
-  function updateEngineChannelWorkingState(s) {
-    const engineItem = elChannelsList.querySelector('.channel-item[data-channel="engine"]');
-    if (engineItem) {
-      engineItem.classList.toggle("working", Boolean(s.moderator_active));
-    }
-  }
+  function popoverHtml() {
+    const s = state.session;
+    const id = state.openActorId;
+    const isMod = id === View.MODERATOR_ID;
+    const p = isMod ? null : View.participantOf(s, id);
+    if (!isMod && !p) return null;
 
-  function renderChannelsSidebar(s, force = false) {
-    const records = s.records || [];
-    const engineCount = records.filter((r) => r.stream === "engine").length;
-    const totalCount = records.length;
+    const name = isMod ? s.moderator.name : p.name;
+    const tags = isMod ? ["主持人"] : View.visibleTags(s, state.viewpoint, p);
+    const m = View.actorMetrics(s, id);
+    const seat = isMod ? undefined : p.seat;
+    const agentState = isMod ? s.moderator.state : p.state;
+    const showState = state.viewpoint === View.GOD || state.viewpoint === id;
+    const stateLabel =
+      showState && View.STATE_LABELS[agentState] ? View.STATE_LABELS[agentState] : "";
 
-    const sigParts = [
-      state.selectedChannel,
-      state.showToolCalls ? "tools1" : "tools0",
-      s.moderator_active ? "mod1" : "mod0",
-      `eng:${engineCount}`,
-      `tot:${totalCount}`,
-    ];
-
-    (s.channels || []).forEach((ch) => {
-      const chCount = records.filter(
-        (r) =>
-          r.channel_id === ch.id &&
-          (r.stream === "channel" || (state.showToolCalls && r.kind === "tool_call"))
-      ).length;
-      const qSig = Object.values(ch.interrupt_quotas || {})
-        .map((q) => `${q.player_id}:${q.used}/${q.max_count}`)
-        .join(",");
-      sigParts.push(`${ch.id}:${ch.status}:${(ch.members || []).length}:${chCount}:${qSig}`);
-    });
-
-    const sig = sigParts.join("|");
-    if (!force && sig === state.lastChannelsSig) {
-      return;
-    }
-    state.lastChannelsSig = sig;
-
-    const itemsHtml = [];
-
-    // 1. 主持人处理流 (Engine Stream)
-    const engineClasses = ["channel-item", "engine-stream"];
-    if (state.selectedChannel === "engine") engineClasses.push("active");
-    if (s.moderator_active) engineClasses.push("working");
-
-    itemsHtml.push(`
-      <div class="${engineClasses.join(" ")}" data-channel="engine">
-        <div class="channel-row-top">
-          <span class="channel-name">主持人处理流</span>
-          <span class="channel-badge engine">引擎</span>
-        </div>
-        <div class="channel-meta">分析与工具调用 &middot; ${engineCount} 条</div>
-        <div class="channel-members-preview">非频道 &middot; 无成员 &middot; 玩家永不可见</div>
-      </div>
-    `);
-
-    // 2. 全部 (All Records)
-    itemsHtml.push(`
-      <div class="channel-item ${
-        state.selectedChannel === "all" ? "active" : ""
-      }" data-channel="all">
-        <div class="channel-row-top">
-          <span class="channel-name">全部</span>
-        </div>
-        <div class="channel-meta">${totalCount} 条记录</div>
-      </div>
-    `);
-
-    // 3. Dynamic Channels created by Moderator
-    const channels = s.channels || [];
-    if (channels.length === 0) {
-      itemsHtml.push(`
-        <div class="empty-placeholder">
-          暂无会话频道<br/>对局启动后由主持人调用工具动态建立
-        </div>
-      `);
-    } else {
-      channels.forEach((ch) => {
-        const chRecords = records.filter(
-          (r) =>
-            r.channel_id === ch.id &&
-            (r.stream === "channel" || (state.showToolCalls && r.kind === "tool_call"))
-        );
-        const memberNames = (ch.members || []).map((m) =>
-          getActorDisplayName(s, m)
-        );
-        const statusLabel = ch.status === "open" ? "开放" : "关闭";
-
-        const quotas = Object.values(ch.interrupt_quotas || {});
-        const quotaHtml = quotas
+    const chips = tags.length
+      ? tags
           .map(
-            (q) =>
-              `<div class="channel-interrupt-pill">插话权: ${escapeHtml(
-                q.player_name
-              )}(${numText(q.used)}/${numText(q.max_count)})</div>`
+            (t) =>
+              `<span class="tag-badge ${escapeHtml(
+                isMod ? "warning" : View.tagVariant(s, t)
+              )}">${escapeHtml(t)}</span>`
           )
-          .join("");
+          .join("")
+      : `<span class="tag-badge muted">无公开标签</span>`;
 
-        itemsHtml.push(`
-          <div class="channel-item ${
-            state.selectedChannel === ch.id ? "active" : ""
-          }" data-channel="${escapeHtml(ch.id)}">
-            <div class="channel-row-top">
-              <span class="channel-name">${escapeHtml(ch.name)}</span>
-              <span class="channel-badge ${escapeHtml(ch.status)}">${statusLabel}</span>
-            </div>
-            <div class="channel-meta">${escapeHtml(ch.type)} &middot; ${numText(
-          memberNames.length
-        )} 人 &middot; ${numText(chRecords.length)} 条</div>
-            <div class="channel-members-preview">${escapeHtml(
-              memberNames.join("、")
-            )}</div>
-            ${quotaHtml}
-          </div>
-        `);
-      });
-    }
+    const stat = (value, label, extra = "") =>
+      `<div class="pop-stat${extra}"><span class="pop-stat-num">${value}</span><span class="pop-stat-label">${label}</span></div>`;
 
-    elChannelsList.innerHTML = itemsHtml.join("");
+    return (
+      `<div class="pop-head">${Avatar.glyphHtml(id, seat, { size: 26 })}` +
+      `<div class="pop-title"><span class="pop-name">${escapeHtml(name)}</span>` +
+      `<span class="pop-id">${escapeHtml(isMod ? "moderator" : id)}${
+        stateLabel ? ` · ${escapeHtml(stateLabel)}` : ""
+      }</span></div>` +
+      `<button type="button" class="pop-close" data-pop-close aria-label="关闭">✕</button></div>` +
+      `<div class="pop-tags">${chips}</div>` +
+      `<div class="pop-model"><span class="pop-label">模型</span>` +
+      `<span class="pop-model-text" title="${escapeHtml(bindingText(s, id))}">${escapeHtml(
+        bindingText(s, id)
+      )}</span>` +
+      `<button type="button" class="btn btn-xs" data-pop-bind="${escapeHtml(id)}">配置</button></div>` +
+      `<div class="pop-grid">` +
+      stat(numText(m.toolCalls), "工具调用") +
+      stat(numText(m.thinkingRounds), "思考次数") +
+      stat(numText(m.calls), "LLM 调用") +
+      stat(numText(m.rejections), "被拒绝") +
+      stat(Core.formatCount(m.promptTokens), "输入 token") +
+      stat(Core.formatCount(m.completionTokens), "输出 token") +
+      stat(escapeHtml(Core.formatCost(m.costUsd)), "费用", " pop-stat-wide") +
+      `</div>`
+    );
   }
 
-  function getActorDisplayName(s, actorId) {
-    if (actorId === "moderator") return "主持人";
-    const p = (s.participants || []).find((x) => x.id === actorId);
-    return p ? p.name : actorId;
+  function positionPopover() {
+    if (!elPopover || !state.openActorId) return;
+    const grid = elParticipantsGrid;
+    const tile =
+      grid && typeof grid.querySelector === "function"
+        ? grid.querySelector(`[data-actor="${cssEscape(state.openActorId)}"]`)
+        : null;
+    if (!tile || typeof tile.getBoundingClientRect !== "function") return;
+    const r = tile.getBoundingClientRect();
+    const pw = elPopover.offsetWidth || 300;
+    const ph = elPopover.offsetHeight || 230;
+    const vw = Number(window.innerWidth) || 1280;
+    const vh = Number(window.innerHeight) || 800;
+    const left = Math.min(Math.max(8, r.left), Math.max(8, vw - pw - 8));
+    let top = r.bottom + 6;
+    if (top + ph > vh - 8) top = Math.max(8, r.top - ph - 6);
+    elPopover.style.left = `${Math.round(left)}px`;
+    elPopover.style.top = `${Math.round(top)}px`;
   }
 
-  function groupRecordsIntoActionBundles(records) {
-    const bundles = [];
-    let curBundle = null;
-
-    for (let i = 0; i < records.length; i++) {
-      const r = records[i];
-      const aid = r.action_id || `legacy_${r.actor_id}_${r.id}`;
-
-      if (curBundle && curBundle.action_id === aid) {
-        curBundle.records.push(r);
-        curBundle.end_time = r.timestamp || curBundle.end_time;
-      } else {
-        if (curBundle) {
-          bundles.push(curBundle);
-        }
-        curBundle = {
-          action_id: aid,
-          action_type:
-            r.action_type || (r.actor_id === "moderator" ? "moderator" : "speak"),
-          actor_id: r.actor_id,
-          actor_name: r.actor_name,
-          channel_id: r.channel_id,
-          stream: r.stream,
-          start_time: r.timestamp,
-          end_time: r.timestamp,
-          records: [r],
-        };
-      }
-    }
-    if (curBundle) {
-      bundles.push(curBundle);
-    }
-    return bundles;
+  function closePopover() {
+    if (state.openActorId === null) return;
+    state.openActorId = null;
+    state.lastPopoverHtml = null;
+    renderPopover();
+    renderBoard(); // the tag loses its "open" look
   }
 
-  function isLevel1Expanded(actionId) {
-    if (state.level1Expanded.has(actionId)) {
-      return state.level1Expanded.get(actionId);
-    }
-    return true; // Level 1 default: expanded
+  function openPopover(actorId) {
+    state.openActorId = actorId;
+    renderPopover();
+    renderBoard();
   }
 
-  function isLevel2Expanded(r) {
-    if (r && state.level2Expanded.has(r.id)) {
-      return state.level2Expanded.get(r.id);
-    }
-    // Level 2 default: only speech message is expanded; thoughts, tool calls, and notes are collapsed
-    return r && r.kind === "message";
+  function togglePopover(actorId) {
+    if (state.openActorId === actorId) closePopover();
+    else openPopover(actorId);
   }
 
-  function renderSubitem(r, isMod) {
-    const isSubExpanded = isLevel2Expanded(r);
-    const isMsg = r.kind === "message";
-    const isThought = r.kind === "thought";
-    const isTool = r.kind === "tool_call";
-    const isNote = r.kind === "note";
-
-    // Subitem header badge
-    let badgeHtml = "";
-    if (isMsg) {
-      badgeHtml = `<span class="subitem-tag-speech">发言</span>`;
-    } else if (isThought) {
-      const cls = isMod ? "badge-mod-thought" : "badge-player-thought";
-      badgeHtml = `<span class="${cls}">思维链</span>`;
-    } else if (isTool) {
-      const cls = isMod ? "badge-mod-tool" : "badge-player-tool";
-      badgeHtml = `<span class="${cls}">工具调用</span>${
-        r.tool_name ? ` <strong class="tool-name">${escapeHtml(r.tool_name)}</strong>` : ""
-      }`;
-    } else if (isNote) {
-      const cls = isMod ? "badge-mod-thought" : "badge-player-thought";
-      badgeHtml = `<span class="${cls}">内部记录</span>`;
-    } else {
-      badgeHtml = `<span class="tag-badge neutral">${escapeHtml(r.kind || "记录")}</span>`;
-    }
-
-    // Subitem preview when collapsed
-    let subPreview = "";
-    if (!isSubExpanded) {
-      if (isTool) {
-        const argsStr = r.tool_args ? JSON.stringify(r.tool_args) : "";
-        subPreview = argsStr.length > 70 ? argsStr.slice(0, 70) + "..." : argsStr;
-      } else {
-        subPreview = stripMarkdownForPreview(r.content || "");
-        if (subPreview.length > 70) {
-          subPreview = subPreview.slice(0, 70) + "...";
-        }
-      }
-    }
-
-    // Subitem body when expanded
-    let bodyHtml = "";
-    if (isSubExpanded) {
-      if (isTool) {
-        bodyHtml = renderToolCallContent(r);
-      } else {
-        bodyHtml = renderFormattedText(r.content);
-      }
-    }
-
-    const subitemCls = [
-      "action-subitem",
-      isMsg ? "subitem-message" : isTool ? "subitem-tool" : isThought ? "subitem-thought" : "subitem-note",
-      isSubExpanded ? "expanded" : "collapsed",
-    ].join(" ");
-
-    return `
-      <div class="${subitemCls}" data-record-id="${escapeHtml(r.id)}">
-        <div class="subitem-header">
-          <span class="subitem-caret">${isSubExpanded ? "▼" : "▶"}</span>
-          ${badgeHtml}
-          ${!isSubExpanded ? `<span class="subitem-preview">${escapeHtml(subPreview)}</span>` : ""}
-          <span class="subitem-time">${escapeHtml(r.timestamp || "")}</span>
-        </div>
-        ${isSubExpanded ? `<div class="subitem-body formatted-text">${bodyHtml}</div>` : ""}
-      </div>
-    `;
-  }
-
-  function renderActionCard(b, isStreaming = false) {
-    const isMod = b.actor_id === "moderator";
-    const isCardExpanded = isLevel1Expanded(b.action_id);
-
-    // First preview text when Level 1 is collapsed
-    let previewText = "";
-    if (!isCardExpanded) {
-      const firstMsg = b.records.find((r) => r.kind === "message");
-      if (firstMsg) {
-        previewText = stripMarkdownForPreview(firstMsg.content);
-      } else if (b.records.length > 0) {
-        const firstRec = b.records[0];
-        if (firstRec.kind === "tool_call") {
-          previewText = `[工具调用: ${firstRec.tool_name || ""}]`;
-        } else {
-          previewText = stripMarkdownForPreview(firstRec.content || "");
-        }
-      }
-      if (previewText.length > 70) {
-        previewText = previewText.slice(0, 70) + "...";
-      }
-    }
-
-    const cardClass = [
-      "action-card",
-      isMod ? "moderator" : "player",
-      isCardExpanded ? "expanded" : "collapsed",
-      isStreaming ? "streaming" : "",
-    ].join(" ");
-
-    return `
-      <div class="${cardClass}" data-action-id="${escapeHtml(b.action_id)}">
-        <div class="action-card-header" data-action-id="${escapeHtml(b.action_id)}">
-          <span class="action-caret">${isCardExpanded ? "▼" : "▶"}</span>
-          <span class="action-actor-name">${escapeHtml(
-            b.actor_name || b.actor_id
-          )}</span>
-          ${
-            b.channel_id
-              ? `<span class="action-channel-pill">${escapeHtml(
-                  b.channel_id
-                )}</span>`
-              : ""
-          }
-          ${
-            !isCardExpanded
-              ? `<span class="action-preview">${escapeHtml(previewText)}</span>`
-              : ""
-          }
-          <span class="action-time">${escapeHtml(
-            b.end_time || b.start_time || ""
-          )}</span>
-        </div>
-
-        ${
-          isCardExpanded
-            ? `
-          <div class="action-card-body">
-            ${b.records.map((r) => renderSubitem(r, isMod)).join("")}
-          </div>
-        `
-            : ""
-        }
-      </div>
-    `;
-  }
-
-  function filterFeedRecords(s) {
-    const records = s.records || [];
-    const sel = state.selectedChannel;
-
-    return records.filter((rec) => {
-      if (rec.kind === "tool_call" && !state.showToolCalls && sel !== "engine") {
-        return false;
-      }
-      if (sel === "engine") {
-        return rec.stream === "engine";
-      }
-      if (sel === "all") {
-        return true;
-      }
-      return rec.channel_id === sel;
-    });
-  }
-
-  // Make `container`'s element children match `htmlList` (one root element per
-  // entry), touching only entries whose HTML differs from the previous call.
-  function patchChildren(container, htmlList) {
-    const prev = container.__patchHtml || [];
-    const tpl = document.createElement("template");
-    for (let i = 0; i < htmlList.length; i++) {
-      const existing = container.children[i];
-      if (existing && prev[i] === htmlList[i]) continue;
-      tpl.innerHTML = htmlList[i];
-      // Every entry must yield exactly one element so indexes stay aligned.
-      const node = tpl.content.firstElementChild || document.createElement("span");
-      if (existing) container.replaceChild(node, existing);
-      else container.appendChild(node);
-    }
-    while (container.children.length > htmlList.length) {
-      container.lastElementChild.remove();
-    }
-    container.__patchHtml = htmlList.slice();
-  }
-
-  function renderFeed(s, force = false) {
-    const sel = state.selectedChannel;
-    if (sel === "engine") {
-      elFeedChannelLabel.textContent = "频道: 主持人处理流 (内部引擎)";
-    } else if (sel === "all") {
-      elFeedChannelLabel.textContent = "频道: 全部记录";
-    } else {
-      elFeedChannelLabel.textContent = `频道: ${sel}`;
-    }
-
-    const filtered = filterFeedRecords(s);
-    const bundles = groupRecordsIntoActionBundles(filtered);
-    const expandedSig = bundles
-      .map(
-        (b) =>
-          `${b.action_id}:${isLevel1Expanded(b.action_id) ? 1 : 0}:[${b.records
-            .map((r) => `${r.id}:${isLevel2Expanded(r) ? 1 : 0}`)
-            .join(",")}]`
-      )
-      .join(";");
-    const recordsSig = `${sel}|${state.showToolCalls ? 1 : 0}|${filtered.length}|${expandedSig}`;
-
-    if (force || recordsSig !== state.lastRecordsSig) {
-      state.lastRecordsSig = recordsSig;
-      const blocksHtml = [];
-
-      if (bundles.length === 0 && !s.streaming_draft) {
-        blocksHtml.push(`
-          <div class="empty-placeholder">
-            当前暂无发言或思考记录 — 点击右上角「开始」后，主持人将深度学习游戏规则并调用工具创建频道、分配身份、推进对局
-          </div>
-        `);
-      } else {
-        bundles.forEach((bundle) => {
-          blocksHtml.push(renderActionCard(bundle));
-        });
-      }
-
-      // Patch only the cards that changed instead of rewriting the whole feed.
-      patchChildren(elFeedRecordsContainer, blocksHtml);
-    }
-
-    renderStreamingDraft(s);
-
-    if (state.autoScroll) {
-      elFeedList.scrollTop = elFeedList.scrollHeight;
-    }
-  }
-
-  // Replace `container`'s children with the given blocks, rewriting only the
-  // blocks whose HTML changed (streaming text grows by appending, so usually
-  // just the last block is touched).
-  function patchBlocks(container, blocks) {
-    patchChildren(container, blocks);
-  }
-
-  function draftStructureSig(d, aid, expanded) {
-    return [
-      expanded ? 1 : 0,
-      d.actor_id === "moderator" ? "m" : "p",
-      d.actor_name || d.actor_id || "",
-      d.channel_id || "",
-      d.thought_text ? 1 : 0,
-      d.content_text ? 1 : 0,
-      aid,
-    ].join("\u0001");
-  }
-
-  function buildDraftCardHtml(d, aid, expanded) {
-    const isMod = d.actor_id === "moderator";
-    const subitems = [];
-    if (expanded && d.thought_text) {
-      subitems.push(`
-        <div class="action-subitem subitem-thought expanded" data-record-id="${escapeHtml(aid)}_thought">
-          <div class="subitem-header">
-            <span class="subitem-caret">▼</span>
-            <span class="${isMod ? "badge-mod-thought" : "badge-player-thought"}">思维链</span>
-            <span class="subitem-time">思考中...</span>
-          </div>
-          <div class="subitem-body formatted-text" data-draft-part="thought"></div>
-        </div>`);
-    }
-    if (expanded && d.content_text) {
-      subitems.push(`
-        <div class="action-subitem subitem-message expanded" data-record-id="${escapeHtml(aid)}_content">
-          <div class="subitem-header">
-            <span class="subitem-caret">▼</span>
-            <span class="subitem-tag-speech">发言</span>
-            <span class="subitem-time">发言生成中...</span>
-          </div>
-          <div class="subitem-body formatted-text" data-draft-part="content"></div>
-        </div>`);
-    }
-    return `
-      <div class="action-card ${isMod ? "moderator" : "player"} streaming ${
-      expanded ? "expanded" : "collapsed"
-    }" data-action-id="${escapeHtml(aid)}">
-        <div class="action-card-header" data-action-id="${escapeHtml(aid)}">
-          <span class="action-caret">${expanded ? "▼" : "▶"}</span>
-          <span class="action-actor-name">${escapeHtml(d.actor_name || d.actor_id)}</span>
-          ${
-            d.channel_id
-              ? `<span class="action-channel-pill">${escapeHtml(d.channel_id)}</span>`
-              : ""
-          }
-          <span class="action-time">行动中...</span>
-        </div>
-        ${expanded ? `<div class="action-card-body">${subitems.join("")}</div>` : ""}
-      </div>`;
-  }
-
-  // Streaming drafts are updated in place: a card is only rebuilt when its
-  // structure changes; per-chunk updates patch the changed text blocks only.
-  function renderStreamingDraft(s) {
-    const sel = state.selectedChannel;
-    const drafts = [];
-    if (s.streaming_draft) {
-      drafts.push(s.streaming_draft);
-    }
-    if (
-      s.concurrent_streaming_drafts &&
-      typeof s.concurrent_streaming_drafts === "object"
-    ) {
-      Object.values(s.concurrent_streaming_drafts).forEach((d) => {
-        if (d && !drafts.some((x) => x.actor_id === d.actor_id)) {
-          drafts.push(d);
-        }
-      });
-    }
-
-    const visibleDrafts = drafts.filter((d) => {
-      if (sel === "all") return true;
-      if (sel === "engine") return d.stream === "engine";
-      return d.channel_id === sel;
-    });
-
-    const container = elFeedStreamingContainer;
-    if (visibleDrafts.length === 0) {
-      if (state.draftNodes.size > 0 || container.firstChild) {
-        while (container.lastElementChild) container.lastElementChild.remove();
-        state.draftNodes.clear();
-      }
+  function renderPopover() {
+    if (!elPopover) return;
+    if (!state.openActorId) {
+      elPopover.hidden = true;
       return;
     }
+    const html = popoverHtml();
+    if (html === null) {
+      // the actor disappeared (new game): close quietly
+      state.openActorId = null;
+      elPopover.hidden = true;
+      return;
+    }
+    if (html !== state.lastPopoverHtml) {
+      state.lastPopoverHtml = html;
+      elPopover.innerHTML = html;
+    }
+    elPopover.hidden = false;
+    positionPopover();
+  }
 
-    const seen = new Set();
-    visibleDrafts.forEach((d, idx) => {
-      const aid = d.action_id || `draft_${d.actor_id}`;
-      let key = aid;
-      while (seen.has(key)) key += "#";
-      seen.add(key);
+  // ---------------------------------------------------------------------------
+  // Rendering: channel bar (floor status, unread, tickets)
+  // ---------------------------------------------------------------------------
 
-      const expanded = isLevel1Expanded(aid);
-      const sig = draftStructureSig(d, aid, expanded);
-      let entry = state.draftNodes.get(key);
+  function unreadBadge(n) {
+    return n > 0 ? `<span class="channel-unread" title="${numText(n)} 条未读">${numText(n > 99 ? 99 : n)}${n > 99 ? "+" : ""}</span>` : "";
+  }
 
-      if (!entry || entry.sig !== sig || !entry.el.isConnected) {
-        const tpl = document.createElement("template");
-        tpl.innerHTML = buildDraftCardHtml(d, aid, expanded);
-        const el = tpl.content.firstElementChild;
-        if (entry && entry.el.parentNode === container) {
-          container.replaceChild(el, entry.el);
-        } else {
-          container.appendChild(el);
-        }
-        entry = { el, sig };
-        state.draftNodes.set(key, entry);
-      }
+  function channelItemHtml(ch, unread, compact) {
+    const sum = View.floorSummary(state.session, ch);
+    const active = state.selectedChannel === ch.id;
+    const n = unread.byChannel[ch.id] || 0;
+    const chip = sum.icon
+      ? `<span class="floor-chip floor-${sum.kind}" title="${escapeHtml(sum.detail || sum.text)}">${sum.icon} ${escapeHtml(
+          sum.text
+        )}</span>`
+      : "";
+    const detail = sum.detail ? `<div class="channel-detail">${escapeHtml(sum.detail)}</div>` : "";
+    const owner = ch.owner ? View.actorLabel(state.session, ch.owner) : "";
+    const meta = compact
+      ? `<span class="channel-members">${escapeHtml(owner)}</span>`
+      : `<span class="channel-members">${numText(ch.members.length)} 人</span>`;
+    return (
+      `<div class="channel-item${compact ? " compact" : ""}${active ? " active" : ""}${n ? " has-unread" : ""}"` +
+      ` data-channel="${escapeHtml(ch.id)}" title="${escapeHtml(ch.name)}（${escapeHtml(ch.id)}）">` +
+      `<div class="channel-row-top"><span class="channel-name">${escapeHtml(ch.name)}</span>${unreadBadge(n)}</div>` +
+      `<div class="channel-meta">${chip}${meta}</div>${detail}</div>`
+    );
+  }
 
-      // Keep DOM order equal to draft order.
-      if (container.children[idx] !== entry.el) {
-        container.insertBefore(entry.el, container.children[idx] || null);
-      }
+  function ticketHtml(t) {
+    const s = state.session;
+    const st = View.ticketStatus(t);
+    const preview = String(t.preview || "");
+    return (
+      `<div class="ticket-item ticket-${st.cls}" data-ticket="${escapeHtml(t.id)}" data-channel="${escapeHtml(
+        View.ticketChannelId(s, t)
+      )}" title="点击定位到该玩家与主持人的私聊">` +
+      `<div class="ticket-row"><span class="ticket-id">${escapeHtml(t.id)}</span>` +
+      `<span class="ticket-who">${escapeHtml(View.actorLabel(s, t.player_id))}</span>` +
+      `<span class="ticket-status ts-${st.cls}">${escapeHtml(st.text)}</span></div>` +
+      `<div class="ticket-preview">${escapeHtml(preview)}</div></div>`
+    );
+  }
 
-      if (expanded) {
-        const thoughtEl = entry.el.querySelector('[data-draft-part="thought"]');
-        if (thoughtEl) patchBlocks(thoughtEl, renderFormattedBlocks(d.thought_text));
-        const contentEl = entry.el.querySelector('[data-draft-part="content"]');
-        if (contentEl) patchBlocks(contentEl, renderFormattedBlocks(d.content_text));
-      }
-    });
+  function renderChannels() {
+    const s = state.session;
+    const vp = state.viewpoint;
+    const unread = View.unreadCounts(s, vp, state.read);
+    const { groups, dms } = View.channelGroups(s, vp);
+    const tickets = View.visibleTickets(s, vp);
+    const total = View.visibleMessages(s, vp, "all").length;
 
-    // Drop cards for drafts that finished or are no longer visible.
-    for (const [key, entry] of Array.from(state.draftNodes.entries())) {
-      if (!seen.has(key)) {
-        entry.el.remove();
-        state.draftNodes.delete(key);
-      }
+    const html = [];
+    html.push(
+      `<div class="channel-item all-item${state.selectedChannel === "all" ? " active" : ""}${
+        unread.total ? " has-unread" : ""
+      }" data-channel="all">` +
+        `<div class="channel-row-top"><span class="channel-name">全部</span>${unreadBadge(unread.total)}</div>` +
+        `<div class="channel-meta"><span class="channel-members">${numText(total)} 条发言</span></div></div>`
+    );
+
+    if (groups.length === 0 && dms.length === 0) {
+      html.push(
+        `<div class="empty-placeholder">暂无频道<br/>对局启动后由主持人调用工具建立</div>`
+      );
+    }
+    for (const ch of groups) html.push(channelItemHtml(ch, unread, false));
+
+    if (dms.length) {
+      const selectedIsDm = dms.some((c) => c.id === state.selectedChannel);
+      const open = state.dmGroupOpen || selectedIsDm;
+      const dmUnread = dms.reduce((n, c) => n + (unread.byChannel[c.id] || 0), 0);
+      html.push(
+        `<div class="channel-group-title" data-dm-toggle role="button" tabindex="0" aria-expanded="${open}">` +
+          `<span class="group-caret">${open ? "▼" : "▶"}</span>私聊 <span class="group-count">${numText(
+            dms.length
+          )}</span>${open ? "" : unreadBadge(dmUnread)}</div>`
+      );
+      if (open) for (const ch of dms) html.push(channelItemHtml(ch, unread, true));
+    }
+
+    if (tickets.length) {
+      const openCount = tickets.filter((t) => t.status !== "resolved").length;
+      html.push(
+        `<div class="channel-group-title tickets-title">质询工单 <span class="group-count">${numText(
+          tickets.length
+        )}</span>${openCount ? `<span class="ticket-open-count">${numText(openCount)} 待处理</span>` : ""}</div>`
+      );
+      for (const t of tickets) html.push(ticketHtml(t));
+    }
+
+    const out = html.join("");
+    if (out !== state.lastChannelsHtml) {
+      state.lastChannelsHtml = out;
+      elChannelsList.innerHTML = out;
     }
   }
 
-  function renderDashboard(s) {
-    const dash = s.dashboard || {};
+  // ---------------------------------------------------------------------------
+  // Rendering: feed (speech only, one block per committed message)
+  // ---------------------------------------------------------------------------
+
+  function appendEllipsis(html) {
+    const mark = `<span class="msg-trunc" title="发言超出字数上限，已被截断">…</span>`;
+    return /<\/p>$/.test(html) ? html.replace(/<\/p>$/, `${mark}</p>`) : html + mark;
+  }
+
+  function channelName(s, channelId) {
+    if (channelId === null || channelId === undefined || channelId === "") return "";
+    const ch = Store.findById(s.channels, channelId);
+    return ch ? ch.name : String(channelId);
+  }
+
+  function messageHtml(m) {
+    const s = state.session;
+    const chName = channelName(s, m.channel_id);
+    const cacheKey = `${m.seq}\u0001${chName}`;
+    const cached = state.msgHtml.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const info = View.messageKindInfo(m.kind);
+    const sender = View.participantOf(s, m.from);
+    const glyph = Avatar.glyphHtml(m.from, sender ? sender.seat : undefined, { size: 22 });
+    const name = m.from_name || View.displayName(s, m.from);
+    const time = Core.formatClockTime(m.ts);
+    let body = Core.renderFormattedText(m.content) || `<p class="fmt-p"></p>`;
+    if (Store.isTruncated(m)) body = appendEllipsis(body);
+
+    const classes = ["msg", `msg-kind-${info.cls}`];
+    if (m.from === View.MODERATOR_ID) classes.push("msg-moderator");
+    if (m.from === View.ENGINE_ID) classes.push("msg-engine");
+    const label = info.label
+      ? `<span class="msg-kind-badge kind-${info.cls}"${
+          m.template_id ? ` title="模板：${escapeHtml(m.template_id)}"` : ""
+        }>${escapeHtml(info.label)}</span>`
+      : "";
+    const ticket = m.ticket_id
+      ? `<span class="msg-ticket" title="质询工单">#${escapeHtml(m.ticket_id)}</span>`
+      : "";
+    const chip = chName
+      ? `<span class="msg-chan" data-channel="${escapeHtml(m.channel_id)}" title="只看这个频道">${escapeHtml(
+          chName
+        )}</span>`
+      : "";
+
+    const html =
+      `<article class="${classes.join(" ")}" data-seq="${numText(m.seq)}"` +
+      ` data-from="${escapeHtml(m.from)}"${m.ticket_id ? ` data-ticket-msg="${escapeHtml(m.ticket_id)}"` : ""}>` +
+      `<div class="msg-avatar">${glyph}</div>` +
+      `<div class="msg-main"><div class="msg-head"><span class="msg-name">${escapeHtml(name)}</span>` +
+      `${chip}${label}${ticket}<span class="msg-time">${escapeHtml(time)}</span></div>` +
+      `<div class="msg-body formatted-text">${body}</div></div></article>`;
+    Core.boundedSet(state.msgHtml, cacheKey, html, MESSAGE_HTML_CACHE_MAX);
+    return html;
+  }
+
+  function appendMessageNode(html) {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    const node = tpl.content && tpl.content.firstElementChild;
+    if (node) elFeedRecords.appendChild(node);
+  }
+
+  function emptyFeedHtml(s) {
+    if (state.viewpoint !== View.GOD) {
+      return `<div class="empty-placeholder">${escapeHtml(
+        View.viewpointLabel(s, state.viewpoint)
+      )} 还没有看到任何发言</div>`;
+    }
+    return `<div class="empty-placeholder">当前暂无发言 — 点击右上角「开始」后，主持人会建立频道并推进对局；这里只显示发言，思维链与工具调用只写入日志</div>`;
+  }
+
+  function renderFeed(force = false) {
+    const s = state.session;
+    const sel = state.selectedChannel;
+    elFeedChannelLabel.textContent =
+      sel === "all" ? "频道: 全部记录" : `频道: ${channelName(s, sel)}`;
+
+    const messages = View.visibleMessages(s, state.viewpoint, sel);
+    // Channel names are part of every block (the channel chip): a rename / new channel repaints.
+    const names = s.channels.map((c) => `${c.id}:${c.name}`).join(",");
+    const key = `${s.session_id}|${state.viewpoint}|${sel}|${names}`;
+    const last = state.feed;
+    const lastSeq = messages.length ? messages[messages.length - 1].seq : 0;
+    const sameKey = !force && last.key === key;
+
+    if (
+      sameKey &&
+      last.count > 0 &&
+      messages.length >= last.count &&
+      messages[last.count - 1].seq === last.lastSeq
+    ) {
+      // Whole messages arrive one at a time: append only the new blocks (no streaming, no patching).
+      for (let i = last.count; i < messages.length; i++) appendMessageNode(messageHtml(messages[i]));
+    } else if (sameKey && last.count === messages.length && last.lastSeq === lastSeq) {
+      // nothing changed for this view
+    } else {
+      elFeedRecords.innerHTML = messages.length
+        ? messages.map(messageHtml).join("")
+        : emptyFeedHtml(s);
+    }
+    state.feed = { key, count: messages.length, lastSeq };
+
+    if (state.autoScroll) elFeedList.scrollTop = elFeedList.scrollHeight;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering: dashboard (right column)
+  // ---------------------------------------------------------------------------
+
+  function renderDashboard() {
+    const dash = state.session.dashboard || {};
     const factions = dash.factions || [];
     const tagStats = dash.tag_stats || [];
 
@@ -1044,11 +742,10 @@
               (f) => `
           <div class="stat-row">
             <span>${escapeHtml(f.name)}</span>
-            <span class="stat-value ${escapeHtml(f.variant || "neutral")}">${numText(
-                f.alive
-              )} / ${numText(f.total)}</span>
-          </div>
-        `
+            <span class="stat-value ${escapeHtml(f.variant || "neutral")}">${numText(f.alive)} / ${numText(
+                f.total
+              )}</span>
+          </div>`
             )
             .join("");
 
@@ -1060,11 +757,8 @@
               (t) => `
           <div class="stat-row">
             <span>${escapeHtml(t.name)}</span>
-            <span class="stat-value ${escapeHtml(t.variant || "neutral")}">${numText(
-                t.count
-              )}</span>
-          </div>
-        `
+            <span class="stat-value ${escapeHtml(t.variant || "neutral")}">${numText(t.count)}</span>
+          </div>`
             )
             .join("");
 
@@ -1076,65 +770,270 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Event Delegation (Immune to SSE DOM Refreshes)
+  // Render scheduling (coalesce bursts of SSE events: at most one paint per frame)
   // ---------------------------------------------------------------------------
 
-  function handleChannelSelectEvent(evt) {
-    if (evt.type === "mousedown" && evt.button !== 0) return;
-    const item = evt.target.closest(".channel-item[data-channel]");
-    if (!item) return;
-    const chId = item.getAttribute("data-channel");
-    if (chId && state.selectedChannel !== chId) {
-      state.selectedChannel = chId;
-      if (state.session) {
-        renderChannelsSidebar(state.session, true);
-        renderFeed(state.session, true);
+  const renderQueue = { pending: false, dirty: Store.newDirty(false), force: false };
+
+  function renderNow(dirty, force = false) {
+    const d = dirty || Store.newDirty(true);
+    if (d.topbar) renderTopbar();
+    if (d.board) renderBoard();
+    if (d.channels) renderChannels();
+    if (d.feed) renderFeed(force);
+    if (d.dashboard) renderDashboard();
+    if (d.popover) renderPopover();
+  }
+
+  function renderAll(force = false) {
+    renderNow(Store.newDirty(true), force);
+  }
+
+  function scheduleRender(dirty, force = false) {
+    Store.mergeDirty(renderQueue.dirty, dirty);
+    renderQueue.force = renderQueue.force || force;
+    if (renderQueue.pending) return;
+    renderQueue.pending = true;
+    const run = () => {
+      renderQueue.pending = false;
+      const d = renderQueue.dirty;
+      const f = renderQueue.force;
+      renderQueue.dirty = Store.newDirty(false);
+      renderQueue.force = false;
+      try {
+        renderNow(d, f);
+      } catch (e) {
+        console.error("Render failed", e);
       }
+    };
+    if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(run);
+    else window.setTimeout(run, 16);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session store glue
+  // ---------------------------------------------------------------------------
+
+  function loadViewpointPref() {
+    try {
+      const v = localStorage.getItem(VIEWPOINT_KEY);
+      if (v) state.viewpointPref = v;
+    } catch {
+      /* storage unavailable: default to god */
     }
   }
 
-  elChannelsList.addEventListener("mousedown", handleChannelSelectEvent);
-  elChannelsList.addEventListener("click", handleChannelSelectEvent);
+  function saveViewpointPref(v) {
+    try {
+      localStorage.setItem(VIEWPOINT_KEY, v);
+    } catch {
+      /* ignore */
+    }
+  }
 
-  function handleFeedClick(evt) {
-    if (
-      window.getSelection &&
-      window.getSelection().toString().trim().length > 0
-    ) {
+  /** Switch the spectator viewpoint. Pure front-end: nothing is requested from the server. */
+  function setViewpoint(id, persist = true) {
+    const vp = View.normalizeViewpoint(state.session, id);
+    state.viewpointPref = vp;
+    state.viewpoint = vp;
+    if (persist) saveViewpointPref(vp);
+    state.selectedChannel = View.normalizeSelectedChannel(state.session, vp, state.selectedChannel);
+    state.autoScroll = true;
+    state.feed.key = ""; // different message set: re-render the feed
+    renderAll(true);
+  }
+
+  /** Replace the whole session (snapshot, state fetch, control / import / load response). */
+  function replaceSession(next) {
+    const prevKey = state.sessionKey;
+    const key = next.session_id || null;
+    state.session = next;
+    state.sessionKey = key;
+    state.loaded = true;
+    if (key !== prevKey) {
+      // A different game: forget selection, unread marks and cached message HTML.
+      state.selectedChannel = "all";
+      state.msgHtml.clear();
+      resetReadState(next);
+    } else if (!state.read.baseline) {
+      resetReadState(next);
+    }
+    state.viewpoint = View.normalizeViewpoint(next, state.viewpointPref);
+    state.selectedChannel = View.normalizeSelectedChannel(next, state.viewpoint, state.selectedChannel);
+    if (state.openActorId && state.openActorId !== View.MODERATOR_ID && !View.participantOf(next, state.openActorId)) {
+      state.openActorId = null;
+    }
+    if (providerUI) providerUI.onSession(next);
+    if (workspaceUI) workspaceUI.onSession(next);
+    // The feed compares what it already shows (view key + count + last seq), so an identical
+    // snapshot after a reconnect does not rebuild the list or move the scroll position.
+    scheduleRender(Store.newDirty(true));
+  }
+
+  /** A whole session from an HTTP response; ignored when the SSE stream is already ahead of it. */
+  function adoptHttpSession(raw, opts = {}) {
+    if (!raw || typeof raw !== "object") return false;
+    const incoming = Store.normalizeSession(raw);
+    if (!opts.force && !Store.shouldAdoptHttpSession(state.session, incoming, state.lastEventId)) {
+      return false;
+    }
+    const differentGame = incoming.session_id !== state.session.session_id;
+    if (differentGame) state.lastEventId = incoming.event_id > 0 ? incoming.event_id : 0;
+    else if (incoming.event_id > state.lastEventId) state.lastEventId = incoming.event_id;
+    replaceSession(incoming);
+    return true;
+  }
+
+  const PROVIDER_RELEVANT = new Set(["session.updated", "game.status"]);
+
+  /** Apply one SSE v2 event {id, type, data}. */
+  function handleEvent(payload) {
+    if (!payload || typeof payload !== "object" || !payload.type) return;
+    if (Store.isStaleEvent(state.lastEventId, payload)) return; // replayed after a reconnect
+    const id = Store.eventIdOf(payload, NaN);
+    const result = Store.applyEvent(state.session, payload);
+
+    if (result.replaced) {
+      state.lastEventId = Number.isFinite(id) ? id : result.session.event_id;
+      state.sseResumeId = state.lastEventId;
+      replaceSession(result.session);
       return;
     }
-
-    // Level 2 toggle: clicking a subitem header inside an action
-    const subHeader = evt.target.closest(".subitem-header");
-    if (subHeader) {
-      const subitem = subHeader.closest(".action-subitem");
-      const rid = subitem ? subitem.getAttribute("data-record-id") : null;
-      if (rid && state.session) {
-        const rec = (state.session.records || []).find((x) => x.id === rid);
-        const curExpanded = isLevel2Expanded(rec || { id: rid, kind: "message" });
-        boundedSet(state.level2Expanded, rid, !curExpanded, MAX_EXPAND_ENTRIES);
-        renderFeed(state.session, true);
-        return;
-      }
+    if (Number.isFinite(id) && id > 0) {
+      if (id > state.lastEventId) state.lastEventId = id;
+      if (id > state.sseResumeId) state.sseResumeId = id;
+      if (id > state.session.event_id) state.session.event_id = id;
     }
+    if (result.reload) {
+      // A workspace switch changes providers, templates and sessions for the whole
+      // server process; every tab must rebuild its UI instead of merging a session.
+      if (typeof window.location.reload === "function") window.location.reload();
+      return;
+    }
+    if (result.toast) showToast(result.toast);
+    if (result.message) onMessageSeen(result.message);
+    if (result.flash) flashActor(result.flash);
+    if (PROVIDER_RELEVANT.has(payload.type)) {
+      if (providerUI) providerUI.onSession(state.session);
+      if (workspaceUI) workspaceUI.onSession(state.session);
+    }
+    scheduleRender(result.dirty);
+  }
 
-    // Level 1 toggle: clicking action card header
-    const cardHeader = evt.target.closest(".action-card-header");
-    if (cardHeader) {
-      const aid = cardHeader.getAttribute("data-action-id");
-      if (aid && state.session) {
-        boundedSet(state.level1Expanded, aid, !isLevel1Expanded(aid), MAX_EXPAND_ENTRIES);
-        renderFeed(state.session, true);
+  // ---------------------------------------------------------------------------
+  // Event delegation (immune to the periodic DOM refreshes)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Activate on mousedown AND click. The board / channel list can be repainted
+   * between a mousedown and its mouseup, which would swallow the click; the click
+   * that does arrive right after a handled mousedown is skipped.
+   */
+  function bindPress(container, selector, keyAttr, handler) {
+    if (!container) return;
+    let recent = { key: null, at: 0 };
+    container.addEventListener("mousedown", (evt) => {
+      if (evt.button !== undefined && evt.button !== 0) return;
+      const node = closestFrom(evt.target, selector);
+      if (!node) return;
+      recent = { key: node.getAttribute(keyAttr), at: Date.now() };
+      handler(node, evt);
+    });
+    container.addEventListener("click", (evt) => {
+      const node = closestFrom(evt.target, selector);
+      if (!node) return;
+      const key = node.getAttribute(keyAttr);
+      if (recent.key !== null && recent.key === key && Date.now() - recent.at < 800) {
+        recent = { key: null, at: 0 };
         return;
       }
+      handler(node, evt);
+    });
+  }
+
+  function selectChannel(id) {
+    const next = View.normalizeSelectedChannel(state.session, state.viewpoint, id);
+    state.selectedChannel = next;
+    markChannelRead(next);
+    state.autoScroll = true;
+    renderNow({ ...Store.newDirty(false), channels: true, feed: true }, true);
+  }
+
+  function locateTicket(ticketId, channelId) {
+    selectChannel(channelId);
+    state.autoScroll = false;
+    const node =
+      elFeedRecords && typeof elFeedRecords.querySelector === "function"
+        ? elFeedRecords.querySelector(`[data-ticket-msg="${cssEscape(ticketId)}"]`)
+        : null;
+    if (node) {
+      if (typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "center" });
+      node.classList.add("msg-flash");
+      setTimeout(() => node.classList.remove("msg-flash"), 1800);
     }
   }
 
-  elFeedRecordsContainer.addEventListener("click", handleFeedClick);
-  elFeedStreamingContainer.addEventListener("click", handleFeedClick);
+  bindPress(elChannelsList, ".channel-item[data-channel]", "data-channel", (node) =>
+    selectChannel(node.getAttribute("data-channel"))
+  );
+  bindPress(elChannelsList, ".ticket-item[data-ticket]", "data-ticket", (node) =>
+    locateTicket(node.getAttribute("data-ticket"), node.getAttribute("data-channel"))
+  );
+  bindPress(elChannelsList, "[data-dm-toggle]", "data-dm-toggle", () => {
+    state.dmGroupOpen = !state.dmGroupOpen;
+    renderNow({ ...Store.newDirty(false), channels: true });
+  });
+  bindPress(elParticipantsGrid, "[data-tag-actor]", "data-tag-actor", (node) =>
+    togglePopover(node.getAttribute("data-tag-actor"))
+  );
+
+  // The channel chip on a message filters the feed to that channel.
+  elFeedRecords.addEventListener("click", (evt) => {
+    if (window.getSelection && window.getSelection().toString().trim().length > 0) return;
+    const chip = closestFrom(evt.target, ".msg-chan[data-channel]");
+    if (chip) selectChannel(chip.getAttribute("data-channel"));
+  });
+
+  if (elPopover) {
+    elPopover.addEventListener("click", (evt) => {
+      if (closestFrom(evt.target, "[data-pop-close]")) {
+        closePopover();
+        return;
+      }
+      const bind = closestFrom(evt.target, "[data-pop-bind]");
+      if (bind) {
+        const actor = bind.getAttribute("data-pop-bind");
+        closePopover();
+        if (providerUI) providerUI.openBindings(actor);
+      }
+    });
+  }
+
+  // Click outside the popover (and not on a tag) or Esc closes it.
+  if (typeof document.addEventListener === "function") {
+    document.addEventListener("click", (evt) => {
+      if (!state.openActorId) return;
+      if (closestFrom(evt.target, "#metrics-popover") || closestFrom(evt.target, "[data-tag-actor]")) return;
+      closePopover();
+    });
+    document.addEventListener("keydown", (evt) => {
+      if (evt && evt.key === "Escape" && state.openActorId) closePopover();
+    });
+  }
+  if (typeof window.addEventListener === "function") {
+    window.addEventListener("resize", () => {
+      if (state.openActorId) positionPopover();
+    });
+  }
+
+  elFeedList.addEventListener("scroll", () => {
+    const nearBottom =
+      elFeedList.scrollHeight - elFeedList.scrollTop - elFeedList.clientHeight < 60;
+    state.autoScroll = nearBottom;
+  });
 
   // ---------------------------------------------------------------------------
-  // Event Handlers & API Calls
+  // Controls
   // ---------------------------------------------------------------------------
 
   elBtnTheme.addEventListener("click", () => {
@@ -1144,31 +1043,46 @@
     htmlEl.setAttribute("data-theme", next);
   });
 
-  elBtnNew.addEventListener("click", async () => {
+  if (elSelectViewpoint) {
+    elSelectViewpoint.addEventListener("change", () => setViewpoint(elSelectViewpoint.value));
+  }
+
+  /** POST a control endpoint and adopt the session in its response. */
+  async function control(path, okMessage) {
     try {
-      const res = await apiPost("api/control/new");
-      setSession(res.session);
-      resetExpandState();
-      state.selectedChannel = "all";
-      renderAll(true);
-      showToast("已重置为空白未开始对局，点击「开始」由主持人初始化并推进");
+      const res = await apiPost(path);
+      if (res && res.session) adoptHttpSession(res.session, { force: path === "api/control/new" });
+      if (okMessage) showToast(okMessage);
+      return true;
     } catch (err) {
       showToast(err.message);
+      return false;
+    }
+  }
+
+  elBtnNew.addEventListener("click", async () => {
+    const ok = await control("api/control/new", "已重置为空白未开始对局，点击「开始」由主持人初始化并推进");
+    if (ok) {
+      state.selectedChannel = "all";
+      renderAll(true);
     }
   });
 
-  if (elBtnShuffle) {
-    elBtnShuffle.addEventListener("click", async () => {
-      try {
-        const res = await apiPost("api/control/shuffle-identities");
-        setSession(res.session);
-        renderAll(true);
-        showToast("已刷新初始身份洗牌种子");
-      } catch (err) {
-        showToast(err.message);
-      }
-    });
-  }
+  elBtnStart.addEventListener("click", () =>
+    control("api/control/start", "对局已启动 — 主持人开始建立频道并推进对局")
+  );
+
+  elBtnResume.addEventListener("click", () => {
+    const finished = state.session.status === "finished";
+    return control(
+      "api/control/start",
+      finished ? "已在终局后继续：主持人和玩家重新开始行动" : "对局已继续运行"
+    );
+  });
+
+  elBtnPause.addEventListener("click", () =>
+    control("api/control/pause", "已暂停：所有 Agent 已停止，计时冻结")
+  );
 
   elBtnSave.addEventListener("click", async () => {
     try {
@@ -1193,95 +1107,6 @@
     }
   });
 
-  elBtnStart.addEventListener("click", async () => {
-    try {
-      const res = await apiPost("api/control/start");
-      setSession(res.session);
-      renderAll(true);
-      showToast("对局已启动 — 主持人正在深度学习规则并初始化全场");
-    } catch (err) {
-      showToast(err.message);
-    }
-  });
-
-  elBtnResume.addEventListener("click", async () => {
-    try {
-      const res = await apiPost("api/control/start");
-      setSession(res.session);
-      renderAll(true);
-      showToast("对局已继续运行");
-    } catch (err) {
-      showToast(err.message);
-    }
-  });
-
-  elBtnPause.addEventListener("click", async () => {
-    try {
-      const res = await apiPost("api/control/pause");
-      setSession(res.session);
-      renderAll(true);
-      showToast("已请求在当前步骤完成后暂停");
-    } catch (err) {
-      showToast(err.message);
-    }
-  });
-
-  elBtnForcePause.addEventListener("click", async () => {
-    try {
-      const res = await apiPost("api/control/force-pause");
-      setSession(res.session);
-      renderAll(true);
-      showToast("已强制中断当前生成并暂停");
-    } catch (err) {
-      showToast(err.message);
-    }
-  });
-
-  elChkShowTools.addEventListener("change", () => {
-    state.showToolCalls = elChkShowTools.checked;
-    if (state.session) {
-      renderChannelsSidebar(state.session, true);
-      renderFeed(state.session, true);
-    }
-  });
-
-  if (elBtnResetDefault) {
-    elBtnResetDefault.addEventListener("click", () => {
-      resetExpandState();
-      if (state.session) {
-        renderFeed(state.session, true);
-      }
-      showToast("已恢复默认折叠：一级行动展开，二级仅发言展开，思维链与工具折叠");
-    });
-  }
-
-  if (elBtnExpandAll) {
-    elBtnExpandAll.addEventListener("click", () => {
-      if (!state.session) return;
-      const bundles = groupRecordsIntoActionBundles(filterFeedRecords(state.session));
-      bundles.forEach((b) => {
-        boundedSet(state.level1Expanded, b.action_id, true, MAX_EXPAND_ENTRIES);
-        b.records.forEach((r) => {
-          boundedSet(state.level2Expanded, r.id, true, MAX_EXPAND_ENTRIES);
-        });
-      });
-      renderFeed(state.session, true);
-      showToast("已全展开（一级行动与二级思维链/工具/发言全部展开）");
-    });
-  }
-
-  if (elBtnCollapseAll) {
-    elBtnCollapseAll.addEventListener("click", () => {
-      if (!state.session) return;
-      const bundles = groupRecordsIntoActionBundles(filterFeedRecords(state.session));
-      bundles.forEach((b) => {
-        boundedSet(state.level1Expanded, b.action_id, false, MAX_EXPAND_ENTRIES);
-      });
-      renderFeed(state.session, true);
-      showToast("已全折叠（一级行动卡片全部折叠）");
-    });
-  }
-
   if (elSelectExecDepth) {
     elSelectExecDepth.addEventListener("change", async () => {
       const val = elSelectExecDepth.value;
@@ -1289,21 +1114,15 @@
         await apiPost("api/session/execution-depth", {
           execution_depth: val,
         });
-        showToast(`已将执行链深度切换为: ${val}`);
+        showToast(`已将执行深度切换为: ${val}`);
       } catch (err) {
         showToast(err.message);
       }
     });
   }
 
-  elFeedList.addEventListener("scroll", () => {
-    const nearBottom =
-      elFeedList.scrollHeight - elFeedList.scrollTop - elFeedList.clientHeight < 60;
-    state.autoScroll = nearBottom;
-  });
-
   // ---------------------------------------------------------------------------
-  // Session Import
+  // Session import
   // ---------------------------------------------------------------------------
   const elBtnImportSession = document.getElementById("btn-import-session");
   const elFileImportSession = document.getElementById("file-import-session");
@@ -1312,6 +1131,12 @@
     elUsagePill.addEventListener("click", () => {
       if (providerUI) providerUI.openBindings();
     });
+  }
+
+  function handleSessionLoaded(session) {
+    adoptHttpSession(session, { force: true });
+    state.selectedChannel = "all";
+    renderAll(true);
   }
 
   if (elBtnImportSession && elFileImportSession) {
@@ -1330,11 +1155,7 @@
           throw new Error("文件不是有效的 JSON");
         }
         const res = await apiPost("api/session/import", json);
-        setSession(res.session);
-        // A different game was loaded: forget every folded/expanded card.
-        resetExpandState();
-        state.selectedChannel = "all";
-        renderAll(true);
+        handleSessionLoaded(res.session);
         showToast(`已成功导入存档: ${file.name}`);
       } catch (err) {
         showToast(`导入失败: ${err.message}`);
@@ -1346,15 +1167,8 @@
 
   if (window.ArenaLayout) {
     // Layout is pure DOM/state: create it before the first render so the saved
-    // card size / collapsed panels are applied immediately.
+    // collapsed panels are applied immediately.
     layoutUI = window.ArenaLayout.create({ Core });
-  }
-
-  function handleSessionLoaded(session) {
-    setSession(session);
-    resetExpandState();
-    state.selectedChannel = "all";
-    renderAll(true);
   }
 
   if (window.ArenaProviderUI) {
@@ -1364,11 +1178,8 @@
       showToast,
       getSession: () => state.session,
       onSessionLoaded: handleSessionLoaded,
-      // Providers/bindings changed: repaint the seat cards that show their model.
-      onChange: () => {
-        state.lastBoardHtml = null;
-        if (state.session) renderParticipantsBoard(state.session);
-      },
+      // Providers/bindings changed: the metrics popover shows the model of an agent.
+      onChange: () => scheduleRender({ ...Store.newDirty(false), popover: true }),
     });
   }
 
@@ -1461,7 +1272,7 @@
   }
 
   // ---------------------------------------------------------------------------
-  // SSE Real-time Connection (exponential backoff + jitter, single timer)
+  // SSE v2 (exponential backoff + jitter, single timer, resume with last_event_id)
   // ---------------------------------------------------------------------------
 
   const SSE_DISABLED = window.location.search.includes("nosse=1");
@@ -1519,7 +1330,8 @@
 
   function connectSSE() {
     closeSSE();
-    const es = new EventSource(Core.buildEventsUrl(URL_PREFIX, getToken()));
+    // A re-created EventSource does not send Last-Event-ID by itself: resume via the query string.
+    const es = new EventSource(Core.buildEventsUrl(URL_PREFIX, getToken(), state.sseResumeId));
     state.sse = es;
 
     es.onopen = () => {
@@ -1530,23 +1342,9 @@
       if (state.sse !== es) return;
       markSseConnected();
       try {
-        const payload = JSON.parse(evt.data);
-        // A workspace switch changes providers, templates and sessions for the whole
-        // server process; other tabs must rebuild their entire UI, not merge a session.
-        if (payload.event === "workspace_changed") {
-          window.location.reload();
-          return;
-        }
-        if (payload.session) {
-          setSession(payload.session);
-          if (payload.event === "stream_chunk") {
-            scheduleRender("stream");
-          } else {
-            scheduleRender("full", payload.event === "initial");
-          }
-        }
+        handleEvent(JSON.parse(evt.data));
       } catch (e) {
-        console.error("Failed to parse SSE payload", e);
+        console.error("Failed to handle SSE payload", e);
       }
     };
 
@@ -1592,7 +1390,7 @@
         if (data.restored && !data.session.restored_from_save) {
           data.session.restored_from_save = true;
         }
-        setSession(data.session);
+        adoptHttpSession(data.session, { force: true });
         // v0.11: /api/state carries the workspace summary (name / path withheld
         // for remote clients); it is the cheapest way to label the top bar.
         if (workspaceUI) {
@@ -1609,9 +1407,9 @@
   }
 
   async function init() {
-    if (elChkShowTools) {
-      state.showToolCalls = elChkShowTools.checked;
-    }
+    loadViewpointPref();
+    // First paint of the (empty) shell so the layout never looks broken while loading.
+    renderAll(true);
     // Both calls check resp.ok through the shared client. A 401 here is the
     // first moment the token modal can appear; with no token configured the
     // user is never bothered.
@@ -1632,6 +1430,20 @@
       window.setTimeout(connectSSE, 300);
     }
   }
+
+  // Small surface for tests and for poking at the UI from the console.
+  window.ArenaApp = {
+    state,
+    handleEvent,
+    adoptHttpSession,
+    setViewpoint,
+    selectChannel,
+    openPopover,
+    closePopover,
+    togglePopover,
+    renderAll,
+    renderNow,
+  };
 
   init();
 })();

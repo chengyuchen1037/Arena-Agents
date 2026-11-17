@@ -87,18 +87,18 @@ async def test_ambient_envelopes_are_only_buffered_until_something_wakes_the_age
 async def test_normal_envelopes_are_debounced_from_the_first_one_and_the_window_does_not_slide():
     rig = Rig()
     rig.llm.script("a1", wait_resp())
-    agent = rig.agent(debounce_s=0.3)
+    agent = rig.agent(debounce_s=0.4)
     loop = asyncio.get_running_loop()
     async with running_agent(agent):
         started = loop.time()
         agent.deliver(normal("message.new", channel_id="free", label="n1"))
-        await asyncio.sleep(0.2)
+        await asyncio.sleep(0.28)
         assert rig.llm.calls == []  # still inside the window
         agent.deliver(normal("message.new", channel_id="free", label="n2"))
         await wait_until(lambda: rig.llm.calls, timeout=3)
         elapsed = rig.llm.calls[0].started - started
-        # fixed window: ~0.3 s after the FIRST envelope.  A sliding window would end at >= 0.5 s.
-        assert 0.22 <= elapsed < 0.46, elapsed
+        # fixed window: ~0.4 s after the FIRST envelope.  A sliding window would end at >= 0.68 s.
+        assert 0.3 <= elapsed < 0.58, elapsed
         await wait_until(lambda: agent.stats["runs"] == 1)
     assert labels(rig.brain.starts[0].reasons) == ["n1", "n2"]  # both are in the same wake
 
@@ -429,7 +429,7 @@ async def test_a_normal_envelope_after_a_restart_is_debounced_again():
     rig = Rig()
     hold = asyncio.Event()
     rig.llm.script("a1", Step(hold=hold, resp=llm_resp(SPEAK)), wait_resp())
-    agent = rig.agent(debounce_s=0.3)
+    agent = rig.agent(debounce_s=0.6)
     async with running_agent(agent):
         agent.deliver(urgent("floor.granted", channel_id="pub"))
         await wait_until(lambda: len(rig.llm.calls) == 1)
@@ -438,7 +438,7 @@ async def test_a_normal_envelope_after_a_restart_is_debounced_again():
         agent.deliver(normal("message.new", channel_id="free", label="n1"))
         await asyncio.sleep(0.1)
         assert len(rig.llm.calls) == 1  # the debounce applies again
-        await wait_until(lambda: len(rig.llm.calls) == 2, timeout=3)
+        await wait_until(lambda: len(rig.llm.calls) == 2, timeout=4)
 
 
 @async_test()

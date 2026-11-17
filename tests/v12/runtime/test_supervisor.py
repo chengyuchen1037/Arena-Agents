@@ -439,7 +439,7 @@ async def test_the_watchdog_still_works_without_an_on_stall_hook():
 async def test_ledger_progress_keeps_the_watchdog_quiet_and_resets_its_counter():
     rig = Rig()
     rig.llm.default = lambda call: wait_resp()
-    sup, agents = make_supervisor(rig, max_watchdog_wakes=3)
+    sup, agents = make_supervisor(rig, max_watchdog_wakes=3, watchdog_s=0.3)
 
     async def keep_busy(seconds: float) -> None:
         end = asyncio.get_running_loop().time() + seconds
@@ -448,7 +448,7 @@ async def test_ledger_progress_keeps_the_watchdog_quiet_and_resets_its_counter()
             await asyncio.sleep(0.03)
 
     sup.start()
-    await keep_busy(0.5)  # the ledger advances faster than ``watchdog_s``: never silent
+    await keep_busy(0.7)  # the ledger advances much faster than ``watchdog_s``: never silent
     assert starts_of(rig, MODERATOR) == []
     await wait_until(lambda: len(starts_of(rig, MODERATOR)) == 1, timeout=3)  # silence at last: attempt 1
     assert starts_of(rig, MODERATOR)[0].reasons[0].payload["attempt"] == 1
@@ -478,12 +478,12 @@ async def test_the_watchdog_does_not_fire_while_the_game_is_paused():
     rig.world.running = False
     sup, _ = make_supervisor(rig)
     sup.start()
-    await asyncio.sleep(0.5)
+    await asyncio.sleep(0.8)  # five times the watchdog period, all of it paused
     assert starts_of(rig, MODERATOR) == []
     rig.world.running = True
     await wait_until(lambda: starts_of(rig, MODERATOR), timeout=3)
-    # the clock of the silence started when the game resumed, not when it was paused
-    assert starts_of(rig, MODERATOR)[0].reasons[0].payload["idle_s"] < 0.45
+    # the clock of the silence started when the game resumed, not when it was paused (that would be >= 0.95)
+    assert starts_of(rig, MODERATOR)[0].reasons[0].payload["idle_s"] < 0.6
     await sup.stop()
 
 

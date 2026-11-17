@@ -1180,6 +1180,7 @@ class ChatModule(WorldModule):
 
 
 __all__ = [
+    "FLOOR_MODES",
     "ChatModule",
     "channel_view",
     "floor_view",

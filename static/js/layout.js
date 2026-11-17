@@ -1,11 +1,14 @@
 /* ==========================================================================
-   Arena-Agents v0.11 — Layout: board / side-panel collapsing, drag resizers and
-   the four player-card size tiers. All persistence goes through localStorage
-   (pure normalization helpers live in core.js). Loaded after core.js; app.js
-   calls window.ArenaLayout.create() once the DOM is available.
+   Arena-Agents v0.12 — Layout: board / side-panel collapsing and drag resizers.
+   All persistence goes through localStorage (pure normalization helpers live in
+   core.js). Loaded after core.js; app.js calls window.ArenaLayout.create() once
+   the DOM is available.
+
+   (v0.12: the four player-card size tiers are gone — players are now tiny
+   fixed-size tiles, see static/css/style.css.)
 
    Nothing here re-renders the session: it only toggles classes / inline sizes,
-   so existing event delegation and streaming scroll are untouched.
+   so existing event delegation and the feed's scroll position are untouched.
    ========================================================================== */
 
 (function (root) {
@@ -35,12 +38,9 @@
       btnToggleBoardLabel: $("btn-toggle-board-label"),
       btnToggleChannels: $("btn-toggle-channels"),
       btnToggleDashboard: $("btn-toggle-dashboard"),
-      selectCardSize: $("select-card-size"),
-      participantsGrid: $("participants-grid"),
     };
 
     const state = Core.loadLayoutState(storage);
-    state.cardSize = Core.loadCardSize(storage);
 
     const active = { kind: null, startPos: 0, startSize: 0 };
 
@@ -116,20 +116,6 @@
     // -----------------------------------------------------------------------
     // Apply state to the DOM
     // -----------------------------------------------------------------------
-    function applyCardSize() {
-      const size = Core.normalizeCardSize(state.cardSize);
-      state.cardSize = size;
-      if (el.selectCardSize && el.selectCardSize.value !== size) {
-        el.selectCardSize.value = size;
-      }
-      const grid = el.participantsGrid;
-      if (grid) {
-        for (const tier of Core.CARD_SIZES) call(grid.classList, "remove", `card-size-${tier.id}`);
-        call(grid.classList, "add", `card-size-${size}`);
-        if (typeof grid.setAttribute === "function") grid.setAttribute("data-card-size", size);
-      }
-    }
-
     function applyResponsive() {
       if (!el.workspaceGrid) return;
       const narrow = viewportWidth() <= 980;
@@ -197,7 +183,6 @@
       if (el.dashboardResizer) el.dashboardResizer.hidden = rc;
 
       updateToggleUi();
-      applyCardSize();
       applyResponsive();
       return publicState();
     }
@@ -210,7 +195,6 @@
       state.boardHeight = saved.boardHeight;
       state.leftWidth = saved.leftWidth;
       state.rightWidth = saved.rightWidth;
-      Core.saveCardSize(storage, state.cardSize);
     }
 
     function publicState() {
@@ -221,7 +205,6 @@
         boardHeight: state.boardHeight,
         leftWidth: state.leftWidth,
         rightWidth: state.rightWidth,
-        cardSize: state.cardSize,
       };
     }
 
@@ -247,13 +230,6 @@
       persist();
       apply();
       return state.rightCollapsed;
-    }
-
-    function setCardSize(id) {
-      state.cardSize = Core.normalizeCardSize(id);
-      Core.saveCardSize(storage, state.cardSize);
-      applyCardSize();
-      return state.cardSize;
     }
 
     // -----------------------------------------------------------------------
@@ -390,7 +366,6 @@
     on(el.btnToggleBoard, "click", () => toggleBoard());
     on(el.btnToggleChannels, "click", () => toggleChannels());
     on(el.btnToggleDashboard, "click", () => toggleDashboard());
-    on(el.selectCardSize, "change", () => setCardSize(el.selectCardSize.value));
 
     if (typeof doc.addEventListener === "function") {
       doc.addEventListener("pointermove", (evt) => {
@@ -415,7 +390,6 @@
       toggleBoard,
       toggleChannels,
       toggleDashboard,
-      setCardSize,
       beginResize,
       moveResize,
       endResize,

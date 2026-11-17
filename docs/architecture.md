@@ -1,88 +1,98 @@
 # Architecture
 
-Arena-Agents separates the **game-agnostic engine** from the **rules of a specific game**.
+Arena-Agents v0.12 把一局游戏里的**每一个角色（所有玩家和主持人）**都做成异步 agent：
+**前端 Actor + 后端 Worker**。引擎只提供与游戏无关的“物理层”（频道、发言权、请求、账本），
+规则写在剧本里，由 LLM 主持人驱动整局流程。
 
 ```text
-config.yml + scenario.md
+config.yml + scenarios/<剧本>.md (schema v2)
+        │  ScenarioSpec：身份池 · 模板 · 能力 · 检查项 · 默认限额 · 规则文本 · 主持人手册
+        ▼
+┌──────────────────────────── World（物理层，同步、单线程、与游戏无关） ────────────────────────────┐
+│  Commit Gate ──► Ledger（只追加，全局 seq）──► 按频道成员投递 Envelope / 向观战者发 UI 事件          │
+│  频道 · 发言权（turn / queue / free / listen）· 请求（密封 / 默认答案）· 模板 · 能力 · 质询工单      │
+│  随机数 · 计时（游戏时钟，暂停时不走）· 看板（每个 agent 的状态视图）                                │
+└────────────────────────────────────────────────────────────────────────────────────────────────┘
+        ▲ Intent（speak / respond / use_ability / mod.* …）            │ Envelope（唤醒信号）
+        │                                                              ▼
+┌──────────────────────── Runtime（asyncio） ────────────────────────┐
+│  Agent = Actor（收件箱，永不调用 LLM，永不阻塞）                      │
+│        + Worker（一次运行：LLM 调用 → 工具 → 注入 → 下一轮，可取消） │
+│  Supervisor（泵、计时轮询、看门狗）· LLM 闸门 · trace 日志 · 事件总线 │
+└─────────────────────────────────────────────────────────────────────┘
+        ▲ Brain：系统提示词 · 工具 schema · 上下文构建（状态板 + 记忆 + 可见历史）
         │
         ▼
-  Scenario parser ──► validated workflow / roles / events / dashboard
-        │
-        ▼
-  Game orchestrator
-    ├─ session runtime (bindings, autosave, restore)
-    ├─ scenario director (steps, conditions, loops, events)
-    ├─ participant turns (LLM + tools, concurrent batches)
-    └─ moderator tools (channels, tags, announcements, dashboard)
-        │
-        ▼
-  LLM client
-    ├─ OpenAI Chat Completions adapter
-    ├─ OpenAI Responses adapter
-    ├─ Anthropic Messages adapter
-    └─ endpoint planner + per-provider client cache
-        │
-        ▼
-  Workspace storage
-    ├─ encrypted provider registry
-    ├─ settings / model templates / bindings
-    ├─ encrypted session snapshots
-    └─ workspace key and lock
+   LLM 适配器（OpenAI Chat / OpenAI Responses / Anthropic Messages）· 加密 Provider 与存档
 ```
 
-## Layers
+## 层次
 
-### API
+### 1. World（`app/world/`）
 
-`app/api/` exposes the REST/SSE surface:
+世界是**同步**的单线程状态机，没有任何 `await`：
 
-- `routes.py` — game controls, state, SSE, import/export;
-- `providers.py` — providers, models, templates, bindings, stored sessions;
-- `workspaces.py` — workspace listing, native folder picker and safe switching;
-- `security.py` — token/Origin checks, URL/SSRF policy, secret redaction;
-- `session_io.py` — bounded import validation.
+- `core.py` — 账本、**提交闸门**、投递与 UI 事件队列、表达式求值；
+- `chat.py` — 频道、发言权（令牌、队列、自由讨论、冻结）、消息与模板；
+- `game.py` — 玩家状态与发牌、请求、能力、质询、随机数、记忆、对局流程；
+- `board.py` / `projection.py` — 每个 agent 的状态板，观战者的快照；
+- `spec.py` / `loader.py` — 剧本 v2（`ScenarioSpec`）及其加载器。
 
-### Engine
+**提交闸门是改变世界的唯一入口。** Agent 的每个动作（`Intent`）在**提交的那一刻**重新校验：
+频道成员资格、发言权、字数、阶段、配额、是否过时（`STALE`）。被拒绝时返回带原因码的回执
+（`NO_FLOOR`、`NOT_MEMBER`、`CHANNEL_CLOSED`、`QUOTA_EXCEEDED` …），Worker 立刻在工具结果里看到。
+所以正确性不依赖“取消正在思考的 agent”——取消只是省 token 的优化。
 
-`app/engine/` owns game state and execution:
+**账本（Ledger）只追加。** 每条记录带全局递增的 `seq` 和写入时的可见集合（`visible_to_ids`）。
+存档、上下文构建、观战事件都以它为准。主持人可以修改玩家的**当前状态**（出局、复活…），
+但已经发生的事不能被改写，更正只能写成新条目。
 
-- `orchestrator.py` — process singleton and game lifecycle;
-- `session_runtime.py` — model bindings, autosave, restore, graceful shutdown;
-- `workspace_runtime.py` — workspace startup and the reversible switch transaction;
-- `director.py` — executable scenario steps;
-- `scenario.py` / `expressions.py` — Markdown parsing, schema validation, bounded expression evaluation;
-- `participant_loop.py` / `participant_tasks.py` — shared LLM/tool turn loop and concurrent batches;
-- `context.py` — information isolation and prompt construction;
-- `state.py` — sessions, participants, channels, records and usage accounting.
+### 2. Runtime（`app/runtime/`）
 
-### Providers and protocols
+- **Actor** 只做一件事：`await mailbox.get()`。它按优先级处理 Envelope：
+  `urgent`（拿到发言权、收到请求、质询回复…）立即唤醒；`normal`（自由讨论里的新消息）防抖后唤醒；
+  `ambient` 只缓冲。运行中的 Worker 在每轮 LLM 调用之后收到“注入”；只有与当前工作直接相关的
+  “打断”（发言权被收回、请求被取消）才会取消 Worker，并带有防饥饿保护。
+- **Worker** 每次运行都从世界重建上下文，**对话不跨运行保留**，所以取消不会留下不成对的工具调用。
+- **Supervisor** 负责把世界的投递和事件泵给各 agent / 事件总线，轮询世界计时器，
+  并带看门狗：对局静止时唤醒主持人，连续无进展则自动暂停。
+- **LLM 闸门** 限制全局与每个 Provider 的并发；**trace 日志**（明文 JSONL，在工作区 `logs/` 下）
+  记录思维链、工具调用和回执；前端不展示这些。
 
-`app/providers/` persists the encrypted provider registry and model metadata. `app/llm/` contains
-one adapter per protocol and `endpoints.py`, the single source of truth for URL construction.
+### 3. Agents（`app/agents/`）
 
-Each call resolves an actor's `ModelBinding` to a Provider + model + reasoning depth. The response
-carries a price/window snapshot. Usage is accumulated by model and actor, so changing a price
-later never rewrites historical cost.
+`ArenaBrain` 把世界翻译成模型能理解的东西：状态板（我现在能不能发言、为什么不能、请求、能力…）、
+可见历史（带长度预算；玩家写的内容一律按“不可信数据”处理，防止伪造记录或章节）、私人笔记与压缩摘要、
+唤醒原因，以及由意图模型生成的工具 schema。模型的正文**不会**被当作发言——必须调用 `speak`。
 
-### Workspaces
+### 4. 应用层（`app/game/`、`app/api/`）
 
-A workspace is a folder containing `.arena/`. The application can switch the active workspace
-only when the game is idle/paused/finished. The switch saves the current game, validates and locks
-the target, swaps workspace-scoped stores and LLM clients, restores the target's last session as
-paused, and broadcasts `workspace_changed`.
+- `GameOrchestrator` 管理生命周期（开始 / 暂停 / 继续 / 终局后继续）、模型绑定、加密存档、
+  观战事件总线与 HTTP API；
+- 存档格式 v3：账本 + 世界状态 + 用量；**不兼容 v0.11 及更早的存档**（它们保留在存档列表中，不会被改动）；
+- API：`/api/state`（PublicSession v2）、`/api/events`（SSE v2：带 `id` 的增量事件，支持 `Last-Event-ID` 续传）。
 
-### Storage and encryption
+### 5. 剧本（`scenarios/*.md`）
 
-`app/storage/crypto.py` uses AES-256-GCM with a file-version/purpose AAD. The 32-byte workspace key
-is wrapped with Windows DPAPI CurrentUser, or supplied by a Docker Secret / environment variable.
-Writes are atomic with a known-good backup. The provider registry and session snapshots are
-encrypted; `settings.json` contains only non-secret bindings/templates and the last-session pointer.
+一个 Markdown 文件：YAML front matter 声明身份池、角色、公开标签、默认限额、**模板**
+（结构化消息，敏感公告只允许主持人使用）、**能力**（例如可随时发动的自爆）和辅助**检查项**；
+正文给所有人看的规则，以及**只给主持人看的“主持人手册”**——手册教主持人如何用工具推进流程
+（比如用 `set_floor_queue` 实现轮流发言）。引擎本身没有任何具体游戏的词汇。
 
-## Design invariants
+### 6. 模型与存储
 
-- The engine must not contain game-specific vocabulary or rules.
-- Scenario definitions are the only authoritative source of game flow.
-- Provider keys never enter prompts, logs, API responses or saved sessions.
-- A running game cannot change models or workspaces.
-- Failed switches/saves must leave the previous state intact.
-- Runtime data never goes into the repository.
+`app/llm/` 每个协议一个适配器，`endpoints.py` 是 URL 构造的唯一来源。每次调用把 agent 的
+`ModelBinding` 解析成 Provider + 模型 + 推理深度，响应带价格快照；用量按 agent 与模型累计，
+以后改价格不会改写历史。工作区（含加密的 Provider 注册表、设置、模板、绑定、存档、日志）与
+v0.11 相同：AES-256-GCM，主密钥由 Windows DPAPI 保护，或来自 Docker Secret / 环境变量。
+
+## 设计不变量
+
+- 引擎不得包含具体游戏的词汇或规则；规则只存在于剧本里（`tests/v12/test_neutrality.py` 会扫描）。
+- 世界里不允许 `await` 或阻塞 I/O；LLM 调用是运行时里唯一的等待点。
+- 改变世界只能通过提交闸门；账本只追加。
+- 主持人是独立 agent：不能操控其他 agent 的内部进程，不能改写已发生的事。
+- 所有期限用游戏时钟，暂停时不走；发言既有时间也有字数限制，超长内容被截断。
+- Provider 密钥不进入提示词、日志、API 响应或存档。
+- 运行中的对局不能换模型或换工作区；失败的切换 / 保存不得破坏原有状态。
+- 运行数据不进入仓库。

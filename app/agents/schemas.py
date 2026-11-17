@@ -44,11 +44,15 @@ TOOL_HELP: dict[str, str] = {
     "announce": "用剧本模板发布公告（敏感信息——出局、投票结果、查验结果、终局等——只能用模板）。"
     "你可以在任何频道发布，不受发言权限制。",
     "send_message": "在频道里发送自由文本。不要用它发布敏感信息（请用 announce 模板）。",
-    "create_channel": "创建频道。你自动是成员；频道初始模式默认 closed（只有你能写）。",
+    "create_channel": "创建频道。你自动是成员；members 必须列全所有参与者（即使 type=public 也不会自动加入全体玩家）；"
+    "频道初始模式默认 closed（只有你能写）。",
     "update_channel": "修改频道：改名、增减成员、设置只读成员、改模式（closed / free / listen）、调整自由讨论限额。"
-    "把玩家的系统私聊设为 closed 可以暂时禁止他向你私聊或质询（之后可再设回 free）。",
+    "把玩家的系统私聊设为 closed 可以暂时禁止他向你私聊或质询（之后可再设回 free）。"
+    "free_limits 是整场的绝对上限，不能设得比已用量更小。",
     "open_floor": "开放发言权。mode=turn：holders 里的每位玩家各得一个令牌（可设条数/字数/时限）；"
-    "mode=free：开启自由讨论（引擎只会在时间/字数用尽或冷场时通知你，不会自动关闭，由你询问后用 close_floor 收尾）。",
+    "mode=free：开启自由讨论——free_limits 里的时长/条数/字数都是“整场”的绝对上限（时长从讨论开始计）；"
+    "引擎只会在时间/字数用尽或冷场时通知你，不会自动关闭，由你询问后用 close_floor 收尾；"
+    "开放本身不会唤醒任何玩家，请随后用 send_message 或 announce 开场。",
     "set_floor_queue": "按 order 给出顺序，引擎自动依次把发言权交给每个人（轮流发言），整轮结束后唤醒你。"
     "每人一个令牌，限额相同。",
     "pause_queue": "暂停发言队列（冻结当前发言者的剩余时间）。",
@@ -62,7 +66,8 @@ TOOL_HELP: dict[str, str] = {
     "set_phase": "更新顶栏的阶段文字。",
     "update_dashboard": "更新右侧的对局状态面板（阵营存活统计、标签统计）。",
     "random": "产生可审计、可复现的随机结果：int（闭区间整数）、choice（从 items 里不重复抽 k 个）、shuffle（洗牌）。",
-    "evaluate": "执行剧本里的检查项（例如计票、胜负判定）。结果只是辅助，最终裁决由你做出。",
+    "evaluate": "执行剧本里的检查项（例如胜负判定、按座位排发言顺序）。需要参数的检查项通过 args 传入"
+    "（args 的键就是表达式里的变量名，见本工具说明里的检查项列表）。结果只是辅助，最终裁决由你做出。",
     "get_ledger": "读取你可见的历史条目（可按频道、起始序号、类型过滤）。",
     "resolve_challenge": "处理玩家的质询：verdict=upheld（成立）或 rejected（驳回），并给出回复。"
     "成立时请用公告更正、update_player 或 reopen_request 纠正，必要时 hold_game。",

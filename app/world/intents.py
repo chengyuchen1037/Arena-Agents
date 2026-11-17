@@ -225,6 +225,8 @@ class ModRandom(_Payload):
 
 class ModEvaluate(_Payload):
     check_id: str
+    # Names bound for this evaluation (identifier keys, JSON values), e.g. {"start": "p03", "direction": "left"}.
+    args: dict[str, Any] = Field(default_factory=dict)
 
 
 class ModGetLedger(_Payload):

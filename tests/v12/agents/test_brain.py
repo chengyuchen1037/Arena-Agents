@@ -350,3 +350,35 @@ def test_moderator_messages_keep_their_formatting() -> None:
     world.add("message", MODERATOR_ID, {"content": "第一行\n第二行", "kind": "announce", "sender_name": "主持人"}, channel="pub")
     history = ArenaBrain(world, world.spec, docs_dir=None).start_message("p1", _wake("p1"))[0].split("【可见历史】")[1]
     assert "第一行\n第二行" in history
+
+
+# ----------------------------------------------------------------------------- v0.12 additions
+
+
+def test_closed_request_shows_the_engine_tally() -> None:
+    world = FakeWorld()
+    namer = Namer(world.display_name, {})
+    entry = world.add("request.closed", MODERATOR_ID, {
+        "request_id": "r1", "reason": "all_answered", "answers": [{"player_id": "p1", "value": "a"}],
+        "tally": {"a": 2, "b": 1, "c": 0}, "leaders": ["a"], "defaulted": [], "missing": []}, visible=[MODERATOR_ID])
+    line = render_entry(entry, namer, viewer=MODERATOR_ID)
+    assert line is not None and "计票：a 2 票、b 1 票、c 0 票" in line and "得票最高：a" in line
+    env = Envelope(kind="request", priority="urgent", payload={"event": "request.closed", "request_id": "r1", "reason": "deadline",
+                                                                "answers": [], "tally": {"a": 0, "b": 0}, "leaders": [], "defaulted": [], "missing": ["p1"]})
+    text, _ = ArenaBrain(world, world.spec, docs_dir=None).start_message(MODERATOR_ID, _wake(MODERATOR_ID, env))
+    assert "无人得票" in text
+
+
+def test_revoked_floor_wake_line_explains_the_reason_in_chinese() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    for reason, expected in (("timeout", "已超时"), ("replaced", "取代"), ("ability:boom", "频道冻结")):
+        env = Envelope(kind="floor", priority="ambient", interrupt=True, channel_id="pub", payload={"event": "floor.revoked", "reason": reason})
+        text, _ = brain.start_message("p1", _wake("p1", env))
+        assert expected in text.split("【本次唤醒】")[1]
+
+
+def test_tool_help_mentions_the_new_semantics() -> None:
+    desc = {t["function"]["name"]: t["function"]["description"] for t in moderator_tool_schemas(make_spec())}
+    assert "整场" in desc["open_floor"] and "开场" in desc["open_floor"]
+    assert "列全" in desc["create_channel"] and "args" in desc["evaluate"]

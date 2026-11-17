@@ -258,7 +258,13 @@ class WorldCore:
     def message_priority(
         self, channel: ChannelState, sender: str, recipient: str, kind: str
     ) -> str:
-        """Wake priority of a new channel message for ``recipient`` (see contracts §4.3)."""
+        """Wake priority of a new channel message for ``recipient`` (contracts §2.6, ``message.new``).
+
+        Challenges wake the moderator at once; a system DM wakes the other side (normal); a message in a
+        live free discussion is *normal* for every member who could still answer it (not read-only, an
+        allowed writer, quota left) and *ambient* for everybody else, as is everything outside a free
+        discussion (turn / queue floors wake their holders through ``floor.granted`` instead).
+        """
         if recipient == MODERATOR_ID:
             if kind == "challenge":
                 return "urgent"

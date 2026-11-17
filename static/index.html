@@ -30,6 +30,16 @@
         <span class="theme-icon">◐</span> 主题
       </button>
 
+      <!-- v0.12: 观战视角（上帝视角 / 某名玩家）。纯前端过滤，切换不会重新请求服务器 -->
+      <label class="viewpoint-picker" for="select-viewpoint"
+             title="观战视角：上帝视角看到全部；选择某名玩家后，只显示该玩家能看到的消息、频道与标签">
+        <span class="viewpoint-icon" aria-hidden="true">👁</span>
+        <span class="viewpoint-label">视角</span>
+        <select id="select-viewpoint" class="viewpoint-select">
+          <option value="god" selected>上帝视角</option>
+        </select>
+      </label>
+
       <div class="status-pill" id="active-status-pill">
         <span class="status-dot idle" id="active-status-dot"></span>
         <span id="active-status-text">未开始 · 点击「开始」由主持人初始化对局</span>
@@ -38,6 +48,9 @@
       <div class="phase-pill" id="phase-pill">
         未开始 · 等待主持人初始化
       </div>
+
+      <!-- v0.12: 请求进度，例如「🗳 投票中 7/12」 -->
+      <div class="request-hints" id="request-hints" aria-live="polite"></div>
     </div>
 
     <div class="topbar-right">
@@ -53,10 +66,12 @@
       <span class="topbar-divider"></span>
       <button class="btn btn-primary-outline" id="btn-start">开始</button>
       <button class="btn btn-default" id="btn-pause" disabled>暂停</button>
-      <button class="btn btn-resume" id="btn-resume" disabled>继续</button>
-      <button class="btn btn-danger-outline" id="btn-force-pause" disabled>强制暂停</button>
+      <button class="btn btn-resume" id="btn-resume" disabled title="继续对局；对局结束后也可以继续">继续</button>
     </div>
   </header>
+
+  <!-- v0.12: 暂停原因（主持人 hold）/ 出错 / 终局提示 -->
+  <div class="status-banner" id="status-banner" role="status" hidden></div>
 
   <!-- 恢复/绑定提示条（仅在需要时显示，不会自动开始对局） -->
   <div class="notice-bar" id="restore-notice" hidden>
@@ -67,36 +82,19 @@
 
   <!-- 主体容器 -->
   <main class="main-container" id="main-container">
-    <!-- 上半部分：参与者看板 -->
+    <!-- 上半部分：参与者（极简玩家块，约 64×44） -->
     <section class="board-section" id="board-section">
       <div class="board-header">
         <div class="board-header-left">
-          <h2 class="section-title">参与者看板</h2>
-          <button class="btn btn-xs" id="btn-shuffle-identities" title="重新随机生成开局身份种子（由主持人开局运行时赋予标签）">刷新身份</button>
-          <span class="board-subtitle">新对局由可执行 Markdown 剧本驱动；参与者属性与频道由通用引擎维护</span>
+          <h2 class="section-title">参与者</h2>
+          <span class="board-legend" id="board-legend"
+                title="图案由座位确定：形状 × 颜色 × 纹理。点击标签查看该 Agent 的工具调用 / 思考次数与 token 消耗。">
+            点击标签看指标 · 💭 思考 · ⚡ 执行 · 🎤 发言权 · ✋ 等待作答 · ▪ 已停止
+          </span>
         </div>
         <div class="board-header-right">
-          <!-- v0.11: 玩家卡片尺寸档位（紧凑/标准/大/超大，保存在 localStorage） -->
-          <div class="card-size-picker" title="玩家卡片尺寸档位（保存在本机浏览器）">
-            <span class="depth-icon">▦</span>
-            <label for="select-card-size" class="exec-depth-label">卡片:</label>
-            <select id="select-card-size" class="exec-depth-select">
-              <option value="compact">紧凑</option>
-              <option value="standard" selected>标准</option>
-              <option value="large">大</option>
-              <option value="xlarge">超大</option>
-            </select>
-          </div>
-
-          <!-- 右上角：主持人实时工作状态指示器 -->
-          <div class="moderator-status-pill" id="moderator-status-pill" title="主持人 Agent 实时工作状态">
-            <span class="mod-dot" id="moderator-status-dot"></span>
-            <span class="mod-label">主持人:</span>
-            <span class="mod-text" id="moderator-status-text">待命 · 等待开局</span>
-          </div>
-
           <!-- 执行深度选择档位 (v0.6) -->
-          <div class="exec-depth-picker" title="执行深度 = 玩家 Agent 每轮行动的最大工具调用预算（主持人无限制）。注意：这不是模型的“思考深度”，思考深度请在「模型绑定」中按角色设置。">
+          <div class="exec-depth-picker" title="执行深度 = 每次唤醒内玩家 Agent 的最大「模型调用 → 工具」轮数（主持人更多）。注意：这不是模型的“思考深度”，思考深度请在「模型绑定」中按角色设置。">
             <span class="depth-icon">⚡</span>
             <label for="select-exec-depth" class="exec-depth-label">执行深度:</label>
             <select id="select-exec-depth" class="exec-depth-select">
@@ -118,9 +116,8 @@
         </div>
       </div>
 
-      <div class="participants-grid" id="participants-grid">
-        <!-- 由 JS 动态渲染 12 张座位卡片 -->
-      </div>
+      <!-- 由 JS 渲染：主持人 + 12 名玩家的极简块 -->
+      <div class="participants-grid" id="participants-grid"></div>
     </section>
 
     <!-- 看板与下方工作区之间的横向拖动条（双击恢复默认高度） -->
@@ -136,7 +133,7 @@
           <button class="btn btn-xs panel-toggle" id="btn-toggle-channels" title="折叠/展开左侧频道栏" aria-pressed="false">◀</button>
         </div>
         <div class="channels-list" id="channels-list">
-          <!-- 由 JS 动态渲染：主持人处理流 / 全部 / 以及主持人动态创建的频道 -->
+          <!-- 由 JS 渲染：全部 / 频道（发言权状态、未读数）/ 私聊 / 质询工单 -->
         </div>
       </aside>
 
@@ -144,7 +141,7 @@
       <div class="col-resizer" id="channels-resizer" role="separator" aria-orientation="vertical"
            title="拖动调整频道栏宽度，双击恢复默认宽度"></div>
 
-      <!-- 中栏：实时信息流 -->
+      <!-- 中栏：信息流（只显示发言，整条到达后一次渲染） -->
       <section class="feed-panel">
         <div class="panel-header feed-header">
           <div class="feed-header-left">
@@ -152,19 +149,12 @@
             <span class="feed-channel-label" id="feed-channel-label">频道: 全部记录</span>
           </div>
           <div class="feed-header-right">
-            <label class="checkbox-label">
-              <input type="checkbox" id="chk-show-tools" checked />
-              <span>显示工具调用</span>
-            </label>
-            <button class="btn btn-xs" id="btn-reset-default" title="恢复默认折叠（一级行动展开，二级仅发言展开，思维链与工具折叠）">恢复默认</button>
-            <button class="btn btn-xs" id="btn-expand-all" title="全展开（一级行动与二级思维链/工具/发言全部展开）">全展开</button>
-            <button class="btn btn-xs" id="btn-collapse-all" title="全折叠（一级行动卡片全部折叠）">全折叠</button>
+            <span class="feed-viewing" id="feed-viewing">视角：上帝视角</span>
           </div>
         </div>
 
         <div class="feed-list" id="feed-list">
           <div id="feed-records-container" class="feed-records-container"></div>
-          <div id="feed-streaming-container" class="feed-streaming-container"></div>
         </div>
       </section>
 
@@ -194,7 +184,7 @@
           </div>
 
           <div class="isolation-note">
-            可见性同时校验当前频道成员与消息产生时的成员快照；后加入者不能回看敏感历史。
+            可见性只由频道决定：消息写入时是频道成员的人才能看到它。观战视角只是前端的过滤，思维链与工具调用只写入服务端日志，这里不展示。
           </div>
         </div>
       </aside>
@@ -446,10 +436,16 @@
   <!-- 轻提示 Toast -->
   <div class="toast-container" id="toast-container"></div>
 
-  <script src="static/js/core.js?v=0.11"></script>
-  <script src="static/js/layout.js?v=0.11"></script>
-  <script src="static/js/providers.js?v=0.11"></script>
-  <script src="static/js/workspace.js?v=0.11"></script>
-  <script src="static/js/app.js?v=0.11"></script>
+  <!-- v0.12: 玩家指标浮层（点击玩家块上的 tag 打开）。放在网格之外，重渲染不会把它冲掉 -->
+  <div class="metrics-popover" id="metrics-popover" role="dialog" aria-label="玩家指标" hidden></div>
+
+  <script src="static/js/core.js?v=0.12"></script>
+  <script src="static/js/avatar.js?v=0.12"></script>
+  <script src="static/js/store.js?v=0.12"></script>
+  <script src="static/js/view.js?v=0.12"></script>
+  <script src="static/js/layout.js?v=0.12"></script>
+  <script src="static/js/providers.js?v=0.12"></script>
+  <script src="static/js/workspace.js?v=0.12"></script>
+  <script src="static/js/app.js?v=0.12"></script>
 </body>
 </html>

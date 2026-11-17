@@ -25,10 +25,15 @@ Conventions used throughout (they are part of the contract the runtime / agents 
 from __future__ import annotations
 
 import copy
+import json
+import keyword
 import logging
+import math
+import re
 from collections.abc import Iterable
 from typing import Any
 
+from app.engine.expressions import ExpressionError
 from app.world import intents as pl
 from app.world.core import EVERYONE, Handler, WorldCore, WorldModule
 from app.world.projection import request_view, seat_sorted, ticket_view
@@ -42,6 +47,21 @@ NO_NOTES_TEXT = "（当前你的私人笔记本为空，可调用 write_note 记
 DEFAULT_NOTE_TITLE = "默认笔记"
 PREVIEW_CHARS = 60  # length of a ticket preview
 MAX_KEEP_RECENT = 1000
+
+# ``mod.evaluate`` arguments are bound as plain variables of the check expression.
+MAX_EVAL_ARGS_CHARS = 4000  # serialized size of all arguments together
+MAX_EVAL_ARGS_DEPTH = 6  # nesting of lists / dicts inside one argument value
+#: Names an evaluate argument may not take: the functions of ``WorldCore.eval_expr``, the ``players``
+#: variable and the literals of the expression language.  (``test_game_evaluate`` keeps it in sync
+#: with the function table of ``eval_expr``.)
+RESERVED_EXPR_NAMES = frozenset(
+    {
+        "alive", "by_role", "by_faction", "by_tag", "ids", "first", "count", "len", "sum", "min", "max",
+        "get", "tally", "leaders", "seat_order", "players", "true", "false", "null",
+    }
+)
+_ARG_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_UNKNOWN_NAME = re.compile(r"Unknown name: ([A-Za-z_][A-Za-z0-9_]*)")
 
 
 # --------------------------------------------------------------------------- helpers
@@ -77,6 +97,45 @@ def _cut(text: str, limit: int) -> tuple[str, dict[str, int] | None]:
     if limit > 0 and len(text) > limit:
         return text[:limit], {"dropped_chars": len(text) - limit, "kept_chars": limit}
     return text, None
+
+
+def _is_plain_json(value: Any, depth: int = 0) -> bool:
+    """JSON primitives, lists and dicts with string keys (finite numbers only), nested at most
+    ``MAX_EVAL_ARGS_DEPTH`` levels."""
+    if depth > MAX_EVAL_ARGS_DEPTH:
+        return False
+    if value is None or isinstance(value, (bool, str, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_plain_json(v, depth + 1) for v in value)
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and _is_plain_json(v, depth + 1) for k, v in value.items())
+    return False
+
+
+def check_eval_args(args: dict[str, Any]) -> str | None:
+    """Why ``args`` cannot be bound as expression variables (a one-sentence reason), or ``None``.
+
+    Keys must be identifiers that do not shadow a built-in name; values must be JSON primitives, lists
+    or dicts; the compact JSON of everything together may not exceed ``MAX_EVAL_ARGS_CHARS``.
+    """
+    for name in args:
+        if not _ARG_NAME.fullmatch(name) or keyword.iskeyword(name):
+            return f"参数名 {name!r} 不合法：只能由字母、数字、下划线组成，不能以数字开头，也不能是 Python 关键字。"
+        if name in RESERVED_EXPR_NAMES:
+            return f"参数名 {name!r} 与表达式的内置名字冲突，请换一个名字（内置名字：{'、'.join(sorted(RESERVED_EXPR_NAMES))}）。"
+    for name, value in args.items():
+        if not _is_plain_json(value):
+            return (
+                f"参数 {name!r} 的值不合法：只能是字符串、数字、布尔、null、列表或字典"
+                f"（字典的键必须是字符串，嵌套不超过 {MAX_EVAL_ARGS_DEPTH} 层，数字必须是有限值）。"
+            )
+    size = len(json.dumps(args, ensure_ascii=False, separators=(",", ":")))
+    if size > MAX_EVAL_ARGS_CHARS:
+        return f"args 序列化后有 {size} 个字符，超过上限 {MAX_EVAL_ARGS_CHARS}。"
+    return None
 
 
 def ability_holders(world: WorldCore, ability_id: str) -> list[str]:
@@ -449,12 +508,25 @@ class GameModule(WorldModule):
             closed=closed,
         )
 
+    @staticmethod
+    def _tally(request: RequestState) -> tuple[dict[str, int], list[str]]:
+        """Votes per option id of a ``choice`` request (defaulted answers included; every option is
+        listed, in option order) and the options with the most votes (several on a tie, none when nobody
+        voted)."""
+        counts = {option["id"]: 0 for option in request.options}
+        for answer in request.answers.values():
+            if answer.value in counts:
+                counts[answer.value] += 1
+        top = max(counts.values(), default=0)
+        return counts, ([option_id for option_id, n in counts.items() if n == top] if top > 0 else [])
+
     def _close_request(self, request: RequestState, reason: str) -> None:
         """Close an open request (``reason``: ``all_answered`` | ``deadline``).
 
         Unanswered targets get their ``default`` (marked ``defaulted``) when there is one; the ledger
-        entry ``request.closed`` (moderator only) carries every answer in seat order; the moderator is
-        woken up; targets who had not answered are told the request expired.
+        entry ``request.closed`` (moderator only) carries every answer in seat order and, for ``choice``
+        requests, ``tally`` / ``leaders``; the moderator is woken up with the same payload; targets who
+        had not answered are told the request expired.
         """
         w = self.w
         request.status = "closed"
@@ -479,13 +551,15 @@ class GameModule(WorldModule):
             for pid in ordered
             if pid in request.answers
         ]
-        summary = {
+        summary: dict[str, Any] = {
             "request_id": request.id,
             "reason": reason,
             "answers": answers,
             "defaulted": defaulted,
             "missing": missing,
         }
+        if request.kind == "choice":
+            summary["tally"], summary["leaders"] = self._tally(request)
         entry = w.commit("request.closed", ENGINE_ID, copy.deepcopy(summary), visible_to=[MODERATOR_ID])
         self._deliver(
             MODERATOR_ID, "request", "request.closed", copy.deepcopy(summary), priority="urgent", seq=entry.seq
@@ -903,13 +977,31 @@ class GameModule(WorldModule):
 
     # ----------------------------------------------------------------------- read-only --
     def on_evaluate(self, intent: Intent, p: pl.ModEvaluate) -> Receipt:
+        """Run ``spec.checks[check_id]``.  ``args`` are bound as variables of the expression (their keys
+        are the variable names); see :func:`check_eval_args` for what is accepted."""
         w = self.w
         expression = w.spec.checks.get(p.check_id)
         if expression is None:
             known = "、".join(w.spec.checks) or "（无）"
             return Receipt.reject(Code.INVALID_TARGET, f"没有名为 {p.check_id} 的检查项。可用检查项：{known}")
+        problem = check_eval_args(p.args)
+        if problem is not None:
+            return Receipt.reject(Code.INVALID_PARAMS, problem)
         try:
-            value = WorldCore.to_plain(w.eval_expr(expression))
+            value = WorldCore.to_plain(w.eval_expr(expression, extra=p.args))
+        except ExpressionError as exc:
+            missing = _UNKNOWN_NAME.search(str(exc))
+            if missing is not None:
+                name = missing.group(1)
+                given = "、".join(p.args) or "（没有传入任何 args）"
+                return Receipt.reject(
+                    Code.INVALID_PARAMS,
+                    f"检查项 {p.check_id} 的表达式用到了没有传入的名字：{name}。请在 args 里提供它"
+                    f"（args 的键名就是表达式里的变量名）。已传入：{given}。",
+                    missing=name,
+                )
+            logger.exception("check %s failed", p.check_id)
+            return Receipt.reject(Code.INTERNAL_ERROR, f"检查项 {p.check_id} 执行失败：{exc}")
         except Exception as exc:  # noqa: BLE001 - scenario expression error
             logger.exception("check %s failed", p.check_id)
             return Receipt.reject(Code.INTERNAL_ERROR, f"检查项 {p.check_id} 执行失败：{exc}")
