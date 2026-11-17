@@ -135,6 +135,7 @@ class ArenaBrain:
 
     def start_message(self, agent_id: str, ctx: WakeContext) -> tuple[str, int]:
         self._nudged.discard(agent_id)
+        self.executor.begin_run(agent_id)
         board = self.world.board(agent_id)
         memory = self.world.memory(agent_id)
         entries = self.world.entries_visible(agent_id, after_seq=memory.summary_upto_seq)
@@ -173,10 +174,13 @@ class ArenaBrain:
         return "\n".join(parts), self.world.seq
 
     def no_tool_nudge(self, agent_id: str, content: str, round_idx: int) -> str | None:
-        if not (content or "").strip() or agent_id in self._nudged:
+        if agent_id in self._nudged:
             return None
+        duties = self.executor.duties_text(agent_id)
+        if not (content or "").strip() and not duties:
+            return None  # nothing was said and nothing is owed: a quiet end of the run
         self._nudged.add(agent_id)
-        return NUDGE_TEXT
+        return NUDGE_TEXT + (f"\n你还有没处理完的事项：{duties}。" if duties else "")
 
     # ----------------------------------------------------------------------------- tools --
     def execute_tool(

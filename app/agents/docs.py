@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import Any
 
 MAX_DOC_CHARS = 60_000
+#: Files named ``moderator_*.md`` are for the moderator only (players neither see nor can read them).
+MODERATOR_ONLY_PREFIX = "moderator_"
+
+
+def _visible(name: str, include_moderator_docs: bool) -> bool:
+    return include_moderator_docs or not name.lower().startswith(MODERATOR_ONLY_PREFIX)
 
 
 def _is_inside(base: Path, target: Path) -> bool:
@@ -26,24 +32,30 @@ def _title(path: Path) -> str:
     return path.name
 
 
-def list_documents(docs_dir: Path | None) -> dict[str, Any]:
+def list_documents(docs_dir: Path | None, *, include_moderator_docs: bool = True) -> dict[str, Any]:
     if docs_dir is None or not docs_dir.is_dir():
         return {"ok": True, "documents": []}
     documents = [
         {"doc_name": path.name, "title": _title(path)}
         for path in sorted(docs_dir.glob("*.md"))
-        if path.is_file() and _is_inside(docs_dir, path)
+        if path.is_file() and _is_inside(docs_dir, path) and _visible(path.name, include_moderator_docs)
     ]
     return {"ok": True, "documents": documents}
 
 
-def read_document(docs_dir: Path | None, name: str) -> dict[str, Any]:
+def read_document(docs_dir: Path | None, name: str, *, include_moderator_docs: bool = True) -> dict[str, Any]:
     name = str(name or "").strip()
     if not name:
         return {"ok": False, "error": "doc_name 不能为空"}
-    available = [d["doc_name"] for d in list_documents(docs_dir)["documents"]]
+    available = [d["doc_name"] for d in list_documents(docs_dir, include_moderator_docs=include_moderator_docs)["documents"]]
     # Only a bare file name is accepted: no separators, no drive letters, no parent references.
-    if name != Path(name).name or not name.lower().endswith(".md") or docs_dir is None:
+    # A moderator-only document does not exist as far as a player is concerned.
+    if (
+        name != Path(name).name
+        or not name.lower().endswith(".md")
+        or docs_dir is None
+        or not _visible(name, include_moderator_docs)
+    ):
         return {"ok": False, "error": f"文档 '{name}' 不存在", "available_documents": available}
     target = docs_dir / name
     if not target.is_file() or not _is_inside(docs_dir, target):

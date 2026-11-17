@@ -397,3 +397,121 @@ def test_a_free_channel_without_a_discussion_shows_no_progress_line() -> None:
     world.boards["p1"] = board
     text, _ = ArenaBrain(world, world.spec, docs_dir=None).start_message("p1", _wake("p1"))
     assert text.count("自由讨论：已进行") == 1  # only the real discussion
+
+
+# ----------------------------------------------------------------------------- unfinished business
+
+
+def _board_with(world: FakeWorld, agent: str, *, requests=None, channels=None) -> None:
+    board = dict(world.board(agent))
+    board["requests"] = requests or []
+    if channels is not None:
+        board["channels"] = channels
+    world.boards[agent] = board
+
+
+OPEN_REQUEST = {"id": "r7", "kind": "choice", "question": "投谁？", "options": [{"id": "a", "label": "甲"}],
+                "seconds_left": 80.0, "sealed": True, "answered": False, "to": ["p1"]}
+HELD_FLOOR = {"id": "pub", "name": "公共频道", "type": "public", "mode": "queue", "members": [MODERATOR_ID, "p1"], "readonly": [],
+              "frozen": False, "system": False, "can_write": True, "why_not": None,
+              "floor": {"kind": "queue", "active": "p1", "paused": False, "seconds_left": 40.0,
+                        "mine": {"messages_left": 1, "chars_per_message": 300, "chars_left": 600, "seconds_left": 40.0}}}
+
+
+def test_wait_with_an_unanswered_request_is_a_reminder_the_first_time_and_ends_the_run_the_second() -> None:
+    world = FakeWorld()
+    _board_with(world, "p1", requests=[OPEN_REQUEST])
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message("p1", _wake("p1"))
+
+    first = brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0)
+    body = json.loads(first.text)
+    assert first.ends_run is False and body["ok"] is False and body["code"] == "NOT_FINISHED"
+    assert "r7" in body["message"] and "respond" in body["message"] and "再调用一次 wait" in body["message"]
+    assert first.receipt is None  # a reminder, not a rejection: it is not counted as one
+
+    second = brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0)
+    assert second.ends_run is True and json.loads(second.text)["ok"] is True  # an explicit refusal is respected
+
+
+def test_waiting_is_fine_once_the_request_is_answered_or_is_about_to_close() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message("p1", _wake("p1"))
+    _board_with(world, "p1", requests=[{**OPEN_REQUEST, "answered": True}])
+    assert brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0).ends_run is True
+    _board_with(world, "p1", requests=[{**OPEN_REQUEST, "seconds_left": 1.0}])
+    assert brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0).ends_run is True
+
+
+def test_holding_the_floor_is_pointed_out_with_the_pass_hint() -> None:
+    world = FakeWorld()
+    _board_with(world, "p1", channels=[HELD_FLOOR])
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message("p1", _wake("p1"))
+    first = brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0)
+    assert first.ends_run is False and "pass" in first.text and "公共频道" in first.text
+    assert brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0).ends_run is True
+    # a paused / frozen floor is not the holder's to give up
+    _board_with(world, "p1", channels=[{**HELD_FLOOR, "frozen": True}])
+    brain.start_message("p1", _wake("p1"))
+    assert brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0).ends_run is True
+
+
+def test_a_new_run_points_the_duty_out_again_and_each_duty_only_once() -> None:
+    world = FakeWorld()
+    _board_with(world, "p1", requests=[OPEN_REQUEST])
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message("p1", _wake("p1"))
+    assert brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0).ends_run is False
+    # a second duty appears during the same run: it is mentioned, the first is not repeated
+    _board_with(world, "p1", requests=[OPEN_REQUEST, {**OPEN_REQUEST, "id": "r8"}])
+    again = brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0)
+    assert again.ends_run is False and "r8" in again.text and "r7" not in again.text
+    assert brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0).ends_run is True
+    brain.start_message("p1", _wake("p1"))  # the next wake-up
+    assert brain.execute_tool("p1", "wait", {}, gen_id=2, seen_seq=0).ends_run is False
+
+
+def test_the_moderator_may_always_wait() -> None:
+    world = FakeWorld()
+    _board_with(world, MODERATOR_ID, requests=[{**OPEN_REQUEST, "to": ["p1"], "answered_by": []}])
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message(MODERATOR_ID, _wake(MODERATOR_ID))
+    assert brain.execute_tool(MODERATOR_ID, "wait", {}, gen_id=1, seen_seq=0).ends_run is True
+
+
+def test_an_empty_answer_is_nudged_only_when_something_is_owed() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message("p1", _wake("p1"))
+    assert brain.no_tool_nudge("p1", "", 0) is None  # nothing owed, nothing said: quiet end
+    _board_with(world, "p1", requests=[OPEN_REQUEST])
+    text = brain.no_tool_nudge("p1", "", 0)
+    assert text is not None and "r7" in text and "没处理完" in text
+    assert brain.no_tool_nudge("p1", "", 1) is None  # once per run
+    brain.start_message("p1", _wake("p1"))
+    plain = brain.no_tool_nudge("p1", "我想想…", 0)
+    assert plain is not None and plain.startswith("（系统提示）") and "r7" in plain
+
+
+def test_moderator_only_documents_are_invisible_to_players(tmp_path: Path) -> None:
+    docs_dir = tmp_path / "kb"
+    docs_dir.mkdir()
+    (docs_dir / "moderator_guide.md").write_text("# 主持人指南\n只给主持人", encoding="utf-8")
+    (docs_dir / "strategy.md").write_text("# 策略\n给所有人", encoding="utf-8")
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=docs_dir)
+
+    def names(agent: str) -> list[str]:
+        out = brain.execute_tool(agent, "list_documents", {}, gen_id=1, seen_seq=0)
+        return [d["doc_name"] for d in json.loads(out.text)["documents"]]
+
+    assert names("p1") == ["strategy.md"] and names(MODERATOR_ID) == ["moderator_guide.md", "strategy.md"]
+    hidden = json.loads(brain.execute_tool("p1", "read_document", {"doc_name": "moderator_guide.md"}, gen_id=1, seen_seq=0).text)
+    assert hidden["ok"] is False and "不存在" in hidden["error"] and hidden["available_documents"] == ["strategy.md"]
+    assert "只给主持人" not in json.dumps(hidden, ensure_ascii=False)
+    for spelling in ("MODERATOR_GUIDE.md", "Moderator_Guide.MD"):
+        assert json.loads(brain.execute_tool("p1", "read_document", {"doc_name": spelling}, gen_id=1, seen_seq=0).text)["ok"] is False
+    shown = json.loads(brain.execute_tool(MODERATOR_ID, "read_document", {"doc_name": "moderator_guide.md"}, gen_id=1, seen_seq=0).text)
+    assert shown["ok"] is True and "只给主持人" in shown["content"]
