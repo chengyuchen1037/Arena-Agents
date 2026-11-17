@@ -14,7 +14,7 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.12.0--dev-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.12.1--dev-blue.svg)](CHANGELOG.md)
 
 ---
 
@@ -28,6 +28,23 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 - **Every agent is asynchronous (v0.12)** — each player and the moderator is an Actor + Worker. The
   actor is never blocked by thinking or tool execution; speech, votes, challenges and abilities can
   happen at any time and are validated by the engine *at commit time*.
+- **The engine never saves money for you (v0.12.1)** — every message delivered to an agent wakes it at
+  once (no debounce, no round cap, no "execution depth"); wolves can agree on the knife at any time and
+  the white wolf can explode at any time. An agent is only *thinking*, *acting* or *sleeping*, and
+  `sleep(seconds)` sets its own alarm. Tokens are managed by orchestration: one persistent append-only
+  conversation per agent (so provider prompt caches hit), messages that arrive mid-run are merged into
+  the running activation, and a conversation is compacted only when the model window is nearly full.
+- **Per-game spending limit** — a button next to the token / cost counter sets a token and / or USD
+  limit and lets you choose "stop the game when it is reached" (yellow at 80 %). Cost is computed from
+  **four token classes** (uncached input / cache read / cache write / output) and four prices.
+- **Price source** — the Provider dialog can fill a model's four prices and context window from a price
+  table (default: LiteLLM's `model_prices_and_context_window.json`); you can still edit every number.
+- **Roster** — seats `N1`–`N12` with default names Alice…Leo that you can rename and keep; a **pixel
+  avatar** per seat randomly assembled from a procedurally generated parts library (regenerate one or
+  all); persona and memory are plain text files in the workspace (empty by default, importable /
+  exportable / clearable, "complete it with the moderator's model" produces a draft you confirm); a
+  manual post-game review writes the record and a first-person note into each player's memory.
+- **Responsive UI** — from a 1920 px desktop to a phone in portrait (layout follows platform and width).
 - **An LLM moderator drives the flow** — taking turns = a moderator announcement + floor management
   (`set_floor_queue` and friends). The rules and the moderator manual live in the scenario; the
   engine contains no game vocabulary.
@@ -52,8 +69,8 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
   Windows the workspace key is protected by DPAPI.
 - **Endpoint preview** — see the exact message and model-list URLs before saving a Provider;
   either auto-append `/v1/...` paths or point at a complete custom endpoint.
-- **Minimal spectator UI** — players are shown as a tiny geometric glyph + short id + tag; click a
-  tag for the agent's tool-call / thinking / token statistics. The feed shows spoken messages only
+- **Spectator UI** — players are shown as a pixel avatar + name + role tag; click a tag for the
+  agent's tool-call / thinking / token statistics. The feed shows spoken messages and request cards only
   (whole messages, no streaming) and supports a god view or any player's view.
 - **Demo mode** — `ARENA_DEMO=1` replaces the models with scripted bots, so you can watch a whole
   game without an API key.
@@ -84,8 +101,8 @@ Browser ──REST + SSE v2 (numbered incremental events, resumable)──► Fa
                                   ┌───────────────────────────────────┴───┐         └─ workspace key
                                   ▼                                       ▼
           World (synchronous, game-agnostic)               Runtime (asyncio)
-          commit gate → ledger (append-only)               13 agents = Actor (mailbox) + Worker (LLM loop)
-          channels · floors · requests · templates         supervisor · watchdog · LLM concurrency gate
+          commit gate → ledger (append-only)               13 agents = Actor (pending) + Worker (LLM loop)
+          channels · floors · requests · templates         persistent conversations · sleep alarms · watchdog
           abilities · challenges · RNG · game clock        Brain: state board + memory + visible history + tools
                                                                       │
                                                                       ▼
@@ -294,12 +311,13 @@ app/
 ├─ world/        physical layer: commit gate, ledger, channels, floors, requests, templates, abilities
 ├─ runtime/      async runtime: actors/workers, supervisor, LLM gate, trace log, event bus, game clock
 ├─ agents/       Brain: tool schemas, context building, notes and compaction, prompt-injection guard
-├─ game/         orchestrator, session container (save format v3), bindings, workspace switch, demo bots
+├─ game/         orchestrator, session container (save format v4), roster / budget / review, bindings, workspace switch, demo bots
 ├─ api/          REST + SSE v2, providers, templates, workspaces
 ├─ engine/       LLM client, expression engine
 ├─ llm/          protocol adapters and endpoint planning
-├─ providers/    encrypted provider registry / model metadata
-├─ storage/      workspace, settings, sessions, crypto
+├─ providers/    encrypted provider registry, the four model prices, price source
+├─ avatars.py    pixel avatars (parts library static/avatar/parts.json is generated by tools/avatar_lab.py)
+├─ storage/      workspace, settings, roster, sessions, crypto
 └─ migration.py  legacy data migration
 scenarios/       Markdown scenarios (schema v2)
 prompts/         moderator / player prompt templates
@@ -311,15 +329,17 @@ docs/            architecture, provider, workspace and UI guides
 
 ## Release
 
-The current development version is **0.12.0**: asynchronous agents everywhere, an LLM-driven
-moderator, channels and speaking rights, challenges and a minimal spectator UI. **v0.12 does not
-open v0.11 (or older) saves** — they stay in the saved-game list untouched. The latest stable
-release is 0.11.0; see [CHANGELOG.md](CHANGELOG.md) for the release notes.
+The current development version is **0.12.1**: on top of 0.12's asynchronous agents it removes every
+engine-side limit that saved money for the user (replaced by persistent conversations, caching, merging
+and compaction), and adds a per-game spending limit, four-price billing with a price source, the
+roster (pixel avatars, persona and memory) and a responsive UI. **v0.12.1 does not open v0.12.0 (or
+older) saves** — they stay in the saved-game list untouched. The latest stable release is 0.11.0; see
+[CHANGELOG.md](CHANGELOG.md) for the release notes.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
-- [v0.12 plan and decision log](docs/v0.12-async-agents-plan.md) · [implementation contract](docs/v0.12-contracts.md)
+- [v0.12 plan and decision log](docs/v0.12-async-agents-plan.md) · [v0.12.1 plan](docs/v0.12.1-plan.md) · [implementation contract](docs/v0.12-contracts.md)
 - [Providers and models](docs/providers.md)
 - [Workspaces and encrypted data](docs/workspaces.md)
 - [UI guide](docs/ui-guide.md)

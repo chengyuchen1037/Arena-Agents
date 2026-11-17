@@ -11,7 +11,7 @@
 AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.12.0--dev-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.12.1--dev-blue.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 
@@ -21,6 +21,19 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 - **全员异步 Agent（v0.12）**：每个玩家和主持人都是 Actor + Worker。Actor 永远能收发消息，
   不会被思考或工具执行阻塞；发言、投票、质询和能力随时可以发生，引擎在**提交的那一刻**校验。
+- **引擎不替你省钱（v0.12.1）**：每一条投递给 agent 的消息都会立刻唤醒它（没有防抖、没有轮数上限、没有
+  “执行深度”），狼人可以随时“拍刀”、白狼王随时自爆；agent 只有三种状态——思考 / 行动 / 休眠，
+  `sleep(秒数)` 可以给自己设闹钟。token 靠**编排**管理：每个 agent 一条持久的只追加对话（命中供应商的
+  前缀缓存）、运行中到达的消息合并注入、窗口快满时才压缩。
+- **预算上限（按局）**：顶栏的 token / 金额统计旁有一个上限按钮，可设 token 和 / 或美元上限，并选择
+  “达到上限后强制停止”；80% 变黄，100% 提示或暂停（原因“预算”）。费用按**四类 token**
+  （未命中缓存的输入 / 缓存读 / 缓存写 / 输出）和四个价格精确计算。
+- **价格源**：Provider 对话框里可从价格表（默认 LiteLLM 的 `model_prices_and_context_window.json`）
+  自动填入模型的四个价格和上下文窗口，你仍可手动修改。
+- **角色名册**：12 个座位 `N1`–`N12`，默认名字 Alice…Leo，可改名并保存；每人有一个由程序化素材库随机组合的
+  **像素头像**（可重新生成全部或单个）；性格设定与记忆是工作区里的纯文本文件，默认为空，可导入 / 导出 /
+  清空，也可让主持人的模型把几句要点“完善”成草稿；赛后手动“复盘”会把战绩和第一人称笔记写进记忆。
+- **自适应界面**：从 1920 宽屏到手机竖屏都能用（按平台与宽度自动切换布局）。
 - **LLM 主持人驱动流程**：轮流发言 = 主持人公告 + 发言权管理（`set_floor_queue` 等工具）；
   规则文本与“主持人手册”写在剧本里，引擎本身不含任何游戏词汇。
 - **频道与发言权**：可见性只由频道决定；主持人可随时关闭发言权（玩家收到“无发言权”回执），
@@ -38,8 +51,8 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 - **本地加密**：Provider 密钥和对局存档使用 AES-256-GCM；Windows 工作区主密钥由 DPAPI 保护。
 - **API 端点预览**：保存 Provider 前显示最终消息地址和模型列表地址；支持自动拼接 `/v1/...`
   或直接填写完整自定义 endpoint。
-- **极简观战界面**：玩家用极简几何图案 + 短 id + 标签表示，点击标签看工具调用/思考/token 统计；
-  信息流只显示发言（整条渲染，不流式），支持“上帝视角”和任意玩家视角。
+- **观战界面**：玩家用像素头像 + 名字 + 身份标签表示，点击标签看工具调用/思考/token 统计；
+  信息流只显示发言和请求卡片（整条渲染，不流式），支持“上帝视角”和任意玩家视角。
 - **演示模式**：`ARENA_DEMO=1` 用脚本化机器人代替模型，不需要 API Key 就能完整体验一局。
 
 ## 界面截图
@@ -67,8 +80,8 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
                               ┌───────────────────────────────┴────────┐     └─ 工作区密钥
                               ▼                                        ▼
         World（同步、与游戏无关）                       Runtime（asyncio）
-        提交闸门 → 账本（只追加）                       13 个 Agent = Actor（收件箱）+ Worker（LLM 循环）
-        频道 · 发言权 · 请求 · 模板                     Supervisor · 看门狗 · LLM 并发闸门
+        提交闸门 → 账本（只追加）                       13 个 Agent = Actor（pending）+ Worker（LLM 循环）
+        频道 · 发言权 · 请求 · 模板                     持久会话 · 休眠闹钟 · Supervisor · 看门狗
         能力 · 质询 · 随机数 · 游戏时钟                 Brain：状态板 + 记忆 + 可见历史 + 工具 schema
                                                               │
                                                               ▼
@@ -242,12 +255,13 @@ app/
 ├─ world/        物理层：提交闸门、账本、频道、发言权、请求、模板、能力、质询（同步、游戏无关）
 ├─ runtime/      异步运行时：Actor/Worker、Supervisor、LLM 闸门、trace 日志、事件总线、游戏时钟
 ├─ agents/       Brain：工具 schema、上下文构建、笔记与压缩、提示注入防护
-├─ game/         编排器、会话容器（存档 v3）、绑定、工作区切换、演示机器人
+├─ game/         编排器、会话容器（存档 v4）、名册 / 预算 / 复盘、绑定、工作区切换、演示机器人
 ├─ api/          REST + SSE v2、Provider、模板、工作区
 ├─ engine/       LLM 客户端、表达式引擎
 ├─ llm/          三协议适配器与 API 端点规划
-├─ providers/    加密 Provider 注册表与模型元数据
-├─ storage/      工作区、设置、对局、加密
+├─ providers/    加密 Provider 注册表、模型的四个价格、价格源
+├─ avatars.py    像素头像（素材库 static/avatar/parts.json 由 tools/avatar_lab.py 生成）
+├─ storage/      工作区、设置、名册、对局、加密
 └─ migration.py  旧数据迁移
 scenarios/       Markdown 剧本（schema v2）
 prompts/         主持人 / 玩家提示词模板
@@ -259,14 +273,15 @@ docs/            架构、Provider、工作区与 UI 文档
 
 ## 版本说明
 
-当前开发版本为 **0.12.0**：全员异步 Agent、LLM 主持人驱动、频道与发言权、质询、极简观战界面。
-**v0.12 不兼容 v0.11 及更早的对局存档**（旧存档会保留在存档列表中、不会被改动）。最近的稳定版本是
-0.11.0。高层发布说明见 [CHANGELOG.md](CHANGELOG.md)。
+当前开发版本为 **0.12.1**：在 0.12 的异步 Agent 之上，去掉引擎里所有“替用户省钱”的限制，
+改为持久会话 + 缓存 + 合并 + 压缩的编排，并加入按局预算、四价计费与价格源、角色名册（像素头像、性格与记忆）
+和自适应界面。**v0.12.1 不兼容 v0.12.0 及更早的对局存档**（旧存档会保留在存档列表中、不会被改动）。
+最近的稳定版本是 0.11.0。高层发布说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 文档
 
 - [架构](docs/architecture.md)
-- [v0.12 开发方案与决策记录](docs/v0.12-async-agents-plan.md) · [实现契约](docs/v0.12-contracts.md)
+- [v0.12 开发方案与决策记录](docs/v0.12-async-agents-plan.md) · [v0.12.1 方案](docs/v0.12.1-plan.md) · [实现契约](docs/v0.12-contracts.md)
 - [Provider 与模型](docs/providers.md)
 - [工作区与加密数据](docs/workspaces.md)
 - [界面操作指南](docs/ui-guide.md)

@@ -42,12 +42,38 @@ for the API Key again to prevent a stored key from being redirected to a differe
 Models are added **one at a time**:
 
 - Model ID;
-- input price per 1M tokens (required);
-- output price per 1M tokens (required);
+- **four prices** per 1M tokens: input (tokens that missed the provider's prompt cache, required),
+  output (required, reasoning tokens are billed as output), **cache read** and **cache write**
+  (optional: empty = billed like an input token; `0` is a real, free price);
 - optional context window.
 
 There is no hidden default price. Existing model entries can be edited independently. Model
 deletion is blocked while a binding or template references the model.
+
+A call is billed as
+`(uncached input × input + cache read × cache read price + cache write × cache write price + output × output) / 10⁶`
+with the prices that were in force **when the call was made** (editing a price never rewrites history).
+Every protocol reports the cache counters separately (OpenAI `cached_tokens`, DeepSeek
+`prompt_cache_hit_tokens`, Anthropic `cache_read_input_tokens` / `cache_creation_input_tokens`).
+
+## Price source
+
+Typing four prices per model is tedious, so the Provider dialog has a **price source**: a JSON
+price table, by default
+`https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json`.
+
+- **Refresh** downloads the table (https only, no redirects, SSRF-guarded like model discovery, 30 s,
+  20 MB cap) and keeps a reduced copy in the workspace (`pricing.v1.json`). A failed download keeps the
+  old table and says why.
+- **Fetching a Provider's model list** adds a *suggested* price set and context window to every model it
+  recognises; picking a model fills the four prices in. You can edit every number before saving.
+- Matching: the exact id, then `<litellm provider>/<id>` (the provider is guessed from the Base URL and the
+  protocol), then the id without a date suffix, then case-insensitively, finally a *unique* `…/<id>` entry.
+  No match = no suggestion (nothing is guessed).
+- A model remembers where its prices came from (`litellm:<key>` or `manual`); editing any price makes it
+  `manual`. Unit conversion (the table is per token) is done for you.
+- You can point the source at your own table (same JSON shape) — the URL is validated and, for a private
+  host, subject to the usual `ARENA_ALLOW_PRIVATE_PROVIDERS` rule.
 
 ## Templates
 

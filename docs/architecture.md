@@ -4,6 +4,11 @@ Arena-Agents v0.12 把一局游戏里的**每一个角色（所有玩家和主�
 **前端 Actor + 后端 Worker**。引擎只提供与游戏无关的“物理层”（频道、发言权、请求、账本），
 规则写在剧本里，由 LLM 主持人驱动整局流程。
 
+**v0.12.1 的原则：引擎不替用户省钱。** 没有 ambient 优先级、没有防抖、没有轮数上限、没有“执行深度”——
+投递给 agent 的**每一条**消息都会立刻唤醒它；狼人可以随时“拍刀”，白狼王可以随时自爆。
+token 由 **actor / worker 的编排**来管理（持久会话 + 前缀缓存、在途合并、按需压缩），
+花多少钱由用户在界面上设置上限（见下文“预算”）。
+
 ```text
 config.yml + scenarios/<剧本>.md (schema v2)
         │  ScenarioSpec：身份池 · 模板 · 能力 · 检查项 · 默认限额 · 规则文本 · 主持人手册
@@ -16,8 +21,9 @@ config.yml + scenarios/<剧本>.md (schema v2)
         ▲ Intent（speak / respond / use_ability / mod.* …）            │ Envelope（唤醒信号）
         │                                                              ▼
 ┌──────────────────────── Runtime（asyncio） ────────────────────────┐
-│  Agent = Actor（收件箱，永不调用 LLM，永不阻塞）                      │
-│        + Worker（一次运行：LLM 调用 → 工具 → 注入 → 下一轮，可取消） │
+│  Agent = Actor（pending 信封，永不调用 LLM，永不阻塞）               │
+│        + Worker（一次激活：LLM → 工具 → 合并注入 → … → sleep，可取消）│
+│  ConversationBook（每个 agent 一条持久、只追加的对话）                │
 │  Supervisor（泵、计时轮询、看门狗）· LLM 闸门 · trace 日志 · 事件总线 │
 └─────────────────────────────────────────────────────────────────────┘
         ▲ Brain：系统提示词 · 工具 schema · 上下文构建（状态板 + 记忆 + 可见历史）
@@ -49,28 +55,56 @@ config.yml + scenarios/<剧本>.md (schema v2)
 
 ### 2. Runtime（`app/runtime/`）
 
-- **Actor** 只做一件事：`await mailbox.get()`。它按优先级处理 Envelope：
-  `urgent`（拿到发言权、收到请求、质询回复…）立即唤醒；`normal`（自由讨论里的新消息）防抖后唤醒；
-  `ambient` 只缓冲。运行中的 Worker 在每轮 LLM 调用之后收到“注入”；只有与当前工作直接相关的
-  “打断”（发言权被收回、请求被取消）才会取消 Worker，并带有防饥饿保护。
-- **Worker** 每次运行都从世界重建上下文，**对话不跨运行保留**，所以取消不会留下不成对的工具调用。
-- **Supervisor** 负责把世界的投递和事件泵给各 agent / 事件总线，轮询世界计时器，
-  并带看门狗：对局静止时唤醒主持人，连续无进展则自动暂停。
-- **LLM 闸门** 限制全局与每个 Provider 的并发；**trace 日志**（明文 JSONL，在工作区 `logs/` 下）
-  记录思维链、工具调用和回执；前端不展示这些。
+- **一切投递都唤醒。** `Agent.deliver(envelope)` 把信封放进 `pending`；agent 在休眠就用 `loop.call_soon`
+  安排**一次**激活——同一次同步泵里投递的所有信封合成一次激活。优先级只剩 `urgent` / `normal`，
+  没有防抖，没有 ambient。出局的玩家只被**直接**给他的事件唤醒（给他的发言权、请求、私聊），
+  不被广播唤醒；发出者不会被自己的消息唤醒。
+- **持久会话**（`conversation.py`，`ConversationBook`，每局一个）：每个 agent 一条只追加的对话；
+  system 与 tools 在创建时确定、之后逐字节不变，这样供应商的前缀缓存（OpenAI 自动缓存、DeepSeek 的
+  `prompt_cache_hit_tokens`、Anthropic 的 `cache_control` 断点）才能命中。第一次激活发 FULL 消息
+  （状态板 + 记忆 + 可见历史），之后只追加 DELTA（新条目 + 状态板的变化 + 唤醒原因）；没有新东西可说就
+  回到休眠、不调用模型。**暂停→继续复用同一本对话**，新局 / 导入 / 恢复存档时清空（对话不进存档）。
+- **在途合并**：Worker 运行中到达的信封，在下一轮边界合并成一条 DELTA 注入；只有直接影响当前工作的
+  “打断”（发言权被收回、请求被取消）才取消在途的 LLM 调用，并带防饥饿保护。
+- **三种状态**：`thinking`（LLM 调用在途）、`acting`（执行工具或两轮之间）、`sleeping`。
+  `sleep(seconds?)` 是唯一的“什么也不做”：被任何新信封叫醒，也可以带一个游戏时钟闹钟
+  （暂停时冻结，到点由 Supervisor 的 tick 合成 `timer.elapsed` 唤醒）。
+- **按需压缩**：每次响应后 `used = 未命中缓存 + 缓存读 + 缓存写` 的输入 token；达到模型窗口的
+  `compact_at`（默认 60%）提醒 agent 调用 `compact_context`；达到 `trim_at`（90%）仍未压缩，
+  就按完整的轮从最前面裁剪。没有轮数上限。
+- **Supervisor** 把世界的投递和事件泵给各 agent / 事件总线，轮询世界计时器和休眠闹钟；
+  看门狗只唤醒主持人，连续无进展则在界面上显示警告横幅——**从不自动暂停**。
+- **LLM 闸门** 默认不限并发（`llm_concurrency: 0`），只在供应商限流时才需要调小；
+  **trace 日志**（明文 JSONL，在工作区 `logs/` 下）记录思维链、工具调用和回执；前端不展示这些。
 
 ### 3. Agents（`app/agents/`）
 
 `ArenaBrain` 把世界翻译成模型能理解的东西：状态板（我现在能不能发言、为什么不能、请求、能力…）、
 可见历史（带长度预算；玩家写的内容一律按“不可信数据”处理，防止伪造记录或章节）、私人笔记与压缩摘要、
 唤醒原因，以及由意图模型生成的工具 schema。模型的正文**不会**被当作发言——必须调用 `speak`。
+系统提示词里有该玩家的**性格设定**与**长期记忆**（来自名册，见下文）；模型看到的称呼统一是
+`N3 Carol`（工具参数用 id，说话用名字）。`inject_message` 用 `app/agents/delta.py` 比较两次状态板，
+只把**可行动的变化**（能不能发言、发言权、请求的新增 / 作答 / 结束、能力、标签、工单）写成一小段，
+让对话保持追加式前缀。
 
 ### 4. 应用层（`app/game/`、`app/api/`）
 
 - `GameOrchestrator` 管理生命周期（开始 / 暂停 / 继续 / 终局后继续）、模型绑定、加密存档、
-  观战事件总线与 HTTP API；
-- 存档格式 v3：账本 + 世界状态 + 用量；**不兼容 v0.11 及更早的存档**（它们保留在存档列表中，不会被改动）；
-- API：`/api/state`（PublicSession v2）、`/api/events`（SSE v2：带 `id` 的增量事件，支持 `Last-Event-ID` 续传）。
+  观战事件总线与 HTTP API；名册 / 预算 / 复盘 / “完善”在 `roster_runtime.py`（mixin）；
+- 存档格式 v4：账本 + 世界状态 + 四类 token 的用量 + 本局的预算与名册快照；**不兼容 v0.12.0 及更早的存档**
+  （它们保留在存档列表中，不会被改动）；
+- API：`/api/state`（PublicSession v3）、`/api/events`（SSE v2：带 `id` 的增量事件，支持 `Last-Event-ID` 续传）、
+  `/api/roster*`、`/api/budget`、`/api/game/review`、`/api/pricing/*`（见 `docs/v0.12-contracts.md` §10）。
+
+**名册（roster）**：座位固定为 `N1`–`N12`，默认名字 Alice…Leo，可改名并**持久保存**；头像由程序化素材库
+随机组合并固定下来，可重新生成全部 / 单个。性格设定与记忆是工作区里的纯文本文件
+（`roster/N1.persona.md`、`N1.memory.md`），默认为空，可导入 / 导出 / 清空，也可以让主持人的模型把几句要点
+“完善”成草稿（草稿由用户确认才保存）。记忆分三段：`## 战绩`（引擎维护）、`## 对局记忆`（赛后复盘）、
+`## 经验与印象`（用户手写）。**默认不自动复盘**——对局结束后手动点“复盘”，每位玩家用自己的模型写一份
+第一人称笔记；每局可以选择是否加载记忆。
+
+**预算**：引擎本身不限制任何东西；用户可为**当前这一局**设置 token 上限和 / 或金额上限，
+并选择“达到上限后强制停止”。记账后同步检查：80% 警告，100% 通知（强制停止则以 `budget` 为原因暂停）。
 
 ### 5. 剧本（`scenarios/*.md`）
 
@@ -82,13 +116,22 @@ config.yml + scenarios/<剧本>.md (schema v2)
 ### 6. 模型与存储
 
 `app/llm/` 每个协议一个适配器，`endpoints.py` 是 URL 构造的唯一来源。每次调用把 agent 的
-`ModelBinding` 解析成 Provider + 模型 + 推理深度，响应带价格快照；用量按 agent 与模型累计，
-以后改价格不会改写历史。工作区（含加密的 Provider 注册表、设置、模板、绑定、存档、日志）与
+`ModelBinding` 解析成 Provider + 模型 + 推理深度，响应带**四个价格**的快照；用量记**四类 token**
+（未命中缓存的输入 / 缓存读 / 缓存写 / 输出），按 agent 与模型累计，
+`cost = (未命中·输入价 + 缓存读·缓存读价 + 缓存写·缓存写价 + 输出·输出价) / 10⁶`，
+以后改价格不会改写历史。三个适配器都解析缓存计数（OpenAI `prompt_tokens_details.cached_tokens`、
+DeepSeek `prompt_cache_hit_tokens`、Anthropic `cache_read/creation_input_tokens`），Anthropic 请求在
+system / 最后一个工具 / 最后一条消息上放缓存断点（≤ 4 个）；上游拒绝时自动去掉重试。
+模型价格可以从**价格源**（默认 LiteLLM 的 `model_prices_and_context_window.json`）自动匹配填入，
+详见 [providers.md](providers.md)。工作区（含加密的 Provider 注册表、设置、模板、绑定、存档、日志）与
 v0.11 相同：AES-256-GCM，主密钥由 Windows DPAPI 保护，或来自 Docker Secret / 环境变量。
 
 ## 设计不变量
 
-- 引擎不得包含具体游戏的词汇或规则；规则只存在于剧本里（`tests/v12/test_neutrality.py` 会扫描）。
+- 引擎不得包含具体游戏的词汇或规则；规则只存在于剧本里（`tests/v12/test_neutrality.py` 会扫描，
+  也禁止引擎代码里出现固定的玩家编号）。
+- **引擎不替用户省钱**：不限制唤醒、不限制轮数、不限制发言；省 token 只靠持久会话 / 前缀缓存 / 合并 / 压缩，
+  上限由用户设置。
 - 世界里不允许 `await` 或阻塞 I/O；LLM 调用是运行时里唯一的等待点。
 - 改变世界只能通过提交闸门；账本只追加。
 - 主持人是独立 agent：不能操控其他 agent 的内部进程，不能改写已发生的事。
