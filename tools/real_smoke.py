@@ -1,0 +1,226 @@
+"""Real-model smoke test for the v0.12 engine (costs API credits — it has a hard call budget).
+
+It plays a *small* game with the models that are bound in a workspace's saved default bindings, and
+prints a compact report (tool usage, rejection codes, token usage).  Nothing is shown from the key
+store; the provider registry is only used by the engine to make the calls.
+
+Isolation: the encrypted provider registry and the DPAPI key wrapper are COPIED from ``--from`` into
+a private scratch directory, so the live workspace (which another running instance may hold locked)
+is never opened or modified; the copy is deleted at the end (``--keep`` keeps it).
+
+Examples::
+
+    python tools/real_smoke.py --from "C:/Users/me/Arena-Agents/Default/.arena" --players 4 --max-calls 60
+    python tools/real_smoke.py --from ... --scenario scenarios/werewolf_12p.md --players 12 --max-calls 80
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import collections
+import copy
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+SEATS = [
+    ("Alice", "逻辑严密，善于从发言细节中推敲破绽。"),
+    ("Bob", "稳健谨慎，倾向于整合多方信息后再站边。"),
+    ("Carol", "直觉敏锐，关注言行一致性与情绪变化。"),
+    ("David", "擅长伪装，喜欢制造信息迷雾。"),
+    ("Eve", "大局观强，善于梳理时间线。"),
+    ("Frank", "作风凌厉，进攻性强。"),
+    ("Grace", "外柔内刚，关键时刻敢于亮明态度。"),
+    ("Henry", "领袖气质，喜欢主动控场。"),
+    ("Ivy", "细致入微，擅长复盘前后矛盾。"),
+    ("Jack", "务实果断，倾向于收益最大化。"),
+    ("Kate", "善于倾听，常能识破套路。"),
+    ("Leo", "思维跳跃，擅长奇袭。"),
+]
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--from", dest="source", required=True, help="a workspace's .arena directory (or a data dir) holding providers.v1.enc")
+    parser.add_argument("--scenario", default="scenarios/minimal_test.md")
+    parser.add_argument("--players", type=int, default=4)
+    parser.add_argument("--max-calls", type=int, default=60, help="hard budget of LLM calls; the game is paused when reached")
+    parser.add_argument("--timeout", type=float, default=300.0, help="wall-clock limit in seconds")
+    parser.add_argument("--depth", default="low", choices=["low", "medium", "high", "xhigh"])
+    parser.add_argument("--keep", action="store_true", help="keep the scratch directory (it holds an encrypted copy of the providers)")
+    return parser.parse_args()
+
+
+def prepare_scratch(source: Path, players: list[str]) -> Path:
+    scratch = Path(tempfile.mkdtemp(prefix="arena-real-smoke-", dir=str(ROOT / ".demo-data")))
+    for name in ("providers.v1.enc", "master.v1.dpapi"):
+        src = source / name
+        if not src.is_file():
+            raise SystemExit(f"missing {name} in {source}")
+        shutil.copy2(src, scratch / name)
+    settings = json.loads((source / "settings.json").read_text(encoding="utf-8")) if (source / "settings.json").is_file() else {}
+    bindings = settings.get("default_bindings") or {}
+    wanted = {actor: bindings[actor] for actor in ["moderator", *players] if actor in bindings}
+    missing = [actor for actor in ["moderator", *players] if actor not in wanted]
+    if missing:
+        # re-use the first available binding for seats that have none (ids only, no secrets)
+        fallback = next(iter(bindings.values()), None)
+        if fallback is None:
+            raise SystemExit("no default model bindings found; bind models in the UI first")
+        for actor in missing:
+            wanted[actor] = fallback
+    # Only the model bindings (ids, no secrets); no last-session pointer, so nothing is restored.
+    (scratch / "settings.json").write_text(
+        json.dumps(
+            {"schema_version": 1, "default_bindings": wanted, "last_session_id": None, "ui": {}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    return scratch
+
+
+async def main() -> int:
+    args = parse_args()
+    source = Path(args.source).expanduser().resolve()
+    ids = [f"p{i:02d}" for i in range(1, args.players + 1)]
+    (ROOT / ".demo-data").mkdir(exist_ok=True)
+    scratch = prepare_scratch(source, ids)
+    os.environ["ARENA_DISABLE_WORKSPACE"] = "1"
+    os.environ["ARENA_DISABLE_LEGACY_MIGRATION"] = "1"
+    os.environ["ARENA_DATA_DIR"] = str(scratch)
+    os.environ.pop("ARENA_MASTER_KEY", None)
+    os.environ.pop("ARENA_MASTER_KEY_FILE", None)
+    os.environ["PYTHONUTF8"] = "1"
+
+    import app.game.orchestrator as orchestrator_module
+    from app.config import load_config
+    from app.game.orchestrator import GameOrchestrator
+    from app.runtime.llm_gate import GatedEngineLlm, LlmGate
+    from app.storage import reset_stores_for_tests
+
+    reset_stores_for_tests()
+    cfg = load_config()
+    cfg["scenario"] = {"path": args.scenario}
+    cfg["participants"] = [
+        {"id": pid, "seat": f"S{index}", "name": f"{SEATS[index - 1][0]} {index}", "persona": SEATS[index - 1][1]}
+        for index, pid in enumerate(ids, start=1)
+    ]
+    cfg["llm"] = {**cfg.get("llm", {}), "execution_depth": args.depth}
+    orchestrator_module.load_config = lambda *a, **k: copy.deepcopy(cfg)
+
+    calls = {"n": 0, "errors": collections.Counter()}
+
+    class Counting:
+        def __init__(self, inner: GatedEngineLlm) -> None:
+            self.inner = inner
+
+        async def complete(self, agent_id, messages, tools, *, max_tokens=None):
+            calls["n"] += 1
+            try:
+                return await self.inner.complete(agent_id, messages, tools, max_tokens=max_tokens)
+            except Exception as exc:  # noqa: BLE001 - reported, then re-raised for the runtime's own handling
+                calls["errors"][type(exc).__name__] += 1
+                raise
+
+    orch = GameOrchestrator()
+    orch.llm_port_factory = lambda o: Counting(
+        GatedEngineLlm(o.llm, o.session.get_model_binding, LlmGate(max_concurrent=6, per_provider=4), 120.0)
+    )
+    started = time.monotonic()
+    try:
+        await orch.startup()
+        await orch.new_game()
+        issues = orch.refresh_binding_issues()
+        if issues:
+            print("BINDING ISSUES:", [(i.actor_id, i.message) for i in issues][:5])
+            return 2
+        print(f"scenario={orch.spec.id} players={len(ids)} depth={args.depth} budget={args.max_calls} calls / {args.timeout:.0f}s")
+        models = {f"{b.provider_id[:6]}…/{b.model_id}" for b in orch.session.model_bindings.values()}
+        print("models:", ", ".join(sorted(models)))
+        await orch.start_or_resume()
+        last_print = 0.0
+        while True:
+            await asyncio.sleep(1.0)
+            elapsed = time.monotonic() - started
+            status = orch.session.status
+            if elapsed - last_print >= 10:
+                last_print = elapsed
+                print(f"[{elapsed:5.0f}s] status={status} calls={calls['n']} ledger={orch.world.seq} phase={orch.world.state.phase!r}")
+            if status != "running":
+                print(f"game left 'running': status={status} reason={orch.session.pause_reason or '-'} {orch.session.hold_reason}")
+                break
+            if calls["n"] >= args.max_calls:
+                print(f"call budget reached ({calls['n']}); pausing")
+                await orch.pause("user")
+                break
+            if elapsed >= args.timeout:
+                print("time limit reached; pausing")
+                await orch.pause("user")
+                break
+        await asyncio.sleep(0.5)
+        report(orch, calls, time.monotonic() - started)
+        return 0
+    finally:
+        try:
+            await orch.shutdown()
+        except Exception as exc:  # noqa: BLE001
+            print("shutdown error:", type(exc).__name__)
+        reset_stores_for_tests()
+        if args.keep:
+            print("scratch kept at", scratch)
+        else:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def report(orch, calls, seconds: float) -> None:
+    world = orch.world
+    usage = orch.usage
+    print("\n=== report ===")
+    print(f"wall time {seconds:.0f}s | LLM calls {calls['n']} | call errors {dict(calls['errors'])} | ledger entries {world.seq}")
+    print(f"tokens in/out {usage.prompt_tokens}/{usage.completion_tokens} | cost ${usage.total_cost_usd:.4f}")
+    print("status:", orch.session.status, "| winner:", world.state.winner, "| phase:", world.state.phase)
+    types = collections.Counter(e.type for e in world.ledger)
+    print("ledger:", dict(types.most_common(14)))
+    for agent_id, actor in sorted(usage.by_actor.items()):
+        print(f"  {agent_id:10s} calls={actor.calls:3d} tools={actor.tool_calls:3d} think={actor.thinking_rounds:3d} rej={actor.rejections:2d} in={actor.prompt_tokens:6d} out={actor.completion_tokens:5d}")
+    log_root = Path(os.environ["ARENA_DATA_DIR"]) / "logs" / orch.session.session_id
+    files = sorted(log_root.glob("trace-*.jsonl")) if log_root.is_dir() else []
+    rejections: collections.Counter[str] = collections.Counter()
+    tool_names: collections.Counter[str] = collections.Counter()
+    errors: list[str] = []
+    for file in files:
+        for line in file.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("event") == "tool_call":
+                tool_names[f"{row.get('agent_id')}:{row.get('name')}" if row.get("agent_id") == "moderator" else str(row.get("name"))] += 1
+                result = str(row.get("result", ""))
+                if '"ok":false' in result:
+                    rejections[f"{row.get('name')} -> {result[:150]}"] += 1
+            elif row.get("event") in ("error", "give_up", "retry"):
+                errors.append(f"{row.get('event')}: {str(row.get('message') or row.get('error') or row)[:200]}")
+    print("tool usage:", dict(tool_names.most_common(25)))
+    if rejections:
+        print("rejected tool calls:")
+        for text, count in rejections.most_common(12):
+            print(f"  x{count} {text}")
+    if errors:
+        print("runtime errors:", errors[:6])
+    print("last public messages:")
+    for entry in [e for e in world.ledger if e.type == "message"][-8:]:
+        print(f"  #{entry.seq} [{entry.channel_id}] {world.display_name(entry.actor_id)}: {str(entry.data.get('content', ''))[:90]}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(asyncio.run(main()))

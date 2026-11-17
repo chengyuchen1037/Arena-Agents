@@ -349,6 +349,13 @@ test("auto-scroll follows new messages only while the reader is at the bottom", 
   list.scrollHeight = 1400;
   env.sse("message.committed", F.msg(43, "public", "p04", "c"));
   assert.equal(list.scrollTop, 1400);
+
+  // The scroll event of OUR OWN scroll-to-bottom arrives a frame late; more messages were appended in
+  // the meantime, so the position no longer looks like "the bottom". It must not turn following off.
+  list.scrollHeight = 1700; // two more messages landed before the event was delivered
+  list.dispatch("scroll"); // reports scrollTop 1400 = where we scrolled to
+  env.sse("message.committed", F.msg(44, "public", "p04", "d"));
+  assert.equal(list.scrollTop, 1700, "still following");
 });
 
 test("an empty game shows a hint that only speech is shown; a snapshot with the same content does not rebuild the feed", async () => {

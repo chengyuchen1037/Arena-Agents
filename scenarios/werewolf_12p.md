@@ -65,7 +65,7 @@ defaults:
   floor: {duration_s: 120, max_messages: 1, max_chars_per_message: 300, max_chars_total: 600}
   free: {duration_s: 300, max_messages_per_member: 6, max_chars_per_message: 300, max_chars_total: 2000, debounce_s: 1.5, silence_s: 30}
   request: {duration_s: 90, max_text_chars: 300}
-  llm: {max_tokens: 2048}
+  llm: {max_tokens: 8192}
   dm: {max_chars_per_message: 600}
   moderator: {max_chars_per_message: 2000}
 

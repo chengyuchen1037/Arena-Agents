@@ -205,7 +205,7 @@ def test_werewolf_defaults_and_ui(ww: ScenarioSpec) -> None:
     assert (d.floor.duration_s, d.floor.max_messages, d.floor.max_chars_per_message, d.floor.max_chars_total) == (120, 1, 300, 600)
     assert (d.free.duration_s, d.free.max_messages_per_member, d.free.max_chars_per_message) == (300, 6, 300)
     assert (d.free.max_chars_total, d.free.debounce_s, d.free.silence_s) == (2000, 1.5, 30)
-    assert d.request.duration_s == 90 and d.llm.max_tokens == 2048
+    assert d.request.duration_s == 90 and d.llm.max_tokens == 8192
     assert d.dm.max_chars_per_message == 600 and d.moderator.max_chars_per_message == 2000
     assert ww.ui.out_tags == ["出局"] and ww.ui.highlight_tags == ["警长"]
     assert ww.ui.status_tags == ["存活", "出局", "警长"] == ww.setup.public_tags

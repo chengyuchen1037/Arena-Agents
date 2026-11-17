@@ -121,7 +121,9 @@ class RequestDefaults(BaseModel):
 class LlmDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    max_tokens: int = 2048  # per LLM call, a safety net next to the character limits
+    # Per LLM call, a safety net next to the character limits.  Reasoning models count their thinking
+    # against it, so it must be generous (a real-model smoke test truncated every call at 1024).
+    max_tokens: int = 8192
 
 
 class ModeratorDefaults(BaseModel):

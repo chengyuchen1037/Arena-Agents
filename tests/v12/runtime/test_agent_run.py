@@ -261,6 +261,58 @@ async def test_the_nudge_and_a_pending_injection_arrive_in_one_user_message():
     assert last[3]["content"] == "NUDGE\n\nINJECT reasons=[request.opened] ambient=0"
 
 
+def cut_off(**kw):
+    """A response that ended because the output-token limit was hit (all of it spent on thinking)."""
+    resp = llm_resp(**kw)
+    resp.finish_reason = "length"
+    return resp
+
+
+@async_test()
+async def test_a_call_cut_off_by_the_token_limit_without_any_tool_call_is_retried_once_with_a_nudge():
+    from app.runtime.agent import CUT_OFF_NUDGE
+
+    rig = Rig()
+    rig.brain.nudge_text = None  # the brain would not nudge an empty answer: the runtime must
+    rig.llm.script("a1", cut_off(thought="thinking..."), llm_resp(SPEAK), wait_resp())
+    agent = rig.agent()
+    async with running_agent(agent):
+        wake(agent)
+        await wait_until(lambda: agent.stats["runs"] == 1)
+    assert len(rig.llm.calls) == 3
+    second = rig.llm.calls[1].messages
+    assert roles(second) == ["system", "user", "user"] and second[2]["content"] == CUT_OFF_NUDGE
+    assert len(rig.world.submitted) == 1  # the retried round produced the action
+    assert any(r.get("why") == "length" for r in rig.trace.of("nudge", "a1"))
+
+
+@async_test()
+async def test_the_cut_off_recovery_happens_at_most_once_per_run():
+    rig = Rig()
+    rig.brain.nudge_text = None
+    rig.llm.script("a1", cut_off(), cut_off(), wait_resp())
+    agent = rig.agent()
+    async with running_agent(agent):
+        wake(agent)
+        await wait_until(lambda: agent.stats["runs"] == 1)
+        await asyncio.sleep(0.05)
+    assert len(rig.llm.calls) == 2  # the second cut-off ends the run; no endless retrying
+    assert len([r for r in rig.trace.of("nudge", "a1") if r.get("why") == "length"]) == 1
+
+
+@async_test()
+async def test_a_normal_stop_without_tools_is_not_mistaken_for_a_cut_off():
+    rig = Rig()
+    rig.brain.nudge_text = None
+    rig.llm.script("a1", llm_resp(content="just thinking"), wait_resp())
+    agent = rig.agent()
+    async with running_agent(agent):
+        wake(agent)
+        await wait_until(lambda: agent.stats["runs"] == 1)
+        await asyncio.sleep(0.05)
+    assert len(rig.llm.calls) == 1 and not rig.trace.of("nudge", "a1")
+
+
 # =============================================================================== failures
 
 

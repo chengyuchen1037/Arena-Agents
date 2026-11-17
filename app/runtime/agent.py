@@ -74,6 +74,14 @@ from app.world.types import Envelope, UiEvent
 
 logger = logging.getLogger(__name__)
 
+#: Sent (once per run) when a call ends because it hit the output-token limit *without* any tool call:
+#: a reasoning model can spend the whole budget on thinking, which would silently end the run.
+CUT_OFF_NUDGE = (
+    "（系统提示）你上一次的输出因长度上限被截断，没有完成任何操作。请大幅缩短思考，"
+    "直接调用工具完成当前待办（例如 speak / respond / wait）。"
+)
+TRUNCATION_REASONS = frozenset({"length", "max_tokens"})
+
 AgentKind = Literal["player", "moderator"]
 AgentState = Literal["idle", "thinking", "acting", "stopped"]
 
@@ -591,6 +599,7 @@ class Agent:
         max_rounds = self.config.rounds_for(self.kind)
         max_tokens = self._max_tokens()
         nudged = False
+        cut_off_retried = False
 
         for round_idx in range(max_rounds):
             run.rounds = round_idx + 1
@@ -609,7 +618,11 @@ class Agent:
                     run.end_reason = "rounds" if self._has_actionable_pending() else "no_tool"
                     return
                 parts: list[str] = []
-                if not nudged:
+                if str(resp.finish_reason or "").lower() in TRUNCATION_REASONS and not cut_off_retried:
+                    cut_off_retried = True  # one recovery attempt per run, then the usual rules apply
+                    parts.append(CUT_OFF_NUDGE)
+                    self._trace("nudge", gen=run.gen, round=round_idx, why="length")
+                elif not nudged:
                     nudge = self._brain_call("no_tool_nudge", brain.no_tool_nudge, aid, resp.content or "", round_idx)
                     if nudge:
                         nudged = True

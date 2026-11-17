@@ -1564,6 +1564,16 @@ def create_app(*, speed: float = 1.0, seed: int = 7) -> Any:
         await game().jump_to_end()
         return {"ok": True, "session": session_payload()}
 
+    @app.post("/api/mock/speed")
+    async def mock_speed(body: dict[str, Any]) -> dict[str, Any]:
+        """Change the replay speed on the fly (applies to the next wait): slow down to catch a moment."""
+        g = game()
+        try:
+            g.speed = max(0.01, float(body.get("speed", 1.0)))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="speed must be a number") from exc
+        return {"ok": True, "speed": g.speed}
+
     @app.post("/api/mock/disconnect")
     async def mock_disconnect() -> dict[str, Any]:
         """Close every SSE stream: browsers reconnect (with last_event_id) and resume from the ring buffer."""
