@@ -3459,9 +3459,9 @@
     "front": [
      ".........oo.........",
      "........olbo........",
-     "......oolbbboo......",
-     "....oollbwwbbboo....",
-     "...ollbbbwwbbbbbo...",
+     ".......olbbbo.......",
+     "......olbwwbbo......",
+     "...ooolbbwwbbbooo...",
      ".oolllllllllllllloo.",
      "oblbbbbbbbbbbbbbbbbo",
      ".osssssssssssssssso.",
@@ -3484,9 +3484,9 @@
     "front": [
      "..........oo........",
      ".........obbo.......",
-     "......ooolbbbo......",
-     "....oolllbbbbboo....",
-     "...ollbbbbbbbbbbo...",
+     ".......oolbbbo......",
+     "......ollbbbso......",
+     "...ooolbbbbbbbooo...",
      ".oolllllllllllllloo.",
      "oblbbbbbbbbbbbbbbbbo",
      ".osssssssssssssssso.",
@@ -3507,11 +3507,11 @@
    "a03": {
     "back": null,
     "front": [
-     "..........oo........",
-     ".........obbo.......",
-     ".......oolbbbo......",
-     ".....oollbbbsoo.....",
-     "....ollbbbbbbbbo....",
+     "...........oo.......",
+     "..........obbo......",
+     "........oobbso......",
+     "......oollbbso......",
+     "....oollbbbbbboo....",
      ".ooossssssssssssooo.",
      "obllbbbblwwlbbbbbbbo",
      ".osssssssssssssssso.",
@@ -3536,7 +3536,7 @@
      "......oooooooo......",
      "..o.oollllbbbboo.o..",
      ".obollbbwwwwbbbbobo.",
-     "olblbbbbpwwpbbbbbbbo",
+     "olblbbbbwppwbbbbbbbo",
      "osbbbbbbbwwbbbbbbbso",
      ".osssssssssssssssso.",
      "..oooooooooooooooo..",
@@ -3560,13 +3560,13 @@
      "....................",
      ".........oo.........",
      "........ollo........",
-     "....oooolbbboooo....",
-     "...ollllbbbbbbbbo...",
-     "..olbbbbbbbbbbbbbo..",
-     ".obbbbbbbbbbbbbbbbo.",
-     "..ollllllllllllllo..",
-     "...oossssssssssoo...",
-     ".....oooooooooo.....",
+     "....oooollbboooo....",
+     "...ollllblbbbbbbo...",
+     "..olbbbbblbbbbbbbo..",
+     ".olbbbbbblbbbbbbbbo.",
+     ".osssssssssssssssso.",
+     "..oossssssssssssoo..",
+     "....oooooooooooo....",
      "....................",
      "....................",
      "....................",
@@ -4180,11 +4180,12 @@
     ]
    },
    "a30": {
-    "back": [
+    "back": null,
+    "front": [
      "......oooooooo......",
      "....oolllllllloo....",
-     "...obbbbbbbbbbbbo...",
-     "....oolllllllloo....",
+     "...ollllllllllllo...",
+     "....oossssssssoo....",
      "......oooooooo......",
      "....................",
      "....................",
@@ -4201,8 +4202,7 @@
      "....................",
      "....................",
      "...................."
-    ],
-    "front": null
+    ]
    },
    "a31": {
     "back": null,
@@ -4255,7 +4255,8 @@
     "front": null
    },
    "a33": {
-    "back": [
+    "back": null,
+    "front": [
      "...oo..........oo...",
      "..obbo........obbo..",
      "..obso........obso..",
@@ -4276,8 +4277,7 @@
      "....................",
      "....................",
      "...................."
-    ],
-    "front": null
+    ]
    },
    "a34": {
     "back": null,

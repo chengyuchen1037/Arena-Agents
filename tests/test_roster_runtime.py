@@ -476,6 +476,7 @@ async def test_pause_reasons_include_budget_and_a_save_keeps_the_limit_and_the_r
 @async_test
 async def test_a_finished_review_is_saved_so_a_restart_cannot_review_the_same_game_twice(monkeypatch):
     orch = make_orch(monkeypatch)
+    orch._autosave_enabled = True  # what startup() switches on
     await finished_game(orch)
     orch.llm_port_factory = lambda o: TextLlm("复盘")
     await orch.start_review()

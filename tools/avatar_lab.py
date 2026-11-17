@@ -1047,10 +1047,10 @@ def with_brim(spec: dict[int, tuple[int, int]], brim_y: int, wide: int = 1) -> P
 
 def acc_wizard(r: Rng, *, bend: int = 0, star: bool = True) -> Art:
     a = Art()
-    body = {1: (9, 10), 2: (8, 11), 3: (6, 13), 4: (4, 15), 5: (3, 16)}
-    for y in (1, 2):
+    body = {1: (9, 10), 2: (8, 11), 3: (7, 12), 4: (6, 13), 5: (4, 15)}
+    for y in (1, 2, 3):
         if bend:
-            body[y] = (body[y][0] + bend, body[y][1] + bend)
+            body[y] = (body[y][0] + bend * (4 - y) // 2, body[y][1] + bend * (4 - y) // 2)
     a.put(rows_spans(body), "b")
     a.put(span(5, 3, 16), "l")  # 帽带
     a.put(span(6, 1, 18) | span(7, 2, 17), "b")
@@ -1062,7 +1062,7 @@ def acc_wizard(r: Rng, *, bend: int = 0, star: bool = True) -> Art:
 
 def acc_witch(r: Rng) -> Art:
     a = Art()
-    body = {1: (10, 11), 2: (9, 12), 3: (7, 12), 4: (5, 14), 5: (4, 15)}
+    body = {1: (11, 12), 2: (10, 12), 3: (8, 12), 4: (6, 13), 5: (4, 15)}
     a.put(rows_spans(body), "b")
     a.put(span(5, 4, 15), "s")
     a.put(span(6, 0 + 1, 18) | span(7, 2, 17), "b")
@@ -1079,16 +1079,16 @@ def acc_pirate(r: Rng) -> Art:
     a.put(span(6, 2, 17), "s")
     a.put({(1, 4), (18, 4), (1, 5), (18, 5), (2, 3), (17, 3)}, "b")
     a.put({(8, 3), (9, 3), (10, 3), (11, 3), (8, 4), (9, 4), (10, 4), (11, 4), (9, 5), (10, 5)}, "w")
-    a.put({(8, 4), (11, 4)}, "p")
+    a.put({(9, 4), (10, 4)}, "p")
     return a
 
 
 def acc_cap(r: Rng) -> Art:
     a = Art()
     a.put(dome(9.5, 6.4, 7.6, 3.6, 6), "b")
-    a.put(span(7, 3, 16) | span(8, 5, 14), "b")
-    a.put(span(7, 3, 16), "l")
-    a.put(span(8, 5, 14), "s")
+    a.put(span(7, 2, 17) | span(8, 4, 15), "s")
+    a.put(span(7, 3, 16), "s")
+    a.put({(9, y) for y in range(3, 7)}, "l")
     a.put({(9, 2), (10, 2)}, "l")
     return a
 
@@ -1320,8 +1320,8 @@ def acc_antenna(r: Rng) -> Art:
 
 def acc_halo(r: Rng) -> Art:
     a = Art()
-    a.put(span(1, 6, 13) | span(2, 4, 15) | span(3, 6, 13), "l", back=True)
-    a.put(span(2, 4, 15), "b", back=True)
+    a.put(span(1, 6, 13) | span(2, 4, 15) | span(3, 6, 13), "l")
+    a.put(span(3, 6, 13), "b")
     return a
 
 
@@ -1343,7 +1343,7 @@ def acc_horns_ram(r: Rng) -> Art:
 def acc_antlers(r: Rng) -> Art:
     a = Art()
     beam = strand([(5, 5), (4, 3), (3, 1)], [2, 2]) | strand([(4, 3), (2, 3)], 1) | {(6, 4)}
-    a.put(beam | mirror(beam), "b", back=True)
+    a.put(beam | mirror(beam), "b")
     return a
 
 
