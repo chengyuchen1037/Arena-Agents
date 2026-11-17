@@ -38,7 +38,7 @@ from app.providers.models import ModelBinding
 logger = logging.getLogger(__name__)
 
 OLD_SAVE_NOTICE = (
-    "上次的对局来自旧版本引擎（v0.11 及更早），v0.12 不兼容，已保留在存档列表中、未被改动；已为你新建了一局。"
+    "上次的对局来自旧版本引擎（v0.12.0 及更早），v0.12.1 不兼容，已保留在存档列表中、未被改动；已为你新建了一局。"
 )
 
 

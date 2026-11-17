@@ -113,8 +113,34 @@ class RosterRuntimeMixin:
         self._moderator_avatar_snapshot = moderator.get("avatar") if isinstance(moderator.get("avatar"), dict) else None
         return players
 
+    def _roster_for_write(self) -> RosterStore:
+        """The roster for a *change*: refused while the workspace is being switched or could not be opened (the
+        change would otherwise land in the legacy global directory)."""
+        self._ensure_not_switching()  # type: ignore[attr-defined]
+        return self._roster()
+
     def roster_payload(self) -> dict[str, Any]:
         """``GET /api/roster``: the editable roster plus whether names / avatars may be changed now."""
+        if not self._roster_io_allowed():
+            # no usable workspace: show the defaults of ``config.yml``, read-only, and create nothing on disk
+            seats = [
+                {
+                    "seat": index,
+                    "id": str(item["id"]),
+                    "name": str(item.get("name") or default_name(index)),
+                    "default_name": default_name(index),
+                    "avatar": None,
+                    "persona": "",
+                    "memory": "",
+                }
+                for index, item in enumerate(self.cfg.get("participants", []), start=1)  # type: ignore[attr-defined]
+            ]
+            return {
+                "memory_enabled": True,
+                "seats": seats,
+                "moderator": {"id": MODERATOR_ID, "name": "主持人", "avatar": None},
+                "editable": False,
+            }
         roster = self._roster()
         self._ensure_avatars(roster)
         data = roster.get()
@@ -163,7 +189,7 @@ class RosterRuntimeMixin:
         """Change one seat (or the moderator, whose only setting is its avatar).  Name / avatar need an idle
         game; persona / memory are files and may be edited at any time (a running game keeps the copy it
         started with)."""
-        roster = self._roster()
+        roster = self._roster_for_write()
         entry = roster.entry(agent_id)  # validates the id
         if agent_id == MODERATOR_ID and (name is not None or persona is not None or memory is not None):
             raise RosterError("主持人只能更换头像，名字、性格设定和记忆都是固定的。")
@@ -260,22 +286,24 @@ class RosterRuntimeMixin:
         return roster.entry(agent_id)
 
     async def set_memory_enabled(self, enabled: bool) -> dict[str, Any]:
-        self._roster().set_memory_enabled(bool(enabled))
+        self._roster_for_write().set_memory_enabled(bool(enabled))
         if self.session.status == "idle":
             self._refresh_idle_texts()
         return self.roster_payload()
 
     async def clear_memory(self, *, include_persona: bool = False) -> dict[str, Any]:
-        self._roster().clear(include_persona=include_persona)
+        self._roster_for_write().clear(include_persona=include_persona)
         if self.session.status == "idle":
             self._refresh_idle_texts()
         return self.roster_payload()
 
     def export_memory(self) -> bytes:
+        if not self._roster_io_allowed():
+            raise RosterError("工作文件夹不可用（初始化失败），没有可导出的记忆；请先选择一个工作文件夹。")
         return self._roster().export_zip()
 
     async def import_memory(self, data: bytes, *, dry_run: bool) -> dict[str, Any]:
-        roster = self._roster()
+        roster = self._roster() if dry_run and self._roster_io_allowed() else self._roster_for_write()
         changes = roster.preview_import(data) if dry_run else roster.import_zip(data)
         if not dry_run and self.session.status == "idle":
             self._refresh_idle_texts()

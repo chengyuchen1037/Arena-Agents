@@ -586,3 +586,54 @@ async def test_the_moderators_avatar_is_part_of_the_save_and_survives_a_restore(
     other = make_orch(monkeypatch)
     await other.load_session_data(payload)
     assert other.public_session()["moderator"]["avatar"] == moderator  # the game keeps the host it started with
+
+
+# ------------------------------------------------------------------------------------ no usable workspace
+def roster_dir_exists(orch):
+    return (orch._roster().data_dir / "roster").exists()
+
+
+@async_test
+async def test_without_a_usable_workspace_the_roster_is_read_only_and_creates_nothing(monkeypatch, isolated_external_storage):
+    orch = make_orch(monkeypatch)
+    orch._workspace_failed = True  # the workspace could not be opened: the legacy global directory must stay untouched
+    payload = orch.roster_payload()
+    assert payload["editable"] is False and payload["memory_enabled"] is True
+    assert [s["id"] for s in payload["seats"]] == IDS and [s["name"] for s in payload["seats"]] == ["Alice", "Bob", "Carol", "David"]
+    assert all(s["avatar"] is None and s["persona"] == "" and s["memory"] == "" for s in payload["seats"])
+    assert payload["moderator"] == {"id": "moderator", "name": "主持人", "avatar": None}
+    for call in (
+        lambda: orch.update_roster_entry("N1", persona="x"),
+        lambda: orch.update_roster_entry("N1", memory="x"),
+        lambda: orch.update_roster_entry("N1", name="Zed"),
+        lambda: orch.set_memory_enabled(False),
+        lambda: orch.clear_memory(),
+        lambda: orch.import_memory(b"x", dry_run=False),
+        lambda: orch.regenerate_avatars("moderator"),
+    ):
+        with pytest.raises(RuntimeError, match="工作文件夹不可用"):
+            await call()
+    with pytest.raises(RosterError, match="工作文件夹不可用"):
+        orch.export_memory()
+    orch._workspace_failed = False
+    shutil_rmtree = __import__("shutil").rmtree
+    shutil_rmtree(isolated_external_storage / "roster", ignore_errors=True)  # forget what the make_orch game created
+    orch._workspace_failed = True
+    orch.roster_payload()
+    assert not (isolated_external_storage / "roster").exists(), "reading the roster of a broken workspace created files"
+
+
+@async_test
+async def test_roster_changes_wait_for_a_workspace_switch_to_finish(monkeypatch):
+    orch = make_orch(monkeypatch)
+    orch._switching_workspace = True
+    for call in (lambda: orch.update_roster_entry("N1", persona="x"), lambda: orch.set_memory_enabled(False), lambda: orch.clear_memory()):
+        with pytest.raises(RuntimeError, match="正在切换工作文件夹"):
+            await call()
+    assert orch.roster_payload()["editable"] is False
+
+
+def test_the_incompatible_save_notice_names_the_versions_of_this_release():
+    from app.game.session_runtime import OLD_SAVE_NOTICE
+
+    assert "v0.12.0" in OLD_SAVE_NOTICE and "v0.12.1" in OLD_SAVE_NOTICE and "未被改动" in OLD_SAVE_NOTICE
