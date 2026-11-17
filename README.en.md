@@ -40,8 +40,8 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 - **Price source** — the Provider dialog can fill a model's four prices and context window from a price
   table (default: LiteLLM's `model_prices_and_context_window.json`); you can still edit every number.
 - **Roster** — seats `N1`–`N12` with default names Alice…Leo that you can rename and keep; a **pixel
-  avatar** per seat randomly assembled from a procedurally generated parts library (regenerate one or
-  all); persona and memory are plain text files in the workspace (empty by default, importable /
+  avatar** per seat (and one for the moderator) randomly assembled from a procedurally generated parts
+  library (regenerate one or all); persona and memory are plain text files in the workspace (empty by default, importable /
   exportable / clearable, "complete it with the moderator's model" produces a draft you confirm); a
   manual post-game review writes the record and a first-person note into each player's memory.
 - **Responsive UI** — from a 1920 px desktop to a phone in portrait (layout follows platform and width).

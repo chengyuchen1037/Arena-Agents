@@ -48,7 +48,9 @@ contract: [docs/v0.12-contracts.md](docs/v0.12-contracts.md) section 10.
 - **Seats `N1`–`N12`**, default names Alice…Leo (no digits), editable and persistent. Models see
   "`N3 Carol`"; the UI shows names.
 - **Pixel avatars** — random combinations from a procedurally generated parts library
-  (`tools/avatar_lab.py` → `static/avatar/parts.json`); regenerate one or all.
+  (`tools/avatar_lab.py` → `static/avatar/parts.json`); regenerate one or all. **The moderator gets a
+  random avatar too** (it is not a seat: it has no name, persona or memory to edit, only an avatar that is
+  rolled together with the twelve players so that all thirteen look different).
 - **Persona and memory** are plain files in the workspace (`roster/N1.persona.md`, `N1.memory.md`), empty by
   default; import / export (zip) / clear; a per-game "load memory" switch; "complete it" asks the moderator's
   model for a draft you confirm. **Reviews are manual**: after a game each player writes a first-person note
