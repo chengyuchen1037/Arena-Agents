@@ -10,7 +10,7 @@ Markdown 剧本中，引擎负责玩家、发言、投票、频道、事件、�
 AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.11.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.12.0--dev-blue.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 
