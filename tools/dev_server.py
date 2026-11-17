@@ -11,10 +11,15 @@ Two modes:
     directory, so the live workspace — which another running instance may hold locked — is never
     opened or modified.  Games started here call the bound models and **cost API credits**.
 
+``--price-source`` (with ``--copy-providers-from``)
+    Before starting, download the LiteLLM price table and price the bound models with it - in the private
+    copy only - so the cost counter shows what the provider really bills (input / cache read / cache write /
+    output) instead of the prices typed into the registry by hand.  Offline: the copied prices stay.
+
 Examples::
 
     python tools/dev_server.py --demo --port 8123
-    python tools/dev_server.py --copy-providers-from "C:/Users/me/Arena-Agents/Default/.arena" --port 8124
+    python tools/dev_server.py --copy-providers-from "C:/Users/me/Arena-Agents/Default/.arena" --price-source --port 8124
 
 The private data directory is ``.demo-data/<mode>`` (git-ignored); delete it to forget everything.
 """
@@ -41,9 +46,12 @@ def main() -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--data-dir", help="private data directory (default: .demo-data/<mode>)")
     parser.add_argument("--fresh", action="store_true", help="wipe the private data directory first")
+    parser.add_argument("--price-source", action="store_true", help="price the bound models with the LiteLLM table (private copy only)")
     args = parser.parse_args()
     if bool(args.demo) == bool(args.copy_providers_from):
         parser.error("choose exactly one of --demo or --copy-providers-from")
+    if args.price_source and not args.copy_providers_from:
+        parser.error("--price-source needs --copy-providers-from (the demo has no models)")
 
     mode = "demo" if args.demo else "real"
     data_dir = Path(args.data_dir) if args.data_dir else ROOT / ".demo-data" / mode
@@ -84,6 +92,17 @@ def main() -> int:
         )
         os.environ.pop("ARENA_MASTER_KEY", None)
         os.environ.pop("ARENA_MASTER_KEY_FILE", None)
+        if args.price_source:
+            import asyncio
+
+            from devlib import apply_price_source
+            from app.storage.settings import get_default_bindings
+
+            try:
+                for line in asyncio.run(apply_price_source(get_default_bindings().values())):
+                    print(line, flush=True)
+            except Exception as exc:  # noqa: BLE001 - never stop a dev instance from starting
+                print(f"price source: skipped ({type(exc).__name__}: {exc})", flush=True)
 
     print(f"Arena-Agents dev instance ({mode}) on http://{args.host}:{args.port}  data: {data_dir}", flush=True)
     if not args.demo:

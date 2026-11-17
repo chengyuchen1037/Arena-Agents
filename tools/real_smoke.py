@@ -201,38 +201,11 @@ async def main() -> int:
 
 
 async def apply_price_source(orch) -> None:
-    """Fetch the price table and write its prices into the (scratch) model entries the bindings use."""
-    from app.providers.pricing import get_price_store
-    from app.providers.store import get_provider_store
+    """Price the bound models with the LiteLLM table (in the scratch copy only; see ``devlib``)."""
+    from devlib import apply_price_source as apply
 
-    prices = get_price_store()
-    status = await prices.refresh()
-    print(f"price table: {status['entries']} models from {status['url']}" + (f" ERROR: {status['error']}" if status["error"] else ""))
-    store = get_provider_store()
-    done: set[tuple[str, str]] = set()
-    for binding in orch.session.model_bindings.values():
-        key = (binding.provider_id, binding.model_id)
-        if key in done:
-            continue
-        done.add(key)
-        provider = store.get_provider(binding.provider_id)
-        match = prices.match(provider, binding.model_id)
-        if match is None:
-            print(f"  no price found for {binding.model_id}: the configured price stays")
-            continue
-        store.update_model(
-            binding.provider_id,
-            binding.model_id,
-            input_price_per_m=match.input_price_per_m,
-            output_price_per_m=match.output_price_per_m,
-            cache_read_price_per_m=match.cache_read_price_per_m,
-            cache_write_price_per_m=match.cache_write_price_per_m,
-            price_source=f"litellm:{match.key}",
-        )
-        print(
-            f"  {binding.model_id}: in ${match.input_price_per_m}/M, cache read ${match.cache_read_price_per_m}/M, "
-            f"cache write ${match.cache_write_price_per_m}/M, out ${match.output_price_per_m}/M  (litellm:{match.key})"
-        )
+    for line in await apply(orch.session.model_bindings.values()):
+        print(line)
 
 
 def report(orch, calls, seconds: float) -> None:
