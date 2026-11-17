@@ -107,8 +107,15 @@ class FreeDefaults(BaseModel):
     max_messages_per_member: int = 6  # hard
     max_chars_per_message: int = 300  # hard (truncating)
     max_chars_total: int = 2000  # advisory
-    debounce_s: float = 1.5  # NORMAL wake debounce for members
     silence_s: float = 30.0  # advisory: no message for this long -> notify the moderator
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_legacy_debounce(cls, data: Any) -> Any:
+        # v0.12.1 (E1): there is no debounce any more; scenario files of v0.12.0 may still carry the key.
+        if isinstance(data, dict) and "debounce_s" in data:
+            data = {k: v for k, v in data.items() if k != "debounce_s"}
+        return data
 
 
 class RequestDefaults(BaseModel):

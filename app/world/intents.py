@@ -38,8 +38,43 @@ class FreeLimits(_Payload):
     max_messages_per_member: int | None = Field(None, ge=1, le=200)  # hard
     max_chars_per_message: int | None = Field(None, ge=1, le=5000)  # hard, truncating
     max_chars_total: int | None = Field(None, ge=1, le=200000)  # advisory (D20)
-    debounce_s: float | None = Field(None, ge=0, le=30)
     silence_s: float | None = Field(None, gt=0, le=3600)  # advisory
+
+
+#: Keys of :class:`OpenLimits` that apply to each floor mode (v0.12.1, E-tools).  The world validates the
+#: keys against the mode (then the values with FloorLimits / FreeLimits) and answers ``INVALID_PARAMS``
+#: naming the allowed keys when a key does not apply.
+TOKEN_LIMIT_KEYS = ("max_messages", "max_chars_per_message", "max_chars_total", "duration_s")
+FREE_LIMIT_KEYS = ("duration_s", "max_messages_per_member", "max_chars_per_message", "max_chars_total", "silence_s")
+
+
+class OpenLimits(_Payload):
+    """ONE ``limits`` object for ``open_floor`` / ``update_channel`` (replaces ``limits`` + ``free_limits``).
+
+    mode=turn takes: max_messages, max_chars_per_message, max_chars_total, duration_s (per token).
+    mode=free takes: duration_s, max_messages_per_member, max_chars_per_message, max_chars_total, silence_s
+    (free discussions: duration_s / max_chars_total / silence_s are advisories, the others are hard).
+    """
+
+    # per-token (turn / queue)
+    max_messages: int | None = Field(None, ge=1, le=50)
+    # free discussion
+    max_messages_per_member: int | None = Field(None, ge=1, le=200)
+    silence_s: float | None = Field(None, gt=0, le=3600)
+    # both
+    max_chars_per_message: int | None = Field(None, ge=1, le=5000)
+    max_chars_total: int | None = Field(None, ge=1, le=200000)
+    duration_s: float | None = Field(None, gt=0, le=7200)
+
+
+def _legacy_free_limits(data: Any) -> Any:
+    """``free_limits`` (v0.12.0) is a deprecated alias of ``limits``; models only ever see ``limits``."""
+    if isinstance(data, dict) and "free_limits" in data:
+        data = dict(data)
+        legacy = data.pop("free_limits")
+        if legacy is not None and data.get("limits") is None:
+            data["limits"] = legacy
+    return data
 
 
 class Option(_Payload):
@@ -110,15 +145,24 @@ class ModUpdateChannel(_Payload):
     remove_members: list[str] = Field(default_factory=list)  # the moderator can never be removed
     readonly_members: list[str] | None = None  # replaces the set of members who may read but not write
     mode: Literal["closed", "free", "listen"] | None = None  # also used to close / re-open a (punished) DM
-    free_limits: FreeLimits | None = None  # (re)configure / extend a running free discussion
+    limits: OpenLimits | None = None  # (re)configure / extend a running free discussion (free keys only)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _alias(cls, data: Any) -> Any:
+        return _legacy_free_limits(data)
 
 
 class ModOpenFloor(_Payload):
     channel_id: str
     mode: Literal["turn", "free"] = "turn"
     holders: list[str] = Field(default_factory=list)  # turn: required; free: optional subset allowed to write
-    limits: FloorLimits | None = None  # turn
-    free_limits: FreeLimits | None = None  # free
+    limits: OpenLimits | None = None  # which keys apply depends on ``mode`` (see OpenLimits)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _alias(cls, data: Any) -> Any:
+        return _legacy_free_limits(data)
 
     @model_validator(mode="after")
     def _holders_for_turn(self) -> "ModOpenFloor":
@@ -146,11 +190,23 @@ class ModOpenRequest(_Payload):
     options: list[Option] = Field(default_factory=list)  # required for kind=choice
     duration_s: float | None = Field(None, gt=0, le=3600)
     sealed: bool = False  # answers hidden from everyone (incl. the moderator) until the request closes
+    # v0.12.1 (E19): every recipient (and the moderator) sees each answer as it is given and may change
+    # their own answer until the request closes - e.g. a group of players agreeing on one target.
+    # Mutually exclusive with ``sealed``.
+    share_answers: bool = False
+    # When the request may close *before* its deadline: all_answered (default) = once everybody answered;
+    # unanimous = once everybody answered with the same option (otherwise it runs to the deadline, so the
+    # group can keep talking and changing answers); deadline = never early.
+    auto_close: Literal["all_answered", "unanimous", "deadline"] = "all_answered"
     default: str | None = None  # applied to non-responders at the deadline (option id / text)
     # ``dm`` is where targets are told about the request; defaults to each target's system DM.
 
     @model_validator(mode="after")
     def _options_for_choice(self) -> "ModOpenRequest":
+        if self.sealed and self.share_answers:
+            raise ValueError("sealed and share_answers cannot both be true")
+        if self.auto_close == "unanimous" and self.kind != "choice":
+            raise ValueError("auto_close=unanimous needs kind=choice")
         if self.kind == "choice" and len(self.options) < 2:
             raise ValueError("kind=choice needs at least two options")
         ids = [o.id for o in self.options]
@@ -252,11 +308,20 @@ class ModEndGame(_Payload):
 
 
 class ModAbilityToggle(_Payload):
-    """``mod.enable_ability`` / ``mod.disable_ability``.  ``holders`` (enable only) narrows who gets it;
-    ``None`` = every holder allowed by the scenario expression."""
+    """``mod.enable_ability`` / ``mod.disable_ability``.
+
+    ``holders`` omitted = every holder allowed by the scenario expression.  enable + holders: only those
+    players may use it.  disable + holders: those players lose it, the others keep what they had (all of
+    them are disabled when nothing is left).  An empty list is an error (use ``null`` / omit it)."""
 
     ability_id: str
     holders: list[str] | None = None
+
+    @model_validator(mode="after")
+    def _not_empty(self) -> "ModAbilityToggle":
+        if self.holders is not None and not self.holders:
+            raise ValueError("holders must not be an empty list: omit it to mean every holder")
+        return self
 
 
 # --------------------------------------------------------------------------- registry

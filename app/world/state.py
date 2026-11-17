@@ -69,7 +69,6 @@ class FreeState(_S):
     max_chars_per_message: int
     max_chars_total: int
     duration_s: float
-    debounce_s: float
     silence_s: float
     started_gt: float = 0.0
     counts: dict[str, int] = Field(default_factory=dict)
@@ -106,6 +105,8 @@ class RequestState(_S):
     question: str
     options: list[dict[str, str]] = Field(default_factory=list)  # [{"id","label"}]
     sealed: bool = False
+    share_answers: bool = False  # v0.12.1 (E19): recipients (and the moderator) see each other's answers live
+    auto_close: Literal["all_answered", "unanimous", "deadline"] = "all_answered"  # when the request may close early
     default: str | None = None
     deadline: float | None = None
     status: Literal["open", "closed", "cancelled"] = "open"

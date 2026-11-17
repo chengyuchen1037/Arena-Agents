@@ -18,8 +18,10 @@ from pydantic import BaseModel, ConfigDict, Field
 MODERATOR_ID = "moderator"
 ENGINE_ID = "engine"  # sender of engine-generated notices / the target of engine notifications
 
-Priority = Literal["urgent", "normal", "ambient"]
-PRIORITY_RANK: dict[str, int] = {"urgent": 0, "normal": 1, "ambient": 2}
+# v0.12.1 (E1): *every* delivered envelope wakes its target at once - there is no ``ambient`` level and no
+# debounce.  ``urgent`` only marks envelopes the agent is expected to act on (ordering of wake reasons).
+Priority = Literal["urgent", "normal"]
+PRIORITY_RANK: dict[str, int] = {"urgent": 0, "normal": 1}
 
 EnvelopeKind = Literal["message", "floor", "request", "challenge", "ability", "notice"]
 
@@ -71,7 +73,7 @@ class Envelope(BaseModel):
 
     seq: int = 0  # ledger seq this notification refers to (0 = none)
     kind: EnvelopeKind
-    priority: Priority = "ambient"
+    priority: Priority = "normal"
     # True = work in flight that concerns ``channel_id`` / ``payload["request_id"]`` is now invalid
     # (floor revoked, request cancelled): the actor cancels a matching running worker.
     interrupt: bool = False
