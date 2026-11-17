@@ -20,7 +20,8 @@
    (static/css/style.css); app.js only reacts to `phone` (the "⋯" menu, the tab bar).
 
    A manual override is available for testing and for people who want another
-   layout:  ?platform=phone | tablet | desktop  in the page URL.
+   layout:  ?platform=phone | tablet | desktop  in the page URL; ?input=touch | mouse forces
+   the tap sizes (a touch device on a machine without a touch screen).
    ========================================================================== */
 
 (function (root, factory) {
@@ -37,6 +38,7 @@
   const PHONE_MAX_WIDTH = 767; // narrower than this is always the phone layout
   const TABLET_MAX_WIDTH = 1439; // touch devices up to this width get the tablet layout
   const COMPACT_MAX_WIDTH = 1023; // below 1024 px even a mouse-driven window gets the compact layout
+  const TABLET_COMPACT_MAX_WIDTH = 1024; // ... and a touch tablet gets it up to (and including) 1024 px
   const PHONE_LANDSCAPE_MAX_HEIGHT = 500; // a phone held sideways is short, not narrow
 
   const PHONE_UA = /iPhone|iPod|Android.*Mobile|Windows Phone|webOS|BlackBerry|Opera Mini|IEMobile|Mobile.*Firefox|\bMobile\b/i;
@@ -56,10 +58,23 @@
     return PLATFORMS.includes(v) ? v : null;
   }
 
-  /** The layout the stylesheet uses: "phone", "compact" (6x2 cards, avatar rail) or "wide". */
+  /** "?input=touch" | "?input=mouse" (test aid: tap sizes of a touch device on a mouse machine). */
+  function parseInputOverride(search) {
+    const m = /(?:^|[?&])input=([A-Za-z]+)/.exec(String(search || ""));
+    const v = m ? m[1].toLowerCase() : "";
+    return v === "touch" || v === "mouse" ? v : null;
+  }
+
+  /**
+   * The layout the stylesheet uses: "phone", "compact" (6x2 cards, avatar rail) or "wide".
+   * Compact: narrower than 1024 px, and a touch tablet up to 1024 px (a classic iPad held sideways);
+   * wider tablets (iPad Air / Pro sideways) have room for the wide layout.
+   */
   function layoutOf(platform, width) {
     if (platform === "phone") return "phone";
-    if (platform === "tablet" || num(width, 1280) <= COMPACT_MAX_WIDTH) return "compact";
+    const w = num(width, 1280);
+    if (w <= COMPACT_MAX_WIDTH) return "compact";
+    if (platform === "tablet" && w <= TABLET_COMPACT_MAX_WIDTH) return "compact";
     return "wide";
   }
 
@@ -83,7 +98,8 @@
     const phoneUa = !tabletUa && (PHONE_UA.test(ua) || (hintMobile === true && !ipadAsMac));
     const mobileUa = hintMobile === true || phoneUa || tabletUa;
     const coarse = Boolean(i.coarsePointer);
-    const touch = coarse || mobileUa || ipadAsMac;
+    const inputOverride = i.inputOverride === "touch" || i.inputOverride === "mouse" ? i.inputOverride : null;
+    const touch = inputOverride ? inputOverride === "touch" : coarse || mobileUa || ipadAsMac;
     const os = IOS_UA.test(ua) || ipadAsMac ? "ios" : ANDROID_UA.test(ua) ? "android" : "other";
     const orientation = height > width ? "portrait" : "landscape";
 
@@ -123,6 +139,7 @@
       width: w.innerWidth || (vv && vv.width) || 1280,
       height: w.innerHeight || (vv && vv.height) || 800,
       override: parseOverride(w.location && w.location.search),
+      inputOverride: parseInputOverride(w.location && w.location.search),
     };
   }
 
@@ -227,7 +244,9 @@
     PHONE_MAX_WIDTH,
     TABLET_MAX_WIDTH,
     COMPACT_MAX_WIDTH,
+    TABLET_COMPACT_MAX_WIDTH,
     parseOverride,
+    parseInputOverride,
     layoutOf,
     detect,
     readEnvironment,

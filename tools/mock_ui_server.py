@@ -2531,6 +2531,21 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         game().emit(str(ev["type"]), **ev["data"])
         return {"ok": True, "id": bus.latest_id}
 
+    @app.get("/api/mock/frame")
+    async def mock_frame(w: int = 390, h: int = 844, q: str = "") -> Response:
+        """The page inside an iframe of w x h CSS pixels: the frame has its own viewport, so the responsive
+        layout can be measured / screenshotted at any size on a desktop browser (q = the page's query string,
+        e.g. ``platform=phone&input=touch``)."""
+        w = max(200, min(4000, int(w)))
+        h = max(200, min(4000, int(h)))
+        src = "/?" + "".join(ch for ch in q if ch.isalnum() or ch in "=&_-")
+        html = (
+            '<!doctype html><meta charset="utf-8"><title>frame</title>'
+            f'<body style="margin:0;background:#64748b"><iframe id="f" src="{src}" '
+            f'style="display:block;width:{w}px;height:{h}px;border:0;background:#fff"></iframe></body>'
+        )
+        return Response(html, media_type="text/html")
+
     @app.get("/api/mock/info")
     async def mock_info() -> dict[str, Any]:
         g = game()

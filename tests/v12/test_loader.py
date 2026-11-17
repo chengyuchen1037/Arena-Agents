@@ -84,7 +84,7 @@ def test_templates_render_with_the_shared_helpers() -> None:
     template = spec.templates["out_notice"]
     params, rejected = validate_params(template.params, {"players": ["a1", "a2"]}, world)
     assert rejected is None
-    assert render_text(template.text, params or {}, template.params, world) == "【出局公告】甲（a1）、乙（a2） 出局。"
+    assert render_text(template.text, params or {}, template.params, world) == "【出局公告】a1 甲、a2 乙 出局。"
 
 
 @pytest.mark.parametrize(
@@ -1194,7 +1194,7 @@ def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosio
     assert t.call(white, "use_ability", ability_id="white_wolf_explode", params={"target": seer, "declaration": "x"}).code == "ABILITY_DISABLED"
     assert t.ev("outcome") == "未分胜负"
     announcements = [e.data["content"] for e in t.world.ledger if e.type == "message" and e.channel_id == "public" and e.data["kind"] == "announce"]
-    assert any("出局公告" in text and "（" in text for text in announcements)
+    assert any("出局公告" in text and f"{white} " in text for text in announcements)  # players are named "<id> <name>"
     assert not any(role in text for text in announcements for role in ("猎人", "白狼王", "预言家", "被毒"))  # a dark-card game
     assert t.world.state.status == "running"
 

@@ -89,7 +89,8 @@ def _dedupe(items: Any) -> list[str]:
 
 
 def _label(world: WorldCore, agent_id: str) -> str:
-    return f"{world.display_name(agent_id)}（{agent_id}）"
+    name = world.display_name(agent_id)
+    return agent_id if name == agent_id else f"{agent_id} {name}"
 
 
 def _clip(text: str, limit: int | None) -> tuple[str, dict[str, int] | None]:

@@ -15,9 +15,10 @@ _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
 
 def player_label(world: Any, player_id: str) -> str:
-    """``<name>（<id>）`` for a known player, the raw id otherwise."""
+    """``<id> <name>`` (the id is what tools take, the name is what people say) for a known player, the raw
+    id otherwise.  Everything a model reads names players this way."""
     player = world.player(player_id)
-    return f"{player.name}（{player.id}）" if player else str(player_id)
+    return f"{player.id} {player.name}" if player else str(player_id)
 
 
 def validate_params(

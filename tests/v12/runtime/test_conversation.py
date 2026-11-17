@@ -162,3 +162,62 @@ def test_without_pinning_the_first_message_can_go_too():
     conv = make([user("FULL"), assistant(["c1"]), tool("c1"), assistant(["c2"]), tool("c2")])
     rounds, _ = conv.drop_oldest_rounds(1, keep_first=False)
     assert rounds == 1 and conv.messages[0]["tool_calls"][0]["id"] == "c2"
+
+
+# ------------------------------------------------- the real protocol adapters leave the conversation alone
+
+
+def real_conversation() -> Conversation:
+    """A conversation as the runtime builds it, with the engine-private key of a thinking model on one turn."""
+    conv = make([])
+    conv.system = "SYSTEM[a1]"
+    conv.messages = [
+        user("START: board + history"),
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "speak", "arguments": '{"channel_id":"pub","content":"你好"}'}},
+                {"id": "c2", "type": "function", "function": {"name": "sleep", "arguments": "{}"}},
+            ],
+            "_provider_private": {"provider_id": "prov", "protocol": "x", "model_id": "m", "blocks": [{"type": "thinking", "thinking": "t", "signature": "s"}]},
+        },
+        tool("c1", '{"ok":true,"seq":3}'),
+        tool("c2", '{"ok":true}'),
+        user("DELTA: new entries"),
+        {"role": "assistant", "content": "plain words"},
+        user("DELTA: more"),
+    ]
+    return conv
+
+
+def test_building_a_request_never_mutates_the_conversation_for_any_protocol():
+    """The conversation hands its message dicts to the adapters by reference (a prefix cache needs the very same
+    bytes every time), so an adapter that marks, sorts or strips something in place would corrupt it for good."""
+    import copy
+
+    from app.llm.anthropic_messages import AnthropicMessagesAdapter
+    from app.llm.openai_chat import OpenAIChatAdapter
+    from app.llm.openai_responses import OpenAIResponsesAdapter
+    from app.llm.types import Target
+
+    for adapter, protocol in (
+        (OpenAIChatAdapter(), "openai_chat"),
+        (OpenAIResponsesAdapter(), "openai_responses"),
+        (AnthropicMessagesAdapter(), "anthropic_messages"),
+    ):
+        conv = real_conversation()
+        target = Target(provider_id="prov", protocol=protocol, base_url="https://x.test", api_key="k", model_id="m")
+        before_messages = json.dumps(conv.request_messages(), ensure_ascii=False, sort_keys=True)
+        before_tools = json.dumps(conv.tools, ensure_ascii=False, sort_keys=True)
+        first = adapter.build_request(target, conv.request_messages(), conv.tools, max_tokens=512, temperature=None)
+        second = adapter.build_request(target, conv.request_messages(), conv.tools, max_tokens=512, temperature=None)
+        assert json.dumps(conv.request_messages(), ensure_ascii=False, sort_keys=True) == before_messages, protocol
+        assert json.dumps(conv.tools, ensure_ascii=False, sort_keys=True) == before_tools, protocol
+        assert json.dumps(first, ensure_ascii=False, sort_keys=True) == json.dumps(second, ensure_ascii=False, sort_keys=True), protocol
+        # growing the conversation does not rewrite what was sent before (only the volatile tail may differ)
+        longer = copy.deepcopy(conv)
+        longer.messages.append(user("DELTA: even more"))
+        third = adapter.build_request(target, longer.request_messages(), longer.tools, max_tokens=512, temperature=None)
+        assert json.dumps(conv.request_messages(), ensure_ascii=False, sort_keys=True) == before_messages, protocol
+        assert third != first, protocol

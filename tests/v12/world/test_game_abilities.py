@@ -172,7 +172,7 @@ def test_use_ability_writes_entry_reveal_message_freezes_and_wakes_the_moderator
     assert message.channel_id == "public" and message.actor_id == holder and message.seq > used[0].seq
     assert message.data["kind"] == "ability"
     assert message.data["content"] == (
-        f"{PLAYER_NAMES[holder]}（{holder}）发动了 strike，目标是 {PLAYER_NAMES[other]}（{other}）。"
+        f"{holder} {PLAYER_NAMES[holder]}发动了 strike，目标是 {other} {PLAYER_NAMES[other]}。"
     )
     assert message.visible_to_ids == world.channel("public").members
 

@@ -36,7 +36,7 @@ def test_a_player_template_is_rendered_and_recorded_structurally() -> None:
     assert receipt.ok and receipt.truncated is None
     [entry] = msgs(world, "c1")
     assert entry.data["kind"] == "template"
-    assert entry.data["content"] == "我投 玩家2（N2）。他太安静"
+    assert entry.data["content"] == "我投 N2 玩家2。他太安静"
     assert entry.data["template_id"] == "vote"
     assert entry.data["params"] == {"target": "N2", "reason": "他太安静"}
     assert entry.data["sender_name"] == "玩家1"
@@ -45,7 +45,7 @@ def test_a_player_template_is_rendered_and_recorded_structurally() -> None:
 def test_optional_params_may_be_left_out() -> None:
     world = _free_world()
     assert speak_template(world, "N1", "c1", "vote", target="N3").ok
-    assert msgs(world, "c1")[0].data["content"] == "我投 玩家3（N3）。"
+    assert msgs(world, "c1")[0].data["content"] == "我投 N3 玩家3。"
     assert msgs(world, "c1")[0].data["params"] == {"target": "N3"}
 
 
@@ -54,7 +54,7 @@ def test_player_lists_and_enums_and_ints_render() -> None:
     assert speak_template(world, "N1", "c1", "shout", who=["N1", "N2"], word="yes").ok
     assert speak_template(world, "N1", "c1", "count", n="3").ok  # a numeric string is accepted
     texts = [e.data["content"] for e in msgs(world, "c1")]
-    assert texts == ["玩家1（N1）、玩家2（N2） 说：yes", "数到 3"]
+    assert texts == ["N1 玩家1、N2 玩家2 说：yes", "数到 3"]
     assert msgs(world, "c1")[1].data["params"] == {"n": 3}
 
 

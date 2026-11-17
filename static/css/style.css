@@ -1001,6 +1001,11 @@ body {
   gap: 10px;
 }
 
+.provider-discover-row .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
 .model-list,
 .discover-list {
   display: flex;
@@ -2412,10 +2417,11 @@ button,
   display: inline-block;
 }
 
+/* fixed: the participant bar clips its overflow; roster.js places the menu under its button */
 .dropdown {
-  position: absolute;
-  z-index: 60;
-  top: calc(100% + 5px);
+  position: fixed;
+  z-index: 7500;
+  top: 0;
   left: 0;
   min-width: 232px;
   display: flex;

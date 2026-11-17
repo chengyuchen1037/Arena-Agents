@@ -61,7 +61,7 @@ def test_turn_channel_without_a_token_means_no_floor() -> None:
     receipt = speak(world, "N2", "c1", "插话")
     assert not receipt.ok and receipt.code == Code.NO_FLOOR
     assert receipt.data == {"holders": ["N1"], "current": None}
-    assert "没有本轮发言权" in receipt.message and "玩家1（N1）" in receipt.message
+    assert "没有本轮发言权" in receipt.message and "N1 玩家1" in receipt.message
 
 
 def test_queue_tells_waiting_and_finished_players_apart() -> None:

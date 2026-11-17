@@ -584,6 +584,9 @@
         showToast(`完善失败：${e.message}`);
       } finally {
         render({ editors: true });
+        // the draft (and its "采用并保存" button) appears below the text box: bring it into view
+        const node = typeof doc.querySelector === "function" ? doc.querySelector(".detail-draft") : null;
+        if (node && typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "nearest" });
       }
     }
 
@@ -751,6 +754,17 @@
       if (el.btnRosterMenu && typeof el.btnRosterMenu.setAttribute === "function") {
         el.btnRosterMenu.setAttribute("aria-expanded", open ? "true" : "false");
       }
+      if (open) placeMenu();
+    }
+
+    /** The menu is position: fixed (the bar clips its overflow): put it under its button, inside the screen. */
+    function placeMenu() {
+      if (!el.rosterMenu || !el.btnRosterMenu || typeof el.btnRosterMenu.getBoundingClientRect !== "function") return;
+      const r = el.btnRosterMenu.getBoundingClientRect();
+      const vw = Number(win.innerWidth) || 1280;
+      const mw = el.rosterMenu.offsetWidth || 240;
+      el.rosterMenu.style.left = `${Math.round(Math.min(Math.max(8, r.left), Math.max(8, vw - mw - 8)))}px`;
+      el.rosterMenu.style.top = `${Math.round(r.bottom + 5)}px`;
     }
 
     function renderControls() {
@@ -1012,6 +1026,7 @@
     if (typeof win.addEventListener === "function") {
       win.addEventListener("resize", () => {
         if (st.openId) position();
+        if (menuOpen()) placeMenu();
       });
     }
 
