@@ -15,9 +15,7 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 
-<img src="docs/images/main-view.png" alt="AI 狼人杀实时对局主界面" width="100%">
-
-> v0.12 的界面已改为极简玩家块与只显示发言的信息流；下方截图在 v0.12 发布前会更新。
+<img src="docs/images/v012-main-view.png" alt="AI 狼人杀实时对局主界面（上帝视角）" width="100%">
 
 ## 主要能力
 
@@ -46,13 +44,15 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 ## 界面截图
 
-| 对局看板与实时信息流 | 工作文件夹 |
+| 玩家指标浮层（点击标签） | 玩家视角（只看到该玩家可见的内容） |
 |---|---|
-| <img src="docs/images/main-view.png" alt="AI 狼人杀对局看板" width="100%"> | <img src="docs/images/workspace-modal.png" alt="工作文件夹选择" width="100%"> |
+| <img src="docs/images/v012-popover.png" alt="玩家指标浮层" width="100%"> | <img src="docs/images/v012-player-view.png" alt="玩家视角" width="100%"> |
+| **深色主题** | **工作文件夹** |
+| <img src="docs/images/v012-main-dark.png" alt="深色主题" width="100%"> | <img src="docs/images/workspace-modal.png" alt="工作文件夹选择" width="100%"> |
 | **Provider 管理与 API 地址预览** | **模型模板与玩家绑定** |
 | <img src="docs/images/provider-modal.png" alt="Provider 管理与 API 地址预览" width="100%"> | <img src="docs/images/templates-bindings.png" alt="模型模板与玩家绑定" width="100%"> |
 
-> 截图来自本地演示对局；工作区路径和 Provider 主机名已做像素化脱敏，不包含任何真实凭据。
+> 截图来自本地**演示模式**对局（脚本化机器人）；工作区路径和 Provider 主机名已做像素化脱敏，不包含任何真实凭据。
 
 详细操作见 [docs/ui-guide.md](docs/ui-guide.md)。
 

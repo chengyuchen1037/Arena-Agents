@@ -21,7 +21,7 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 **Arena-Agents 是一个开源的 AI 狼人杀、社交推理与多智能体博弈沙盒。**
 游戏规则写在可执行 Markdown 剧本中，引擎负责玩家、发言、投票、频道、事件与断点恢复。内置一套完整的 12 人狼人杀，也可用同一引擎运行其他社交推理/桌游规则。
 
-<img src="docs/images/main-view.png" alt="Arena-Agents AI Werewolf live game view" width="100%">
+<img src="docs/images/v012-main-view.png" alt="Arena-Agents AI Werewolf live game view (god view)" width="100%">
 
 ## Highlights
 
@@ -60,14 +60,15 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 
 ## Screenshots
 
-| Game board and live feed | Workspace selector |
+| Player metrics popover (click a tag) | A player's viewpoint |
 |---|---|
-| <img src="docs/images/main-view.png" alt="Game board and live feed" width="100%"> | <img src="docs/images/workspace-modal.png" alt="Workspace selector" width="100%"> |
+| <img src="docs/images/v012-popover.png" alt="Player metrics popover" width="100%"> | <img src="docs/images/v012-player-view.png" alt="A player's viewpoint" width="100%"> |
+| **Dark theme** | **Workspace selector** |
+| <img src="docs/images/v012-main-dark.png" alt="Dark theme" width="100%"> | <img src="docs/images/workspace-modal.png" alt="Workspace selector" width="100%"> |
 | **Provider management and URL preview** | **Model templates and bindings** |
 | <img src="docs/images/provider-modal.png" alt="Provider management and endpoint preview" width="100%"> | <img src="docs/images/templates-bindings.png" alt="Model templates and bindings" width="100%"> |
 
-> The v0.12 UI uses minimal player tiles and a speech-only feed; the screenshots below are refreshed
-> before the v0.12 release. They are taken from a local demo game. Workspace paths and provider hostnames are
+> Screenshots are taken from a local **demo-mode** game (scripted bots). Workspace paths and provider hostnames are
 > pixelated before publication; no credentials are displayed.
 
 More UI walkthrough: [docs/ui-guide.md](docs/ui-guide.md).
