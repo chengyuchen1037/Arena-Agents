@@ -95,7 +95,7 @@ def _render_floor(channel: dict[str, Any]) -> list[str]:
             )
             state = "（已暂停）" if floor.get("paused") else ""
             lines.append(f"    发言组 {kind}{state}：{shown}；当前发言者：{floor.get('active') or '（无）'}")
-    elif kind == "free":
+    elif kind == "free" and floor.get("free"):  # system DMs are "free" without a discussion to report
         free = floor.get("free") or {}
         lines.append(
             f"    自由讨论：已进行 {_secs(free.get('elapsed_s'))}/{_secs(free.get('duration_s'))}，"

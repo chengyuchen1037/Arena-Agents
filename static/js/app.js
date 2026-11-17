@@ -54,6 +54,7 @@
     openActorId: null, // metrics popover (kept in state so re-renders never lose it)
     dmGroupOpen: false,
     autoScroll: true,
+    autoScrollTop: null, // scrollTop of the feed right after our own scroll-to-bottom
     read: { baseline: 0, all: 0, seqs: {} }, // unread watermarks per channel
     flash: new Map(), // actor id -> expiry (ms): briefly highlights a tile (ability.used)
     // SSE
@@ -341,7 +342,7 @@
   // Rendering: player tiles (≈64×44)
   // ---------------------------------------------------------------------------
 
-  const BADGE_TEXT = { thinking: "💭", acting: "⚡", stopped: "" };
+  const BADGE_TEXT = { thinking: "💭", acting: "⚡", stopped: "■" };
   const FLOW_TEXT = { floor: "🎤", waiting: "✋" };
 
   function tileHtml(t) {
@@ -370,14 +371,17 @@
         )}">${FLOW_TEXT[t.flow] || ""}</span>`
       : "";
 
-    // Layout (≈64×44): [glyph][id]            [state badge]
-    //                  [main tag chip]        [flow badge]
+    // Layout (≈64×44): [glyph][id]
+    //                  [main tag chip]
+    // The state badge (thinking / acting / stopped) sits on the top-right corner and the
+    // flow badge (holds the floor / owes an answer) on the bottom-right corner.
     return (
       `<div class="${classes.join(" ")}" data-actor="${escapeHtml(t.id)}" title="${escapeHtml(t.title)}">` +
-      `<div class="tile-top">${glyph}<span class="tile-id">${escapeHtml(idText)}</span>${stateBadge}</div>` +
+      `<div class="tile-top">${glyph}<span class="tile-id">${escapeHtml(idText)}</span></div>` +
       `<div class="tile-bottom"><button type="button" class="tile-tag ${tagClass}" data-tag-actor="${escapeHtml(t.id)}"` +
       ` aria-haspopup="dialog" aria-expanded="${open ? "true" : "false"}"` +
-      ` title="点击查看 ${escapeHtml(t.id)} 的指标">${escapeHtml(tagText)}</button>${flowBadge}</div></div>`
+      ` title="点击查看 ${escapeHtml(t.id)} 的指标">${escapeHtml(tagText)}</button></div>` +
+      `${stateBadge}${flowBadge}</div>`
     );
   }
 
@@ -735,7 +739,10 @@
     }
     state.feed = { key, count: messages.length, lastSeq };
 
-    if (state.autoScroll) elFeedList.scrollTop = elFeedList.scrollHeight;
+    if (state.autoScroll) {
+      elFeedList.scrollTop = elFeedList.scrollHeight;
+      state.autoScrollTop = elFeedList.scrollTop; // the (clamped) position we scrolled to
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -786,7 +793,7 @@
   // Render scheduling (coalesce bursts of SSE events: at most one paint per frame)
   // ---------------------------------------------------------------------------
 
-  const renderQueue = { pending: false, dirty: Store.newDirty(false), force: false };
+  const renderQueue = { pending: false, run: null, dirty: Store.newDirty(false), force: false };
 
   function renderNow(dirty, force = false) {
     const d = dirty || Store.newDirty(true);
@@ -802,13 +809,19 @@
     renderNow(Store.newDirty(true), force);
   }
 
+  const pageHidden = () =>
+    document.visibilityState === "hidden" || document.hidden === true;
+
   function scheduleRender(dirty, force = false) {
     Store.mergeDirty(renderQueue.dirty, dirty);
     renderQueue.force = renderQueue.force || force;
     if (renderQueue.pending) return;
     renderQueue.pending = true;
     const run = () => {
+      // rAF and the timer fallback below race: whichever comes first paints, the other is a no-op.
+      if (!renderQueue.pending || renderQueue.run !== run) return;
       renderQueue.pending = false;
+      renderQueue.run = null;
       const d = renderQueue.dirty;
       const f = renderQueue.force;
       renderQueue.dirty = Store.newDirty(false);
@@ -819,9 +832,20 @@
         console.error("Render failed", e);
       }
     };
-    if (typeof window.requestAnimationFrame === "function") window.requestAnimationFrame(run);
-    else window.setTimeout(run, 16);
+    renderQueue.run = run;
+    // requestAnimationFrame never fires in a hidden / occluded tab, which would leave the DOM stale
+    // (automation, background windows): use a plain timer there.
+    if (!pageHidden() && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(run);
+    } else {
+      window.setTimeout(run, pageHidden() ? 120 : 16);
+    }
   }
+
+  // A render that was queued on rAF when the page went hidden would wait until it is visible again.
+  document.addEventListener("visibilitychange", () => {
+    if (renderQueue.pending && renderQueue.run && pageHidden()) window.setTimeout(renderQueue.run, 120);
+  });
 
   // ---------------------------------------------------------------------------
   // Session store glue
@@ -863,10 +887,11 @@
     state.session = next;
     state.sessionKey = key;
     state.loaded = true;
+    // Whole-session replacement: never trust per-message HTML cached from the previous object.
+    state.msgHtml.clear();
     if (key !== prevKey) {
-      // A different game: forget selection, unread marks and cached message HTML.
+      // A different game: forget selection and unread marks.
       state.selectedChannel = "all";
-      state.msgHtml.clear();
       resetReadState(next);
     } else if (!state.read.baseline) {
       resetReadState(next);
@@ -1040,9 +1065,14 @@
   }
 
   elFeedList.addEventListener("scroll", () => {
+    // Scroll events arrive a frame late. If new messages were appended after our own scroll-to-bottom,
+    // the position would look "not at the bottom" and silently switch following off: events that
+    // merely report where WE scrolled to are ignored; only a real user scroll changes the mode.
+    if (state.autoScrollTop !== null && Math.abs(elFeedList.scrollTop - state.autoScrollTop) <= 1) return;
     const nearBottom =
       elFeedList.scrollHeight - elFeedList.scrollTop - elFeedList.clientHeight < 60;
     state.autoScroll = nearBottom;
+    state.autoScrollTop = null;
   });
 
   // ---------------------------------------------------------------------------

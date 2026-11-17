@@ -1266,6 +1266,7 @@ def create_app(*, speed: float = 1.0, seed: int = 7) -> Any:
     }
 
     app = FastAPI(title="Arena-Agents UI mock", version=APP_VERSION)
+    app.state.mock_holder = holder  # tests reach the MockGame (created on the first request) through this
 
     def game() -> MockGame:
         if "game" not in holder:  # created lazily: the asyncio primitives need a running loop

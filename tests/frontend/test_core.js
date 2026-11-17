@@ -150,6 +150,49 @@ test("joinUrl / buildEventsUrl", () => {
   assert.equal(Core.buildEventsUrl("/x/", "a b&c"), "/x/api/events?token=a%20b%26c");
 });
 
+test("buildEventsUrl carries the SSE v2 resume point as ?last_event_id= (a re-created EventSource sends no Last-Event-ID)", () => {
+  assert.equal(Core.buildEventsUrl("/", "", 42), "/api/events?last_event_id=42");
+  assert.equal(Core.buildEventsUrl("/", "tok", 42), "/api/events?token=tok&last_event_id=42");
+  assert.equal(Core.buildEventsUrl("/arena/", "", "7"), "/arena/api/events?last_event_id=7");
+  assert.equal(Core.buildEventsUrl("/", "", 12.9), "/api/events?last_event_id=12");
+  // nothing useful to resume from: a plain URL (the server answers with a snapshot)
+  for (const none of [0, -3, NaN, null, undefined, "", "abc", Infinity]) {
+    assert.equal(Core.buildEventsUrl("/", "", none), "/api/events", String(none));
+  }
+});
+
+// --- v0.12 formatting --------------------------------------------------------
+test("formatCount / formatTokensCount / formatCost", () => {
+  assert.equal(Core.formatCount(0), "0");
+  assert.equal(Core.formatCount(999), "999");
+  assert.equal(Core.formatCount(6057), "6,057");
+  assert.equal(Core.formatCount(12345), "12.3K");
+  assert.equal(Core.formatCount(2_500_000), "2.50M");
+  assert.equal(Core.formatCount(3_100_000_000), "3.10B");
+  assert.equal(Core.formatCount("<b>"), "0");
+  assert.equal(Core.formatCount(null), "0");
+  assert.equal(Core.formatTokensCount(0), "0 Tokens");
+  assert.equal(Core.formatTokensCount(1500), "1.5K Tokens");
+  assert.equal(Core.formatTokensCount(2_930_000), "2.93M Tokens");
+  assert.equal(Core.formatTokensCount(undefined), "0 Tokens");
+  assert.equal(Core.formatCost(0), "$0.0000");
+  assert.equal(Core.formatCost(0.0123456), "$0.0123");
+  assert.equal(Core.formatCost(12.5, 2), "$12.50");
+  assert.equal(Core.formatCost(-1), "$0.0000");
+  assert.equal(Core.formatCost("x"), "$0.0000");
+});
+
+test("formatClockTime shows HH:MM:SS of a ledger timestamp and never throws", () => {
+  const local = new Date(2026, 10, 17, 8, 5, 9);
+  assert.equal(Core.formatClockTime(local.toISOString()), "08:05:09"); // local time of the viewer
+  assert.equal(Core.formatClockTime("2026-11-17T08:05:09.123"), "08:05:09"); // naive timestamps are local
+  assert.equal(Core.formatClockTime(""), "");
+  assert.equal(Core.formatClockTime(null), "");
+  assert.equal(Core.formatClockTime(undefined), "");
+  assert.equal(Core.formatClockTime("12:34:56 whatever"), "12:34:56"); // not a date: pick the time out
+  assert.equal(Core.formatClockTime("garbage"), "");
+});
+
 // --- backoff -----------------------------------------------------------------
 test("computeBackoff: exponential, capped at 30s, jittered", () => {
   const noJitter = { rand: () => 0 };
@@ -690,7 +733,7 @@ test("normalizeLayoutState clamps widths, validates height, defaults everything"
   assert.equal(Core.normalizeLayoutState({ boardHeight: "abc" }).boardHeight, null);
 });
 
-test("layout state + card size round-trip through storage; broken JSON falls back", () => {
+test("layout state round-trips through storage; broken JSON falls back (card size tiers are gone)", () => {
   const storage = memoryStorage();
   assert.equal(Core.loadLayoutState(storage).boardCollapsed, false);
   const saved = Core.saveLayoutState(storage, {
@@ -706,12 +749,11 @@ test("layout state + card size round-trip through storage; broken JSON falls bac
   storage.setItem(Core.LAYOUT_STORAGE_KEY, "{not json");
   assert.deepEqual(Core.loadLayoutState(storage), Core.normalizeLayoutState(null));
 
-  assert.equal(Core.loadCardSize(memoryStorage()), "standard");
-  assert.equal(Core.saveCardSize(storage, "compact"), "compact");
-  assert.equal(Core.loadCardSize(storage), "compact");
-  assert.equal(Core.saveCardSize(storage, "gigantic"), "standard");
-  assert.equal(Core.normalizeCardSize("xlarge"), "xlarge");
-  assert.deepEqual(Core.CARD_SIZES.map((c) => c.id), ["compact", "standard", "large", "xlarge"]);
+  // v0.12 removed the four card-size tiers: players are fixed-size tiles
+  for (const gone of ["CARD_SIZES", "CARD_SIZE_STORAGE_KEY", "normalizeCardSize", "loadCardSize", "saveCardSize"]) {
+    assert.equal(Core[gone], undefined, gone);
+  }
+  assert.equal(Object.keys(Core.normalizeLayoutState({ cardSize: "large" })).includes("cardSize"), false);
 });
 
 // --- v0.11: provider auto_append_path + endpoint preview ----------------------

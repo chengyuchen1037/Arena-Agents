@@ -24,63 +24,37 @@ setup:
       faction: wolves
       tags: [狼人, 存活]
       attributes: {group: wolves}
-      brief: >-
-        你是【狼人】，属于狼人阵营（共 4 人：3 名狼人 + 1 名白狼王）。夜间你和队友在狼人频道里商议刀口，
-        由座位最靠前的存活狼人代表提交（可以自刀，也可以空刀）；白天隐藏身份，误导好人，推动放逐好人。
-        胜利条件：4 名神职全部出局，或 4 名平民全部出局（屠边）。队友名单会由主持人在狼人频道里告知，
-        不要在公共频道暴露队友关系。
+      brief: "你是【狼人】，属于狼人阵营（共 4 人：3 名狼人 + 1 名白狼王）。夜间你和队友在狼人频道里商议刀口，由座位最靠前的存活狼人代表提交（可以自刀，也可以空刀）；白天隐藏身份，误导好人，推动放逐好人。胜利条件：4 名神职全部出局，或 4 名平民全部出局（屠边）。队友名单会由主持人在狼人频道里告知，不要在公共频道暴露队友关系。"
     white_wolf:
       faction: wolves
       tags: [白狼王, 存活]
       attributes: {group: wolves}
-      brief: >-
-        你是【白狼王】，属于狼人阵营，和其他狼人一起在夜间商议刀口。你有一项额外技能“自爆”
-        （use_ability，ability_id=white_wolf_explode，params 填 target=被带走玩家的 id、declaration=你的公开宣言）：
-        只在主持人启用期间——白天非投票的正式发言环节，包括警长竞选演说和平票 PK 发言——可以公开自爆，
-        当场带走一名存活玩家，白天随即结束直接进入黑夜；
-        首日警徽尚未产生时自爆，本局不再设警长。自爆会公开你的身份，你和被带走的玩家都没有遗言。
-        胜利条件：4 名神职全部出局，或 4 名平民全部出局（屠边）。
+      brief: "你是【白狼王】，属于狼人阵营，和其他狼人一起在夜间商议刀口。你有一项额外技能“自爆”（use_ability，ability_id=white_wolf_explode，params 填 target=被带走玩家的 id、declaration=你的公开宣言）：只在主持人启用期间——白天非投票的正式发言环节，包括警长竞选演说和平票 PK 发言——可以公开自爆，当场带走一名存活玩家，白天随即结束直接进入黑夜；首日警徽尚未产生时自爆，本局不再设警长。自爆会公开你的身份，你和被带走的玩家都没有遗言。胜利条件：4 名神职全部出局，或 4 名平民全部出局（屠边）。"
     villager:
       faction: good
       tags: [平民, 存活]
       attributes: {group: villagers}
-      brief: >-
-        你是【平民】，属于好人阵营。你没有夜间技能，靠白天的发言和投票找出狼人。
-        胜利条件：4 名狼人（含白狼王）全部出局。
+      brief: "你是【平民】，属于好人阵营。你没有夜间技能，靠白天的发言和投票找出狼人。胜利条件：4 名狼人（含白狼王）全部出局。"
     seer:
       faction: good
       tags: [预言家, 存活]
       attributes: {group: gods}
-      brief: >-
-        你是【预言家】，属于好人阵营的神职。每晚主持人会私下请你选择一名存活玩家查验，随后在你的私聊里告诉你
-        他属于“好人阵营”还是“狼人阵营”（只告知阵营，不告知具体身份；白狼王属于狼人阵营）。
-        是否跳身份、怎么报查验由你决定。胜利条件：4 名狼人（含白狼王）全部出局。
+      brief: "你是【预言家】，属于好人阵营的神职。每晚主持人会私下请你选择一名存活玩家查验，随后在你的私聊里告诉你他属于“好人阵营”还是“狼人阵营”（只告知阵营，不告知具体身份；白狼王属于狼人阵营）。是否跳身份、怎么报查验由你决定。胜利条件：4 名狼人（含白狼王）全部出局。"
     witch:
       faction: good
       tags: [女巫, 存活]
       attributes: {group: gods, antidote: 1, poison: 1}
-      brief: >-
-        你是【女巫】，属于好人阵营的神职。你有一瓶解药和一瓶毒药，整局各限用一次，同一晚最多用一瓶。
-        解药还在时，主持人会在你的私聊里告诉你今晚被狼人袭击的人（可能是你自己），你可以用解药救他；
-        毒药可以毒杀任意一名存活玩家（被毒死的猎人不能开枪）。若守卫当晚守护的人恰好也被你救，
-        这个人仍会出局（同守同救）。状态板上的属性 antidote / poison 表示药还剩几瓶。
-        胜利条件：4 名狼人（含白狼王）全部出局。
+      brief: "你是【女巫】，属于好人阵营的神职。你有一瓶解药和一瓶毒药，整局各限用一次，同一晚最多用一瓶。解药还在时，主持人会在你的私聊里告诉你今晚被狼人袭击的人（可能是你自己），你可以用解药救他；毒药可以毒杀任意一名存活玩家（被毒死的猎人不能开枪）。若守卫当晚守护的人恰好也被你救，这个人仍会出局（同守同救）。状态板上的属性 antidote / poison 表示药还剩几瓶。胜利条件：4 名狼人（含白狼王）全部出局。"
     hunter:
       faction: good
       tags: [猎人, 存活]
       attributes: {group: gods}
-      brief: >-
-        你是【猎人】，属于好人阵营的神职。当你因狼人夜袭、白天被放逐或被白狼王自爆带走而出局时，
-        可以亮出身份开枪，带走一名存活玩家（主持人会私下问你是否开枪以及目标，也可以选择不开枪）；
-        如果你是被女巫毒死的，则不能开枪。胜利条件：4 名狼人（含白狼王）全部出局。
+      brief: "你是【猎人】，属于好人阵营的神职。当你因狼人夜袭、白天被放逐或被白狼王自爆带走而出局时，可以亮出身份开枪，带走一名存活玩家（主持人会私下问你是否开枪以及目标，也可以选择不开枪）；如果你是被女巫毒死的，则不能开枪。胜利条件：4 名狼人（含白狼王）全部出局。"
     guard:
       faction: good
       tags: [守卫, 存活]
       attributes: {group: gods, last_guard: ''}
-      brief: >-
-        你是【守卫】，属于好人阵营的神职。每晚主持人会私下请你选择一名存活玩家守护（可以守自己，也可以空守），
-        被守护者免受当晚狼人袭击；不能连续两晚守护同一名玩家（属性 last_guard 是你上一晚守护的人）。
-        注意“同守同救”：你守护的人如果当晚也被女巫解药所救，反而会出局。胜利条件：4 名狼人（含白狼王）全部出局。
+      brief: "你是【守卫】，属于好人阵营的神职。每晚主持人会私下请你选择一名存活玩家守护（可以守自己，也可以空守），被守护者免受当晚狼人袭击；不能连续两晚守护同一名玩家（属性 last_guard 是你上一晚守护的人）。注意“同守同救”：你守护的人如果当晚也被女巫解药所救，反而会出局。胜利条件：4 名狼人（含白狼王）全部出局。"
   # 其他玩家（含观战者）能看到的标签；其余标签（身份）只有本人和主持人能看到。
   public_tags: [存活, 出局, 警长]
 
@@ -192,9 +166,7 @@ abilities:
     reveal:
       channel_id: public
       text: "【自爆】{{actor}} 亮明白狼王身份并自爆，带走 {{target}}。{{declaration}}"
-    description: >-
-      白狼王自爆：只在主持人启用期间（白天非投票的正式发言环节）可用。公开宣布自爆并带走一名存活的其他玩家
-      （target），declaration 是你的公开宣言；公共频道会被冻结，白天随即结束直接进入黑夜。
+    description: "白狼王自爆：只在主持人启用期间（白天非投票的正式发言环节）可用。公开宣布自爆并带走一名存活的其他玩家（target），declaration 是你的公开宣言；公共频道会被冻结，白天随即结束直接进入黑夜。"
 
 # ============================================================================
 # 检查项：给主持人用的辅助计算（evaluate）；最终裁决仍由主持人做出。
@@ -455,7 +427,7 @@ ui:
 
 ### D1 首日警长竞选（只在第 1 天；第 1 夜出局的人不参加）
 
-1. `set_phase(text="第 1 天 · 警长竞选")`。参加者 P = `evaluate(check_id="candidates_without", args={"excluded": 待公布死亡})`。
+1. `set_phase(text="第 1 天 · 警长竞选")`。参加者 P = `evaluate(check_id="candidates_without", args={"excluded": ["p03"]})`（excluded 填《进度》里“待公布死亡”的 id 列表，没有就传 `[]`）。
 2. `open_request(to=P, kind="choice", question="是否上警竞选警长？本选择保密。", options=[{"id":"yes","label":"上警"},{"id":"no","label":"不上警"}], sealed=true, default="no")`。《进度》：D1 等待上警名单 → `wait()`。
 3. `request.closed`：上警者 C = value 为 yes 的人（座位顺序），警下选民 V = P 里的其余人。写进《进度》。
    - C 为空 → `announce(channel_id="public", template_id="no_sheriff", params={})`，去 D2。
@@ -470,7 +442,11 @@ ui:
 8. `request.closed`：唤醒信息里已经有引擎算好的计票和“得票最高”的人（leaders）；警长投票没有弃票，直接用它们。用 `announce(channel_id="public", template_id="vote_result", params={"summary": "票型：p01→p05，p02→p06，……（按座位顺序）；得票：p05 3 票，p06 3 票"})` 公布票型和结果。
    - leaders 只有 1 人 → 当选（同上）。
    - leaders 为空（没有任何有效选票）→ `announce(channel_id="public", template_id="no_sheriff", params={})`。
-   - leaders 有多人 → `announce(channel_id="public", template_id="tie_pk", params={"players": leaders})`；启用自爆（如白狼王存活）；`set_floor_queue` 让并列者按座位顺序 PK 发言；`floor.completed` 后关闭自爆，V 在并列者中重投（`open_request` 同第 7 步，options 只含并列者）；结果再并列、或没人投 → `announce(channel_id="public", template_id="no_sheriff", params={})`。
+   - leaders 有多人（并列）→ **PK**（只有一次）：
+     1. `announce(channel_id="public", template_id="tie_pk", params={"players": leaders})`。
+     2. 白狼王存活时 `enable_ability`；`evaluate(check_id="order_of", args={"members": leaders})` 得到顺序，`set_floor_queue` 让并列者依次 PK 发言，并提醒白狼王（同 D4 第 4 步）。《进度》：D1 PK 发言中 → `wait()`。
+     3. `floor.completed`：`disable_ability`（如启用过）。V 在并列者中重投：`open_request(to=V, kind="choice", question="警长投票（PK）：请在并列的候选人中选一名。", options=[并列者……], sealed=true)`。
+     4. `request.closed`：公布票型（`vote_result`）；只有 1 个最高票者 → 当选（同上）；仍并列或没人投 → `announce(channel_id="public", template_id="no_sheriff", params={})`。
 9. 去 D2。
 
 ### D2 公布死讯与出局处理
@@ -502,7 +478,7 @@ ui:
 
 1. `set_phase(text="第 N 天 · 放逐投票")`。
 2. `open_request(to=全体存活玩家, kind="choice", question="第 N 天放逐投票：请选择要放逐的玩家，或弃票。", options=[{"id":"abstain","label":"弃票"}, 全体存活玩家……], sealed=true, default="abstain")`。《进度》：D5 等待投票 → `wait()`。
-3. `request.closed`：`evaluate(check_id="weighted_vote", args={"answers": [{"player_id":"……","value":"……"}, ……], "privileged": [警长 id（没有警长或警长已出局就写 []）], "weight": 1.5})`。answers 每项只保留 player_id 和 value（去掉 reason 等其他字段，args 总长不得超过 4000 字符）。
+3. `request.closed`：`evaluate(check_id="weighted_vote", args={"answers": [{"player_id":"……","value":"……"}, ……], "privileged": [警长 id（没有警长或警长已出局就写 []）], "weight": 1.5})`。answers 每项只保留 player_id 和 value（去掉 reason 等其他字段，args 总长不得超过 4000 字符）。**不要**直接采用唤醒信息里引擎给出的“得票最高”：它把弃票当成一个普通选项，也不计警长的 1.5 票。
 4. 公布（不带 reason）：`announce(channel_id="public", template_id="vote_result", params={"summary": "票型：p01→p05，p02→p05，p03 弃票，……（按座位顺序）；得票：p05 4.5 票，……"})`。
 5. leaders 的数量：
    - **1 人**（X）→ D7。

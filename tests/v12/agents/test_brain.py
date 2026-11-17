@@ -382,3 +382,18 @@ def test_tool_help_mentions_the_new_semantics() -> None:
     desc = {t["function"]["name"]: t["function"]["description"] for t in moderator_tool_schemas(make_spec())}
     assert "整场" in desc["open_floor"] and "开场" in desc["open_floor"]
     assert "列全" in desc["create_channel"] and "args" in desc["evaluate"]
+
+
+def test_a_free_channel_without_a_discussion_shows_no_progress_line() -> None:
+    world = FakeWorld()
+    board = world.board("p1")
+    board["channels"] = [
+        {"id": "dm-p1", "name": "私聊", "type": "dm", "mode": "free", "members": [MODERATOR_ID, "p1"], "readonly": [], "frozen": False,
+         "system": True, "can_write": True, "why_not": None, "floor": {"kind": "free", "free": None, "mine": None}},
+        {"id": "talk", "name": "讨论", "type": "group", "mode": "free", "members": [MODERATOR_ID, "p1"], "readonly": [], "frozen": False,
+         "system": False, "can_write": True, "why_not": None,
+         "floor": {"kind": "free", "free": {"elapsed_s": 5, "duration_s": 60, "chars_used": 10, "max_chars_total": 600, "silent_s": 2, "my_messages_left": 3}}},
+    ]
+    world.boards["p1"] = board
+    text, _ = ArenaBrain(world, world.spec, docs_dir=None).start_message("p1", _wake("p1"))
+    assert text.count("自由讨论：已进行") == 1  # only the real discussion

@@ -3,10 +3,12 @@
 **English** | [简体中文](README.md)
 
 **Arena-Agents is an open-source AI Werewolf (狼人杀), social-deduction and multi-agent game arena.**
-It is a game-agnostic sandbox for LLM agents: a Markdown scenario defines the game rules, and the
-engine runs players, voting, speech, channels, events and recovery. The bundled scenario is a
-complete 12-player Werewolf game; the same engine can host other social-deduction or tabletop
-rules. Keywords: **AI 狼人杀, 狼人杀, 多智能体狼人杀, AI 多智能体博弈, social deduction, AI Werewolf,
+It is a game-agnostic sandbox for LLM agents: a Markdown scenario defines the game rules, **every
+player and the moderator is an asynchronous agent** (a front *actor* that always accepts and emits
+messages, plus a back *worker* that thinks and calls tools), and an LLM moderator drives the game by
+following the scenario's manual. The engine only provides channels, speaking rights, requests and a
+ledger. The bundled scenario is a complete 12-player Werewolf game; the same engine can host other
+social-deduction or tabletop rules. Keywords: **AI 狼人杀, 狼人杀, 多智能体狼人杀, AI 多智能体博弈, social deduction, AI Werewolf,
 LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
@@ -23,8 +25,21 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 
 ## Highlights
 
-- **Executable Markdown scenarios** — roles, phases, workflows, event hooks, win conditions and
-  dashboard rules live in `scenarios/*.md`, not in Python conditionals.
+- **Every agent is asynchronous (v0.12)** — each player and the moderator is an Actor + Worker. The
+  actor is never blocked by thinking or tool execution; speech, votes, challenges and abilities can
+  happen at any time and are validated by the engine *at commit time*.
+- **An LLM moderator drives the flow** — taking turns = a moderator announcement + floor management
+  (`set_floor_queue` and friends). The rules and the moderator manual live in the scenario; the
+  engine contains no game vocabulary.
+- **Channels and speaking rights** — visibility is decided by channels only; the moderator can close
+  the floor at any time (players get a "no floor" receipt), speech is limited by time *and* by
+  characters, players can privately challenge the moderator, and the moderator can punish harassment
+  by closing a player's private channel.
+- **Append-only ledger** — everything that happened is recorded; saves, agent context and spectating
+  all derive from it. The moderator may change a player's *current* state (out, revived …) but can
+  never rewrite history.
+- **Executable Markdown scenarios (schema v2)** — identity pool, templates, abilities, checks and
+  default limits in the front matter; the body holds the rules and a moderator-only manual.
 - **Multi-provider model routing** — OpenAI Chat Completions, OpenAI Responses and Anthropic
   Messages; every player and the moderator can use a different model and reasoning depth.
 - **Model templates** — save up to three Provider/model/reasoning presets and apply them to
@@ -37,8 +52,11 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
   Windows the workspace key is protected by DPAPI.
 - **Endpoint preview** — see the exact message and model-list URLs before saving a Provider;
   either auto-append `/v1/...` paths or point at a complete custom endpoint.
-- **Resizable arena UI** — collapse the board or side panels, drag widths/heights, and choose
-  four player-card size tiers.
+- **Minimal spectator UI** — players are shown as a tiny geometric glyph + short id + tag; click a
+  tag for the agent's tool-call / thinking / token statistics. The feed shows spoken messages only
+  (whole messages, no streaming) and supports a god view or any player's view.
+- **Demo mode** — `ARENA_DEMO=1` replaces the models with scripted bots, so you can watch a whole
+  game without an API key.
 
 ## Screenshots
 
@@ -48,7 +66,8 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 | **Provider management and URL preview** | **Model templates and bindings** |
 | <img src="docs/images/provider-modal.png" alt="Provider management and endpoint preview" width="100%"> | <img src="docs/images/templates-bindings.png" alt="Model templates and bindings" width="100%"> |
 
-> Screenshots are taken from a local demo game. Workspace paths and provider hostnames are
+> The v0.12 UI uses minimal player tiles and a speech-only feed; the screenshots below are refreshed
+> before the v0.12 release. They are taken from a local demo game. Workspace paths and provider hostnames are
 > pixelated before publication; no credentials are displayed.
 
 More UI walkthrough: [docs/ui-guide.md](docs/ui-guide.md).
@@ -56,27 +75,28 @@ More UI walkthrough: [docs/ui-guide.md](docs/ui-guide.md).
 ## How it works
 
 ```text
-Browser
-  │  REST + SSE
-  ▼
-FastAPI API ────────────── Workspace selector
-  │                          │
-  ▼                          ▼
-Game Orchestrator ◄──── Workspace (.arena/)
-  │  ├─ Session runtime       ├─ providers.v1.enc
-  │  ├─ Scenario Director     ├─ settings.json (templates / bindings)
-  │  ├─ Participant turns     ├─ sessions/*.enc
-  │  └─ Moderator tools       └─ workspace key
-  │
-  ▼
-LLM Client ──► OpenAI Chat / OpenAI Responses / Anthropic Messages adapters
-  │
-  └─ encrypted usage, price snapshots, retry/backoff
+Browser ──REST + SSE v2 (numbered incremental events, resumable)──► FastAPI API ── workspace (.arena/)
+                                                                      │             ├─ providers.v1.enc
+                                                                      ▼             ├─ settings.json
+                                                              GameOrchestrator      ├─ sessions/*.enc
+                                                                      │             ├─ logs/<game>/trace-*.jsonl
+                                  ┌───────────────────────────────────┴───┐         └─ workspace key
+                                  ▼                                       ▼
+          World (synchronous, game-agnostic)               Runtime (asyncio)
+          commit gate → ledger (append-only)               13 agents = Actor (mailbox) + Worker (LLM loop)
+          channels · floors · requests · templates         supervisor · watchdog · LLM concurrency gate
+          abilities · challenges · RNG · game clock        Brain: state board + memory + visible history + tools
+                                                                      │
+                                                                      ▼
+                                    OpenAI Chat / OpenAI Responses / Anthropic Messages adapters
 ```
 
-The engine never knows game-specific phases or role names. A Scenario Parser validates the
-Markdown front matter; the Director executes workflow steps, conditions, loops, events and win
-conditions. See [docs/architecture.md](docs/architecture.md) for the current module map.
+The engine never knows game-specific phases or role names (`tests/v12/test_neutrality.py` scans for
+them). The scenario provides rules and a manual, the **moderator agent** drives the game with tools,
+and players act with `speak` / `respond` / `use_ability` / `challenge_moderator`. Chains of thought
+and tool calls go only to a plaintext trace log; the UI never shows them. See
+[docs/architecture.md](docs/architecture.md) for the module map and
+[docs/v0.12-contracts.md](docs/v0.12-contracts.md) for the implementation contract.
 
 ## Quick start
 
@@ -110,6 +130,16 @@ Linux:   <app data dir>/workspace/default
 ```
 
 Provider settings are configured from the UI; no `.env` file is required for local use.
+
+### Demo mode (no model / API key)
+
+```bash
+ARENA_DEMO=1 ARENA_DISABLE_WORKSPACE=1 uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Scripted bots play the moderator and the 12 players through the real engine, channels, floors,
+requests and UI, with no network traffic and no cost. A demo game cannot be resumed from a save
+(start a new game instead).
 
 ### Run with Docker Compose
 
@@ -184,15 +214,19 @@ A workspace is a normal folder. Everything that belongs to a set of games lives 
 
 Full details: [docs/workspaces.md](docs/workspaces.md).
 
-## Layout controls
+## Using the UI
 
-- **Board**: collapse from the top bar.
-- **Side panels**: collapse channels or status from their headers.
-- **Resize**: drag the horizontal bar under the board or the vertical bars beside the side panels;
-  double-click a bar to reset.
-- **Card size**: compact / standard / large / extra-large from the board header.
-
-Layout and card-size preferences are stored in the browser's `localStorage`.
+- **Player tiles**: a minimal glyph + short id + one main tag; click the tag to see that agent's
+  tool-call count, thinking rounds, LLM calls, tokens and cost. Players who are out are greyed.
+- **Feed**: spoken messages, announcements and challenge replies only, rendered whole; no chain of
+  thought, no tool calls, no streaming.
+- **Spectating**: the top-bar selector switches between the god view and any player's view (only the
+  channels and messages that player may see).
+- **Channel list**: shows each channel's floor state (🔒 closed / 🎤 holder / 📋 queue / 💬 free
+  discussion / ❄ frozen); challenge tickets form their own group.
+- **Controls**: Start / Pause / Resume; a finished game can still be resumed (the moderator is told).
+- **Layout**: collapse the board or side panels from their headers; drag the separators, double-click
+  to reset. Layout is stored in the browser's `localStorage`.
 
 ## Configuration
 
@@ -211,6 +245,7 @@ reads only these deployment-level environment variables:
 | `ARENA_ALLOW_PRIVATE_PROVIDERS` | `false` | Allow loopback/private provider endpoints (e.g. Ollama) |
 | `ARENA_MAX_IMPORT_BYTES` | `20971520` | Maximum session import size |
 | `ARENA_BIND` | `127.0.0.1` | Docker host bind address |
+| `ARENA_DEMO` | unset | `1` enables demo mode (scripted bots, no model calls) |
 
 `config.yml` contains only game defaults, seats/personas, tag styles and the scenario path. The
 cryptographic provider registry is never stored in YAML or `.env`.
@@ -235,24 +270,27 @@ pip install -r requirements-dev.txt
 python -m pytest -q tests
 ```
 
-The suite is offline and never calls a real LLM. Node.js enables the frontend helper tests; they
-are skipped when Node is unavailable. CI runs on Ubuntu and Windows.
-
-Current local verification: **899 passed, 3 skipped, 101 subtests**.
+The suite is offline and never calls a real LLM (engine tests use a scripted FakeLLM / the demo
+bots). Node.js enables the frontend tests; they are skipped when Node is unavailable. CI runs on
+Ubuntu and Windows.
 
 ## Project structure
 
 ```text
 app/
-├─ api/          REST + SSE, providers, templates, workspaces
-├─ engine/       orchestration, scenario director, turns, recovery
+├─ world/        physical layer: commit gate, ledger, channels, floors, requests, templates, abilities
+├─ runtime/      async runtime: actors/workers, supervisor, LLM gate, trace log, event bus, game clock
+├─ agents/       Brain: tool schemas, context building, notes and compaction, prompt-injection guard
+├─ game/         orchestrator, session container (save format v3), bindings, workspace switch, demo bots
+├─ api/          REST + SSE v2, providers, templates, workspaces
+├─ engine/       LLM client, expression engine
 ├─ llm/          protocol adapters and endpoint planning
 ├─ providers/    encrypted provider registry / model metadata
 ├─ storage/      workspace, settings, sessions, crypto
 └─ migration.py  legacy data migration
-scenarios/       executable Markdown scenarios
-prompts/         prompt templates
-knowledge/       optional strategy documents
+scenarios/       Markdown scenarios (schema v2)
+prompts/         moderator / player prompt templates
+knowledge/       moderator guide and strategy documents
 static/          single-page arena UI
 tests/           offline regression, API, storage and UI tests
 docs/            architecture, provider, workspace and UI guides
@@ -260,13 +298,15 @@ docs/            architecture, provider, workspace and UI guides
 
 ## Release
 
-The current supported release is **0.11.0**, focused on workspaces, model templates and endpoint
-control. Earlier releases are intentionally summarized rather than itemized; see
-[CHANGELOG.md](CHANGELOG.md) for the public release notes.
+The current development version is **0.12.0**: asynchronous agents everywhere, an LLM-driven
+moderator, channels and speaking rights, challenges and a minimal spectator UI. **v0.12 does not
+open v0.11 (or older) saves** — they stay in the saved-game list untouched. The latest stable
+release is 0.11.0; see [CHANGELOG.md](CHANGELOG.md) for the release notes.
 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [v0.12 plan and decision log](docs/v0.12-async-agents-plan.md) · [implementation contract](docs/v0.12-contracts.md)
 - [Providers and models](docs/providers.md)
 - [Workspaces and encrypted data](docs/workspaces.md)
 - [UI guide](docs/ui-guide.md)

@@ -1,7 +1,9 @@
 """Scenario v2 loader: a Markdown file (YAML front matter + body) -> :class:`ScenarioSpec`.
 
 The body is split by heading: the section whose heading text equals ``manual_heading`` (default
-"主持人手册") becomes ``manual_text`` (moderator only), everything else becomes ``rules_text``.
+"主持人手册") becomes ``manual_text`` (moderator only), everything else becomes ``rules_text``.  A scenario
+that declares ``manual_heading`` must contain that section (exactly once): a manual that failed to be split
+off would be shown to the players.
 """
 
 from __future__ import annotations
@@ -42,11 +44,10 @@ def _front_matter(source: str, where: str) -> tuple[dict[str, Any], str]:
     return data, "".join(lines[end + 1 :])
 
 
-def split_body(body: str, manual_heading: str = DEFAULT_MANUAL_HEADING) -> tuple[str, str]:
-    """``(rules_text, manual_text)``.  Headings inside fenced code blocks are ignored."""
-    lines = body.splitlines()
+def _headings(lines: list[str]) -> list[tuple[int, int, str]]:
+    """``(line index, level, text)`` of every Markdown heading outside fenced code blocks."""
     in_fence = False
-    headings: list[tuple[int, int, str]] = []  # (line index, level, text)
+    headings: list[tuple[int, int, str]] = []
     for index, line in enumerate(lines):
         if _FENCE.match(line):
             in_fence = not in_fence
@@ -56,6 +57,18 @@ def split_body(body: str, manual_heading: str = DEFAULT_MANUAL_HEADING) -> tuple
         match = _HEADING.match(line)
         if match:
             headings.append((index, len(match.group(1)), match.group(2).strip()))
+    return headings
+
+
+def count_headings(body: str, heading: str) -> int:
+    """How many headings of ``body`` read exactly ``heading`` (code fences ignored)."""
+    return sum(1 for _, _, text in _headings(body.splitlines()) if text == heading.strip())
+
+
+def split_body(body: str, manual_heading: str = DEFAULT_MANUAL_HEADING) -> tuple[str, str]:
+    """``(rules_text, manual_text)``.  Headings inside fenced code blocks are ignored."""
+    lines = body.splitlines()
+    headings = _headings(lines)
     start = next((h for h in headings if h[2] == manual_heading.strip()), None)
     if start is None:
         return body.strip(), ""
@@ -100,7 +113,18 @@ def parse_scenario_v2(source: str, *, where: str = "<scenario>") -> ScenarioSpec
     data, body = _front_matter(source, where)
     if int(data.get("schema_version", 0) or 0) != 2:
         raise ScenarioError(f"{where}: schema_version 必须是 2（收到 {data.get('schema_version')!r}）")
+    declared = "manual_heading" in data
     manual_heading = str(data.pop("manual_heading", DEFAULT_MANUAL_HEADING) or DEFAULT_MANUAL_HEADING)
+    # Everything outside the manual section is shown to the players, so a manual that silently fails to be
+    # split off (a mistyped heading, a second copy of the heading) would leak it: refuse such documents.
+    found = count_headings(body, manual_heading)
+    if declared and found == 0:
+        raise ScenarioError(
+            f"{where}: front matter 声明了 manual_heading「{manual_heading}」，但正文里没有这个标题的章节"
+            "（找不到手册时整篇正文都会被当成玩家可见的规则）"
+        )
+    if found > 1:
+        raise ScenarioError(f"{where}: 标题「{manual_heading}」出现了 {found} 次；主持人手册只能是一个章节（其余的会泄露给玩家）")
     rules_text, manual_text = split_body(body, manual_heading)
     data["rules_text"], data["manual_text"] = rules_text, manual_text
     try:

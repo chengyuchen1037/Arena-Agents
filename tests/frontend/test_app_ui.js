@@ -23,7 +23,7 @@ async function live(over = {}, overrides = {}) {
 function tiles(env) {
   const html = env.el("participants-grid").innerHTML;
   const byId = {};
-  for (const part of html.split(/(?=<div class="tile)/).filter(Boolean)) {
+  for (const part of html.split(/(?=<div class="tile[ "])/).filter(Boolean)) {
     const m = part.match(/data-actor="([^"]+)"/);
     if (m) byId[m[1]] = part;
   }
@@ -48,7 +48,7 @@ test("13 compact tiles: the moderator first, then p01..p12; glyph + short id + e
     assert.match(t[id], /data-glyph="[a-z]+-\d+-[a-z]+"/); // the generated pattern
     assert.ok(t[id].includes(`>${id}</span>`)); // the short id
     assert.equal((t[id].match(/class="tile-tag /g) || []).length, 1, `${id}: one main tag`);
-    assert.ok(!t[id].includes("Carol 3"), "names are not printed on the tile (only in the hover title)");
+    assert.ok(!t[id].replace(/<[^>]*>/g, "").includes("Carol 3"), "names are not printed on the tile (only in the hover title)");
     assert.ok(!t[id].includes("model-x") && !t[id].includes("tokens"), "no detailed info on the tile");
   }
   assert.match(t.moderator, /data-glyph="star-ink-solid"/);
@@ -85,7 +85,7 @@ test("the main tag prefers ui.highlight_tags, then a non-status tag; out players
   assert.ok(tileClasses(p05).includes("out"));
   assert.equal(tagText(p05), "女巫");
   assert.ok(!tileClasses(tiles(env).p01).includes("out"));
-  assert.match(p05, /tag-purple/);
+  assert.match(p05, /tag-neutral/); // no style declared for 女巫: neutral
 });
 
 test("state badges: thinking / acting / stopped on the corner; floor holder and waiting-for-answer", async () => {
@@ -308,7 +308,9 @@ test("message kinds get their own look; a truncated message ends with …; HTML 
   send(6, "ability");
   env.sse("message.committed", F.msg(7, "public", "p01", "<img src=x onerror=alert(1)> & **粗体**"));
   env.sse("message.committed", F.msg(8, "public", "p01", "这句话太长，被引擎截断了", "speech", F.EVERYONE, { truncated: { dropped_chars: 36, kept_chars: 300 } }));
-  const html = env.el("feed-records-container").children.map((c) => c.outerHTML).join("\n");
+  const feedEl = env.el("feed-records-container");
+  // the first message of an empty feed is a full render (innerHTML), the rest are appended blocks
+  const html = feedEl.innerHTML + "\n" + feedEl.children.map((c) => c.outerHTML).join("\n");
   for (const kind of ["announce", "template", "system", "reply", "challenge", "ability"]) {
     assert.match(html, new RegExp(`msg-kind-${kind}`), kind);
   }
@@ -488,6 +490,7 @@ test("unread counts per channel; opening a channel (or 'all') marks it read; his
 
 test("the folded DM group shows its unread total; challenges arrive as unread DM messages", async () => {
   const { env } = await live();
+  channelClick(env, "public"); // "all" auto-reads everything: look at one channel so the DM counts as unread
   env.sse("message.committed", F.msg(50, "dm-p08", "p08", "主持人，请复核。", "challenge", ["moderator", "p08"], { ticket_id: "t2" }));
   const html = env.el("channels-list").innerHTML;
   assert.match(html, /私聊 <span class="group-count">12<\/span><span class="channel-unread"[^>]*>1<\/span>/);
@@ -675,7 +678,7 @@ test("control buttons follow the game status; after the verdict 'continue' is cl
   env.sse("game.status", { status: "finished", reason: "end_game", winner: "好人阵营", summary: "狼人全部出局" });
   assert.deepEqual(state(), [false, false, true], "finished: continue stays available (D8)");
 
-  backend.controlSession = F.makeSession({ event_id: 900, status: "running", winner: null });
+  backend.controlSession = F.makeSession({ event_id: 5000, status: "running", winner: null });
   env.el("btn-resume").dispatch("click");
   await settle();
   const post = backend.calls.filter((c) => c.url.endsWith("/api/control/start")).pop();
@@ -774,6 +777,29 @@ test("names and tags from the server are escaped on the tiles, in the popover an
   tagClick(env, "p01");
   assert.ok(!env.el("metrics-popover").innerHTML.includes("<img"));
   assert.ok(!env.el("feed-records-container").innerHTML.includes("<img"));
+});
+
+test("a hidden / occluded page still repaints (rAF never fires there): timer fallback, and no double paint", async () => {
+  const { env } = await live();
+  const text = () => env.el("phase-pill").textContent;
+  env.document.visibilityState = "hidden";
+  env.sse("phase.changed", { text: "第 2 夜 · 黑夜" }, undefined, { flush: false });
+  env.flushRaf(); // nothing is queued on requestAnimationFrame while hidden
+  assert.notEqual(text(), "第 2 夜 · 黑夜");
+  assert.ok(env.timers.some((t) => t.ms <= 200), "a short fallback timer is pending");
+  while (env.timers.length) env.runNextTimer();
+  assert.equal(text(), "第 2 夜 · 黑夜");
+
+  // the page goes hidden AFTER the frame was requested: the visibilitychange hook adds the timer
+  env.document.visibilityState = "visible";
+  env.sse("phase.changed", { text: "第 3 天" }, undefined, { flush: false });
+  env.document.visibilityState = "hidden";
+  env.document.dispatchEvent("visibilitychange");
+  while (env.timers.length) env.runNextTimer();
+  assert.equal(text(), "第 3 天");
+  env.flushRaf(); // the late rAF callback finds nothing left to do
+  assert.equal(text(), "第 3 天");
+  env.document.visibilityState = "visible";
 });
 
 test("theme toggle flips data-theme", async () => {

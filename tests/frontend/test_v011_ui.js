@@ -1,7 +1,8 @@
 "use strict";
-// v0.11 frontend tests: layout collapse/resize/card-size, workspace (工作文件夹)
-// modal, provider auto_append_path + endpoint preview, and the 3-slot model
-// templates with actor checkboxes. Runs against a tiny fake DOM (no browser).
+// Frontend tests for the v0.11 features that survive in v0.12: layout collapse/resize,
+// workspace (工作文件夹) modal, provider auto_append_path + endpoint preview, and the 3-slot
+// model templates with actor checkboxes. (The card-size tiers of v0.11 were removed in v0.12:
+// players are fixed-size tiles.) Runs against a tiny fake DOM (no browser).
 // Run: node tests/frontend/test_v011_ui.js
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -548,7 +549,6 @@ test("index.html ships every v0.11 control", () => {
     "board-resizer",
     "channels-resizer",
     "dashboard-resizer",
-    "select-card-size",
     "workspace-modal",
     "input-workspace-path",
     "btn-pick-native-folder",
@@ -569,9 +569,7 @@ test("index.html ships every v0.11 control", () => {
   ]) {
     assert.ok(HTML_SRC.includes(`id="${id}"`), `missing #${id}`);
   }
-  for (const label of ["紧凑", "标准", "大", "超大"]) {
-    assert.ok(HTML_SRC.includes(label), `missing card size label ${label}`);
-  }
+  assert.ok(!HTML_SRC.includes("select-card-size"), "the card size picker was removed in v0.12");
   // scripts load in dependency order
   const c = HTML_SRC.indexOf("static/js/core.js");
   const l = HTML_SRC.indexOf("static/js/layout.js");
@@ -581,7 +579,7 @@ test("index.html ships every v0.11 control", () => {
   assert.ok(c >= 0 && c < l && l < p && p < w && w < a);
 });
 
-test("style.css defines the collapse/resize/card-size/template hooks", () => {
+test("style.css defines the collapse/resize/template hooks and the v0.12 tile styles (no card tiers)", () => {
   for (const frag of [
     ".row-resizer",
     ".col-resizer",
@@ -589,16 +587,19 @@ test("style.css defines the collapse/resize/card-size/template hooks", () => {
     ".left-collapsed",
     ".right-collapsed",
     ".narrow-layout",
-    ".card-size-compact",
-    ".card-size-standard",
-    ".card-size-large",
-    ".card-size-xlarge",
+    ".tile",
+    ".tile-tag",
+    ".glyph-s-hexagon",
+    ".metrics-popover",
     ".endpoint-preview-url",
     ".template-row",
     ".advanced-bindings",
     ".workspace-current-path",
   ]) {
     assert.ok(CSS_SRC.includes(frag), `missing CSS ${frag}`);
+  }
+  for (const gone of [".card-size-", ".player-card", ".action-card", ".trace-card", ".thought-card", ".subitem-"]) {
+    assert.ok(!CSS_SRC.includes(gone), `obsolete CSS ${gone} is still there`);
   }
 });
 
@@ -614,7 +615,6 @@ test("layout: persisted collapse/size state is applied on create", () => {
         leftWidth: 300,
         rightWidth: 320,
       }),
-      [Core.CARD_SIZE_STORAGE_KEY]: "large",
     },
   });
   assert.ok(env.el("main-container").classList.contains("board-collapsed"));
@@ -627,8 +627,6 @@ test("layout: persisted collapse/size state is applied on create", () => {
   assert.ok(env.el("channels-resizer").hidden);
   assert.ok(!env.el("dashboard-resizer").hidden);
   assert.equal(env.el("btn-toggle-board-label").textContent, "展开看板");
-  assert.ok(env.el("participants-grid").classList.contains("card-size-large"));
-  assert.equal(env.el("select-card-size").value, "large");
 
   // expand the board: its persisted height comes back
   env.el("btn-toggle-board").dispatch("click");
@@ -646,7 +644,7 @@ test("layout: persisted collapse/size state is applied on create", () => {
   assert.ok(!env.el("workspace-grid").classList.contains("left-collapsed"));
 });
 
-test("layout: toggles and card size tiers persist to localStorage", () => {
+test("layout: toggles persist to localStorage", () => {
   const env = makeEnv();
   assert.ok(!env.el("main-container").classList.contains("board-collapsed"));
   assert.equal(env.el("channels-panel").style.width, "245px");
@@ -658,15 +656,11 @@ test("layout: toggles and card size tiers persist to localStorage", () => {
   const saved = JSON.parse(env.storageMap.get(Core.LAYOUT_STORAGE_KEY));
   assert.equal(saved.rightCollapsed, true);
 
-  env.el("select-card-size").value = "compact";
-  env.el("select-card-size").dispatch("change");
-  assert.ok(env.el("participants-grid").classList.contains("card-size-compact"));
-  assert.equal(env.storageMap.get(Core.CARD_SIZE_STORAGE_KEY), "compact");
-
-  // an unknown tier falls back to standard
-  env.layout.setCardSize("gigantic");
-  assert.ok(env.el("participants-grid").classList.contains("card-size-standard"));
-  assert.equal(env.el("select-card-size").value, "standard");
+  // the four card-size tiers are gone: no picker, no class on the grid, nothing persisted
+  assert.equal(env.layout.setCardSize, undefined);
+  assert.equal("cardSize" in env.layout.state(), false);
+  assert.ok(![...env.el("participants-grid")._classes].some((c) => c.startsWith("card-size")));
+  assert.equal([...env.storageMap.keys()].some((k) => /card_size/.test(k)), false);
 });
 
 test("layout: drag resizers resize within limits and persist; dblclick resets", () => {

@@ -2,9 +2,10 @@
 
 [English](README.en.md) | **简体中文**
 
-**Arena-Agents 是一个开源的 AI 狼人杀、社交推理与多智能体博弈沙盒。** 游戏规则写在可执行
-Markdown 剧本中，引擎负责玩家、发言、投票、频道、事件、变量与断点恢复。项目内置一套完整的
-12 人狼人杀，也可以用同一引擎运行其他社交推理、剧本杀或桌游规则。
+**Arena-Agents 是一个开源的 AI 狼人杀、社交推理与多智能体博弈沙盒。** 游戏规则写在 Markdown
+剧本中；**每一位玩家和主持人都是异步 Agent**（前端 Actor 随时收发消息，后端 Worker 负责思考和
+工具调用），由 LLM 主持人按剧本手册推进流程，引擎只提供与游戏无关的频道、发言权、请求与账本。
+项目内置一套完整的 12 人狼人杀，也可以用同一引擎运行其他社交推理、剧本杀或桌游规则。
 
 关键词：**AI 狼人杀、狼人杀、多智能体狼人杀、AI 多智能体博弈、社交推理、LLM 智能体、
 AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
@@ -16,10 +17,20 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 <img src="docs/images/main-view.png" alt="AI 狼人杀实时对局主界面" width="100%">
 
+> v0.12 的界面已改为极简玩家块与只显示发言的信息流；下方截图在 v0.12 发布前会更新。
+
 ## 主要能力
 
-- **可执行 Markdown 剧本**：角色、阶段、流程、事件钩子、胜负条件与看板规则都在
-  `scenarios/*.md` 中，不写死在 Python 条件分支里。
+- **全员异步 Agent（v0.12）**：每个玩家和主持人都是 Actor + Worker。Actor 永远能收发消息，
+  不会被思考或工具执行阻塞；发言、投票、质询和能力随时可以发生，引擎在**提交的那一刻**校验。
+- **LLM 主持人驱动流程**：轮流发言 = 主持人公告 + 发言权管理（`set_floor_queue` 等工具）；
+  规则文本与“主持人手册”写在剧本里，引擎本身不含任何游戏词汇。
+- **频道与发言权**：可见性只由频道决定；主持人可随时关闭发言权（玩家收到“无发言权”回执），
+  发言既有时间限制也有字数限制；玩家可以私聊质询主持人，主持人可以惩罚骚扰者（关闭其私聊）。
+- **只追加的账本**：所有已发生的事都记在账本里，存档、上下文和观战都以它为准；主持人可以改玩家的
+  当前状态（出局、复活…），但不能改写历史。
+- **可执行 Markdown 剧本（schema v2）**：身份池、模板、能力、检查项和默认限额写在
+  `scenarios/*.md` 的 front matter 中，正文是规则说明和只给主持人看的手册。
 - **多 Provider / 多模型**：支持 OpenAI Chat Completions、OpenAI Responses、Anthropic
   Messages；主持人及每位玩家可以使用不同模型和思考深度。
 - **模型模板**：保存 3 个 Provider/模型/思考深度预设，勾选玩家后一键应用。
@@ -29,7 +40,9 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 - **本地加密**：Provider 密钥和对局存档使用 AES-256-GCM；Windows 工作区主密钥由 DPAPI 保护。
 - **API 端点预览**：保存 Provider 前显示最终消息地址和模型列表地址；支持自动拼接 `/v1/...`
   或直接填写完整自定义 endpoint。
-- **可调整的观战界面**：看板/左右栏可折叠，高度和宽度可拖动，玩家卡片提供 4 档尺寸。
+- **极简观战界面**：玩家用极简几何图案 + 短 id + 标签表示，点击标签看工具调用/思考/token 统计；
+  信息流只显示发言（整条渲染，不流式），支持“上帝视角”和任意玩家视角。
+- **演示模式**：`ARENA_DEMO=1` 用脚本化机器人代替模型，不需要 API Key 就能完整体验一局。
 
 ## 界面截图
 
@@ -46,27 +59,26 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 ## 工作原理
 
 ```text
-浏览器
-  │  REST + SSE
-  ▼
-FastAPI API ────────────── 工作文件夹
-  │                          │
-  ▼                          ▼
-Game Orchestrator ◄──── Workspace (.arena/)
-  │  ├─ 会话运行时           ├─ providers.v1.enc
-  │  ├─ 剧本 Director        ├─ settings.json（模板 / 绑定）
-  │  ├─ 参与者回合           ├─ sessions/*.enc
-  │  └─ 主持人工具           └─ 工作区密钥
-  │
-  ▼
-LLM Client ──► OpenAI Chat / OpenAI Responses / Anthropic Messages 适配器
-  │
-  └─ 加密用量、价格快照、重试与退避
+浏览器 ──REST + SSE v2（带 id 的增量事件，支持断线续传）──► FastAPI API ── 工作文件夹 (.arena/)
+                                                              │              ├─ providers.v1.enc
+                                                              ▼              ├─ settings.json
+                                                      GameOrchestrator       ├─ sessions/*.enc
+                                                              │              ├─ logs/<对局>/trace-*.jsonl
+                              ┌───────────────────────────────┴────────┐     └─ 工作区密钥
+                              ▼                                        ▼
+        World（同步、与游戏无关）                       Runtime（asyncio）
+        提交闸门 → 账本（只追加）                       13 个 Agent = Actor（收件箱）+ Worker（LLM 循环）
+        频道 · 发言权 · 请求 · 模板                     Supervisor · 看门狗 · LLM 并发闸门
+        能力 · 质询 · 随机数 · 游戏时钟                 Brain：状态板 + 记忆 + 可见历史 + 工具 schema
+                                                              │
+                                                              ▼
+                                      OpenAI Chat / OpenAI Responses / Anthropic Messages 适配器
 ```
 
-引擎本身不理解“狼人”“警长”“第 2 夜”等游戏概念。Scenario Parser 负责校验 Markdown
-剧本，Director 执行步骤、条件、循环、事件和终局判定。模块说明见
-[docs/architecture.md](docs/architecture.md)。
+引擎本身不理解“狼人”“警长”“第 2 夜”等游戏概念（`tests/v12/test_neutrality.py` 会扫描）。
+剧本给出规则和手册，**主持人 Agent** 用工具推进流程；玩家用 `speak` / `respond` / `use_ability` /
+`challenge_moderator` 行动。思维链和工具调用只写进明文 trace 日志，前端不展示。模块说明见
+[docs/architecture.md](docs/architecture.md)，实现契约见 [docs/v0.12-contracts.md](docs/v0.12-contracts.md)。
 
 ## 快速开始
 
@@ -100,6 +112,15 @@ Linux:   <应用数据目录>/workspace/default
 ```
 
 Provider 配置在界面中完成，本地使用不需要 `.env`。
+
+### 演示模式（无需模型 / API Key）
+
+```bash
+ARENA_DEMO=1 ARENA_DISABLE_WORKSPACE=1 uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+演示模式用脚本化机器人扮演主持人和 12 名玩家，走真实的引擎、频道、发言权、请求和界面，
+但没有任何网络请求和费用；演示局不支持从存档继续（需要新建对局）。
 
 ### Docker Compose
 
@@ -158,10 +179,15 @@ docker compose up -d --build
 
 ## 界面操作
 
-- **看板**：顶栏按钮整体折叠；左右侧栏在各自头部折叠。
-- **拖动**：看板下方横向分隔条改变高度；左右栏分隔条改变宽度；双击恢复默认。
-- **卡片尺寸**：紧凑 / 标准 / 大 / 超大。
-- 布局与卡片尺寸保存在浏览器 `localStorage`。
+- **玩家块**：极简图案 + 短 id + 一个主标签；点击标签查看该 Agent 的工具调用次数、思考次数、
+  LLM 调用次数、token 与费用。出局者置灰。
+- **信息流**：只显示发言、公告和质询回复，整条渲染；没有思维链、工具调用和流式输出。
+- **观战视角**：顶栏下拉框切换“上帝视角”或某名玩家的视角（只显示该玩家有权看到的频道与消息）。
+- **频道栏**：显示每个频道的发言权状态（🔒 关闭 / 🎤 持麦 / 📋 队列 / 💬 自由讨论 / ❄ 冻结）；
+  “质询工单”单独成组。
+- **对局控制**：开始 / 暂停 / 继续；对局结束后仍可点击“继续”恢复（主持人会收到通知）。
+- **看板**：顶栏按钮整体折叠；左右侧栏在各自头部折叠；分隔条可拖动，双击恢复默认。布局保存在浏览器
+  `localStorage`。
 
 ## 环境变量
 
@@ -177,6 +203,7 @@ docker compose up -d --build
 | `ARENA_ALLOW_PRIVATE_PROVIDERS` | `false` | 允许本机/内网 Provider（如 Ollama） |
 | `ARENA_MAX_IMPORT_BYTES` | `20971520` | 导入存档大小上限 |
 | `ARENA_BIND` | `127.0.0.1` | Docker 宿主机绑定地址 |
+| `ARENA_DEMO` | 未设置 | 设为 1 启用演示模式（脚本化机器人，不调用模型） |
 
 ## 安全
 
@@ -194,24 +221,26 @@ pip install -r requirements-dev.txt
 python -m pytest -q tests
 ```
 
-测试完全离线，不调用真实 LLM。安装 Node.js 后会运行前端纯函数测试，否则自动跳过。
-CI 覆盖 Ubuntu 与 Windows。
-
-当前本地验证：**899 passed, 3 skipped, 101 subtests**。
+测试完全离线，不调用真实 LLM（引擎测试用脚本化的 FakeLLM / 演示机器人）。安装 Node.js 后会运行前端
+测试，否则自动跳过。CI 覆盖 Ubuntu 与 Windows。
 
 ## 目录结构
 
 ```text
 app/
-├─ api/          REST + SSE、Provider、模板、工作区
-├─ engine/       编排、剧本 Director、参与者回合、恢复
+├─ world/        物理层：提交闸门、账本、频道、发言权、请求、模板、能力、质询（同步、游戏无关）
+├─ runtime/      异步运行时：Actor/Worker、Supervisor、LLM 闸门、trace 日志、事件总线、游戏时钟
+├─ agents/       Brain：工具 schema、上下文构建、笔记与压缩、提示注入防护
+├─ game/         编排器、会话容器（存档 v3）、绑定、工作区切换、演示机器人
+├─ api/          REST + SSE v2、Provider、模板、工作区
+├─ engine/       LLM 客户端、表达式引擎
 ├─ llm/          三协议适配器与 API 端点规划
 ├─ providers/    加密 Provider 注册表与模型元数据
 ├─ storage/      工作区、设置、对局、加密
 └─ migration.py  旧数据迁移
-scenarios/       可执行 Markdown 剧本
-prompts/         提示词模板
-knowledge/       可选策略资料
+scenarios/       Markdown 剧本（schema v2）
+prompts/         主持人 / 玩家提示词模板
+knowledge/       主持人指南与策略资料
 static/          单页观战界面
 tests/           离线回归、API、存储与 UI 测试
 docs/            架构、Provider、工作区与 UI 文档
@@ -219,12 +248,14 @@ docs/            架构、Provider、工作区与 UI 文档
 
 ## 版本说明
 
-当前稳定版本为 **0.11.0**，重点是多 Provider/多模型、加密工作区、模板、可调整布局和端点预览。
-更早的发布仅做概括，不展开逐项版本历史；高层发布说明见 [CHANGELOG.md](CHANGELOG.md)。
+当前开发版本为 **0.12.0**：全员异步 Agent、LLM 主持人驱动、频道与发言权、质询、极简观战界面。
+**v0.12 不兼容 v0.11 及更早的对局存档**（旧存档会保留在存档列表中、不会被改动）。最近的稳定版本是
+0.11.0。高层发布说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 文档
 
 - [架构](docs/architecture.md)
+- [v0.12 开发方案与决策记录](docs/v0.12-async-agents-plan.md) · [实现契约](docs/v0.12-contracts.md)
 - [Provider 与模型](docs/providers.md)
 - [工作区与加密数据](docs/workspaces.md)
 - [界面操作指南](docs/ui-guide.md)
