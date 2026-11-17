@@ -12,11 +12,20 @@ games.
    ├─ master.v1.dpapi          Windows DPAPI-wrapped workspace key
    ├─ providers.v1.enc         encrypted provider registry
    ├─ providers.v1.backup.enc  known-good backup
-   ├─ settings.json            bindings, templates, last session, UI preferences
+   ├─ settings.json            bindings, templates, last session, UI preferences, default spending limit
+   ├─ pricing.v1.json          the downloaded price table (public data, plain JSON; v0.12.1)
+   ├─ roster/                  the players' names, avatars, persona and memory (plain files; v0.12.1)
+   │  ├─ roster.json           names + avatar descriptions + the "load memory" switch
+   │  ├─ N1.persona.md  …      persona text of each seat (no text = no file)
+   │  └─ N1.memory.md   …      memory of each seat: ## 战绩 / ## 对局记忆 / ## 经验与印象
    ├─ sessions/<id>/           current + previous encrypted session snapshots
    ├─ logs/  exports/
    └─ workspace.lock
 ```
+
+The roster files are deliberately **not encrypted**: they are text you may want to read, edit, back up or
+share (the *Roster* menu exports them all as one zip). They never contain Provider keys. A game takes a
+copy of the roster when it is created, so editing a file never changes a game in progress.
 
 The application-level `%LOCALAPPDATA%/Arena-Agent/app-state.json` only remembers the last/recent
 workspace paths. It never stores Provider keys or session content.
