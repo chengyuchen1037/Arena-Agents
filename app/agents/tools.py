@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from pathlib import Path
 from typing import Any
 
 from app.agents import docs
-from app.agents.schemas import MODERATOR_TOOL_INTENTS, PLAYER_TOOL_INTENTS, WAIT_TOOL
+from app.agents.schemas import (
+    LEGACY_WAIT_TOOL,
+    MODERATOR_TOOL_INTENTS,
+    PLAYER_TOOL_INTENTS,
+    SLEEP_MAX_SECONDS,
+    SLEEP_MIN_SECONDS,
+    SLEEP_TOOL,
+)
 from app.engine.toolargs import ARGS_ERROR_KEY, args_error_result
 from app.runtime.ports import ToolOutcome
 from app.world.port import WorldPort
@@ -19,6 +27,21 @@ MAX_NOTE_CHARS = 4000
 
 def _dump(**fields: Any) -> str:
     return json.dumps(fields, ensure_ascii=False)
+
+
+def _parse_sleep_seconds(raw: Any) -> tuple[float | None, str | None]:
+    """``(seconds, error)``: ``None`` = no timer.  Out-of-range values are clamped, garbage is an error."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None, None
+    if isinstance(raw, bool):
+        return None, "seconds 必须是数字（游戏时钟秒）。"
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, "seconds 必须是数字（游戏时钟秒）。"
+    if not math.isfinite(value):
+        return None, "seconds 必须是有限的数字。"
+    return min(SLEEP_MAX_SECONDS, max(SLEEP_MIN_SECONDS, value)), None
 
 
 def _rejected(code: str, message: str) -> ToolOutcome:
@@ -88,11 +111,21 @@ class ToolExecutor:
         if not fresh:
             return None
         warned.update(key for key, _text in fresh)
-        return "先别结束，你还有没处理完的事项：" + "；".join(text for _key, text in fresh) + "。如果你确实决定不作答 / 不发言，再调用一次 wait 即可。"
+        return "先别结束，你还有没处理完的事项：" + "；".join(text for _key, text in fresh) + "。如果你确实决定不作答 / 不发言，再调用一次 sleep 即可。"
 
     def tool_names(self, agent_id: str) -> set[str]:
         world_tools = MODERATOR_TOOL_INTENTS if agent_id == MODERATOR_ID else PLAYER_TOOL_INTENTS
-        return {*world_tools, WAIT_TOOL, "list_documents", "read_document", "write_note", "read_notes", "compact_context"}
+        # ``wait`` (v0.12.0) is still executed, as a sleep without a timer, but is not advertised any more.
+        return {
+            *world_tools,
+            SLEEP_TOOL,
+            LEGACY_WAIT_TOOL,
+            "list_documents",
+            "read_document",
+            "write_note",
+            "read_notes",
+            "compact_context",
+        }
 
     def execute(
         self, agent_id: str, name: str, args: dict[str, Any], *, gen_id: int, seen_seq: int
@@ -106,11 +139,8 @@ class ToolExecutor:
         if name not in self.tool_names(agent_id):
             return _rejected(Code.INVALID_PARAMS, f"未知工具：{name}。可用工具见工具列表。")
 
-        if name == WAIT_TOOL:
-            reminder = self._wait_warning(agent_id)
-            if reminder:
-                return ToolOutcome(text=_dump(ok=False, code="NOT_FINISHED", message=reminder), ends_run=False)
-            return ToolOutcome(text=_dump(ok=True, message="本次行动结束，等待下一次唤醒。"), ends_run=True)
+        if name in (SLEEP_TOOL, LEGACY_WAIT_TOOL):
+            return self._sleep(agent_id, args if name == SLEEP_TOOL else {})
         if name == "list_documents":
             listing = docs.list_documents(self.docs_dir, include_moderator_docs=agent_id == MODERATOR_ID)
             return ToolOutcome(text=json.dumps(listing, ensure_ascii=False), shared=True)
@@ -141,6 +171,20 @@ class ToolExecutor:
         return ToolOutcome(text=receipt.tool_json(), receipt=receipt)
 
     # ------------------------------------------------------------------ shared tools --
+    def _sleep(self, agent_id: str, args: dict[str, Any]) -> ToolOutcome:
+        """``sleep(seconds?)``: end the run; wake on anything new, or after ``seconds`` of game time."""
+        seconds, error = _parse_sleep_seconds(args.get("seconds"))
+        if error:
+            return _rejected(Code.INVALID_PARAMS, error)
+        reminder = self._wait_warning(agent_id)
+        if reminder:
+            return ToolOutcome(text=_dump(ok=False, code="NOT_FINISHED", message=reminder), ends_run=False)
+        if seconds is None:
+            message = "已休眠：有新消息或新状态时会唤醒你。"
+        else:
+            message = f"已休眠：有新消息或新状态时会唤醒你；{seconds:g} 秒（游戏时钟）后即使没有动静也会唤醒你。"
+        return ToolOutcome(text=_dump(ok=True, message=message), ends_run=True, sleep_s=seconds)
+
     def _write_note(self, agent_id: str, args: dict[str, Any]) -> ToolOutcome:
         title = str(args.get("title") or "笔记").strip()[:60] or "笔记"
         content = str(args.get("content") or "").strip()

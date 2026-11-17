@@ -169,12 +169,15 @@ class Supervisor:
     async def _do_stop(self) -> None:
         # While stopping nothing is pumped (``_notify`` ignores the world); the last pump below flushes.
         self._stopping = True
+        # Agents first, and synchronously: cancel workers and scheduled activations, drop what is pending,
+        # publish ``agent.status = sleeping`` (the conversations stay).  Nothing can start a run any more, not
+        # even in the loop turns the awaits below give away.
+        stopping = [agent.stop() for agent in self.agents.values()]
         loop_tasks, self._loop_tasks = self._loop_tasks, []
         for task in loop_tasks:
             task.cancel()
         await asyncio.gather(*loop_tasks, return_exceptions=True)
-        # Agents: cancel workers, drop buffers, publish ``agent.status = sleeping`` (the conversations stay).
-        await asyncio.gather(*(agent.stop() for agent in self.agents.values()), return_exceptions=True)
+        await asyncio.gather(*stopping, return_exceptions=True)  # wait (bounded) for the cancelled workers
         self._publish_metrics()
         self.pump(final=True)
 

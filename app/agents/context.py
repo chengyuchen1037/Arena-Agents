@@ -1,7 +1,8 @@
 """Text rendering for an agent's context: state board, memory, visible history and wake reasons.
 
-Everything is rebuilt from the world on every run (the conversation is not kept between runs), so
-these functions are pure and deterministic given the world state.
+Pure and deterministic given the world state.  The FULL message of a conversation is built from
+``render_board`` + memory + history; every later message is a DELTA (new history entries, board changes
+from ``app.agents.delta.diff_board``, wake reasons) so the conversation stays an append-only prefix.
 """
 
 from __future__ import annotations
@@ -48,10 +49,15 @@ class Namer:
         self.channels = channels or {}
 
     def who(self, agent_id: str | None) -> str:
+        """``N3 Carol`` for a player (the id is what tools take, the name is what people say)."""
         if not agent_id:
             return "?"
+        if agent_id == MODERATOR_ID:
+            return "主持人"
+        if agent_id == ENGINE_ID:
+            return "系统"
         name = self._display(agent_id)
-        return name if name == agent_id else f"{name}（{agent_id}）"
+        return agent_id if not name or name == agent_id else f"{agent_id} {name}"
 
     def whos(self, ids: Any) -> str:
         return "、".join(self.who(i) for i in (ids or [])) or "（无）"
@@ -105,6 +111,25 @@ def _render_floor(channel: dict[str, Any]) -> list[str]:
     return lines
 
 
+def request_flags(r: dict[str, Any]) -> str:
+    """Short flags of a request line: shared answers / how it closes early."""
+    flags = ""
+    if r.get("share_answers"):
+        flags += "　答案互相可见（可随时改答）"
+    auto = r.get("auto_close")
+    if auto == "unanimous":
+        flags += "　全员答案一致才会提前关闭"
+    elif auto == "deadline":
+        flags += "　只在截止时关闭"
+    return flags
+
+
+def shared_answers_text(answers: list[dict[str, Any]], namer: Namer) -> str:
+    return "；".join(
+        f"{namer.who(a.get('player_id'))}→{a.get('label') or a.get('value')}" for a in answers
+    ) or "（还没有人作答）"
+
+
 def render_board(board: dict[str, Any], namer: Namer, *, hint: str = "") -> str:
     me = board.get("me") or {}
     is_mod = bool(me.get("is_moderator"))
@@ -114,7 +139,7 @@ def render_board(board: dict[str, Any], namer: Namer, *, hint: str = "") -> str:
     if is_mod:
         lines.append(f"你是主持人（{me.get('id', 'moderator')}）。你知道所有玩家的底牌，请严格保密。")
     else:
-        lines.append(f"你是 {me.get('name', '')}（{me.get('id', '')}，座位 {me.get('seat', '')}）。")
+        lines.append(f"你是 {me.get('id', '')} {me.get('name', '')}（座位 {me.get('seat', '')}）。")
         if me.get("brief"):
             lines.append(f"你的身份说明：{me['brief']}")
         if me.get("tags"):
@@ -160,11 +185,14 @@ def render_board(board: dict[str, Any], namer: Namer, *, hint: str = "") -> str:
         head += f"　剩余 {_secs(r.get('seconds_left'))}"
         if r.get("sealed"):
             head += "　密封"
+        head += request_flags(r)
         if is_mod:
             head += f"　发给 {_ids(r.get('to'))}，已作答 {_ids(r.get('answered_by'))}"
         else:
             head += "　（你已作答，可改答）" if r.get("answered") else "　（你还没作答）"
         lines.append(head)
+        if r.get("answers"):
+            lines.append("    当前答案：" + shared_answers_text(r["answers"], namer))
 
     abilities = board.get("abilities") or []
     if abilities:
@@ -311,19 +339,34 @@ def render_memory(memory: AgentMemory, notes_text: str) -> str:
     return "\n".join(lines)
 
 
-def render_wake(reasons: list[Envelope], ambient: list[Envelope], namer: Namer, *, agent_id: str) -> str:
+MAX_WAKE_LINES = 14
+
+
+def render_wake(reasons: list[Envelope], namer: Namer, *, agent_id: str, ambient: list[Envelope] | None = None) -> str:
+    """Why the agent was woken.  New messages are summed up per channel (a busy channel would otherwise
+    fill the section with one line per message); everything else gets a line of its own."""
     lines = ["【本次唤醒】"]
-    shown = False
-    for env in reasons:
+    per_channel: dict[str, tuple[list[str], int]] = {}
+    others: list[str] = []
+    for env in [*reasons, *(ambient or [])]:
+        if env.payload.get("event") == "message.new":
+            who = namer.who(env.sender)
+            senders, count = per_channel.setdefault(str(env.channel_id or ""), ([], 0))
+            if who not in senders:
+                senders.append(who)
+            per_channel[str(env.channel_id or "")] = (senders, count + 1)
+            continue
         text = _wake_line(env, namer)
         if text:
-            lines.append("- " + text)
-            shown = True
-    if ambient and not shown:
-        lines.append(f"- 频道里有 {len(ambient)} 条新动态（见上面的可见历史）。")
-        shown = True
-    if not shown:
-        lines.append("- （没有明确的唤醒原因，请查看状态板决定是否需要行动；没事就调用 wait。）")
+            others.append(text)
+    for channel_id, (senders, count) in per_channel.items():
+        lines.append(f"- {namer.channel(channel_id or None)} 里有 {count} 条新消息（{'、'.join(senders)}）。")
+    for text in others[:MAX_WAKE_LINES]:
+        lines.append("- " + text)
+    if len(others) > MAX_WAKE_LINES:
+        lines.append(f"- …另有 {len(others) - MAX_WAKE_LINES} 件事（见可见历史与状态变化）。")
+    if len(lines) == 1:
+        lines.append("- （没有明确的唤醒原因，请查看状态变化与可见历史决定是否需要行动；没事就调用 sleep。）")
     return "\n".join(lines)
 
 
@@ -387,7 +430,18 @@ def _wake_line(env: Envelope, namer: Namer) -> str:
         return f"{ch} 的自由讨论{why}。请先在频道里询问大家是否还有话要说，协商后再用 close_floor 收尾（引擎不会自动关闭）。"
     if event == "request.opened":
         options = "；".join(f"{o.get('id')}={o.get('label') or o.get('id')}" for o in (p.get("options") or []))
-        return f"你收到请求 {p.get('request_id')}：{p.get('question', '')}{('（选项：' + options + '）') if options else ''}，{_secs(p.get('seconds'))} 内作答（respond）。"
+        shared = "各收件人的答案会实时互相可见，可随时改答。" if p.get("share_answers") else ""
+        return (
+            f"你收到请求 {p.get('request_id')}：{p.get('question', '')}{('（选项：' + options + '）') if options else ''}，"
+            f"{_secs(p.get('seconds'))} 内作答（respond）。{shared}"
+        )
+    if event == "request.answer":
+        return (
+            f"{namer.who(p.get('player_id'))} 对请求 {p.get('request_id')} 的答案是「{p.get('label') or p.get('value')}」"
+            f"{('（理由：' + _safe(str(p.get('reason'))) + '）') if p.get('reason') else ''}。请求仍然开放，答案可以修改。"
+        )
+    if event == "timer.elapsed":
+        return f"你设定的休眠时间到了（睡了 {float(p.get('slept_s') or 0):g} 秒）。看看现在该做什么。"
     if event == "request.closed":
         return (
             f"请求 {p.get('request_id')} 已关闭（{p.get('reason')}）。答案：{json.dumps(p.get('answers'), ensure_ascii=False)}"
@@ -401,10 +455,10 @@ def _wake_line(env: Envelope, namer: Namer) -> str:
         return {
             "game.started": "对局开始了。请依据规则与主持人手册开局。",
             "game.resumed": "对局从暂停中恢复。请查看状态板与可见历史，确认当前进度后继续。",
-            "game.continued": "对局在终局后被用户继续。请查看状态板，决定如何继续（例如宣布继续、调整状态）。",
+            "game.continued": "对局在终局后被用户继续。请查看状态变化，决定如何继续（例如宣布继续、调整状态）。",
         }[event]
     if event == "watchdog":
         return "对局已经静止一段时间（没有任何人在行动、也没有计时器）。请检查流程是否漏了一步并推进；确实无法推进时再 hold_game。"
     if event in ("channel.created", "channel.updated", "player.updated", "phase.changed"):
-        return f"状态变化：{event}（见状态板与可见历史）。"
+        return f"状态变化：{event}（见状态变化与可见历史）。"
     return f"{event or env.kind}：{json.dumps(p, ensure_ascii=False)[:200]}"

@@ -116,9 +116,12 @@
     // -----------------------------------------------------------------------
     // Apply state to the DOM
     // -----------------------------------------------------------------------
+    /** The avatar rail is forced in the "compact" layout (platform.js sets <html data-layout>). */
     function applyResponsive() {
       if (!el.workspaceGrid) return false;
-      const narrow = viewportWidth() <= NARROW_MAX;
+      const html = doc.documentElement;
+      const layout = html && typeof html.getAttribute === "function" ? html.getAttribute("data-layout") : null;
+      const narrow = layout ? layout === "compact" : viewportWidth() <= NARROW_MAX;
       call(el.workspaceGrid.classList, "toggle", "narrow-layout", narrow);
       return narrow;
     }

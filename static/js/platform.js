@@ -10,11 +10,14 @@
      - the viewport width (and height, for a phone held sideways).
    The result is written to <html>:
      data-platform    desktop | tablet | phone
+     data-layout      wide | compact | phone   (what the stylesheet keys on:
+                      compact = 6x2 player cards + avatar-only channel rail, below 1024 px
+                      or on a touch tablet; phone = one pane at a time + bottom tab bar)
      data-input       touch | mouse
      data-orientation portrait | landscape
-   and recomputed whenever the window is resized or rotated.  CSS owns the actual
-   layout (breakpoints in static/css/style.css); app.js only reacts to `phone`
-   (the "⋯" menu, the bottom tab bar).
+   and recomputed whenever the window is resized or rotated (synchronously, so a
+   resize never paints a stale layout).  CSS owns the actual layout
+   (static/css/style.css); app.js only reacts to `phone` (the "⋯" menu, the tab bar).
 
    A manual override is available for testing and for people who want another
    layout:  ?platform=phone | tablet | desktop  in the page URL.
@@ -33,6 +36,7 @@
   const PLATFORMS = ["desktop", "tablet", "phone"];
   const PHONE_MAX_WIDTH = 767; // narrower than this is always the phone layout
   const TABLET_MAX_WIDTH = 1439; // touch devices up to this width get the tablet layout
+  const COMPACT_MAX_WIDTH = 1023; // below 1024 px even a mouse-driven window gets the compact layout
   const PHONE_LANDSCAPE_MAX_HEIGHT = 500; // a phone held sideways is short, not narrow
 
   const PHONE_UA = /iPhone|iPod|Android.*Mobile|Windows Phone|webOS|BlackBerry|Opera Mini|IEMobile|Mobile.*Firefox|\bMobile\b/i;
@@ -50,6 +54,13 @@
     const m = /(?:^|[?&])platform=([A-Za-z]+)/.exec(String(search || ""));
     const v = m ? m[1].toLowerCase() : "";
     return PLATFORMS.includes(v) ? v : null;
+  }
+
+  /** The layout the stylesheet uses: "phone", "compact" (6x2 cards, avatar rail) or "wide". */
+  function layoutOf(platform, width) {
+    if (platform === "phone") return "phone";
+    if (platform === "tablet" || num(width, 1280) <= COMPACT_MAX_WIDTH) return "compact";
+    return "wide";
   }
 
   /**
@@ -87,7 +98,8 @@
     } else {
       platform = "desktop";
     }
-    return { platform, mobileUa, phoneUa, tabletUa, touch, os, width, height, orientation, override };
+    const layout = layoutOf(platform, width);
+    return { platform, layout, mobileUa, phoneUa, tabletUa, touch, os, width, height, orientation, override };
   }
 
   /** Collect the detection inputs from a browser-like `win` (window or a test double). */
@@ -115,13 +127,20 @@
   }
 
   const same = (a, b) =>
-    a && b && a.platform === b.platform && a.touch === b.touch && a.orientation === b.orientation && a.os === b.os;
+    a &&
+    b &&
+    a.platform === b.platform &&
+    a.layout === b.layout &&
+    a.touch === b.touch &&
+    a.orientation === b.orientation &&
+    a.os === b.os;
 
   /** Write the result to <html> data attributes (and a --vh helper for browsers without dvh). */
   function applyToDocument(doc, info) {
     const el = doc && doc.documentElement;
     if (!el || typeof el.setAttribute !== "function") return false;
     el.setAttribute("data-platform", info.platform);
+    el.setAttribute("data-layout", info.layout || layoutOf(info.platform, info.width));
     el.setAttribute("data-input", info.touch ? "touch" : "mouse");
     el.setAttribute("data-orientation", info.orientation);
     el.setAttribute("data-os", info.os);
@@ -156,14 +175,17 @@
       return next;
     }
 
-    // resize bursts (dragging a window edge) are folded into one recompute per frame
+    // Recomputed synchronously: detection is a handful of comparisons, and a resize must never
+    // paint one frame of the old layout (nor may a screenshot taken right after it).
     function schedule() {
-      if (timer !== null) return;
-      const run = () => {
-        timer = null;
-        refresh();
-      };
-      timer = typeof win.setTimeout === "function" ? win.setTimeout(run, 60) : (run(), null);
+      refresh();
+      // some browsers report the final size of a rotation a moment later
+      if (timer === null && typeof win.setTimeout === "function") {
+        timer = win.setTimeout(() => {
+          timer = null;
+          refresh();
+        }, 250);
+      }
     }
 
     if (typeof win.addEventListener === "function") {
@@ -204,7 +226,9 @@
     PLATFORMS,
     PHONE_MAX_WIDTH,
     TABLET_MAX_WIDTH,
+    COMPACT_MAX_WIDTH,
     parseOverride,
+    layoutOf,
     detect,
     readEnvironment,
     applyToDocument,

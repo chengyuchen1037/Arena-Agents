@@ -38,7 +38,7 @@
         </button>
 
         <button class="btn btn-theme" id="btn-theme" title="切换明暗主题" aria-label="切换明暗主题">
-          <span class="theme-icon">◐</span>
+          <span class="theme-icon">◐</span><span class="theme-label">明暗主题</span>
         </button>
 
         <!-- v0.12: 观战视角（上帝视角 / 某名玩家）。纯前端过滤，切换不会重新请求服务器 -->
@@ -525,6 +525,9 @@
 
   <!-- 长按（触屏）/ 悬停时显示的名字提示（频道头像条等只有头像的地方） -->
   <div class="touch-tip" id="touch-tip" role="tooltip" hidden></div>
+
+  <!-- 频道栏收缩成头像条时，质询工单折叠成一个带数字的图标；点开就是这个列表 -->
+  <div class="ticket-pop" id="ticket-pop" role="dialog" aria-label="质询工单" hidden></div>
 
   <!-- v0.12.1: 玩家详情：桌面 / 平板是贴着卡片的浮层，手机是底部抽屉。放在网格之外，重渲染不会把它冲掉 -->
   <div class="detail-backdrop" id="detail-backdrop" hidden></div>

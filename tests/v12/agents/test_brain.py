@@ -53,11 +53,16 @@ def test_tool_schemas_are_provider_friendly(builder) -> None:
         assert "properties" in fn["parameters"]
 
 
+def moderator_tool_names() -> list[str]:
+    return _names(moderator_tool_schemas(make_spec()))
+
+
 def test_player_and_moderator_tool_sets_differ() -> None:
     player, moderator = _names(player_tool_schemas(make_spec())), _names(moderator_tool_schemas(make_spec()))
-    assert {"speak", "pass", "respond", "challenge_moderator", "wait", "write_note"} <= set(player)
+    assert {"speak", "pass", "respond", "challenge_moderator", "sleep", "write_note"} <= set(player)
+    assert "wait" not in player and "wait" not in moderator_tool_names()  # replaced by sleep (still executed)
     assert "set_floor_queue" not in player and "end_game" not in player
-    assert {"announce", "open_floor", "set_floor_queue", "open_request", "resolve_challenge", "hold_game", "end_game", "wait"} <= set(moderator)
+    assert {"announce", "open_floor", "set_floor_queue", "open_request", "resolve_challenge", "hold_game", "end_game", "sleep"} <= set(moderator)
     assert "speak" not in moderator and "challenge_moderator" not in moderator
 
 
@@ -227,13 +232,14 @@ def test_inject_message_only_contains_new_material() -> None:
     world = FakeWorld()
     world.add("message", "p2", {"content": "旧消息", "kind": "speech"}, channel="pub")
     brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message("p1", _wake("p1"))  # the conversation exists: later messages are deltas
     assert brain.inject_message("p1", _wake("p1", kind="inject", after=world.seq)) is None
     world.add("message", "p2", {"content": "新消息", "kind": "speech", "sender_name": "Blair"}, channel="pub")
     result = brain.inject_message("p1", _wake("p1", kind="inject", after=1))
     assert result is not None
     text, seen = result
     assert "新消息" in text and "旧消息" not in text and seen == world.seq
-    assert "你当前可以发言的频道" in text
+    assert "你当前可以发言的频道" in text and "【状态变化】" not in text  # nothing changed on the board
 
 
 def test_inject_for_reasons_without_new_entries() -> None:
@@ -299,7 +305,7 @@ def test_render_entry_covers_the_ledger_catalogue() -> None:
     world = FakeWorld()
     namer = Namer(world.display_name, {"pub": "公共频道"})
     cases = {
-        "message": ({"content": "你好", "kind": "speech"}, "[公共频道[pub]] Alex（p1）：你好"),
+        "message": ({"content": "你好", "kind": "speech"}, "[公共频道[pub]] p1 Alex：你好"),
         "request.opened": ({"request_id": "r1", "question": "投谁", "options": [{"id": "a", "label": "甲"}]}, "请求 r1"),
         "request.closed": ({"request_id": "r1", "reason": "deadline", "answers": {"p1": "a"}, "defaulted": [], "missing": ["p2"]}, "已关闭"),
         "ability.used": ({"ability_id": "boom", "actor_id": "p1", "params": {}}, "boom"),
@@ -373,15 +379,18 @@ def test_revoked_floor_wake_line_explains_the_reason_in_chinese() -> None:
     world = FakeWorld()
     brain = ArenaBrain(world, world.spec, docs_dir=None)
     for reason, expected in (("timeout", "已超时"), ("replaced", "取代"), ("ability:boom", "频道冻结")):
-        env = Envelope(kind="floor", priority="ambient", interrupt=True, channel_id="pub", payload={"event": "floor.revoked", "reason": reason})
+        env = Envelope(kind="floor", priority="normal", interrupt=True, channel_id="pub", payload={"event": "floor.revoked", "reason": reason})
         text, _ = brain.start_message("p1", _wake("p1", env))
         assert expected in text.split("【本次唤醒】")[1]
 
 
 def test_tool_help_mentions_the_new_semantics() -> None:
     desc = {t["function"]["name"]: t["function"]["description"] for t in moderator_tool_schemas(make_spec())}
-    assert "整场" in desc["open_floor"] and "开场" in desc["open_floor"]
+    assert "整场" in desc["open_floor"] and "limits 只有一个" in desc["open_floor"] and "max_messages_per_member" in desc["open_floor"]
     assert "列全" in desc["create_channel"] and "args" in desc["evaluate"]
+    assert "share_answers" in desc["open_request"] and "unanimous" in desc["open_request"]
+    assert "不能传空列表" in desc["enable_ability"] and "不能传空列表" in desc["disable_ability"]
+    assert "seconds" in desc["sleep"] and "唤醒" in desc["sleep"]
 
 
 def test_a_free_channel_without_a_discussion_shows_no_progress_line() -> None:
@@ -427,7 +436,7 @@ def test_wait_with_an_unanswered_request_is_a_reminder_the_first_time_and_ends_t
     first = brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0)
     body = json.loads(first.text)
     assert first.ends_run is False and body["ok"] is False and body["code"] == "NOT_FINISHED"
-    assert "r7" in body["message"] and "respond" in body["message"] and "再调用一次 wait" in body["message"]
+    assert "r7" in body["message"] and "respond" in body["message"] and "再调用一次 sleep" in body["message"]
     assert first.receipt is None  # a reminder, not a rejection: it is not counted as one
 
     second = brain.execute_tool("p1", "wait", {}, gen_id=1, seen_seq=0)
@@ -515,3 +524,197 @@ def test_moderator_only_documents_are_invisible_to_players(tmp_path: Path) -> No
         assert json.loads(brain.execute_tool("p1", "read_document", {"doc_name": spelling}, gen_id=1, seen_seq=0).text)["ok"] is False
     shown = json.loads(brain.execute_tool(MODERATOR_ID, "read_document", {"doc_name": "moderator_guide.md"}, gen_id=1, seen_seq=0).text)
     assert shown["ok"] is True and "只给主持人" in shown["content"]
+
+
+# ----------------------------------------------------------------------------- v0.12.1: sleep
+
+
+def _sleep(brain: ArenaBrain, agent: str = "p2", **args):
+    return brain.execute_tool(agent, "sleep", args, gen_id=1, seen_seq=0)
+
+
+def test_sleep_ends_the_run_with_or_without_a_timer() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.begin_run("p2")
+    plain = _sleep(brain)
+    assert plain.ends_run is True and plain.sleep_s is None and json.loads(plain.text)["ok"] is True
+    timed = _sleep(brain, seconds=60)
+    assert timed.ends_run is True and timed.sleep_s == 60.0 and "60" in json.loads(timed.text)["message"]
+
+
+@pytest.mark.parametrize("given,expected", [(0, 1.0), (0.2, 1.0), (99999, 3600.0), ("45", 45.0), (12.5, 12.5), (None, None), ("", None)])
+def test_sleep_seconds_are_clamped_and_blank_means_no_timer(given, expected) -> None:
+    world = FakeWorld()
+    outcome = _sleep(ArenaBrain(world, world.spec, docs_dir=None), seconds=given)
+    assert outcome.ends_run is True and outcome.sleep_s == expected
+
+
+@pytest.mark.parametrize("bad", ["soon", [5], True, float("nan"), float("inf"), {"a": 1}])
+def test_garbage_sleep_seconds_are_a_clear_rejection_not_a_crash(bad) -> None:
+    world = FakeWorld()
+    outcome = _sleep(ArenaBrain(world, world.spec, docs_dir=None), seconds=bad)
+    body = json.loads(outcome.text)
+    assert outcome.ends_run is False and body["ok"] is False and body["code"] == "INVALID_PARAMS" and "seconds" in body["message"]
+
+
+def test_the_old_wait_name_still_works_as_a_sleep_without_a_timer() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    outcome = brain.execute_tool("p2", "wait", {"seconds": 30}, gen_id=1, seen_seq=0)
+    assert outcome.ends_run is True and outcome.sleep_s is None  # the timer belongs to ``sleep`` only
+
+
+def test_the_sleep_tool_schema_has_an_optional_bounded_seconds_parameter() -> None:
+    for build in (player_tool_schemas, moderator_tool_schemas):
+        tool = next(t["function"] for t in build(make_spec()) if t["function"]["name"] == "sleep")
+        prop = tool["parameters"]["properties"]["seconds"]
+        assert prop["type"] == "number" and prop["minimum"] == 1 and prop["maximum"] == 3600
+        assert "required" not in tool["parameters"]
+
+
+def test_sleeping_still_triggers_the_unfinished_business_reminder_once() -> None:
+    world = FakeWorld()
+    _board_with(world, "p1", requests=[OPEN_REQUEST])
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.begin_run("p1")
+    first = brain.execute_tool("p1", "sleep", {"seconds": 30}, gen_id=1, seen_seq=0)
+    assert first.ends_run is False and first.sleep_s is None and "NOT_FINISHED" in first.text
+    second = brain.execute_tool("p1", "sleep", {"seconds": 30}, gen_id=1, seen_seq=0)
+    assert second.ends_run is True and second.sleep_s == 30.0
+
+
+# ----------------------------------------------------------------------------- v0.12.1: deltas
+
+
+def test_a_delta_reports_only_what_changed_on_the_board() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message("p1", _wake("p1"))
+    world.add("message", "p2", {"content": "轮到你了吗", "kind": "speech", "sender_name": "Blair"}, channel="pub")
+    board = dict(world.board("p1"))
+    board["channels"] = [HELD_FLOOR]
+    board["requests"] = [OPEN_REQUEST]
+    board["me"] = {**board["me"], "tags": ["存活", "警长"]}
+    world.boards["p1"] = board
+
+    text, _ = brain.inject_message("p1", _wake("p1", kind="inject", after=0))
+    changes = text.split("【状态变化】")[1].split("【本次唤醒】")[0]
+    assert "你的标签：存活 → 存活、警长" in changes
+    assert "公共频道" in changes and "你现在可以发言" in changes  # the floor opened
+    assert "新请求 r7" in changes and "投谁" in changes
+    assert "对局状态" not in changes and "阶段" not in changes  # nothing else changed
+
+    # the baseline moved: the very same board is not reported twice
+    assert brain.inject_message("p1", _wake("p1", kind="inject", after=world.seq)) is None
+
+
+def test_requests_that_got_answers_or_ended_are_reported_as_changes() -> None:
+    world = FakeWorld()
+    shared = {**OPEN_REQUEST, "id": "r9", "share_answers": True, "auto_close": "unanimous", "answers": [], "to": ["p1", "p2"]}
+    _board_with(world, "p1", requests=[shared])
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message("p1", _wake("p1"))
+    _board_with(world, "p1", requests=[{**shared, "answers": [{"player_id": "p2", "value": "a", "label": "甲", "reason": ""}]}])
+    text, _ = brain.inject_message("p1", _wake("p1", kind="inject", after=0))
+    assert "请求 r9：当前答案：p2 Blair→甲" in text
+    _board_with(world, "p1", requests=[])
+    text, _ = brain.inject_message("p1", _wake("p1", kind="inject", after=0))
+    assert "请求 r9 已结束" in text
+
+
+def test_a_shared_request_is_shown_with_its_flags_and_current_answers_in_the_full_board() -> None:
+    world = FakeWorld()
+    _board_with(world, "p1", requests=[{**OPEN_REQUEST, "share_answers": True, "auto_close": "unanimous",
+                                        "answers": [{"player_id": "p2", "value": "a", "label": "甲", "reason": ""}]}])
+    text, _ = ArenaBrain(world, world.spec, docs_dir=None).start_message("p1", _wake("p1"))
+    assert "答案互相可见" in text and "全员答案一致才会提前关闭" in text and "当前答案：p2 Blair→甲" in text
+
+
+def test_the_time_of_the_game_is_the_only_thing_that_always_changes_so_it_alone_is_no_reason_to_wake() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message("p1", _wake("p1"))
+    board = dict(world.board("p1"))
+    board["now"] = 99.0
+    channels = [dict(c) for c in board["channels"]]
+    channels[0] = {**channels[0], "floor": {**(channels[0].get("floor") or {}), "seconds_left": 12.0}}  # a ticking clock
+    board["channels"] = channels
+    world.boards["p1"] = board
+    assert brain.inject_message("p1", _wake("p1", kind="inject", after=world.seq)) is None
+    # ... whereas the channel turning into a queue you wait in *is* news
+    channels[0] = {**channels[0], "floor": {"kind": "queue", "mine": None, "seconds_left": 12.0}}
+    board["channels"] = channels
+    assert "公共频道" in brain.inject_message("p1", _wake("p1", kind="inject", after=world.seq))[0]
+
+
+def test_a_brain_without_a_baseline_refreshes_the_whole_board_once() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    world.add("message", "p2", {"content": "你好", "kind": "speech", "sender_name": "Blair"}, channel="pub")
+    first, _ = brain.inject_message("p1", _wake("p1", kind="inject", after=0))
+    assert "状态板完整刷新" in first and "【状态板】" in first
+    assert brain.inject_message("p1", _wake("p1", kind="inject", after=world.seq)) is None  # now it has one
+
+
+def test_reset_conversation_forgets_the_baseline() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    brain.start_message("p1", _wake("p1"))
+    brain.reset_conversation("p1")
+    world.add("message", "p2", {"content": "x", "kind": "speech"}, channel="pub")
+    assert "状态板完整刷新" in brain.inject_message("p1", _wake("p1", kind="inject", after=0))[0]
+
+
+def test_many_messages_in_one_channel_are_summed_up_in_the_wake_not_listed_one_by_one() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    envs = [Envelope(kind="message", priority="normal", channel_id="pub", sender=who, payload={"event": "message.new"})
+            for who in ("p2", "p2", "p2", MODERATOR_ID)]
+    envs.append(Envelope(kind="request", priority="urgent", payload={"event": "request.opened", "request_id": "r1", "question": "？", "options": [], "seconds": 30}))
+    text, _ = brain.start_message("p1", _wake("p1", *envs))
+    wake = text.split("【本次唤醒】")[1]
+    assert wake.count("新消息") == 1 and "4 条新消息" in wake and "p2 Blair" in wake and "主持人" in wake
+    assert "你收到请求 r1" in wake
+
+
+def test_a_shared_answer_and_a_timer_have_their_own_wake_lines() -> None:
+    world = FakeWorld()
+    brain = ArenaBrain(world, world.spec, docs_dir=None)
+    envs = [
+        Envelope(kind="request", priority="normal", payload={"event": "request.answer", "request_id": "r7", "player_id": "p2", "value": "a", "label": "甲", "reason": "我选甲"}),
+        Envelope(kind="notice", priority="normal", payload={"event": "timer.elapsed", "slept_s": 60}),
+    ]
+    wake = brain.start_message("p1", _wake("p1", *envs))[0].split("【本次唤醒】")[1]
+    assert "p2 Blair 对请求 r7 的答案是「甲」" in wake and "我选甲" in wake and "答案可以修改" in wake
+    assert "休眠时间到了（睡了 60 秒）" in wake
+
+
+# ----------------------------------------------------------------------------- v0.12.1: names / memory
+
+
+def test_agents_are_named_the_way_people_say_it_with_the_id_the_tools_take() -> None:
+    world = FakeWorld()
+    namer = Namer(world.display_name, {})
+    assert namer.who("p1") == "p1 Alex" and namer.who(MODERATOR_ID) == "主持人" and namer.who("ghost") == "ghost"
+    assert namer.whos(["p1", "p2"]) == "p1 Alex、p2 Blair"
+
+
+def test_persona_and_memory_live_in_the_system_prompt_and_an_empty_memory_leaves_no_hole(tmp_path, monkeypatch) -> None:
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "participant.md").write_text("你是 {{id}} {{name}}。\n性格：{{persona}}\n\n{{memory_block}}\n\n{{rules}}", encoding="utf-8")
+    monkeypatch.setattr("app.config.BASE_DIR", tmp_path)
+    world = FakeWorld()
+    plain = ArenaBrain(world, world.spec, docs_dir=None).system_prompt("p1")
+    assert plain == "你是 p1 Alex。\n性格：（没有特别设定，按你自己的判断行事。）\n\n规则正文"  # no empty block, no blank lines in a row
+
+    rich = ArenaBrain(world, world.spec, docs_dir=None, personas={"p1": "寡言、谨慎"}, memories={"p1": "上局被 Blair 骗过。\n胜率 3/10。"}).system_prompt("p1")
+    assert "性格：寡言、谨慎" in rich and "# 你的记忆与经验" in rich and "上局被 Blair 骗过。" in rich
+    other = ArenaBrain(world, world.spec, docs_dir=None, memories={"p1": "只属于 p1"}).system_prompt("p2")
+    assert "只属于 p1" not in other  # each agent only gets its own memory
+
+
+def test_the_moderator_gets_no_memory_block() -> None:
+    world = FakeWorld()
+    prompt = ArenaBrain(world, world.spec, docs_dir=None, memories={MODERATOR_ID: "不应出现"}).system_prompt(MODERATOR_ID)
+    assert "不应出现" not in prompt

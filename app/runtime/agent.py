@@ -706,6 +706,10 @@ class Agent:
                         sleeps.append(seconds)
             conv.messages.append(assistant_tool_message(resp))
             conv.messages.extend(results)
+            if self._stale(run):  # an interrupt delivered from inside a tool: the batch is whole, the run is over
+                run.end_reason = "stale"
+                self._trace("discard", gen=run.gen, reason="stale after tools")
+                return
 
             if rebuild:
                 conv = self._rebuild(run, conv)

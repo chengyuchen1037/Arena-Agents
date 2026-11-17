@@ -722,6 +722,7 @@
       answeredCount: answered.size,
       total: list(request.to).length || num(request.total, 0),
       countdown: requestCountdown(request, ctx && ctx.clockNow),
+      deadlineClock: request.status === "open" && request.deadline_clock !== undefined ? request.deadline_clock : null,
       result,
       // sealed requests keep their answers from the other players; god always sees them
       answersHidden: request.sealed && viewpoint !== GOD,

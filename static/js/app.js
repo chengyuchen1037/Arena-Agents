@@ -1,16 +1,20 @@
 /* ==========================================================================
-   Arena-Agents v0.12 Frontend Controller
-   (async agents · SSE v2 · minimal player tiles · speech-only feed)
+   Arena-Agents v0.12.1 Frontend Controller
+   (async agents · SSE v2 · player cards with pixel avatars · request cards · responsive)
 
    Pure logic lives in
-     core.js    escaping / API client / formatting
-     avatar.js  deterministic glyphs (shape x colour x texture)
-     store.js   SSE v2 event application on a PublicSession v2 object
-     view.js    viewpoint filtering, tiles, floor status, unread, banners
+     core.js      escaping / API client / formatting / budget + price helpers
+     avatar.js    pixel avatars (sprite library static/avatar/parts.json, canvas -> data URL)
+     store.js     SSE event application on a PublicSession v3 object
+     view.js      viewpoint filtering, cards, channels, request cards, banners
+     platform.js  desktop / tablet / phone detection (<html data-platform>)
+   Panels with their own state: roster.js (detail panel, roster menu), budget.js (limit dialog),
+   providers.js (Provider / price source / bindings), layout.js, workspace.js.
    This file wires them to the DOM.
 
-   What is NOT here any more (v0.11 -> v0.12): streaming drafts, chain-of-thought
-   and tool-call cards, expand/collapse controls, the moderator "engine stream".
+   What is NOT here (v0.12 -> v0.12.1): the 🎤 / ✋ / ■ card states and their legend, the execution
+   depth select, the "全部" channel, the right-hand "对局状态" column (it became the summary strip of
+   the participant bar). Still not here: streaming drafts, chain-of-thought, tool-call cards.
    ========================================================================== */
 
 (() => {
@@ -18,6 +22,7 @@
   const Avatar = window.ArenaAvatar;
   const Store = window.ArenaStore;
   const View = window.ArenaView;
+  const Platform = window.ArenaPlatform || null;
   if (!Core) {
     throw new Error("core.js 未加载：请确认 static/js/core.js 可访问");
   }
@@ -25,6 +30,7 @@
     throw new Error("avatar.js / store.js / view.js 未加载：请确认 static/js 下的脚本可访问");
   }
   const { escapeHtml, numText } = Core;
+  const MOD = View.MODERATOR_ID;
 
   // URL prefix the app is served under (supports sub-path reverse proxies).
   const SCRIPT_SRC = document.currentScript && document.currentScript.src;
@@ -40,23 +46,30 @@
   const VIEWPOINT_KEY = "arena_viewpoint_v1";
   const MESSAGE_HTML_CACHE_MAX = 5000;
   const FLASH_MS = 3000;
+  const LONG_PRESS_MS = 450;
   let providerUI = null; // v0.10 provider/binding/session-list UI (providers.js)
   let layoutUI = null; // v0.11 collapse/resize UI (layout.js)
   let workspaceUI = null; // v0.11 workspace (工作文件夹) UI (workspace.js)
+  let rosterUI = null; // v0.12.1 detail panel + roster menu (roster.js)
+  let budgetUI = null; // v0.12.1 token / cost limit dialog (budget.js)
+  let platformCtl = null; // platform.js controller
 
   const state = {
-    session: Store.emptySession(), // PublicSession v2, updated in place by SSE events
+    session: Store.emptySession(), // PublicSession v3, updated in place by SSE events
     loaded: false, // a first session (HTTP or SSE) has arrived
     sessionKey: null,
     viewpointPref: View.GOD, // what the user chose (kept even while the game has no players yet)
     viewpoint: View.GOD, // effective viewpoint: "god" | player id
-    selectedChannel: "all", // "all" | channel.id
-    openActorId: null, // metrics popover (kept in state so re-renders never lose it)
+    selectedChannel: null, // channel id; null while there is no channel (the default is picked automatically)
     dmGroupOpen: false,
+    ticketPopOpen: false,
+    phoneTab: "feed", // phone layout: "feed" | "channels" | "players"
+    platform: null, // platform.js result
     autoScroll: true,
     autoScrollTop: null, // scrollTop of the feed right after our own scroll-to-bottom
-    read: { baseline: 0, all: 0, seqs: {} }, // unread watermarks per channel
-    flash: new Map(), // actor id -> expiry (ms): briefly highlights a tile (ability.used)
+    read: { baseline: 0, seqs: {} }, // unread watermarks per channel
+    flash: new Map(), // actor id -> expiry (ms): briefly highlights a card (ability.used)
+    clockSync: { clock: 0, at: 0, running: false }, // estimate of the game clock (sleep timers, request deadlines)
     // SSE
     sse: null,
     sseAttempt: 0,
@@ -65,15 +78,19 @@
     lastEventId: 0, // highest event id reflected in state.session
     sseResumeId: 0, // last id received over the stream (resume point for reconnects)
     appVersion: "",
+    avatarEpoch: 0, // bumps when the sprite library arrives (avatars change from circles to pixel art)
+    rosterSig: "", // names + avatars: part of every cache key that contains them
     // render caches (skip DOM writes when nothing changed)
     lastBoardHtml: null,
+    lastSummaryHtml: null,
     lastChannelsHtml: null,
     lastViewpointHtml: null,
     lastHintsHtml: null,
     lastBannerHtml: null,
-    lastDashboardSig: null,
-    lastPopoverHtml: null,
-    feed: { key: "", count: 0, lastSeq: 0 },
+    lastModHtml: null,
+    lastTabbarHtml: null,
+    lastTicketPopHtml: null,
+    feed: { key: "", rows: [] },
     msgHtml: new Map(),
   };
 
@@ -138,8 +155,9 @@
   const elStatusBanner = $("status-banner");
   const elSelectViewpoint = $("select-viewpoint");
   const elFeedViewing = $("feed-viewing");
+  const elModChip = $("mod-chip");
+  const elTopbarStatus = $("topbar-status");
 
-  const elSelectExecDepth = $("select-exec-depth");
   const elUsagePill = $("usage-telemetry-pill");
   const elUsageTokensText = $("usage-tokens-text");
   const elUsageCostText = $("usage-cost-text");
@@ -149,16 +167,20 @@
   const elBtnStart = $("btn-start");
   const elBtnPause = $("btn-pause");
   const elBtnResume = $("btn-resume");
+  const elBtnMore = $("btn-more");
+  const elMoreMenu = $("more-menu");
+  const elMoreMenuList = $("more-menu-list");
 
+  const elMain = $("main-container");
+  const elTabbar = $("tabbar");
   const elParticipantsGrid = $("participants-grid");
+  const elBoardSummary = $("board-summary");
   const elChannelsList = $("channels-list");
   const elFeedChannelLabel = $("feed-channel-label");
   const elFeedList = $("feed-list");
   const elFeedRecords = $("feed-records-container");
-  const elPopover = $("metrics-popover");
-
-  const elFactionsList = $("factions-list");
-  const elTagStatsList = $("tag-stats-list");
+  const elTicketPop = $("ticket-pop");
+  const elTouchTip = $("touch-tip");
   const elToastContainer = $("toast-container");
 
   const elConnBanner = $("conn-banner");
@@ -182,17 +204,35 @@
     }, 3200);
   }
 
-  const cssEscape = (value) =>
-    typeof CSS !== "undefined" && CSS && typeof CSS.escape === "function"
-      ? CSS.escape(String(value))
-      : String(value).replace(/["\\]/g, "\\$&");
-
   /** event.target.closest that tolerates text nodes and the node-test stubs. */
   function closestFrom(target, selector) {
     let node = target;
     // A text node has no closest(): walk up to its element.
     if (node && typeof node.closest !== "function" && node.parentElement) node = node.parentElement;
     return node && typeof node.closest === "function" ? node.closest(selector) : null;
+  }
+
+  const isPhone = () => Boolean(state.platform && state.platform.platform === "phone");
+
+  /** Set an element's innerHTML only when it changed (keeps hover / focus, saves work). */
+  function setHtml(node, html, cacheKey) {
+    if (!node) return;
+    if (state[cacheKey] === html) return;
+    state[cacheKey] = html;
+    node.innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Game clock estimate (sleep timers, request deadlines)
+  // ---------------------------------------------------------------------------
+
+  function clockNow() {
+    return Core.gameClockNow(state.clockSync, Date.now());
+  }
+
+  /** The server told us the clock (snapshot / session.updated): trust it and run from now on. */
+  function syncClock(session) {
+    state.clockSync = { clock: Number(session.clock) || 0, at: Date.now(), running: session.status === "running" };
   }
 
   // ---------------------------------------------------------------------------
@@ -206,28 +246,36 @@
 
   function resetReadState(session) {
     // History that exists when a game is loaded counts as read.
-    state.read = { baseline: lastMessageSeq(session), all: 0, seqs: {} };
+    state.read = { baseline: lastMessageSeq(session), seqs: {} };
   }
 
   function markChannelRead(channelId) {
-    const s = state.session;
-    if (channelId === "all") {
-      state.read.all = Math.max(state.read.all, View.latestSeq(s, "all"));
-    } else {
-      state.read.seqs[channelId] = Math.max(
-        state.read.seqs[channelId] || 0,
-        View.latestSeq(s, channelId)
-      );
-    }
+    if (!channelId) return;
+    state.read.seqs[channelId] = Math.max(
+      state.read.seqs[channelId] || 0,
+      View.latestSeq(state.session, channelId)
+    );
   }
 
   function onMessageSeen(msg) {
-    // A message that arrives in the channel being read (or while "all" is shown) is not unread.
-    if (state.selectedChannel === "all") {
-      state.read.all = Math.max(state.read.all, msg.seq);
-    } else if (msg.channel_id === state.selectedChannel) {
+    // A message that arrives in the channel being read is not unread.
+    if (msg.channel_id && msg.channel_id === state.selectedChannel) {
       state.read.seqs[msg.channel_id] = Math.max(state.read.seqs[msg.channel_id] || 0, msg.seq);
     }
+  }
+
+  /**
+   * The selected channel is always a visible one (there is no "all" any more): keep the user's choice
+   * while it is valid, otherwise fall back to the public channel (or the first one).
+   */
+  function ensureSelectedChannel() {
+    const next = View.normalizeSelectedChannel(state.session, state.viewpoint, state.selectedChannel);
+    if (next !== state.selectedChannel) {
+      state.selectedChannel = next;
+      if (next) markChannelRead(next);
+      state.autoScroll = true;
+    }
+    return next;
   }
 
   function flashActor(info) {
@@ -235,14 +283,27 @@
     state.flash.set(info.actor_id, Date.now() + FLASH_MS);
     const s = state.session;
     showToast(
-      `⚡ ${View.displayName(s, info.actor_id)}（${info.actor_id}）发动了能力${
-        info.ability_id ? `：${info.ability_id}` : ""
-      }`
+      `⚡ ${View.displayName(s, info.actor_id)} 发动了能力${info.ability_id ? `：${info.ability_id}` : ""}`
     );
     setTimeout(() => {
       state.flash.delete(info.actor_id);
       scheduleRender({ board: true });
     }, FLASH_MS);
+  }
+
+  /** Names + avatars: every cached HTML that contains them is keyed by this. */
+  function computeRosterSig(s) {
+    return (
+      `${state.avatarEpoch}|` +
+      s.participants.map((p) => `${p.id}:${p.name}:${Avatar.descriptionKey(p.avatar)}`).join("|") +
+      `|${s.moderator.name}`
+    );
+  }
+
+  /** An <img> for any actor (moderator / engine / player). */
+  function avatarImg(id, size, className) {
+    const a = View.actorAvatar(state.session, id);
+    return Avatar.imgHtml(id, a.seat, a.desc, { size, className });
   }
 
   // ---------------------------------------------------------------------------
@@ -279,10 +340,7 @@
     if (hints.length > shown.length) {
       html += `<span class="req-pill req-more">+${numText(hints.length - shown.length)}</span>`;
     }
-    if (html !== state.lastHintsHtml) {
-      state.lastHintsHtml = html;
-      elRequestHints.innerHTML = html;
-    }
+    setHtml(elRequestHints, html, "lastHintsHtml");
   }
 
   function renderBanner(s) {
@@ -299,6 +357,30 @@
     elStatusBanner.hidden = lines.length === 0;
   }
 
+  /** The moderator is a small chip at the end of the status row (not a card). */
+  function renderModeratorChip(s) {
+    if (!elModChip) return;
+    const t = View.moderatorTile(s, state.viewpoint, { clockNow: clockNow() });
+    const html =
+      `${Avatar.imgHtml(MOD, undefined, null, { size: 24, className: "mod-chip-avatar" })}` +
+      `<span class="mod-chip-name">${escapeHtml(t.name)}</span>` +
+      (t.state
+        ? `<span class="mod-chip-state st-${t.state}" title="${escapeHtml(t.stateTitle)}">${t.stateIcon}</span>`
+        : "");
+    setHtml(elModChip, html, "lastModHtml");
+    if (elModChip.setAttribute) elModChip.setAttribute("title", t.title);
+    elModChip.classList.toggle("popover-open", Boolean(rosterUI && rosterUI.openId() === MOD));
+  }
+
+  function usageTitle(budget) {
+    if (!budget.hasLimit) return "点击打开模型绑定（费用按每次调用的价格快照累加）。点「上限」可设置 token / 费用上限。";
+    const parts = [];
+    if (budget.tokens.max) parts.push(`token ${Core.formatPercent(budget.tokens.ratio)}`);
+    if (budget.cost.max) parts.push(`费用 ${Core.formatPercent(budget.cost.ratio)}`);
+    const word = budget.state === "reached" ? "已达到上限" : budget.state === "warning" ? "已超过 80%" : "预算";
+    return `${word}：${parts.join("，")}${budget.forceStop ? "（达到上限后强制停止）" : ""}。点击打开模型绑定。`;
+  }
+
   function renderTopbar() {
     const s = state.session;
     elAppTitle.textContent = s.title || "Arena-Agents";
@@ -310,16 +392,20 @@
     elPhasePill.textContent = s.phase_text || "未开始";
     elStatusDot.className = `status-dot ${View.statusDotClass(s)}`;
 
-    if (elSelectExecDepth && s.execution_depth && document.activeElement !== elSelectExecDepth) {
-      elSelectExecDepth.value = s.execution_depth;
-    }
-
-    // Top-right token & cost telemetry (the cost is accumulated server-side per call).
+    // Top-right token & cost telemetry (the cost is accumulated server-side per call);
+    // yellow from 80 % of the limit, red when it is reached.
     if (elUsageTokensText && elUsageCostText) {
       const u = s.usage_stats || {};
       const total = u.total_tokens > 0 ? u.total_tokens : 0;
       elUsageTokensText.textContent = Core.formatTokensCount(total);
       elUsageCostText.textContent = `$${Core.sessionCostUsd(u).toFixed(4)}`;
+    }
+    if (elUsagePill) {
+      const budget = View.budgetView(s);
+      if (elUsagePill.setAttribute) {
+        elUsagePill.setAttribute("data-budget", budget.state);
+        elUsagePill.setAttribute("title", usageTitle(budget));
+      }
     }
 
     // Start only on a fresh game; Resume also works after the game finished (D8).
@@ -331,236 +417,134 @@
     renderViewpointSelect(s);
     renderRequestHints(s);
     renderBanner(s);
+    renderModeratorChip(s);
     if (elFeedViewing) {
       elFeedViewing.textContent = `视角：${View.viewpointLabel(s, state.viewpoint)}`;
       elFeedViewing.classList.toggle("is-player", state.viewpoint !== View.GOD);
     }
     if (elSelectViewpoint) elSelectViewpoint.classList.toggle("is-player", state.viewpoint !== View.GOD);
+    if (budgetUI) budgetUI.onSession(s);
+    if (rosterUI) rosterUI.renderControls();
   }
 
   // ---------------------------------------------------------------------------
-  // Rendering: player tiles (≈64×44)
+  // Rendering: player cards (E17: identity is the main tag; badges; three agent states)
   // ---------------------------------------------------------------------------
 
-  const BADGE_TEXT = { thinking: "💭", acting: "⚡", stopped: "■" };
-  const FLOW_TEXT = { floor: "🎤", waiting: "✋" };
-
   function tileHtml(t) {
-    const classes = ["tile"];
-    if (t.isModerator) classes.push("tile-moderator");
+    const classes = ["pcard"];
     if (t.out) classes.push("out");
     if (t.viewing) classes.push("viewing");
     if (t.state) classes.push(`st-${t.state}`);
-    if (t.flow) classes.push(`flow-${t.flow}`);
     if (state.flash.has(t.id)) classes.push("flash");
-    const open = state.openActorId === t.id;
-    if (open) classes.push("popover-open");
+    if (rosterUI && rosterUI.openId() === t.id) classes.push("popover-open");
 
-    const glyph = Avatar.glyphHtml(t.id, t.seat, { size: 20 });
-    const idText = t.isModerator ? "MOD" : t.id;
-    const tagText = t.mainTag || "—";
-    const tagClass = t.mainTag ? `tag-${t.variant || "neutral"}` : "tag-empty";
-    const stateBadge = t.state
-      ? `<span class="tile-badge badge-${t.state}" title="${escapeHtml(
-          View.STATE_LABELS[t.state] || ""
-        )}">${BADGE_TEXT[t.state] || ""}</span>`
+    const badges = t.badges
+      .map(
+        (b) =>
+          `<span class="pbadge pbadge-${escapeHtml(b.variant)}" title="${escapeHtml(b.tag)}">${escapeHtml(b.text)}</span>`
+      )
+      .join("");
+    const tag =
+      `<span class="pcard-tag tag-${escapeHtml(t.main.variant)}${t.main.known ? "" : " unknown"}"` +
+      ` title="${t.main.known ? escapeHtml(t.main.text) : "当前视角看不到这名玩家的身份"}">${escapeHtml(t.main.text)}</span>`;
+    const stateEl = t.state
+      ? `<span class="pcard-state st-${t.state}" title="${escapeHtml(t.stateTitle)}">${t.stateIcon}</span>`
       : "";
-    const flowBadge = t.flow
-      ? `<span class="tile-badge badge-${t.flow}" title="${escapeHtml(
-          View.FLOW_LABELS[t.flow] || ""
-        )}">${FLOW_TEXT[t.flow] || ""}</span>`
-      : "";
-
-    // Layout (≈64×44): [glyph][id]
-    //                  [main tag chip]
-    // The state badge (thinking / acting / stopped) sits on the top-right corner and the
-    // flow badge (holds the floor / owes an answer) on the bottom-right corner.
+    const until = t.sleepUntil === null || t.sleepUntil === undefined ? "" : numText(t.sleepUntil);
+    // Layout: [number]            [badges]
+    //                 [avatar]
+    //                 [name]
+    //                 [identity tag]      [state]
     return (
-      `<div class="${classes.join(" ")}" data-actor="${escapeHtml(t.id)}" title="${escapeHtml(t.title)}">` +
-      `<div class="tile-top">${glyph}<span class="tile-id">${escapeHtml(idText)}</span></div>` +
-      `<div class="tile-bottom"><button type="button" class="tile-tag ${tagClass}" data-tag-actor="${escapeHtml(t.id)}"` +
-      ` aria-haspopup="dialog" aria-expanded="${open ? "true" : "false"}"` +
-      ` title="点击查看 ${escapeHtml(t.id)} 的指标">${escapeHtml(tagText)}</button></div>` +
-      `${stateBadge}${flowBadge}</div>`
+      `<div class="${classes.join(" ")}" data-actor="${escapeHtml(t.id)}" data-state="${escapeHtml(t.state)}"` +
+      ` data-until="${until}" role="button" tabindex="0" title="${escapeHtml(t.title)}"` +
+      ` aria-label="${escapeHtml(t.name)}，${numText(t.seat)} 号">` +
+      `<span class="pcard-num">${numText(t.seat)}</span>` +
+      `<span class="pcard-badges">${badges}</span>` +
+      `<span class="pcard-avatar">${avatarImg(t.id, 40)}</span>` +
+      `<span class="pcard-text"><span class="pcard-name">${escapeHtml(t.name)}</span>${tag}</span>` +
+      `${stateEl}</div>`
     );
   }
 
   function renderBoard() {
     const s = state.session;
-    const tiles = View.boardTiles(s, state.viewpoint);
+    const tiles = View.boardTiles(s, state.viewpoint, { clockNow: clockNow() });
     const html = tiles.map(tileHtml).join("");
     // Skip the DOM write when nothing changed (keeps hover / focus, saves work).
-    if (html !== state.lastBoardHtml) {
-      state.lastBoardHtml = html;
-      elParticipantsGrid.innerHTML = html;
-    }
-    if (state.openActorId) positionPopover();
+    setHtml(elParticipantsGrid, html, "lastBoardHtml");
+    if (rosterUI && rosterUI.isOpen()) rosterUI.position();
   }
 
-  // ---------------------------------------------------------------------------
-  // Rendering: metrics popover (outside the grid; opened id lives in `state`)
-  // ---------------------------------------------------------------------------
-
-  function bindingText(s, actorId) {
-    const b = providerUI ? providerUI.getBindingsFor(actorId) : (s.model_bindings || {})[actorId];
-    if (!b) return "未绑定";
-    const providers = providerUI ? providerUI.getProviders() : [];
-    if (providers.length === 0) return `${b.model_id || "未绑定"} · ${b.reasoning_depth || "high"}`;
-    return Core.bindingSummary(b, providers);
-  }
-
-  function popoverHtml() {
-    const s = state.session;
-    const id = state.openActorId;
-    const isMod = id === View.MODERATOR_ID;
-    const p = isMod ? null : View.participantOf(s, id);
-    if (!isMod && !p) return null;
-
-    const name = isMod ? s.moderator.name : p.name;
-    const tags = isMod ? ["主持人"] : View.visibleTags(s, state.viewpoint, p);
-    const m = View.actorMetrics(s, id);
-    const seat = isMod ? undefined : p.seat;
-    const agentState = isMod ? s.moderator.state : p.state;
-    const showState = state.viewpoint === View.GOD || state.viewpoint === id;
-    const stateLabel =
-      showState && View.STATE_LABELS[agentState] ? View.STATE_LABELS[agentState] : "";
-
-    const chips = tags.length
-      ? tags
+  /** "狼 2/4 · 神 4/4 · 民 3/4 · 警长 Grace": the god view's compact summary at the end of the bar. */
+  function renderSummary() {
+    if (!elBoardSummary) return;
+    const sum = View.boardSummary(state.session, state.viewpoint);
+    const html = sum
+      ? `<span class="sum-label">对局状态</span>` +
+        sum.items
           .map(
-            (t) =>
-              `<span class="tag-badge ${escapeHtml(
-                isMod ? "warning" : View.tagVariant(s, t)
-              )}">${escapeHtml(t)}</span>`
+            (i) =>
+              `<span class="sum-chip sum-${escapeHtml(i.variant)}" title="${escapeHtml(i.title)}">${escapeHtml(i.text)}</span>`
           )
           .join("")
-      : `<span class="tag-badge muted">无公开标签</span>`;
-
-    const stat = (value, label, extra = "") =>
-      `<div class="pop-stat${extra}"><span class="pop-stat-num">${value}</span><span class="pop-stat-label">${label}</span></div>`;
-
-    return (
-      `<div class="pop-head">${Avatar.glyphHtml(id, seat, { size: 26 })}` +
-      `<div class="pop-title"><span class="pop-name">${escapeHtml(name)}</span>` +
-      `<span class="pop-id">${escapeHtml(isMod ? "moderator" : id)}${
-        stateLabel ? ` · ${escapeHtml(stateLabel)}` : ""
-      }</span></div>` +
-      `<button type="button" class="pop-close" data-pop-close aria-label="关闭">✕</button></div>` +
-      `<div class="pop-tags">${chips}</div>` +
-      `<div class="pop-model"><span class="pop-label">模型</span>` +
-      `<span class="pop-model-text" title="${escapeHtml(bindingText(s, id))}">${escapeHtml(
-        bindingText(s, id)
-      )}</span>` +
-      `<button type="button" class="btn btn-xs" data-pop-bind="${escapeHtml(id)}">配置</button></div>` +
-      `<div class="pop-grid">` +
-      stat(numText(m.toolCalls), "工具调用") +
-      stat(numText(m.thinkingRounds), "思考次数") +
-      stat(numText(m.calls), "LLM 调用") +
-      stat(numText(m.rejections), "被拒绝") +
-      stat(Core.formatCount(m.promptTokens), "输入 token") +
-      stat(Core.formatCount(m.completionTokens), "输出 token") +
-      stat(escapeHtml(Core.formatCost(m.costUsd)), "费用（累计）", " pop-stat-wide") +
-      `</div>`
-    );
+      : "";
+    setHtml(elBoardSummary, html, "lastSummaryHtml");
+    elBoardSummary.hidden = !sum;
   }
 
-  function positionPopover() {
-    if (!elPopover || !state.openActorId) return;
-    const grid = elParticipantsGrid;
-    const tile =
-      grid && typeof grid.querySelector === "function"
-        ? grid.querySelector(`[data-actor="${cssEscape(state.openActorId)}"]`)
-        : null;
-    if (!tile || typeof tile.getBoundingClientRect !== "function") return;
-    const r = tile.getBoundingClientRect();
-    const pw = elPopover.offsetWidth || 300;
-    const ph = elPopover.offsetHeight || 230;
-    const vw = Number(window.innerWidth) || 1280;
-    const vh = Number(window.innerHeight) || 800;
-    const left = Math.min(Math.max(8, r.left), Math.max(8, vw - pw - 8));
-    let top = r.bottom + 6;
-    if (top + ph > vh - 8) top = Math.max(8, r.top - ph - 6);
-    elPopover.style.left = `${Math.round(left)}px`;
-    elPopover.style.top = `${Math.round(top)}px`;
-  }
-
-  function closePopover() {
-    if (state.openActorId === null) return;
-    state.openActorId = null;
-    state.lastPopoverHtml = null;
-    renderPopover();
-    renderBoard(); // the tag loses its "open" look
-  }
-
-  function openPopover(actorId) {
-    state.openActorId = actorId;
-    renderPopover();
-    renderBoard();
-  }
-
-  function togglePopover(actorId) {
-    if (state.openActorId === actorId) closePopover();
-    else openPopover(actorId);
-  }
-
-  function renderPopover() {
-    if (!elPopover) return;
-    if (!state.openActorId) {
-      elPopover.hidden = true;
-      return;
-    }
-    const html = popoverHtml();
-    if (html === null) {
-      // the actor disappeared (new game): close quietly
-      state.openActorId = null;
-      elPopover.hidden = true;
-      return;
-    }
-    if (html !== state.lastPopoverHtml) {
-      state.lastPopoverHtml = html;
-      elPopover.innerHTML = html;
-    }
-    elPopover.hidden = false;
-    positionPopover();
+  // Hover: the sleeping timer in the tooltip must be fresh (the board is not repainted every second).
+  function refreshCardTitle(card) {
+    if (!card || typeof card.getAttribute !== "function") return;
+    if (card.getAttribute("data-state") !== "sleeping") return;
+    const id = card.getAttribute("data-actor");
+    const p = View.participantOf(state.session, id);
+    if (!p) return;
+    const tip = View.stateTitle("sleeping", p.sleep_until, clockNow());
+    const t = View.tileModel(state.session, state.viewpoint, p, { clockNow: clockNow() });
+    card.setAttribute("title", t.title);
+    const icon = card.querySelector ? card.querySelector(".pcard-state") : null;
+    if (icon && icon.setAttribute) icon.setAttribute("title", tip);
   }
 
   // ---------------------------------------------------------------------------
-  // Rendering: channel bar (floor status, unread, tickets)
+  // Rendering: channel bar (floor status, unread, tickets) — no "all" channel
   // ---------------------------------------------------------------------------
 
-  function unreadBadge(n) {
-    return n > 0 ? `<span class="channel-unread" title="${numText(n)} 条未读">${numText(n > 99 ? 99 : n)}${n > 99 ? "+" : ""}</span>` : "";
+  function unreadBadge(n, cls = "channel-unread") {
+    return n > 0
+      ? `<span class="${cls}" title="${numText(n)} 条未读">${numText(n > 99 ? 99 : n)}${n > 99 ? "+" : ""}</span>`
+      : "";
   }
 
-  function channelItemHtml(ch, unread, compact) {
-    const sum = View.floorSummary(state.session, ch);
+  function channelItemHtml(ch, unread) {
+    const s = state.session;
+    const m = View.channelModel(s, state.viewpoint, ch);
+    const sum = m.summary;
     const active = state.selectedChannel === ch.id;
     const n = unread.byChannel[ch.id] || 0;
-    const attrs =
-      `data-channel="${escapeHtml(ch.id)}" title="${escapeHtml(ch.name)}（${escapeHtml(ch.id)}）"`;
-    if (compact) {
-      // System DMs: one line. The floor chip is only worth showing when the DM is not simply open
-      // (closed as a punishment, frozen, ...): a free DM is the normal case.
-      const chip =
-        sum.icon && sum.kind !== "free"
-          ? `<span class="floor-chip floor-${sum.kind} chip-icon" title="${escapeHtml(sum.text)}">${sum.icon}</span>`
-          : "";
-      return (
-        `<div class="channel-item compact${active ? " active" : ""}${n ? " has-unread" : ""}" ${attrs}>` +
-        `<div class="channel-row-top"><span class="channel-name">${escapeHtml(ch.name)}</span>` +
-        `<span class="channel-flags">${chip}${unreadBadge(n)}</span></div></div>`
-      );
-    }
-    const chip = sum.icon
-      ? `<span class="floor-chip floor-${sum.kind}" title="${escapeHtml(sum.detail || sum.text)}">${sum.icon} ${escapeHtml(
-          sum.text
-        )}</span>`
+    const isDm = m.kind === "dm";
+    // A private chat is normally "free": the chip is only worth showing when it is muted / frozen.
+    const showChip = Boolean(sum.icon) && !(isDm && sum.kind === "free");
+    const tipText = `${m.title}${showChip ? `｜${sum.icon} ${sum.text}${sum.detail ? `（${sum.detail}）` : ""}` : ""}`;
+    const hue = Avatar.HUES[Avatar.hashString(ch.id) % Avatar.HUES.length];
+    const avatar = isDm
+      ? avatarImg(m.avatarId, 32, "chan-avatar-img")
+      : `<span class="chan-glyph" style="--gh:${hue}" aria-hidden="true">${escapeHtml(m.glyph)}</span>`;
+    const chip = showChip
+      ? `<span class="floor-chip floor-${escapeHtml(sum.kind)}" title="${escapeHtml(sum.detail || sum.text)}">` +
+        `<span class="chip-icon">${sum.icon}</span><span class="chip-text">${escapeHtml(sum.text)}</span></span>`
       : "";
-    const detail = sum.detail ? `<div class="channel-detail">${escapeHtml(sum.detail)}</div>` : "";
+    const detail = sum.detail && showChip ? `<span class="channel-detail">${escapeHtml(sum.detail)}</span>` : "";
+    const members = isDm ? "" : `<span class="channel-members">${numText(m.memberCount)} 人</span>`;
     return (
-      `<div class="channel-item${active ? " active" : ""}${n ? " has-unread" : ""}" ${attrs}>` +
-      `<div class="channel-row-top"><span class="channel-name">${escapeHtml(ch.name)}</span>${unreadBadge(n)}</div>` +
-      `<div class="channel-meta">${chip}<span class="channel-members">${numText(ch.members.length)} 人</span></div>${detail}</div>`
+      `<div class="channel-item${isDm ? " is-dm" : " is-group"}${active ? " active" : ""}${n ? " has-unread" : ""}"` +
+      ` data-channel="${escapeHtml(ch.id)}" data-title="${escapeHtml(tipText)}" title="${escapeHtml(tipText)}" role="button" tabindex="0">` +
+      `<span class="chan-avatar">${avatar}` +
+      `${showChip ? `<span class="chan-ov ov-state">${sum.icon}</span>` : ""}${unreadBadge(n, "chan-ov ov-unread")}</span>` +
+      `<span class="chan-body"><span class="chan-row"><span class="channel-name">${escapeHtml(m.title)}</span>${unreadBadge(n)}</span>` +
+      `<span class="channel-meta">${chip}${members}</span>${detail}</span></div>`
     );
   }
 
@@ -571,9 +555,9 @@
     return (
       `<div class="ticket-item ticket-${st.cls}" data-ticket="${escapeHtml(t.id)}" data-channel="${escapeHtml(
         View.ticketChannelId(s, t)
-      )}" title="点击定位到该玩家与主持人的私聊">` +
+      )}" title="点击定位到该玩家与主持人的对话">` +
       `<div class="ticket-row"><span class="ticket-id">${escapeHtml(t.id)}</span>` +
-      `<span class="ticket-who">${escapeHtml(View.actorLabel(s, t.player_id))}</span>` +
+      `<span class="ticket-who">${escapeHtml(View.displayName(s, t.player_id))}</span>` +
       `<span class="ticket-status ts-${st.cls}">${escapeHtml(st.text)}</span></div>` +
       `<div class="ticket-preview">${escapeHtml(preview)}</div></div>`
     );
@@ -582,28 +566,19 @@
   function renderChannels() {
     const s = state.session;
     const vp = state.viewpoint;
+    ensureSelectedChannel();
     const unread = View.unreadCounts(s, vp, state.read);
     const { groups, dms } = View.channelGroups(s, vp);
     const tickets = View.visibleTickets(s, vp);
-    const total = View.visibleMessages(s, vp, "all").length;
 
     const html = [];
-    html.push(
-      `<div class="channel-item all-item${state.selectedChannel === "all" ? " active" : ""}${
-        unread.total ? " has-unread" : ""
-      }" data-channel="all">` +
-        `<div class="channel-row-top"><span class="channel-name">全部</span>${unreadBadge(unread.total)}</div>` +
-        `<div class="channel-meta"><span class="channel-members">${numText(total)} 条发言</span></div></div>`
-    );
-
     if (groups.length === 0 && dms.length === 0) {
-      html.push(
-        `<div class="empty-placeholder">暂无频道<br/>对局启动后由主持人调用工具建立</div>`
-      );
+      html.push(`<div class="empty-placeholder channels-empty">暂无频道<br/>对局启动后由主持人建立</div>`);
     }
-    for (const ch of groups) html.push(channelItemHtml(ch, unread, false));
+    for (const ch of groups) html.push(channelItemHtml(ch, unread));
 
-    // Challenge tickets are their own group, right below the channels (the system DMs follow).
+    // Challenge tickets are their own group, right below the channels (the private chats follow).
+    // Wide: a titled list. Avatar rail: one icon with the number (opens the list as a popover).
     if (tickets.length) {
       const openCount = tickets.filter((t) => t.status !== "resolved").length;
       html.push(
@@ -612,6 +587,11 @@
         )}</span>${openCount ? `<span class="ticket-open-count">${numText(openCount)} 待处理</span>` : ""}</div>`
       );
       for (const t of tickets) html.push(ticketHtml(t));
+      html.push(
+        `<button type="button" class="rail-tickets${openCount ? " has-open" : ""}" data-tickets-toggle` +
+          ` title="质询工单：共 ${numText(tickets.length)} 条，${numText(openCount)} 条待处理">` +
+          `<span class="rail-icon" aria-hidden="true">❓</span><span class="rail-count">${numText(tickets.length)}</span></button>`
+      );
     }
 
     if (dms.length) {
@@ -619,23 +599,88 @@
       const open = state.dmGroupOpen || selectedIsDm;
       const dmUnread = dms.reduce((n, c) => n + (unread.byChannel[c.id] || 0), 0);
       html.push(
-        `<div class="channel-group-title" data-dm-toggle role="button" tabindex="0" aria-expanded="${open}">` +
-          `<span class="group-caret">${open ? "▼" : "▶"}</span>私聊 <span class="group-count">${numText(
-            dms.length
-          )}</span>${open ? "" : unreadBadge(dmUnread)}</div>`
+        `<div class="channel-group-title dm-title" data-dm-toggle role="button" tabindex="0" aria-expanded="${open}"` +
+          ` title="${open ? "收起" : "展开"}私聊频道（${numText(dms.length)} 个）">` +
+          `<span class="group-caret">${open ? "▼" : "▶"}</span><span class="group-icon" aria-hidden="true">✉</span>` +
+          `<span class="group-label">私聊</span> <span class="group-count">${numText(dms.length)}</span>${
+            open ? "" : unreadBadge(dmUnread)
+          }</div>`
       );
-      if (open) for (const ch of dms) html.push(channelItemHtml(ch, unread, true));
+      if (open) for (const ch of dms) html.push(channelItemHtml(ch, unread));
     }
 
     const out = html.join("");
-    if (out !== state.lastChannelsHtml) {
-      state.lastChannelsHtml = out;
-      elChannelsList.innerHTML = out;
+    setHtml(elChannelsList, `${out}`, "lastChannelsHtml");
+    renderTabbar(unread.total);
+    renderTicketPop(tickets);
+  }
+
+  /** The ticket list as a popover (avatar-rail mode), kept in sync while it is open. */
+  function renderTicketPop(tickets) {
+    if (!elTicketPop) return;
+    const list = tickets || View.visibleTickets(state.session, state.viewpoint);
+    if (!state.ticketPopOpen || !list.length) {
+      elTicketPop.hidden = true;
+      return;
     }
+    setHtml(
+      elTicketPop,
+      `<div class="ticket-pop-title">质询工单 <span class="group-count">${numText(list.length)}</span></div>` +
+        list.map(ticketHtml).join(""),
+      "lastTicketPopHtml"
+    );
+    elTicketPop.hidden = false;
+  }
+
+  function positionTicketPop(anchor) {
+    if (!elTicketPop || !anchor || typeof anchor.getBoundingClientRect !== "function") return;
+    const r = anchor.getBoundingClientRect();
+    const vw = Number(window.innerWidth) || 1280;
+    const vh = Number(window.innerHeight) || 800;
+    const pw = Math.min(elTicketPop.offsetWidth || 280, vw - 16);
+    elTicketPop.style.left = `${Math.round(Math.min(Math.max(8, r.right + 8), Math.max(8, vw - pw - 8)))}px`;
+    elTicketPop.style.top = `${Math.round(Math.min(Math.max(8, r.top), Math.max(8, vh - 260)))}px`;
   }
 
   // ---------------------------------------------------------------------------
-  // Rendering: feed (speech only, one block per committed message)
+  // Rendering: phone tab bar
+  // ---------------------------------------------------------------------------
+
+  const TABS = [
+    { id: "feed", icon: "💬", label: "信息流" },
+    { id: "channels", icon: "#", label: "频道" },
+    { id: "players", icon: "👥", label: "玩家" },
+  ];
+
+  function renderTabbar(unreadTotal) {
+    if (!elTabbar) return;
+    const total = unreadTotal === undefined ? View.unreadCounts(state.session, state.viewpoint, state.read).total : unreadTotal;
+    const html = TABS.map((t) => {
+      const on = state.phoneTab === t.id;
+      const badge = t.id === "channels" && total > 0 ? `<span class="tab-badge">${numText(total > 99 ? 99 : total)}</span>` : "";
+      return (
+        `<button type="button" class="tab-btn${on ? " active" : ""}" role="tab" aria-selected="${on}" data-tab="${t.id}">` +
+        `<span class="tab-icon" aria-hidden="true">${t.icon}</span><span class="tab-label">${t.label}</span>${badge}</button>`
+      );
+    }).join("");
+    setHtml(elTabbar, html, "lastTabbarHtml");
+  }
+
+  function setPhoneTab(tab) {
+    if (!TABS.some((t) => t.id === tab)) return;
+    state.phoneTab = tab;
+    if (elMain && elMain.setAttribute) elMain.setAttribute("data-phone-tab", tab);
+    state.lastTabbarHtml = null;
+    renderTabbar();
+    if (tab === "feed") {
+      state.autoScroll = true;
+      scheduleRender({ ...Store.newDirty(false), feed: true });
+    }
+    if (rosterUI) rosterUI.close();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering: feed (speech + request cards, one block per committed message)
   // ---------------------------------------------------------------------------
 
   function appendEllipsis(html) {
@@ -643,29 +688,24 @@
     return /<\/p>$/.test(html) ? html.replace(/<\/p>$/, `${mark}</p>`) : html + mark;
   }
 
-  function channelName(s, channelId) {
-    if (channelId === null || channelId === undefined || channelId === "") return "";
-    const ch = Store.findById(s.channels, channelId);
-    return ch ? ch.name : String(channelId);
-  }
-
   function messageHtml(m) {
     const s = state.session;
-    const chName = channelName(s, m.channel_id);
-    const cacheKey = `${m.seq}\u0001${chName}`;
+    const cacheKey = `${m.seq}\u0001${state.rosterSig}`;
     const cached = state.msgHtml.get(cacheKey);
     if (cached !== undefined) return cached;
 
     const info = View.messageKindInfo(m.kind);
     const sender = View.participantOf(s, m.from);
-    const glyph = Avatar.glyphHtml(m.from, sender ? sender.seat : undefined, { size: 22 });
-    const name = m.from_name || View.displayName(s, m.from);
+    // the live nickname (roster) wins over the name frozen into the message
+    const name = sender ? sender.name : m.from === MOD || m.from === View.ENGINE_ID ? View.displayName(s, m.from) : m.from_name || m.from;
     const time = Core.formatClockTime(m.ts);
     let body = Core.renderFormattedText(m.content) || `<p class="fmt-p"></p>`;
     if (Store.isTruncated(m)) body = appendEllipsis(body);
+    // "N3" in the text keeps its characters and gets the hover text "N3 Carol"
+    body = View.annotateIdRefs(body, s);
 
     const classes = ["msg", `msg-kind-${info.cls}`];
-    if (m.from === View.MODERATOR_ID) classes.push("msg-moderator");
+    if (m.from === MOD) classes.push("msg-moderator");
     if (m.from === View.ENGINE_ID) classes.push("msg-engine");
     const label = info.label
       ? `<span class="msg-kind-badge kind-${info.cls}"${
@@ -675,21 +715,91 @@
     const ticket = m.ticket_id
       ? `<span class="msg-ticket" title="质询工单">#${escapeHtml(m.ticket_id)}</span>`
       : "";
-    const chip = chName
-      ? `<span class="msg-chan" data-channel="${escapeHtml(m.channel_id)}" title="只看这个频道">${escapeHtml(
-          chName
-        )}</span>`
-      : "";
 
     const html =
       `<article class="${classes.join(" ")}" data-seq="${numText(m.seq)}"` +
       ` data-from="${escapeHtml(m.from)}"${m.ticket_id ? ` data-ticket-msg="${escapeHtml(m.ticket_id)}"` : ""}>` +
-      `<div class="msg-avatar">${glyph}</div>` +
+      `<div class="msg-avatar">${avatarImg(m.from, 32, "msg-avatar-img")}</div>` +
       `<div class="msg-main"><div class="msg-head"><span class="msg-name">${escapeHtml(name)}</span>` +
-      `${chip}${label}${ticket}<span class="msg-time">${escapeHtml(time)}</span></div>` +
+      `${label}${ticket}<span class="msg-time">${escapeHtml(time)}</span></div>` +
       `<div class="msg-body formatted-text">${body}</div></div></article>`;
     Core.boundedSet(state.msgHtml, cacheKey, html, MESSAGE_HTML_CACHE_MAX);
     return html;
+  }
+
+  const AUTO_CLOSE_LABELS = { unanimous: "全员一致才结束", deadline: "到时才结束" };
+
+  /** Request card (E18 / E25): question, recipients with their (visible) answers, countdown, result. */
+  function requestHtml(c) {
+    const s = state.session;
+    const kindLabel = c.shareAnswers ? "商议" : c.kind === "choice" ? "投票" : "问答";
+    const icon = c.kind === "choice" ? "🗳" : "✍";
+    const chips = [];
+    if (c.sealed) chips.push(`<span class="req-chip sealed" title="密封：关闭前其他玩家看不到答案">🔒 密封</span>`);
+    if (c.shareAnswers) chips.push(`<span class="req-chip share" title="收件人实时看到彼此的选择，关闭前可以改答">👥 组内可见</span>`);
+    if (AUTO_CLOSE_LABELS[c.autoClose]) chips.push(`<span class="req-chip auto">${AUTO_CLOSE_LABELS[c.autoClose]}</span>`);
+    const timer =
+      c.deadlineClock !== null && c.deadlineClock !== undefined
+        ? `<span class="req-timer" title="剩余时间（游戏时钟，暂停时冻结）">⏱ <span class="req-count" data-deadline="${numText(c.deadlineClock)}"></span></span>`
+        : "";
+    const pct = c.total > 0 ? Math.min(100, Math.round((c.answeredCount / c.total) * 100)) : 0;
+    const rows = c.recipients
+      .map((r) => {
+        let ans;
+        if (r.answer) {
+          const revised = r.answer.changes > 0 ? `<span class="req-revised" title="改答 ${numText(r.answer.changes)} 次">↻${numText(r.answer.changes)}</span>` : "";
+          const lock = c.sealed ? `<span class="req-lock" title="密封请求：只有上帝视角能看到答案">🔒</span>` : "";
+          const text = escapeHtml(r.answer.label);
+          ans = `<span class="req-ans answered${r.answer.defaulted ? " defaulted" : ""}"><span class="req-ans-label" title="${escapeHtml(
+            r.answer.reason || r.answer.label
+          )}">${r.answer.defaulted ? "（默认）" : ""}${text}</span>${revised}${lock}</span>`;
+        } else if (r.hidden) {
+          ans = `<span class="req-ans submitted" title="已作答（答案不公开）">✓ 已提交</span>`;
+        } else {
+          ans = `<span class="req-ans pending">…</span>`;
+        }
+        return (
+          `<li class="req-row${r.answered ? " answered" : ""}"><span class="req-who">${avatarImg(r.id, 20, "req-avatar")}` +
+          `<span class="req-name">${escapeHtml(r.name)}</span></span>${ans}</li>`
+        );
+      })
+      .join("");
+    let result = "";
+    if (c.status !== "open") {
+      if (c.result) {
+        const max = Math.max(1, ...c.result.tally.map((t) => t.count));
+        const tally = c.result.tally
+          .map(
+            (t) =>
+              `<li class="${t.leader ? "leader" : ""}"><span class="tally-label">${escapeHtml(t.label)}</span>` +
+              `<span class="tally-bar"><span style="width:${Math.round((t.count / max) * 100)}%"></span></span>` +
+              `<span class="tally-n">${numText(t.count)} 票</span></li>`
+          )
+          .join("");
+        const notes = [];
+        if (c.result.leaders.length) notes.push(`最高：${c.result.leaders.map(escapeHtml).join("、")}`);
+        if (c.result.defaulted.length) notes.push(`默认答案：${c.result.defaulted.map(escapeHtml).join("、")}`);
+        if (c.result.missing.length) notes.push(`未作答：${c.result.missing.map(escapeHtml).join("、")}`);
+        result =
+          `<div class="req-result"><div class="req-result-title">结果</div>` +
+          `${tally ? `<ul class="req-tally">${tally}</ul>` : ""}` +
+          `${notes.length ? `<div class="req-result-note">${notes.join(" · ")}</div>` : ""}</div>`;
+      } else if (c.status === "closed") {
+        result = `<div class="req-result"><div class="req-result-note">已关闭，共 ${numText(c.answeredCount)} 人作答${
+          c.answersHidden ? "（密封请求的结果由主持人公布）" : ""
+        }</div></div>`;
+      }
+    }
+    const question = View.annotateIdRefs(Core.renderInlineFormatting(c.question), s);
+    return (
+      `<article class="req-card req-${escapeHtml(c.status)}${c.sealed ? " is-sealed" : ""}${c.shareAnswers ? " is-share" : ""}" data-req="${escapeHtml(c.id)}">` +
+      `<div class="req-head"><span class="req-icon" aria-hidden="true">${icon}</span><span class="req-kind">${kindLabel}请求</span>` +
+      `<span class="req-status st-${escapeHtml(c.status)}">${escapeHtml(c.statusLabel)}</span>${chips.join("")}${timer}</div>` +
+      `<div class="req-question">${question || "（没有问题文本）"}</div>` +
+      `<div class="req-progress"><span class="req-progress-text">${numText(c.answeredCount)}/${numText(c.total)} 已作答</span>` +
+      `<span class="req-bar"><span class="req-bar-fill" style="width:${pct}%"></span></span></div>` +
+      `<ul class="req-rows">${rows}</ul>${result}</article>`
+    );
   }
 
   function appendMessageNode(html) {
@@ -699,45 +809,83 @@
     if (node) elFeedRecords.appendChild(node);
   }
 
+  /** Replace the i-th block in place (a request card changed); false when the DOM cannot do it. */
+  function replaceRow(i, html) {
+    const node = elFeedRecords.children && elFeedRecords.children[i];
+    if (!node || typeof elFeedRecords.replaceChild !== "function") return false;
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    const fresh = tpl.content && tpl.content.firstElementChild;
+    if (!fresh) return false;
+    elFeedRecords.replaceChild(fresh, node);
+    return true;
+  }
+
   function emptyFeedHtml(s) {
+    if (!state.selectedChannel) {
+      return `<div class="empty-placeholder">当前暂无频道 — 点击「开始」后，主持人会建立频道并推进对局</div>`;
+    }
     if (state.viewpoint !== View.GOD) {
       return `<div class="empty-placeholder">${escapeHtml(
         View.viewpointLabel(s, state.viewpoint)
-      )} 还没有看到任何发言</div>`;
+      )} 在这个频道里还没有看到任何内容</div>`;
     }
-    return `<div class="empty-placeholder">当前暂无发言 — 点击右上角「开始」后，主持人会建立频道并推进对局；这里只显示发言，思维链与工具调用只写入日志</div>`;
+    return `<div class="empty-placeholder">这个频道里还没有发言 — 这里显示发言与请求卡片；思维链与工具调用只写入日志</div>`;
+  }
+
+  function tickCountdowns() {
+    if (elFeedRecords && typeof elFeedRecords.querySelectorAll === "function") {
+      const now = clockNow();
+      for (const n of Array.from(elFeedRecords.querySelectorAll("[data-deadline]"))) {
+        const d = Number(n.getAttribute("data-deadline"));
+        n.textContent = Core.formatCountdown(d - now);
+      }
+    }
   }
 
   function renderFeed(force = false) {
     const s = state.session;
-    const sel = state.selectedChannel;
-    elFeedChannelLabel.textContent =
-      sel === "all" ? "频道: 全部记录" : `频道: ${channelName(s, sel)}`;
-
-    const messages = View.visibleMessages(s, state.viewpoint, sel);
-    // Channel names are part of every block (the channel chip): a rename / new channel repaints.
-    const names = s.channels.map((c) => `${c.id}:${c.name}`).join(",");
-    const key = `${s.session_id}|${state.viewpoint}|${sel}|${names}`;
-    const last = state.feed;
-    const lastSeq = messages.length ? messages[messages.length - 1].seq : 0;
-    const sameKey = !force && last.key === key;
-
-    if (
-      sameKey &&
-      last.count > 0 &&
-      messages.length >= last.count &&
-      messages[last.count - 1].seq === last.lastSeq
-    ) {
-      // Whole messages arrive one at a time: append only the new blocks (no streaming, no patching).
-      for (let i = last.count; i < messages.length; i++) appendMessageNode(messageHtml(messages[i]));
-    } else if (sameKey && last.count === messages.length && last.lastSeq === lastSeq) {
-      // nothing changed for this view
-    } else {
-      elFeedRecords.innerHTML = messages.length
-        ? messages.map(messageHtml).join("")
-        : emptyFeedHtml(s);
+    const vp = state.viewpoint;
+    const sel = ensureSelectedChannel();
+    if (elFeedChannelLabel) {
+      elFeedChannelLabel.textContent = sel ? View.channelTitle(s, vp, sel) : "";
     }
-    state.feed = { key, count: messages.length, lastSeq };
+
+    const clock = clockNow();
+    const entries = sel ? View.feedEntries(s, vp, sel) : [];
+    const rows = entries.map((e) => ({
+      key: e.key,
+      html: e.kind === "msg" ? messageHtml(e.ref) : requestHtml(View.requestCard(s, vp, e.ref, { clockNow: clock })),
+    }));
+    const key = `${s.session_id}|${vp}|${sel}|${state.rosterSig}`;
+    const prev = state.feed.rows;
+
+    const rebuild = () => {
+      elFeedRecords.innerHTML = rows.length ? rows.map((r) => r.html).join("") : emptyFeedHtml(s);
+    };
+
+    if (force || state.feed.key !== key) {
+      rebuild();
+    } else {
+      // Whole blocks arrive one at a time: append the new ones; a request card is repainted in place.
+      let i = 0;
+      let ok = true;
+      for (; i < prev.length && i < rows.length; i++) {
+        if (prev[i].key !== rows[i].key) break;
+        if (prev[i].html !== rows[i].html && !replaceRow(i, rows[i].html)) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok || i < prev.length) rebuild();
+      else for (let j = i; j < rows.length; j++) appendMessageNode(rows[j].html);
+      if (prev.length === 0 && rows.length > 0 && ok && i === 0) {
+        // the empty-feed placeholder must go when the first block arrives
+        rebuild();
+      }
+    }
+    state.feed = { key, rows: rows.map((r) => ({ key: r.key, html: r.html })) };
+    tickCountdowns();
 
     if (state.autoScroll) {
       elFeedList.scrollTop = elFeedList.scrollHeight;
@@ -746,53 +894,29 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Rendering: dashboard (right column)
+  // Detail panel (roster.js owns it; this only forwards)
   // ---------------------------------------------------------------------------
 
-  function renderDashboard() {
-    // The panel is written by the moderator for the spectators: faction statistics are hidden
-    // information, so a *player's* viewpoint must not show them (god view only).
-    const hidden = state.viewpoint !== View.GOD;
-    const dash = hidden ? {} : state.session.dashboard || {};
-    const factions = dash.factions || [];
-    const tagStats = dash.tag_stats || [];
-    const emptyText = hidden
-      ? "玩家视角不显示（阵营统计只属于主持人和上帝视角）"
-      : "待主持人调用工具初始化";
+  function renderPopover() {
+    if (rosterUI) rosterUI.render();
+  }
 
-    const factionsHtml =
-      factions.length === 0
-        ? `<div class="empty-placeholder">${emptyText}</div>`
-        : factions
-            .map(
-              (f) => `
-          <div class="stat-row">
-            <span>${escapeHtml(f.name)}</span>
-            <span class="stat-value ${escapeHtml(f.variant || "neutral")}">${numText(f.alive)} / ${numText(
-                f.total
-              )}</span>
-          </div>`
-            )
-            .join("");
+  function openPopover(actorId) {
+    if (rosterUI) rosterUI.open(actorId);
+    renderBoard();
+    renderModeratorChip(state.session);
+  }
 
-    const tagStatsHtml =
-      tagStats.length === 0
-        ? `<div class="empty-placeholder">${emptyText}</div>`
-        : tagStats
-            .map(
-              (t) => `
-          <div class="stat-row">
-            <span>${escapeHtml(t.name)}</span>
-            <span class="stat-value ${escapeHtml(t.variant || "neutral")}">${numText(t.count)}</span>
-          </div>`
-            )
-            .join("");
+  function closePopover() {
+    if (!rosterUI || !rosterUI.isOpen()) return;
+    rosterUI.close();
+    renderBoard();
+    renderModeratorChip(state.session);
+  }
 
-    const sig = factionsHtml + "\u0001" + tagStatsHtml;
-    if (sig === state.lastDashboardSig) return;
-    state.lastDashboardSig = sig;
-    elFactionsList.innerHTML = factionsHtml;
-    elTagStatsList.innerHTML = tagStatsHtml;
+  function togglePopover(actorId) {
+    if (rosterUI && rosterUI.openId() === actorId) closePopover();
+    else openPopover(actorId);
   }
 
   // ---------------------------------------------------------------------------
@@ -803,11 +927,15 @@
 
   function renderNow(dirty, force = false) {
     const d = dirty || Store.newDirty(true);
+    state.rosterSig = computeRosterSig(state.session);
     if (d.topbar) renderTopbar();
     if (d.board) renderBoard();
-    if (d.channels) renderChannels();
+    if (d.board || d.dashboard) renderSummary();
+    if (d.channels || d.feed) {
+      if (d.channels) renderChannels();
+      else ensureSelectedChannel();
+    }
     if (d.feed) renderFeed(force);
-    if (d.dashboard) renderDashboard();
     if (d.popover) renderPopover();
   }
 
@@ -881,6 +1009,7 @@
     state.viewpoint = vp;
     if (persist) saveViewpointPref(vp);
     state.selectedChannel = View.normalizeSelectedChannel(state.session, vp, state.selectedChannel);
+    markChannelRead(state.selectedChannel);
     state.autoScroll = true;
     state.feed.key = ""; // different message set: re-render the feed
     renderAll(true);
@@ -893,23 +1022,26 @@
     state.session = next;
     state.sessionKey = key;
     state.loaded = true;
+    syncClock(next);
     // Whole-session replacement: never trust per-message HTML cached from the previous object.
     state.msgHtml.clear();
     if (key !== prevKey) {
       // A different game: forget selection and unread marks.
-      state.selectedChannel = "all";
+      state.selectedChannel = null;
       resetReadState(next);
     } else if (!state.read.baseline) {
       resetReadState(next);
     }
     state.viewpoint = View.normalizeViewpoint(next, state.viewpointPref);
     state.selectedChannel = View.normalizeSelectedChannel(next, state.viewpoint, state.selectedChannel);
-    if (state.openActorId && state.openActorId !== View.MODERATOR_ID && !View.participantOf(next, state.openActorId)) {
-      state.openActorId = null;
+    if (state.selectedChannel && key !== prevKey) markChannelRead(state.selectedChannel);
+    if (rosterUI && rosterUI.openId() && rosterUI.openId() !== MOD && !View.participantOf(next, rosterUI.openId())) {
+      rosterUI.close();
     }
     if (providerUI) providerUI.onSession(next);
     if (workspaceUI) workspaceUI.onSession(next);
-    // The feed compares what it already shows (view key + count + last seq), so an identical
+    if (rosterUI) rosterUI.onSession(next);
+    // The feed compares what it already shows (view key + blocks), so an identical
     // snapshot after a reconnect does not rebuild the list or move the scroll position.
     scheduleRender(Store.newDirty(true));
   }
@@ -930,12 +1062,20 @@
 
   const PROVIDER_RELEVANT = new Set(["session.updated", "game.status"]);
 
+  /** roster.js / the store change names and avatars through the same code path as roster.updated. */
+  function patchParticipants(list) {
+    const res = Store.applyEvent(state.session, { type: "roster.updated", data: { participants: list } });
+    scheduleRender(res.dirty);
+  }
+
   /** Apply one SSE v2 event {id, type, data}. */
   function handleEvent(payload) {
     if (!payload || typeof payload !== "object" || !payload.type) return;
     if (Store.isStaleEvent(state.lastEventId, payload)) return; // replayed after a reconnect
     const id = Store.eventIdOf(payload, NaN);
-    const result = Store.applyEvent(state.session, payload);
+    const prevStatus = state.session.status;
+    const before = clockNow();
+    const result = Store.applyEvent(state.session, payload, { clockNow: before });
 
     if (result.replaced) {
       state.lastEventId = Number.isFinite(id) ? id : result.session.event_id;
@@ -954,9 +1094,23 @@
       if (typeof window.location.reload === "function") window.location.reload();
       return;
     }
+    // the game clock stops while the game is not running (D18): freeze / resume our estimate
+    const s = state.session;
+    if (payload.type === "session.updated" && payload.data && payload.data.clock !== undefined) {
+      syncClock(s);
+    } else if (s.status !== prevStatus) {
+      state.clockSync = { clock: before, at: Date.now(), running: s.status === "running" };
+    }
     if (result.toast) showToast(result.toast);
     if (result.message) onMessageSeen(result.message);
     if (result.flash) flashActor(result.flash);
+    if (result.budgetEvent === "warning") showToast("⚠ 预算已用到上限的 80%");
+    if (result.budgetEvent === "reached") showToast("⛔ 已达到预算上限");
+    if (result.reviewEvent) {
+      const ev = result.reviewEvent;
+      if (ev.state === "done" && rosterUI) rosterUI.onReviewDone();
+      if (ev.state === "error") showToast(`复盘失败（${View.displayName(s, ev.id)}）：${ev.message || "未知错误"}`);
+    }
     if (PROVIDER_RELEVANT.has(payload.type)) {
       if (providerUI) providerUI.onSession(state.session);
       if (workspaceUI) workspaceUI.onSession(state.session);
@@ -1000,10 +1154,13 @@
     state.selectedChannel = next;
     markChannelRead(next);
     state.autoScroll = true;
+    state.ticketPopOpen = false;
     renderNow({ ...Store.newDirty(false), channels: true, feed: true }, true);
+    if (isPhone() && state.phoneTab !== "feed") setPhoneTab("feed");
   }
 
   function locateTicket(ticketId, channelId) {
+    state.ticketPopOpen = false;
     selectChannel(channelId);
     state.autoScroll = false;
     const node =
@@ -1017,6 +1174,11 @@
     }
   }
 
+  const cssEscape = (value) =>
+    typeof CSS !== "undefined" && CSS && typeof CSS.escape === "function"
+      ? CSS.escape(String(value))
+      : String(value).replace(/["\\]/g, "\\$&");
+
   bindPress(elChannelsList, ".channel-item[data-channel]", "data-channel", (node) =>
     selectChannel(node.getAttribute("data-channel"))
   );
@@ -1027,46 +1189,104 @@
     state.dmGroupOpen = !state.dmGroupOpen;
     renderNow({ ...Store.newDirty(false), channels: true });
   });
-  bindPress(elParticipantsGrid, "[data-tag-actor]", "data-tag-actor", (node) =>
-    togglePopover(node.getAttribute("data-tag-actor"))
-  );
-
-  // The channel chip on a message filters the feed to that channel.
-  elFeedRecords.addEventListener("click", (evt) => {
-    if (window.getSelection && window.getSelection().toString().trim().length > 0) return;
-    const chip = closestFrom(evt.target, ".msg-chan[data-channel]");
-    if (chip) selectChannel(chip.getAttribute("data-channel"));
+  bindPress(elChannelsList, "[data-tickets-toggle]", "data-tickets-toggle", (node) => {
+    state.ticketPopOpen = !state.ticketPopOpen;
+    state.lastTicketPopHtml = null;
+    renderTicketPop();
+    if (state.ticketPopOpen) positionTicketPop(node);
   });
-
-  if (elPopover) {
-    elPopover.addEventListener("click", (evt) => {
-      if (closestFrom(evt.target, "[data-pop-close]")) {
-        closePopover();
-        return;
-      }
-      const bind = closestFrom(evt.target, "[data-pop-bind]");
-      if (bind) {
-        const actor = bind.getAttribute("data-pop-bind");
-        closePopover();
-        if (providerUI) providerUI.openBindings(actor);
-      }
+  if (elTicketPop) {
+    elTicketPop.addEventListener("click", (evt) => {
+      const node = closestFrom(evt.target, ".ticket-item[data-ticket]");
+      if (node) locateTicket(node.getAttribute("data-ticket"), node.getAttribute("data-channel"));
     });
   }
 
-  // Click outside the popover (and not on a tag) or Esc closes it.
+  // a player card (or the moderator chip) opens the detail panel / drawer
+  bindPress(elParticipantsGrid, ".pcard[data-actor]", "data-actor", (node) =>
+    togglePopover(node.getAttribute("data-actor"))
+  );
+  bindPress(elTopbarStatus, "#mod-chip", "data-actor", (node) =>
+    togglePopover(node.getAttribute("data-actor") || MOD)
+  );
+  if (elParticipantsGrid) {
+    elParticipantsGrid.addEventListener("keydown", (evt) => {
+      if (!evt || (evt.key !== "Enter" && evt.key !== " ")) return;
+      const card = closestFrom(evt.target, ".pcard[data-actor]");
+      if (!card) return;
+      if (typeof evt.preventDefault === "function") evt.preventDefault();
+      togglePopover(card.getAttribute("data-actor"));
+    });
+    elParticipantsGrid.addEventListener("mouseover", (evt) => {
+      refreshCardTitle(closestFrom(evt.target, ".pcard[data-actor]"));
+    });
+  }
+
+  // phone: the bottom tab bar
+  if (elTabbar) {
+    elTabbar.addEventListener("click", (evt) => {
+      const node = closestFrom(evt.target, "[data-tab]");
+      if (node) setPhoneTab(node.getAttribute("data-tab"));
+    });
+  }
+
+  // touch: a long press on a channel (or a rail avatar) shows its name
+  let tipTimer = null;
+  let tipHideTimer = null;
+  function hideTip() {
+    if (tipTimer !== null) window.clearTimeout(tipTimer);
+    tipTimer = null;
+    if (elTouchTip) elTouchTip.hidden = true;
+  }
+  if (elChannelsList && elTouchTip) {
+    elChannelsList.addEventListener("pointerdown", (evt) => {
+      if (evt.pointerType === "mouse") return;
+      const item = closestFrom(evt.target, ".channel-item[data-title]");
+      if (!item) return;
+      hideTip();
+      tipTimer = window.setTimeout(() => {
+        tipTimer = null;
+        elTouchTip.textContent = item.getAttribute("data-title") || "";
+        elTouchTip.hidden = false;
+        if (typeof item.getBoundingClientRect === "function") {
+          const r = item.getBoundingClientRect();
+          const vw = Number(window.innerWidth) || 390;
+          elTouchTip.style.left = `${Math.round(Math.min(r.right + 8, Math.max(8, vw - (elTouchTip.offsetWidth || 160) - 8)))}px`;
+          elTouchTip.style.top = `${Math.round(Math.max(8, r.top + 4))}px`;
+        }
+        if (tipHideTimer !== null) window.clearTimeout(tipHideTimer);
+        tipHideTimer = window.setTimeout(hideTip, 2200);
+      }, LONG_PRESS_MS);
+    });
+    for (const type of ["pointerup", "pointercancel", "pointerleave"]) {
+      elChannelsList.addEventListener(type, () => {
+        if (tipTimer !== null) {
+          window.clearTimeout(tipTimer);
+          tipTimer = null;
+        }
+      });
+    }
+  }
+
+  // Click outside the ticket popover closes it; the detail panel / roster menu close themselves (roster.js).
   if (typeof document.addEventListener === "function") {
     document.addEventListener("click", (evt) => {
-      if (!state.openActorId) return;
-      if (closestFrom(evt.target, "#metrics-popover") || closestFrom(evt.target, "[data-tag-actor]")) return;
-      closePopover();
+      if (state.ticketPopOpen && !closestFrom(evt.target, "#ticket-pop") && !closestFrom(evt.target, "[data-tickets-toggle]")) {
+        state.ticketPopOpen = false;
+        renderTicketPop();
+      }
+      if (elMoreMenu && !elMoreMenu.hidden && !closestFrom(evt.target, "#more-menu") && !closestFrom(evt.target, "#btn-more")) {
+        setMoreMenu(false);
+      }
     });
     document.addEventListener("keydown", (evt) => {
-      if (evt && evt.key === "Escape" && state.openActorId) closePopover();
-    });
-  }
-  if (typeof window.addEventListener === "function") {
-    window.addEventListener("resize", () => {
-      if (state.openActorId) positionPopover();
+      if (evt && evt.key === "Escape") {
+        if (elMoreMenu && !elMoreMenu.hidden) setMoreMenu(false);
+        if (state.ticketPopOpen) {
+          state.ticketPopOpen = false;
+          renderTicketPop();
+        }
+      }
     });
   }
 
@@ -1080,6 +1300,74 @@
     state.autoScroll = nearBottom;
     state.autoScrollTop = null;
   });
+
+  // ---------------------------------------------------------------------------
+  // Phone: the "⋯" menu takes the secondary buttons of the top bar
+  // ---------------------------------------------------------------------------
+
+  // Real elements are moved (so their listeners keep working) and put back when the screen widens.
+  const RELOCATIONS = [
+    { id: "btn-open-workspace-modal", slot: "menu" },
+    { id: "btn-theme", slot: "menu" },
+    { id: "viewpoint-picker", slot: "menu" },
+    { id: "btn-open-budget-modal", slot: "menu" },
+    { id: "btn-new", slot: "menu" },
+    { id: "btn-save", slot: "menu" },
+    { id: "btn-import-session", slot: "menu" },
+    { id: "btn-open-sessions-modal", slot: "menu" },
+    { id: "btn-open-bindings-modal", slot: "menu" },
+    { id: "btn-open-provider-modal", slot: "menu" },
+    { id: "usage-telemetry-pill", slot: "status" },
+  ];
+  let relocated = false;
+
+  function relocateTopbar(phone) {
+    if (phone === relocated) return;
+    for (const r of RELOCATIONS) {
+      const node = $(r.id);
+      if (!node || !node.parentNode) continue;
+      if (phone) {
+        if (!r.marker) {
+          r.marker = typeof document.createComment === "function" ? document.createComment(`home:${r.id}`) : document.createElement("span");
+          node.parentNode.insertBefore(r.marker, node);
+        }
+        const target = r.slot === "menu" ? elMoreMenuList : elTopbarStatus;
+        if (!target) continue;
+        if (r.slot === "status" && elModChip && elModChip.parentNode === target) target.insertBefore(node, elModChip);
+        else target.appendChild(node);
+      } else if (r.marker && r.marker.parentNode) {
+        r.marker.parentNode.insertBefore(node, r.marker);
+      }
+    }
+    relocated = phone;
+    if (!phone) setMoreMenu(false);
+  }
+
+  function setMoreMenu(open) {
+    if (!elMoreMenu) return;
+    elMoreMenu.hidden = !open;
+    if (elBtnMore && elBtnMore.setAttribute) elBtnMore.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  if (elBtnMore) elBtnMore.addEventListener("click", () => setMoreMenu(Boolean(elMoreMenu && elMoreMenu.hidden)));
+  if (elMoreMenu) {
+    elMoreMenu.addEventListener("click", (evt) => {
+      // an action closes the menu; the select / checkbox-like rows keep it open until the user is done
+      const btn = closestFrom(evt.target, "button");
+      if (btn && btn.id !== "btn-theme") setMoreMenu(false);
+    });
+  }
+
+  function onPlatformChange(info) {
+    state.platform = info;
+    relocateTopbar(info.platform === "phone");
+    if (layoutUI) layoutUI.apply(); // the avatar rail follows the layout
+    if (rosterUI) rosterUI.render();
+    renderTabbar();
+    hideTip();
+    state.ticketPopOpen = false;
+    renderTicketPop();
+  }
 
   // ---------------------------------------------------------------------------
   // Controls
@@ -1112,7 +1400,7 @@
   elBtnNew.addEventListener("click", async () => {
     const ok = await control("api/control/new", "已重置为空白未开始对局，点击「开始」由主持人初始化并推进");
     if (ok) {
-      state.selectedChannel = "all";
+      state.selectedChannel = null;
       renderAll(true);
     }
   });
@@ -1130,7 +1418,7 @@
   });
 
   elBtnPause.addEventListener("click", () =>
-    control("api/control/pause", "已暂停：所有 Agent 已停止，计时冻结")
+    control("api/control/pause", "已暂停：所有 Agent 已休眠，计时冻结")
   );
 
   elBtnSave.addEventListener("click", async () => {
@@ -1156,20 +1444,6 @@
     }
   });
 
-  if (elSelectExecDepth) {
-    elSelectExecDepth.addEventListener("change", async () => {
-      const val = elSelectExecDepth.value;
-      try {
-        await apiPost("api/session/execution-depth", {
-          execution_depth: val,
-        });
-        showToast(`已将执行深度切换为: ${val}`);
-      } catch (err) {
-        showToast(err.message);
-      }
-    });
-  }
-
   // ---------------------------------------------------------------------------
   // Session import
   // ---------------------------------------------------------------------------
@@ -1184,7 +1458,7 @@
 
   function handleSessionLoaded(session) {
     adoptHttpSession(session, { force: true });
-    state.selectedChannel = "all";
+    state.selectedChannel = null;
     renderAll(true);
   }
 
@@ -1227,8 +1501,50 @@
       showToast,
       getSession: () => state.session,
       onSessionLoaded: handleSessionLoaded,
-      // Providers/bindings changed: the metrics popover shows the model of an agent.
+      // Providers/bindings changed: the detail panel shows the model of an agent.
       onChange: () => scheduleRender({ ...Store.newDirty(false), popover: true }),
+    });
+  }
+
+  function bindingText(actorId) {
+    const b = providerUI ? providerUI.getBindingsFor(actorId) : (state.session.model_bindings || {})[actorId];
+    if (!b) return "未绑定";
+    const providers = providerUI ? providerUI.getProviders() : [];
+    if (providers.length === 0) return `${b.model_id || "未绑定"} · ${b.reasoning_depth || "high"}`;
+    return Core.bindingSummary(b, providers);
+  }
+
+  if (window.ArenaRosterUI) {
+    rosterUI = window.ArenaRosterUI.create({
+      api,
+      Core,
+      Avatar,
+      View,
+      showToast,
+      getSession: () => state.session,
+      getViewpoint: () => state.viewpoint,
+      getClockNow: clockNow,
+      bindingText,
+      openBindings: (id) => {
+        if (providerUI) providerUI.openBindings(id);
+      },
+      setViewpoint: (id) => setViewpoint(id),
+      patchParticipants,
+      onChange: () => scheduleRender({ ...Store.newDirty(false), board: true, topbar: true, channels: true, feed: true }),
+    });
+  }
+
+  if (window.ArenaBudgetUI) {
+    budgetUI = window.ArenaBudgetUI.create({
+      api,
+      Core,
+      View,
+      showToast,
+      getSession: () => state.session,
+      onBudget: (budget) => {
+        state.session.budget = budget;
+        scheduleRender({ ...Store.newDirty(false), topbar: true });
+      },
     });
   }
 
@@ -1455,10 +1771,31 @@
     }
   }
 
+  // 1 Hz: request countdowns and the sleep timers in the open detail panel (the game clock is an estimate
+  // between events; it stops while the game is paused).
+  function startTicker() {
+    if (typeof window.setInterval !== "function") return;
+    window.setInterval(() => {
+      tickCountdowns();
+      if (rosterUI && rosterUI.isOpen()) rosterUI.render({ live: true });
+    }, 1000);
+  }
+
   async function init() {
     loadViewpointPref();
     // First paint of the (empty) shell so the layout never looks broken while loading.
     renderAll(true);
+    // The sprite library is optional: without it every avatar is a coloured circle with the seat number.
+    Avatar.onChange(() => {
+      state.avatarEpoch += 1;
+      state.lastBoardHtml = null;
+      state.lastModHtml = null;
+      state.lastChannelsHtml = null;
+      state.feed.key = "";
+      state.msgHtml.clear();
+      scheduleRender(Store.newDirty(true), true);
+    });
+    Avatar.loadParts((...args) => window.fetch(...args), Core.joinUrl(URL_PREFIX, "static/avatar/parts.json"));
     // Both calls check resp.ok through the shared client. A 401 here is the
     // first moment the token modal can appear; with no token configured the
     // user is never bothered.
@@ -1475,9 +1812,18 @@
     if (workspaceUI) {
       workspaceUI.load().catch(() => {});
     }
+    if (rosterUI) rosterUI.load().catch(() => {});
     if (!SSE_DISABLED) {
       window.setTimeout(connectSSE, 300);
     }
+    startTicker();
+  }
+
+  // Platform detection: <html data-platform> is already set by index.html's head script; start tracking
+  // rotations / resizes and move the phone-only pieces.
+  if (Platform) {
+    platformCtl = Platform.start({ window, document, onChange: onPlatformChange });
+    if (platformCtl && platformCtl.info()) onPlatformChange(platformCtl.info());
   }
 
   // Small surface for tests and for poking at the UI from the console.
@@ -1487,11 +1833,16 @@
     adoptHttpSession,
     setViewpoint,
     selectChannel,
+    setPhoneTab,
     openPopover,
     closePopover,
     togglePopover,
     renderAll,
     renderNow,
+    patchParticipants,
+    platform: () => (platformCtl ? platformCtl.info() : null),
+    roster: () => rosterUI,
+    budget: () => budgetUI,
   };
 
   init();

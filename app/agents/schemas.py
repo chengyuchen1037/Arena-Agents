@@ -26,7 +26,13 @@ MODERATOR_TOOL_INTENTS: dict[str, str] = {
     intent_type.removeprefix("mod."): intent_type for intent_type in MODERATOR_INTENTS
 }
 
-WAIT_TOOL = "wait"
+#: v0.12.1: ``sleep`` replaces ``wait`` (an optional ``seconds`` timer); the old name is still *executed*
+#: (as a sleep without a timer) but is no longer advertised.  ``WAIT_TOOL`` is kept as the symbol name.
+SLEEP_TOOL = "sleep"
+WAIT_TOOL = SLEEP_TOOL
+LEGACY_WAIT_TOOL = "wait"
+SLEEP_MIN_SECONDS = 1.0
+SLEEP_MAX_SECONDS = 3600.0
 SHARED_TOOL_NAMES = ("list_documents", "read_document", "write_note", "read_notes", "compact_context")
 
 TOOL_HELP: dict[str, str] = {
@@ -34,7 +40,7 @@ TOOL_HELP: dict[str, str] = {
     "speak": "在指定频道发言。只有你在该频道拥有发言权时才会成功（状态板会告诉你现在能不能写）。"
     "正文有字数限制，超出部分会被截掉，请把关键结论放在前面。",
     "speak_template": "用剧本提供的结构化模板在频道里发言（例如公开表态）。同样受发言权限制。",
-    "pass": "放弃你在该频道当前的发言权（轮到你但不想说时使用），让流程继续。",
+    "pass": "放弃你在该频道当前的发言权（轮到你但不想说时使用），让流程继续。持有多条额度时，说完也请 pass 让出。",
     "respond": "回应主持人发给你的请求（投票、选择、回答问题）。选择题的 value 必须是选项 id；"
     "文字题的 value 是你的回答。截止前可以改答，以最后一次为准。",
     "use_ability": "发动你拥有的能力。可用的能力、参数与限制见本工具说明和状态板。",
@@ -48,12 +54,14 @@ TOOL_HELP: dict[str, str] = {
     "频道初始模式默认 closed（只有你能写）。",
     "update_channel": "修改频道：改名、增减成员、设置只读成员、改模式（closed / free / listen）、调整自由讨论限额。"
     "把玩家的系统私聊设为 closed 可以暂时禁止他向你私聊或质询（之后可再设回 free）。"
-    "free_limits 是整场的绝对上限，不能设得比已用量更小。",
-    "open_floor": "开放发言权。mode=turn：holders 里的每位玩家各得一个令牌（可设条数/字数/时限；"
-    "同样建议 max_messages=1，多条额度需要持麦者主动 pass 才会让出）；"
-    "mode=free：开启自由讨论——free_limits 里的时长/条数/字数都是“整场”的绝对上限（时长从讨论开始计）；"
-    "引擎只会在时间/字数用尽或冷场时通知你，不会自动关闭，由你询问后用 close_floor 收尾；"
-    "开放本身不会唤醒任何玩家，请随后用 send_message 或 announce 开场。",
+    "limits（只接受自由讨论的键：duration_s、max_messages_per_member、max_chars_per_message、max_chars_total、silence_s）"
+    "是整场的绝对上限，不能设得比已用量更小。",
+    "open_floor": "开放发言权。**limits 只有一个**，可用的键取决于 mode：mode=turn：holders 里的每位玩家各得一个令牌，"
+    "limits 可设 max_messages、max_chars_per_message、max_chars_total、duration_s（建议 max_messages=1，"
+    "多条额度需要持麦者主动 pass 才会让出）；mode=free：开启自由讨论，limits 可设 duration_s、max_messages_per_member、"
+    "max_chars_per_message、max_chars_total、silence_s——时长/总字数/冷场只是通知你的“整场”上限（时长从讨论开始计），"
+    "条数和单条字数是硬限制；引擎不会自动关闭自由讨论，到时只会通知你，由你询问后用 close_floor 收尾。"
+    "给了该模式不接受的键会被拒绝并告诉你可用的键。",
     "set_floor_queue": "按 order 给出顺序，引擎自动依次把发言权交给每个人（轮流发言），整轮结束后唤醒你。"
     "每人一个令牌，限额相同。**轮流发言请让 limits.max_messages=1**：说完一条就自动交棒；如果给多条，"
     "持麦者必须主动 pass 或等到时限（duration_s）结束，整个队列都会被他拖住——玩家说完通常就停下，不会自己 pass。"
@@ -61,8 +69,11 @@ TOOL_HELP: dict[str, str] = {
     "pause_queue": "暂停发言队列（冻结当前发言者的剩余时间）。",
     "resume_queue": "恢复发言队列（也会解除被能力触发的冻结）。",
     "close_floor": "收回频道的发言权/结束自由讨论，频道变为 closed。",
-    "open_request": "向玩家发起请求（投票/选择/文字回答）。立即返回 request_id，不会阻塞你；全员作答或到期后你会被唤醒。"
-    "sealed=true 时截止前谁也看不到答案；default 会应用到未作答者。",
+    "open_request": "向玩家发起请求（投票/选择/文字回答）。立即返回 request_id，不会阻塞你；请求关闭后你会收到汇总（含计票）。"
+    "sealed=true 时截止前谁也看不到答案；default 会应用到未作答者。"
+    "share_answers=true 时收件人之间（和你）实时看到彼此当前的答案，并且可以随时改答——适合一群人商量一个共同的决定（与 sealed 互斥）。"
+    "auto_close 决定何时可以提前关闭：all_answered（默认，全员作答即关）、unanimous（全员作答且答案一致才关，否则开到截止，"
+    "期间大家可以继续商量改答）、deadline（只在截止时关）。",
     "cancel_request": "取消一个进行中的请求。",
     "reopen_request": "重新发起一个已关闭或已取消的请求（新 id）。只能重开，不能修改已发生的结果。",
     "update_player": "修改玩家的标签与属性（出局、复活、授予徽章等）。这是对当前状态的修改，历史记录不会被改写。",
@@ -76,10 +87,13 @@ TOOL_HELP: dict[str, str] = {
     "成立时请用公告更正、update_player 或 reopen_request 纠正，必要时 hold_game。",
     "hold_game": "暂停对局，等待人工处理（用于无法自行解决的严重问题）。",
     "end_game": "宣布对局结束并给出胜者与总结。结束后所有 agent 停止；用户可以点“继续”恢复。",
-    "enable_ability": "启用某个能力（可限定持有者）。能力默认关闭。",
-    "disable_ability": "关闭某个能力。",
+    "enable_ability": "启用某个能力。能力默认关闭。holders 省略 = 所有持有者；给了 holders = 只有这些人可用（不能传空列表）。",
+    "disable_ability": "关闭某个能力。holders 省略 = 对所有持有者关闭；给了 holders = 只让这些人失去它，其余人保持原状"
+    "（没有人剩下时整体关闭）。不能传空列表。",
     # ---- generic -------------------------------------------------------------
-    "wait": "什么也不做，结束本次行动，等待下一次被唤醒。没有事情需要处理时调用它。",
+    "sleep": "休眠：结束本次行动。之后只要有新消息或新状态出现（包括别人的每一次发言、请求、状态变化），你都会被立刻唤醒，"
+    "所以不必为了“等”而反复调用。可选的 seconds（游戏时钟秒，1–3600）让你到点也会醒来继续规划，"
+    "例如“给狼人讨论定时 60 秒，到点醒来看是否要催促”。没有事情需要处理时调用它。",
     "list_documents": "列出可查阅的参考文档。",
     "read_document": "读取一份参考文档的全文。",
     "write_note": "写入你的私人笔记（只有你自己可见）。你的思考不会被保留，需要跨次记住的要点请写在这里。",
@@ -105,8 +119,10 @@ FIELD_HELP: dict[str, str] = {
     "mode": "模式",
     "holders": "发言者 id 列表",
     "order": "发言顺序（玩家 id 列表）",
-    "limits": "令牌限额（条数/单条字数/总字数/时限秒数，缺省取剧本默认）",
-    "free_limits": "自由讨论限额（缺省取剧本默认）",
+    "limits": "限额（可用的键取决于 mode，缺省取剧本默认；见本工具说明）",
+    "share_answers": "收件人之间实时看到彼此的答案（与 sealed 互斥）",
+    "auto_close": "何时可以提前关闭：all_answered / unanimous / deadline",
+    "seconds": "休眠多少游戏秒后自动醒来（可选，1–3600）",
     "to": "目标玩家 id 列表",
     "kind": "类型",
     "question": "问题",
@@ -217,6 +233,23 @@ def _object(properties: dict[str, Any], required: list[str] | None = None) -> di
     return schema
 
 
+def sleep_tool_schema() -> dict[str, Any]:
+    return _tool(
+        SLEEP_TOOL,
+        TOOL_HELP[SLEEP_TOOL],
+        _object(
+            {
+                "seconds": {
+                    "type": "number",
+                    "minimum": SLEEP_MIN_SECONDS,
+                    "maximum": SLEEP_MAX_SECONDS,
+                    "description": FIELD_HELP["seconds"],
+                }
+            }
+        ),
+    )
+
+
 def shared_tool_schemas() -> list[dict[str, Any]]:
     string = {"type": "string"}
     return [
@@ -278,7 +311,7 @@ def player_tool_schemas(spec: ScenarioSpec) -> list[dict[str, Any]]:
                 for aid, a in spec.abilities.items()
             )
         tools.append(_intent_tool(tool_name, model, extra))
-    tools.append(_tool(WAIT_TOOL, TOOL_HELP[WAIT_TOOL], _object({})))
+    tools.append(sleep_tool_schema())
     tools.extend(shared_tool_schemas())
     return tools
 
@@ -302,6 +335,6 @@ def moderator_tool_schemas(spec: ScenarioSpec) -> list[dict[str, Any]]:
         elif tool_name in ("enable_ability", "disable_ability"):
             extra = "能力：" + (", ".join(spec.abilities) or "（无）")
         tools.append(_intent_tool(tool_name, model, extra))
-    tools.append(_tool(WAIT_TOOL, TOOL_HELP[WAIT_TOOL], _object({})))
+    tools.append(sleep_tool_schema())
     tools.extend(shared_tool_schemas())
     return tools
