@@ -32,7 +32,7 @@ from app.engine.expressions import (
     seat_order,
     tally,
 )
-from app.world.intents import INTENT_MODELS, READ_ONLY_INTENTS, STALE_CHECKED_INTENTS, is_moderator_intent
+from app.world.intents import INTENT_MODELS, STALE_CHECKED_INTENTS, is_moderator_intent
 from app.world.port import Clock
 from app.world.spec import ScenarioSpec
 from app.world.state import ChannelState, PlayerState, WorldState
@@ -159,7 +159,10 @@ class WorldCore:
         if not self._running:
             return
         for module in self.modules:
-            module.tick()
+            try:
+                module.tick()
+            except Exception:  # noqa: BLE001 - one module's bug must not stop the others' timers
+                logger.exception("world module %s failed in tick()", module.name)
         self._notify()
 
     def next_deadline(self) -> float | None:
@@ -187,10 +190,10 @@ class WorldCore:
             if channel_id is None:
                 raise ValueError("commit() needs visible_to or channel_id")
             audience = list(self.audience(channel_id))
-        elif visible_to == EVERYONE:
-            audience = self.everyone()
+        elif isinstance(visible_to, str):
+            audience = self.everyone() if visible_to == EVERYONE else [visible_to]
         else:
-            audience = _dedupe(visible_to)  # type: ignore[arg-type]
+            audience = _dedupe(visible_to)
         entry = LedgerEntry(
             seq=self.seq + 1,
             ts=datetime.datetime.now().astimezone().isoformat(timespec="milliseconds"),
@@ -224,8 +227,20 @@ class WorldCore:
         sender: str | None = None,
         seq: int = 0,
         interrupt: bool = False,
-        **payload: Any,
+        payload: dict[str, Any] | None = None,
+        **extra: Any,
     ) -> None:
+        """Queue one mailbox delivery.
+
+        ``payload`` (a ready-made dict, may use any key such as ``kind``) and the keyword ``extra``
+        are merged into ``Envelope.payload``; ``event`` and (when given) ``channel_id`` are always
+        included in it, so a consumer can read either ``envelope.channel_id`` or ``payload["channel_id"]``.
+        """
+        body: dict[str, Any] = {"event": event}
+        if channel_id is not None:
+            body["channel_id"] = channel_id
+        body.update(payload or {})
+        body.update(extra)
         envelope = Envelope(
             seq=seq,
             kind=kind,  # type: ignore[arg-type]
@@ -233,7 +248,7 @@ class WorldCore:
             interrupt=interrupt,
             channel_id=channel_id,
             sender=sender,
-            payload={"event": event, **payload},
+            payload=body,
         )
         self._outbox.append(Delivery(target=target, envelope=envelope))
 
@@ -254,7 +269,12 @@ class WorldCore:
             return "urgent" if kind == "reply" else "normal"
         if channel.mode == "free" and not channel.frozen and recipient not in channel.readonly:
             free = channel.free
-            if free is None or free.writers is None or recipient in free.writers:
+            if free is None:
+                return "normal"
+            # A member who may not write, or who has used up the quota, cannot answer: no need to wake it.
+            if (free.writers is None or recipient in free.writers) and free.counts.get(
+                recipient, 0
+            ) < free.max_messages_per_member:
                 return "normal"
         return "ambient"
 
@@ -439,10 +459,16 @@ class WorldCore:
         self._running = bool(running)
         if running:
             new = "running"
+        elif previous in ("finished", "idle"):
+            new = previous  # a game that never started stays ``idle``; a finished one stays ``finished``
         else:
-            new = "finished" if previous == "finished" else "paused"
+            new = "paused"
         if new == previous:
             return
+        if previous == "finished" and new == "running":  # D8: the moderator's verdict is withdrawn
+            reason = "continued"
+            self.state.winner = None
+            self.state.summary = ""
         self.state.status = new
         self.commit("game.status", ENGINE_ID, {"status": new, "reason": reason}, visible_to=EVERYONE)
         self.emit("game.status", status=new, reason=reason, winner=self.state.winner)

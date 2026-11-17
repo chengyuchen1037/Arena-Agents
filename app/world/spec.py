@@ -17,6 +17,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _SHORTHAND = re.compile(r"^\s*([a-z_]+)\s*(?:\((.*)\))?\s*(\?)?\s*$")
 
 
+class ScenarioError(ValueError):
+    """A scenario document is malformed (raised by ``app.world.loader``)."""
+
+
 class ParamSpec(BaseModel):
     """Type of one template / ability parameter.
 
