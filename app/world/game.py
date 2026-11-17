@@ -930,7 +930,9 @@ class GameModule(WorldModule):
         }
         w.state.dashboard.factions = copy.deepcopy(dashboard["factions"])
         w.state.dashboard.tag_stats = copy.deepcopy(dashboard["tag_stats"])
-        entry = w.commit("dashboard.updated", MODERATOR_ID, copy.deepcopy(dashboard), visible_to=EVERYONE)
+        # The panel is for the moderator and the spectators (UI event / god-view snapshot) only: faction
+        # statistics would give hidden information (e.g. who was exiled) to the players.
+        entry = w.commit("dashboard.updated", MODERATOR_ID, copy.deepcopy(dashboard), visible_to=[MODERATOR_ID])
         w.emit("dashboard.updated", dashboard=copy.deepcopy(dashboard))
         return Receipt.accept(seq=entry.seq, message="看板已更新。")
 

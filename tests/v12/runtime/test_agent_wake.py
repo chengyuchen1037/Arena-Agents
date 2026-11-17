@@ -58,7 +58,7 @@ async def test_urgent_envelope_starts_a_run_immediately():
     assert first.messages[0]["content"] == "SYSTEM[a1]"
     assert "floor.granted@pub" in first.messages[1]["content"]
     assert first.tools == rig.brain.tools
-    assert first.max_tokens == 2048  # spec.defaults.llm.max_tokens
+    assert first.max_tokens == 8192  # spec.defaults.llm.max_tokens (generous: thinking counts against it)
     wake = rig.trace.of("wake", "a1")[0]
     assert wake["gen"] == ctx.gen_id and wake["reasons"][0]["event"] == "floor.granted"
 

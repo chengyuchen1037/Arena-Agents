@@ -23,7 +23,7 @@ setup:
   public_tags: [存活, 出局]
 
 defaults:
-  floor: {duration_s: 30, max_messages: 2, max_chars_per_message: 120, max_chars_total: 200}
+  floor: {duration_s: 30, max_messages: 1, max_chars_per_message: 120, max_chars_total: 200}
   free: {duration_s: 60, max_messages_per_member: 3, max_chars_per_message: 120, max_chars_total: 600, debounce_s: 0.5, silence_s: 20}
   request: {duration_s: 30}
   llm: {max_tokens: 4096}

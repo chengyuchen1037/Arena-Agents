@@ -750,13 +750,19 @@
   // ---------------------------------------------------------------------------
 
   function renderDashboard() {
-    const dash = state.session.dashboard || {};
+    // The panel is written by the moderator for the spectators: faction statistics are hidden
+    // information, so a *player's* viewpoint must not show them (god view only).
+    const hidden = state.viewpoint !== View.GOD;
+    const dash = hidden ? {} : state.session.dashboard || {};
     const factions = dash.factions || [];
     const tagStats = dash.tag_stats || [];
+    const emptyText = hidden
+      ? "玩家视角不显示（阵营统计只属于主持人和上帝视角）"
+      : "待主持人调用工具初始化";
 
     const factionsHtml =
       factions.length === 0
-        ? `<div class="empty-placeholder">待主持人调用工具初始化</div>`
+        ? `<div class="empty-placeholder">${emptyText}</div>`
         : factions
             .map(
               (f) => `
@@ -771,7 +777,7 @@
 
     const tagStatsHtml =
       tagStats.length === 0
-        ? `<div class="empty-placeholder">待主持人调用工具初始化</div>`
+        ? `<div class="empty-placeholder">${emptyText}</div>`
         : tagStats
             .map(
               (t) => `

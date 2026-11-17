@@ -207,7 +207,7 @@ def test_set_phase_rejects_blank_text():
     assert world.seq == seq and world.state.phase == ""
 
 
-def test_update_dashboard_replaces_the_dashboard_and_is_public():
+def test_update_dashboard_replaces_the_dashboard_and_is_for_the_moderator_and_spectators_only():
     world = make_world()
     receipt = mod(
         world,
@@ -223,7 +223,7 @@ def test_update_dashboard_replaces_the_dashboard_and_is_public():
     assert world.state.dashboard.factions == expected["factions"]
     assert world.state.dashboard.tag_stats == expected["tag_stats"]
     entry = entries(world, "dashboard.updated")[0]
-    assert entry.data == expected and sorted(entry.visible_to_ids) == sorted([MODERATOR_ID, *PLAYER_IDS])
+    assert entry.data == expected and entry.visible_to_ids == [MODERATOR_ID]  # players never see faction statistics
     assert [e.data for e in events(world, "dashboard.updated")] == [{"dashboard": expected}]
 
     mod(world, "update_dashboard", factions=[], tag_stats=[])

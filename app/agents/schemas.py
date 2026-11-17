@@ -49,12 +49,15 @@ TOOL_HELP: dict[str, str] = {
     "update_channel": "修改频道：改名、增减成员、设置只读成员、改模式（closed / free / listen）、调整自由讨论限额。"
     "把玩家的系统私聊设为 closed 可以暂时禁止他向你私聊或质询（之后可再设回 free）。"
     "free_limits 是整场的绝对上限，不能设得比已用量更小。",
-    "open_floor": "开放发言权。mode=turn：holders 里的每位玩家各得一个令牌（可设条数/字数/时限）；"
+    "open_floor": "开放发言权。mode=turn：holders 里的每位玩家各得一个令牌（可设条数/字数/时限；"
+    "同样建议 max_messages=1，多条额度需要持麦者主动 pass 才会让出）；"
     "mode=free：开启自由讨论——free_limits 里的时长/条数/字数都是“整场”的绝对上限（时长从讨论开始计）；"
     "引擎只会在时间/字数用尽或冷场时通知你，不会自动关闭，由你询问后用 close_floor 收尾；"
     "开放本身不会唤醒任何玩家，请随后用 send_message 或 announce 开场。",
     "set_floor_queue": "按 order 给出顺序，引擎自动依次把发言权交给每个人（轮流发言），整轮结束后唤醒你。"
-    "每人一个令牌，限额相同。",
+    "每人一个令牌，限额相同。**轮流发言请让 limits.max_messages=1**：说完一条就自动交棒；如果给多条，"
+    "持麦者必须主动 pass 或等到时限（duration_s）结束，整个队列都会被他拖住——玩家说完通常就停下，不会自己 pass。"
+    "duration_s 也不要设得太长（默认值已经够用）。",
     "pause_queue": "暂停发言队列（冻结当前发言者的剩余时间）。",
     "resume_queue": "恢复发言队列（也会解除被能力触发的冻结）。",
     "close_floor": "收回频道的发言权/结束自由讨论，频道变为 closed。",

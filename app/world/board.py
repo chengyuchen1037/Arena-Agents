@@ -341,8 +341,10 @@ def build_board(world: Any, agent_id: str) -> dict[str, Any]:
         "requests": _requests_block(world, agent_id, is_moderator),
         "abilities": _abilities_block(world, agent_id, is_moderator),
         "tickets": _tickets_block(world, agent_id, is_moderator),
+        # Spectator panel: only the moderator sees it.  For a player it would leak hidden information
+        # (faction statistics), so the key stays (stable shape) but is always empty.
         "dashboard": {
-            "factions": copy.deepcopy(state.dashboard.factions),
-            "tag_stats": copy.deepcopy(state.dashboard.tag_stats),
+            "factions": copy.deepcopy(state.dashboard.factions) if is_moderator else [],
+            "tag_stats": copy.deepcopy(state.dashboard.tag_stats) if is_moderator else [],
         },
     }

@@ -515,11 +515,14 @@ def test_resolved_tickets_are_capped_but_open_ones_always_stay():
         assert ids[0] == "t6" and ids[-1] == f"t{total + 1}"  # the five oldest resolved ones were dropped
 
 
-def test_dashboard_is_copied_into_every_board():
+def test_the_dashboard_is_on_the_moderators_board_only_never_a_players():
     world = make_world()
     mod(world, "update_dashboard", factions=[{"name": "红队", "alive": 1, "total": 1}], tag_stats=[{"name": "存活", "count": 4}])
-    for agent in ("u1", MODERATOR_ID):
-        dash = build_board(world, agent)["dashboard"]
-        assert dash["factions"][0]["name"] == "红队" and dash["tag_stats"][0]["count"] == 4
+    dash = build_board(world, MODERATOR_ID)["dashboard"]
+    assert dash["factions"][0]["name"] == "红队" and dash["tag_stats"][0]["count"] == 4
     dash["factions"].clear()
     assert world.state.dashboard.factions  # a copy
+    # faction statistics would leak hidden information (who was exiled) to the players
+    for agent in world.everyone():
+        if agent != MODERATOR_ID:
+            assert build_board(world, agent)["dashboard"] == {"factions": [], "tag_stats": []}

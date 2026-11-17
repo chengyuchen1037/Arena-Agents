@@ -21,6 +21,7 @@ import asyncio
 import collections
 import copy
 import json
+import logging
 import os
 import shutil
 import sys
@@ -90,6 +91,7 @@ def prepare_scratch(source: Path, players: list[str]) -> Path:
 
 async def main() -> int:
     args = parse_args()
+    logging.basicConfig(level=logging.WARNING, format="LOG %(levelname)s %(name)s: %(message)s")
     source = Path(args.source).expanduser().resolve()
     ids = [f"p{i:02d}" for i in range(1, args.players + 1)]
     (ROOT / ".demo-data").mkdir(exist_ok=True)
@@ -154,7 +156,12 @@ async def main() -> int:
             status = orch.session.status
             if elapsed - last_print >= 10:
                 last_print = elapsed
-                print(f"[{elapsed:5.0f}s] status={status} calls={calls['n']} ledger={orch.world.seq} phase={orch.world.state.phase!r}")
+                deadline = orch.world.next_deadline()
+                busy = [a for a, ag in (orch._supervisor.agents.items() if orch._supervisor else []) if ag.status != "idle"]
+                print(
+                    f"[{elapsed:5.0f}s] status={status} calls={calls['n']} ledger={orch.world.seq} clock={orch.clock.now():.0f}"
+                    f" next_deadline={'-' if deadline is None else f'{deadline:.0f}'} busy={busy} phase={orch.world.state.phase!r}"
+                )
             if status != "running":
                 print(f"game left 'running': status={status} reason={orch.session.pause_reason or '-'} {orch.session.hold_reason}")
                 break
@@ -217,6 +224,11 @@ def report(orch, calls, seconds: float) -> None:
             print(f"  x{count} {text}")
     if errors:
         print("runtime errors:", errors[:6])
+    print("floor timeline (game seconds):")
+    for entry in world.ledger:
+        if entry.type.startswith("floor.") or entry.type in ("request.opened", "request.closed", "game.status"):
+            d = entry.data
+            print(f"  #{entry.seq:3d} t={entry.gt:6.1f} {entry.type:20s} {d.get('holder', '')} {d.get('reason', '')} {d.get('request_id', '')}")
     print("last public messages:")
     for entry in [e for e in world.ledger if e.type == "message"][-8:]:
         print(f"  #{entry.seq} [{entry.channel_id}] {world.display_name(entry.actor_id)}: {str(entry.data.get('content', ''))[:90]}")

@@ -367,9 +367,15 @@ def _wake_line(env: Envelope, namer: Namer) -> str:
         return f"主持人回复了你的质询 {p.get('ticket_id') or ''}（见可见历史）。"
     if event == "floor.granted":
         pos = f"（第 {p['position']}/{p['total']} 位）" if p.get("position") else ""
+        many = int(p.get("max_messages") or 1) > 1
+        tail = (
+            "说完请调用 pass 让出发言权，否则要等到限时结束，别人才能接着发言。"
+            if many
+            else "发言一条后发言权会自动交给下一位。"
+        )
         return (
             f"你获得了 {ch} 的发言权{pos}：最多 {p.get('max_messages', '?')} 条，单条 ≤ "
-            f"{p.get('max_chars_per_message', '?')} 字，总共 ≤ {p.get('max_chars_total', '?')} 字，{_secs(p.get('seconds'))} 内有效。"
+            f"{p.get('max_chars_per_message', '?')} 字，总共 ≤ {p.get('max_chars_total', '?')} 字，{_secs(p.get('seconds'))} 内有效。{tail}"
         )
     if event in ("floor.revoked", "floor.paused", "floor.frozen"):
         label = {"floor.revoked": "被收回", "floor.paused": "被暂停", "floor.frozen": "被冻结"}[event]
