@@ -10,6 +10,7 @@ const jsPath = (name) => path.join(ROOT, "static", "js", name);
 
 const Core = require(jsPath("core.js"));
 const Avatar = require(jsPath("avatar.js"));
+const Platform = require(jsPath("platform.js"));
 const Store = require(jsPath("store.js"));
 const View = require(jsPath("view.js"));
 const F = require("./fixtures.js");
@@ -20,7 +21,10 @@ const SRC = {
   providers: read("providers.js"),
   layout: read("layout.js"),
   workspace: read("workspace.js"),
+  roster: read("roster.js"),
+  budget: read("budget.js"),
 };
+const PARTS_MIN = JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "parts.min.json"), "utf8"));
 const HTML_SRC = fs.readFileSync(path.join(ROOT, "static", "index.html"), "utf8");
 const CSS_SRC = fs.readFileSync(path.join(ROOT, "static", "css", "style.css"), "utf8");
 
@@ -144,9 +148,13 @@ class FakeEl {
   querySelector() {
     return null;
   }
+  querySelectorAll() {
+    return [];
+  }
   closest() {
     return null;
   }
+  scrollIntoView() {}
   getBoundingClientRect() {
     return { left: 100, top: 60, right: 164, bottom: 104, width: 64, height: 44 };
   }
@@ -168,17 +176,30 @@ const target = (map, extra = {}) => ({
   ...extra,
 });
 
-function resp(status, body, ct = "application/json") {
+function resp(status, body, ct = "application/json", extraHeaders = {}) {
   const text = typeof body === "string" ? body : JSON.stringify(body);
   return {
     status,
     ok: status >= 200 && status < 300,
-    headers: { get: (k) => (k.toLowerCase() === "content-type" ? ct : null) },
+    headers: {
+      get: (k) => (k.toLowerCase() === "content-type" ? ct : extraHeaders[k.toLowerCase()] !== undefined ? extraHeaders[k.toLowerCase()] : null),
+    },
     text: async () => text,
+    blob: async () => ({ size: text.length, type: ct, text }),
   };
 }
 
-function makeEnv({ fetchImpl, storedToken = "", storage: initialStorage = {}, innerWidth = 1280, innerHeight = 800 } = {}) {
+function makeEnv({
+  fetchImpl,
+  storedToken = "",
+  storage: initialStorage = {},
+  innerWidth = 1280,
+  innerHeight = 800,
+  userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/130 Safari/537.36",
+  coarse = false,
+  maxTouchPoints = 0,
+  search = "",
+} = {}) {
   const els = new Map();
   const timers = [];
   let timerId = 0;
@@ -240,8 +261,10 @@ function makeEnv({ fetchImpl, storedToken = "", storage: initialStorage = {}, in
     },
     EventSource: FakeEventSource,
     fetch: fetchImpl,
+    navigator: { userAgent, maxTouchPoints, platform: "", userAgentData: null },
+    matchMedia: (q) => ({ matches: /pointer:\s*coarse/.test(q) ? Boolean(coarse) : false, addEventListener() {} }),
     location: {
-      search: "",
+      search,
       href: "http://localhost/arena/",
       pathname: "/arena/",
       reload: () => reloads.push(1),
@@ -274,6 +297,7 @@ function makeEnv({ fetchImpl, storedToken = "", storage: initialStorage = {}, in
     },
     ArenaCore: Core,
     ArenaAvatar: Avatar,
+    ArenaPlatform: Platform,
     ArenaStore: Store,
     ArenaView: View,
     confirm: () => true,
@@ -300,6 +324,8 @@ function makeEnv({ fetchImpl, storedToken = "", storage: initialStorage = {}, in
     run: () => {
       vm.runInContext(SRC.layout, sandbox, { filename: "layout.js" });
       vm.runInContext(SRC.providers, sandbox, { filename: "providers.js" });
+      vm.runInContext(SRC.roster, sandbox, { filename: "roster.js" });
+      vm.runInContext(SRC.budget, sandbox, { filename: "budget.js" });
       vm.runInContext(SRC.workspace, sandbox, { filename: "workspace.js" });
       vm.runInContext(SRC.app, sandbox, { filename: "app.js" });
     },
@@ -342,7 +368,17 @@ function makeBackend(overrides = {}) {
         base_url: "https://api.example.com",
         api_key_set: true,
         read_only: false,
-        models: [{ id: "model-x", input_price_per_m: 0.5, output_price_per_m: 2, context_window_tokens: 128000 }],
+        models: [
+          {
+            id: "model-x",
+            input_price_per_m: 0.5,
+            cache_read_price_per_m: 0.1,
+            cache_write_price_per_m: null,
+            output_price_per_m: 2,
+            context_window_tokens: 128000,
+            price_source: "litellm:deepseek/model-x",
+          },
+        ],
       },
       {
         id: "p2",
@@ -351,7 +387,17 @@ function makeBackend(overrides = {}) {
         base_url: "https://api.anthropic.com",
         api_key_set: true,
         read_only: false,
-        models: [{ id: "claude-y", input_price_per_m: 3, output_price_per_m: 15, context_window_tokens: 200000 }],
+        models: [
+          {
+            id: "claude-y",
+            input_price_per_m: 3,
+            cache_read_price_per_m: null,
+            cache_write_price_per_m: null,
+            output_price_per_m: 15,
+            context_window_tokens: 200000,
+            price_source: "manual",
+          },
+        ],
       },
       { id: "env", name: "Env", protocol: "openai_chat", base_url: "https://e.com", api_key_set: true, read_only: true, models: [] },
     ],
@@ -361,6 +407,25 @@ function makeBackend(overrides = {}) {
       { session_id: "old-1", current: false, status: "paused", record_count: 7 },
     ],
     discovered: ["model-x", "m-new", "other/slash"],
+    suggestions: {}, // model id -> a `suggested` object (null / missing = no match)
+    pricing: { url: Core.DEFAULT_PRICING_SOURCE_URL, default_url: Core.DEFAULT_PRICING_SOURCE_URL, fetched_at: "2026-11-17T08:00:00Z", entries: 2345, error: null },
+    budget: { max_tokens: null, max_cost_usd: null, force_stop: false, used_tokens: 0, used_cost_usd: 0, state: "ok" },
+    roster: {
+      memory_enabled: true,
+      editable: true,
+      seats: F.PLAYER_IDS.map((id, i) => ({
+        seat: i + 1,
+        id,
+        name: F.NAMES[i],
+        default_name: F.NAMES[i],
+        avatar: F.avatarOf(i + 1),
+        persona: "",
+        memory: "",
+      })),
+    },
+    importChanges: [{ id: "N3", persona: true, memory: true }, { id: "N5", persona: false, memory: true }],
+    refineDraft: "【草稿】这是主持人模型完善后的设定。",
+    reviewStarted: ["N1"],
     workspaces: {
       enabled: true,
       current: { id: "w1", name: "Av11WS", path: "D:\\Av11\\WS", status: "ok" },
@@ -375,7 +440,8 @@ function makeBackend(overrides = {}) {
     session,
   };
   b.fetch = async (url, init) => {
-    const body = init.body ? JSON.parse(init.body) : undefined;
+    const isJson = !init.headers || !init.headers["Content-Type"] || /json/.test(init.headers["Content-Type"]);
+    const body = init.body ? (isJson ? JSON.parse(init.body) : init.body) : undefined;
     const call = { url, method: init.method, body, headers: init.headers };
     b.calls.push(call);
     if (b.requireToken && init.headers["X-Arena-Token"] !== b.requireToken) {
@@ -385,11 +451,10 @@ function makeBackend(overrides = {}) {
     if (b.failures[key]) return resp(b.failures[key][0], { detail: b.failures[key][1] });
     const find = (id) => b.providers.find((p) => p.id === id);
     let m;
-    if (key === "GET /api/state") return resp(200, { app_version: "v0.12-test", session: b.session });
+    if (key === "GET /api/state") return resp(200, { app_version: "v0.12.1-test", session: b.session });
     if (/^POST \/api\/control\/(new|start|pause|force-pause)$/.test(key)) {
       return resp(200, { ok: true, session: b.controlSession || b.session });
     }
-    if (key === "POST /api/session/execution-depth") return resp(200, { ok: true, execution_depth: body.execution_depth });
     if (key === "GET /api/providers") return resp(200, { providers: b.providers });
     if (key === "POST /api/providers") {
       const p = { id: "new1", read_only: false, api_key_set: true, models: [], ...body };
@@ -406,7 +471,12 @@ function makeBackend(overrides = {}) {
       return resp(200, { ok: true });
     }
     if ((m = key.match(/^POST \/api\/providers\/([^/]+)\/discover-models$/))) {
-      return resp(200, { models: b.discovered, existing_models: find(m[1]).models.map((x) => x.id) });
+      const models = b.discoveredShape === "map"
+        ? b.discovered
+        : b.discovered.map((id) => ({ id, suggested: b.suggestions[id] || null }));
+      const out = { models, existing_models: find(m[1]).models.map((x) => x.id) };
+      if (b.discoveredShape === "map") out.suggested = b.suggestions;
+      return resp(200, out);
     }
     if ((m = key.match(/^(POST|PATCH|DELETE) \/api\/providers\/([^/]+)\/models$/))) {
       const p = find(m[2]);
@@ -414,8 +484,11 @@ function makeBackend(overrides = {}) {
         const e = {
           id: body.model_id,
           input_price_per_m: body.input_price_per_m,
+          cache_read_price_per_m: body.cache_read_price_per_m ?? null,
+          cache_write_price_per_m: body.cache_write_price_per_m ?? null,
           output_price_per_m: body.output_price_per_m,
           context_window_tokens: body.context_window_tokens ?? 1000000,
+          price_source: "manual",
         };
         p.models.push(e);
         return resp(201, e);
@@ -448,6 +521,80 @@ function makeBackend(overrides = {}) {
     }
     if ((m = key.match(/^POST \/api\/sessions\/(.+)\/load$/))) {
       return resp(200, { ok: true, session: { ...b.session, session_id: decodeURIComponent(m[1]), status: "paused" } });
+    }
+    // ---- v0.12.1: price source, budget, roster, review
+    if (key === "GET /api/pricing/source") return resp(200, b.pricing);
+    if (key === "PUT /api/pricing/source") {
+      b.pricing = { ...b.pricing, url: body.url, error: null };
+      return resp(200, b.pricing);
+    }
+    if (key === "POST /api/pricing/refresh") {
+      b.pricing = b.refreshError
+        ? { ...b.pricing, error: b.refreshError }
+        : { ...b.pricing, entries: 2400, fetched_at: "2026-11-17T09:30:00Z", error: null };
+      return resp(200, b.pricing);
+    }
+    if ((m = key.match(/^GET \/api\/pricing\/match\?provider_id=([^&]*)&model_id=(.*)$/))) {
+      const hit = b.suggestions[decodeURIComponent(m[2])];
+      return resp(200, hit ? { matched: true, key: "litellm/x", ...hit } : { matched: false, key: null });
+    }
+    if (key === "GET /api/budget") return resp(200, b.budget);
+    if (key === "PUT /api/budget") {
+      b.budget = { ...b.budget, ...body };
+      return resp(200, b.budget);
+    }
+    if (key === "GET /api/roster") return resp(200, b.roster);
+    if (key === "PUT /api/roster/memory-enabled") {
+      b.roster.memory_enabled = Boolean(body.enabled);
+      return resp(200, { enabled: b.roster.memory_enabled });
+    }
+    if (key === "GET /api/roster/memory:export") {
+      return resp(200, "ZIPDATA", "application/zip", { "content-disposition": 'attachment; filename="arena-memory-test.zip"' });
+    }
+    if ((m = key.match(/^POST \/api\/roster\/memory:import\?dry_run=(true|false)$/))) {
+      b.importCalls = (b.importCalls || []).concat([{ dry_run: m[1] === "true", body, contentType: init.headers["Content-Type"] }]);
+      if (b.importError) return resp(400, { detail: b.importError });
+      return resp(200, { dry_run: m[1] === "true", changes: b.importChanges });
+    }
+    if (key === "POST /api/roster/memory:clear") {
+      b.lastClear = body;
+      for (const seat of b.roster.seats) {
+        seat.memory = "";
+        if (body && body.include_persona) seat.persona = "";
+      }
+      return resp(200, { ok: true });
+    }
+    if (key === "POST /api/roster/avatars:regenerate") {
+      if (b.session.status !== "idle") return resp(409, { detail: "对局已开始，不能重新生成头像" });
+      b.roster.seats.forEach((seat, i) => (seat.avatar = F.avatarOf(i + 20)));
+      return resp(200, { seats: b.roster.seats });
+    }
+    if ((m = key.match(/^POST \/api\/roster\/([^/]+)\/avatar:regenerate$/))) {
+      const seat = b.roster.seats.find((x) => x.id === m[1]);
+      seat.avatar = F.avatarOf(30 + b.roster.seats.indexOf(seat));
+      return resp(200, seat);
+    }
+    if ((m = key.match(/^POST \/api\/roster\/([^/]+)\/refine$/))) {
+      b.lastRefine = { id: m[1], ...body };
+      if (b.refineError) return resp(502, { detail: b.refineError });
+      return resp(200, { draft: b.refineDraft });
+    }
+    if ((m = key.match(/^PUT \/api\/roster\/([^/]+)$/))) {
+      const seat = b.roster.seats.find((x) => x.id === m[1]);
+      if (!seat) return resp(404, { detail: "no such seat" });
+      b.rosterPuts = (b.rosterPuts || []).concat([{ id: m[1], ...body }]);
+      if (("name" in body || "avatar" in body) && b.session.status !== "idle") return resp(409, { detail: "对局已开始，不能修改名字或头像" });
+      if ("name" in body) {
+        if (b.roster.seats.some((x) => x.id !== m[1] && x.name === body.name)) return resp(422, { detail: `名字「${body.name}」已被使用` });
+        seat.name = body.name;
+      }
+      for (const k of ["persona", "memory", "avatar"]) if (k in body) seat[k] = body[k];
+      return resp(200, seat);
+    }
+    if (key === "POST /api/game/review") {
+      b.lastReview = body;
+      if (b.reviewError) return resp(409, { detail: b.reviewError });
+      return resp(200, { started: b.reviewStarted });
     }
     if (key === "POST /api/session/save") return resp(200, { ok: true, filename: "x.json", session: b.session });
     if (key === "POST /api/session/import") return resp(200, { ok: true, session: { ...b.session, session_id: "imported" } });
@@ -506,6 +653,8 @@ module.exports = {
   ROOT,
   Core,
   Avatar,
+  Platform,
+  PARTS_MIN,
   Store,
   View,
   F,

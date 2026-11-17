@@ -203,7 +203,6 @@
     const L = lib || parts;
     if (!L) return null;
     const n = Math.max(1, Math.round(Number(seat)) || 1);
-    const step = { face: 3, skin: 5, hair: 7, hair_color: 11, eyes: 13, mouth: 17, accessory: 19, accessory_color: 23 };
     const desc = { v: DESC_VERSION };
     for (const f of FIELDS) {
       const ids = idsOf(L, f);
@@ -214,7 +213,9 @@
         }
         return null;
       }
-      desc[f] = ids[(n * step[f] + step[f]) % ids.length];
+      // a hash per (field, seat): neighbouring seats do not share a face, a skin, a hair ... just by
+      // arithmetic accident, even in a tiny library
+      desc[f] = ids[hashString(`${f}:${n}`) % ids.length];
     }
     return normalizeDescription(desc);
   }

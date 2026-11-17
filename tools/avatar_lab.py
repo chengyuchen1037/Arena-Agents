@@ -378,9 +378,9 @@ FACE_SPECS: list[tuple[str, dict[str, Any]]] = [
     ("square", dict(top=5, bot=16, cmax=6, ctop=5, cbot=5, ywide=8, jaw="square")),
     ("narrow", dict(top=5, bot=16, cmax=5, ctop=3, cbot=3, ywide=9)),
     ("chubby", dict(top=6, bot=16, cmax=8, ctop=5, cbot=4, ywide=11)),
-    ("pointed", dict(top=5, bot=17, cmax=6, ctop=3, cbot=1, ywide=8, jaw="linear")),
+    ("pointed", dict(top=5, bot=17, cmax=6, ctop=3, cbot=1, ywide=12, jaw="linear")),
     ("trapezoid", dict(top=5, bot=16, cmax=6, ctop=4, cbot=5, ywide=15, dome="linear", jaw="square")),
-    ("heart", dict(top=5, bot=17, cmax=6, ctop=4, cbot=1, ywide=7, jaw="linear")),
+    ("heart", dict(top=5, bot=17, cmax=6, ctop=4, cbot=2, ywide=9, jaw="soft")),
     ("small", dict(top=6, bot=16, cmax=5, ctop=3, cbot=3, ywide=10)),
     ("robot", dict(top=5, bot=16, cmax=6, ctop=5, cbot=6, ywide=7, jaw="square")),
     ("ears", dict(top=5, bot=16, cmax=5, ctop=3, cbot=3, ywide=9, ears=(10, 12, 1))),
@@ -510,7 +510,7 @@ def build_eye(spec: dict[str, Any]) -> dict[str, Any]:
             px[(xo + dx, top + dy)] = "p"
             px[(mx(xo + dx), top + dy)] = "p"
     if spec.get("blush"):
-        for x in (xo - 1, xo):
+        for x in (xo, xo + 1):
             px[(x, EYE_ROW_BOTTOM + 1)] = "x"
             px[(mx(x), EYE_ROW_BOTTOM + 1)] = "x"
     return {"front": rows_of(px)}
@@ -857,6 +857,17 @@ def _back_curtain(rows: tuple[int, int], x_out: int, bottoms: dict[int, int]) ->
     return out
 
 
+def _back_profile(first_row: int, bottoms: list[int], x_start: int = 1) -> PxSet:
+    """脑后的头发：列 x_start.. 起各自垂到 bottoms[i] 行（左半，镜像），从 first_row 行开始；越往中间越短（被脸挡住）。"""
+    out: PxSet = set()
+    for i, y1 in enumerate(bottoms):
+        x = x_start + i
+        for y in range(first_row, y1 + 1):
+            out.add((x, y))
+            out.add((mx(x), y))
+    return out
+
+
 def _tails(rng: Rng, *, x0: int, y0: int, y1: int, flare: int, width: int, wave: int = 0) -> PxSet:
     """左右一对垂下的发束（双马尾 / 辫子 / 公主发）：从 (x0, y0) 垂到 y1，末端向外飘 ``flare`` 格。"""
     pts = [(x0, y0), (x0 - flare // 2, (y0 + y1) // 2), (x0 - flare, y1)]
@@ -866,8 +877,12 @@ def _tails(rng: Rng, *, x0: int, y0: int, y1: int, flare: int, width: int, wave:
     return s | mirror(s)
 
 
-def _afro(rng: Rng, *, ry: float, rx: float, cy: float) -> PxSet:
-    return ellipse(9.5, cy, rx, ry)
+def _afro_style() -> tuple[PxSet, PxSet]:
+    """爆炸头：一大团带卷边的圆；front 是头顶和两侧（脸的窗口留出来），back 是整团。"""
+    whole = scallop(ellipse(9.5, 6.8, 7.4, 4.9), (3, 5, 7, 9), (5, 7, 9), 1.8) | box(3, 9, 16, 11)
+    whole = {(x, y) for x, y in whole if y <= 12}
+    front = {(x, y) for x, y in whole if y <= 7 or x <= 3 or x >= 16}
+    return front, whole
 
 
 def hair_recipes() -> list[tuple[str, Any]]:
@@ -878,7 +893,7 @@ def hair_recipes() -> list[tuple[str, Any]]:
         R.append((name, fn))
 
     # ---- 短发 ----
-    add("buzz", lambda r: (_cap(r, top=3, ry=4.2, rx=7.8, base=5, side_len=7), set()))
+    add("buzz", lambda r: (_cap(r, top=2, ry=4.6, rx=7.9, base=6, side_len=8), set()))
     add("crop", lambda r: (_cap(r, top=2, ry=5.2, rx=8.2, base=6, bang="wisps", side_len=8), set()))
     add("bowl", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=8, side_len=10), set()))
     add("sweep", lambda r: (_cap(r, top=2, ry=5.4, rx=8.4, base=7, bang="arch", side_len=9), set()))
@@ -892,45 +907,44 @@ def hair_recipes() -> list[tuple[str, Any]]:
     add("receding", lambda r: (_cap(r, top=2, ry=5.2, rx=8.2, base=5, bang="vee", side_len=9), set()))
     add("mushroom", lambda r: (_cap(r, top=1, ry=6.4, rx=8.8, base=9, side_len=12, side_cols=3), set()))
     # ---- 中长发 ----
-    add("bob", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=7, bang="arch", side_len=13), _back_curtain((6, 14), 1, {1: 13, 2: 14})))
-    add("bob_flip", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=7, side_len=12), _back_curtain((6, 14), 0, {0: 13, 1: 14, 2: 14})))
+    add("bob", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=7, bang="arch", side_len=13), _back_profile(6, [12, 14, 14, 14, 13, 13, 13, 13, 13])))
+    add("bob_flip", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=7, side_len=12), _back_profile(6, [12, 14, 15, 14, 13, 13, 13, 13, 13])))
     add("wolf", lambda r: (_cap(r, top=1, ry=6.0, rx=8.6, base=7, bang="wisps", side_len=12, jitter=0.3),
-                           _back_curtain((6, 16), 1, {1: 14 + r.randrange(3), 2: 15 + r.randrange(3), 3: 16})))
-    add("shoulder", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=7, bang="arch", side_len=15), _back_curtain((6, 17), 0, {0: 15, 1: 17, 2: 17})))
+                           _back_profile(6, [13 + r.randrange(3), 14 + r.randrange(3), 15 + r.randrange(3), 15, 14, 14, 14, 14, 14])))
+    add("shoulder", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=7, bang="arch", side_len=15), _back_profile(6, [15, 17, 17, 16, 15, 15, 15, 15, 15])))
     # ---- 长发 ----
-    add("long", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=7, side_len=15), _back_curtain((6, 18), 0, {0: 17, 1: 18, 2: 18, 3: 17})))
+    add("long", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=7, side_len=15), _back_profile(6, [15, 17, 18, 18, 17, 16, 16, 16, 16])))
     add("long_wave", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=7, bang="arch", side_len=14),
-                                _back_curtain((6, 18), 0, {0: 16, 1: 18, 2: 17, 3: 18, 4: 16})))
-    add("long_part", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=8, bang="curtain", side_len=16), _back_curtain((6, 18), 0, {0: 17, 1: 18, 2: 18})))
-    add("hime", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=8, side_len=15, side_cols=3), _back_curtain((6, 18), 0, {0: 17, 1: 18, 2: 18})))
+                                _back_profile(6, [16, 18, 17, 18, 16, 16, 16, 16, 16])))
+    add("long_part", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=8, bang="curtain", side_len=16), _back_profile(6, [15, 17, 18, 17, 16, 16, 16, 16, 16])))
+    add("hime", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=8, side_len=15, side_cols=3), _back_profile(6, [15, 17, 18, 17, 16, 16, 16, 16, 16])))
     add("layered", lambda r: (_cap(r, top=2, ry=5.5, rx=8.4, base=7, bang="arch", side_len=14, side_cols=3, side_lens=[16, 14, 12]),
-                              _back_curtain((6, 18), 0, {0: 16, 1: 18, 2: 17})))
+                              _back_profile(6, [16, 18, 18, 17, 16, 16, 16, 16, 16])))
     # ---- 发束 / 丸子 ----
-    add("pony_side", lambda r: (_cap(r, top=2, ry=5.4, rx=8.2, base=7, bang="arch", side_len=8), strand([(14, 4), (17, 8), (18, 12), (16, 16)], [3, 3, 2])))
+    add("pony_side", lambda r: (_cap(r, top=2, ry=5.4, rx=8.2, base=7, bang="arch", side_len=8), strand([(14, 4), (16, 8), (17, 12), (16, 16)], [4, 4, 3])))
     add("pony_high", lambda r: (_cap(r, top=3, ry=4.6, rx=8.0, base=7, side_len=8) | ellipse(14.5, 2.4, 2.4, 1.9),
-                                strand([(15, 3), (18, 7), (18, 11), (17, 14)], [3, 3, 2])))
+                                strand([(15, 3), (16, 7), (17, 11), (16, 15)], [4, 4, 3])))
     add("twin_low", lambda r: (_cap(r, top=2, ry=5.4, rx=8.2, base=7, side_len=8), _tails(r, x0=3, y0=8, y1=17, flare=2, width=3)))
     add("twin_high", lambda r: (_cap(r, top=3, ry=4.8, rx=8.2, base=7, side_len=8) | sym(ellipse(3.0, 4.2, 1.8, 1.8)),
                                 _tails(r, x0=2, y0=4, y1=16, flare=2, width=3, wave=1)))
     add("buns_twin", lambda r: (_cap(r, top=3, ry=4.7, rx=8.0, base=7, side_len=8) | sym(ellipse(4.6, 2.6, 2.3, 2.1)), set()))
     add("bun_top", lambda r: (_cap(r, top=3, ry=4.7, rx=8.0, base=7, bang="arch", side_len=8) | ellipse(9.5, 1.9, 3.0, 2.1), set()))
     add("braids", lambda r: (_cap(r, top=2, ry=5.4, rx=8.2, base=7, side_len=9), _tails(r, x0=3, y0=9, y1=18, flare=0, width=2, wave=1)))
-    add("braid_one", lambda r: (_cap(r, top=2, ry=5.4, rx=8.2, base=7, bang="arch", side_len=8), strand([(15, 8), (16, 12), (15, 15), (16, 18)], [3, 2, 2])))
+    add("braid_one", lambda r: (_cap(r, top=2, ry=5.4, rx=8.2, base=7, bang="arch", side_len=8), strand([(15, 8), (16, 12), (15, 15), (16, 18)], [4, 3, 3])))
     add("pigtails", lambda r: (_cap(r, top=2, ry=5.4, rx=8.2, base=7, side_len=9), sym(ellipse(1.8, 10.5, 1.9, 3.0))))
     add("topknot", lambda r: (_cap(r, top=3, ry=4.6, rx=8.0, base=6, side_len=8) | ellipse(9.5, 1.6, 1.9, 1.3), set()))
     # ---- 蓬松 / 卷 ----
-    add("afro", lambda r: (_afro(r, ry=6.1, rx=8.6, cy=7.2) & box(0, 0, 19, 8) | _cap(r, top=1, ry=6.0, rx=8.6, base=6, side_len=11, side_cols=3),
-                           _afro(r, ry=6.1, rx=8.6, cy=7.2) & box(0, 0, 19, 12)))
-    add("curly", lambda r: (scallop(_cap(r, top=3, ry=4.4, rx=7.6, base=7, side_len=10), (3, 6, 9), (6, 9), 1.7), set()))
-    add("curly_long", lambda r: (scallop(_cap(r, top=3, ry=4.4, rx=7.6, base=7, side_len=12), (3, 6, 9), (6, 9, 12), 1.7),
-                                 scallop(_back_curtain((6, 16), 1, {1: 15, 2: 16}), (), (8, 11, 14), 1.7)))
-    add("fluffy", lambda r: (scallop(_cap(r, top=3, ry=4.4, rx=7.8, base=7, side_len=9), (2, 4, 7, 9), (7, 10), 1.9), set()))
+    add("afro", lambda r: _afro_style())
+    add("curly", lambda r: (scallop(_cap(r, top=3, ry=4.4, rx=7.6, base=7, side_len=10), (3, 5, 7, 9), (5, 7, 9), 1.7), set()))
+    add("curly_long", lambda r: (scallop(_cap(r, top=3, ry=4.4, rx=7.6, base=7, side_len=12), (3, 5, 7, 9), (5, 7, 9, 11), 1.7),
+                                 scallop(_back_profile(6, [15, 17, 17, 16, 15, 15, 15, 15, 15]), (), (8, 10, 12, 14), 1.7)))
+    add("fluffy", lambda r: (scallop(_cap(r, top=3, ry=4.4, rx=7.8, base=7, side_len=9), (2, 4, 6, 8), (6, 8, 10), 2.0), set()))
     add("ahoge", lambda r: (_cap(r, top=3, ry=4.6, rx=8.0, base=7, bang="arch", side_len=8) | strand([(9, 3), (9, 2), (10, 1), (11, 1)], 1), set()))
     add("wild", lambda r: (_cap(r, top=3, ry=4.6, rx=8.0, base=6, bang="zig3", side_len=8)
                            | poly([(3, 4), (4, 0.5), (6, 3.5)]) | poly([(7, 3.5), (9.5, 0.5), (12, 3.5)]) | poly([(13, 3.5), (15, 0.5), (16.5, 4)]), set()))
     add("mohawk", lambda r: (box(8, 1, 11, 4) | box(7, 4, 12, 7) | box(8, 8, 11, 8), set()))
-    add("dreads", lambda r: (_cap(r, top=2, ry=5.2, rx=8.2, base=6, bang="zig", side_len=8),
-                             strand([(2, 8), (1, 12), (2, 16)], 2) | strand([(4, 9), (3, 13), (4, 15)], 1) | mirror(strand([(2, 8), (1, 12), (2, 16)], 2)) | mirror(strand([(4, 9), (3, 13), (4, 15)], 1))))
+    add("dreads", lambda r: (_cap(r, top=2, ry=5.2, rx=8.2, base=6, bang="zig", side_len=9, side_cols=3, side_lens=[17, 14, 16]),
+                             _back_profile(6, [16, 18, 15, 17, 15, 16, 16, 16, 16])))
     add("bald_sides", lambda r: (sym(ellipse(3.0, 9.0, 2.2, 3.2)) & box(0, 6, 19, 13), set()))
     add("tufts", lambda r: (_cap(r, top=3, ry=4.4, rx=7.8, base=6, bang="zig", side_len=8) | sym(poly([(3, 4.5), (4, 0.5), (6.5, 3.5)])), set()))
     add("swirl", lambda r: (_cap(r, top=3, ry=4.6, rx=8.0, base=7, side_len=8) | poly([(9.5, 0.5), (5.5, 4.5), (13.5, 4.5)]) | ellipse(9.5, 2.5, 2.4, 2.0), set()))
@@ -1026,6 +1040,11 @@ def dome(cx: float, cy: float, rx: float, ry: float, ymax: int) -> PxSet:
     return {p for p in ellipse(cx, cy, rx, ry) if p[1] <= ymax}
 
 
+def std_dome(ymax: int) -> PxSet:
+    """帽子的标准头顶圆顶：比任何 top=2 的发冠都略大，所以戴上帽子头发不会从上面冒出来。"""
+    return dome(9.5, 7.0, 8.7, 6.0, ymax)
+
+
 def span(y: int, x0: int, x1: int) -> PxSet:
     return {(x, y) for x in range(x0, x1 + 1)}
 
@@ -1045,32 +1064,25 @@ def with_brim(spec: dict[int, tuple[int, int]], brim_y: int, wide: int = 1) -> P
 # --------------------------------------- 帽子 ---------------------------------------
 
 
-def acc_wizard(r: Rng, *, bend: int = 0, star: bool = True) -> Art:
+def acc_wizard(r: Rng, *, bend: int = 0, star: bool = True, buckle: bool = False) -> Art:
+    """巫师帽：下摆外扩的钟形锥体（高而尖）+ 宽帽檐。bend 让锥尖向右歪。"""
     a = Art()
-    body = {1: (9, 10), 2: (8, 11), 3: (7, 12), 4: (6, 13), 5: (4, 15)}
-    for y in (1, 2, 3):
+    body = {1: (9, 10), 2: (8, 11), 3: (7, 12), 4: (6, 13), 5: (4, 15), 6: (2, 17)}
+    for y in (1, 2, 3, 4):
         if bend:
-            body[y] = (body[y][0] + bend * (4 - y) // 2, body[y][1] + bend * (4 - y) // 2)
+            body[y] = (body[y][0] + bend * (5 - y) // 2, body[y][1] + bend * (5 - y) // 2)
     a.put(rows_spans(body), "b")
-    a.put(span(5, 3, 16), "l")  # 帽带
-    a.put(span(6, 1, 18) | span(7, 2, 17), "b")
-    a.put(span(7, 2, 17), "s")
+    a.put(span(6, 2, 17), "l")  # 帽带
+    a.put(span(7, 1, 18) | span(8, 2, 17), "b")
+    a.put(span(8, 2, 17), "s")
     if star:
-        a.put({(9 + bend // 2, 3), (10 + bend // 2, 3), (9, 4), (10, 4)}, "w")
+        a.put({(9, 3), (10, 3), (9, 4), (10, 4)}, "w")
+    if buckle:
+        a.put(box(8, 6, 11, 6), "w")
     return a
-
 
 def acc_witch(r: Rng) -> Art:
-    a = Art()
-    body = {1: (11, 12), 2: (10, 12), 3: (8, 12), 4: (6, 13), 5: (4, 15)}
-    a.put(rows_spans(body), "b")
-    a.put(span(5, 4, 15), "s")
-    a.put(span(6, 0 + 1, 18) | span(7, 2, 17), "b")
-    a.put(span(7, 2, 17), "s")
-    a.put(span(6, 8, 11), "l")  # 带扣
-    a.put({(9, 6), (10, 6)}, "w")
-    return a
-
+    return acc_wizard(r, bend=2, star=False, buckle=True)
 
 def acc_pirate(r: Rng) -> Art:
     a = Art()
@@ -1084,14 +1096,14 @@ def acc_pirate(r: Rng) -> Art:
 
 
 def acc_cap(r: Rng) -> Art:
+    """棒球帽：圆顶 + 向一侧伸出的帽舌（半侧面），顶上一个扣子、中缝一条亮线。"""
     a = Art()
-    a.put(dome(9.5, 6.4, 7.6, 3.6, 6), "b")
-    a.put(span(7, 2, 17) | span(8, 4, 15), "s")
+    a.put(std_dome(6), "b")
     a.put(span(7, 3, 16), "s")
+    a.put(span(7, 10, 18) | span(8, 11, 17), "s")
     a.put({(9, y) for y in range(3, 7)}, "l")
     a.put({(9, 2), (10, 2)}, "l")
     return a
-
 
 def acc_top_hat(r: Rng) -> Art:
     a = Art()
@@ -1116,30 +1128,27 @@ def acc_crown(r: Rng) -> Art:
 
 def acc_santa(r: Rng) -> Art:
     a = Art()
-    a.put(dome(9.5, 5.2, 7.2, 3.4, 5) | strand([(13, 3), (16, 5), (17, 8)], [3, 3]), "b")
-    a.put(span(6, 2, 17) | span(7, 3, 16), "w")
+    a.put(std_dome(5) | strand([(13, 3), (16, 5), (17, 8)], [3, 3]), "b")
+    a.put(span(6, 1, 18) | span(7, 2, 17), "w")
     a.put(ellipse(17.2, 9.4, 1.6, 1.6), "w")
     return a
 
-
 def acc_beanie(r: Rng) -> Art:
     a = Art()
-    a.put(dome(9.5, 6.6, 7.4, 4.6, 5), "b")
-    a.put(span(6, 2, 17) | span(7, 3, 16), "l")
-    for x in range(3, 17, 2):
+    a.put(std_dome(5), "b")
+    a.put(span(6, 1, 18) | span(7, 2, 17), "l")
+    for x in range(2, 18, 2):
         a.put({(x, 6), (x, 7)}, "s")
-    a.put(ellipse(9.5, 1.8, 1.9, 1.5), "l")
+    a.put(ellipse(9.5, 1.7, 1.9, 1.4), "l")
     return a
-
 
 def acc_bucket(r: Rng) -> Art:
     a = Art()
-    a.put(dome(9.5, 6.0, 6.6, 3.6, 5), "b")
+    a.put(rows_spans({2: (6, 13), 3: (4, 15), 4: (3, 16), 5: (3, 16)}), "b")
     a.put(span(5, 3, 16), "s")
     a.put(span(6, 2, 17) | span(7, 1, 18) | span(8, 3, 16), "b")
     a.put(span(8, 3, 16), "s")
     return a
-
 
 def acc_cowboy(r: Rng) -> Art:
     a = Art()
@@ -1162,32 +1171,30 @@ def acc_chef(r: Rng) -> Art:
 
 def acc_knight(r: Rng) -> Art:
     a = Art()
-    a.put(dome(9.5, 7.0, 7.8, 5.0, 7), "b")
-    a.put(span(7, 2, 17), "s")
-    a.put({(9, y) for y in range(2, 6)} | {(10, y) for y in range(2, 6)}, "l")
-    a.put(box(9, 8, 10, 12), "b")  # 鼻甲
-    a.put(box(2, 8, 3, 10) | box(16, 8, 17, 10), "b")
-    return a
-
-
-def acc_hardhat(r: Rng) -> Art:
-    a = Art()
-    a.put(dome(9.5, 6.6, 7.4, 4.4, 6), "b")
-    a.put(span(7, 1, 18), "b")
+    a.put(std_dome(7), "b")
     a.put(span(7, 1, 18), "s")
     a.put({(9, y) for y in range(2, 6)} | {(10, y) for y in range(2, 6)}, "l")
+    a.put(box(9, 8, 10, 12), "b")  # 鼻甲
+    a.put(box(1, 8, 3, 10) | box(16, 8, 18, 10), "b")
     return a
 
+def acc_hardhat(r: Rng) -> Art:
+    """安全帽：圆顶 + 两道纵棱 + 前灯，帽檐只在前面一圈。"""
+    a = Art()
+    a.put(std_dome(6), "b")
+    a.put(span(7, 2, 17), "s")
+    a.put({(7, y) for y in range(3, 7)} | {(12, y) for y in range(3, 7)}, "l")
+    a.put({(9, 3), (10, 3), (9, 4), (10, 4)}, "w")
+    return a
 
 def acc_viking(r: Rng) -> Art:
     a = Art()
-    a.put(dome(9.5, 6.8, 7.4, 4.2, 6), "b")
-    a.put(span(6, 2, 17) | span(7, 3, 16), "l")
+    a.put(std_dome(6), "b")
+    a.put(span(6, 1, 18) | span(7, 2, 17), "l")
     horn = strand([(3, 5), (2, 3), (1, 1)], [2, 2])
     a.put(horn | mirror(horn), "w")
     a.put({(9, 3), (10, 3), (9, 4), (10, 4)}, "l")
     return a
-
 
 def acc_party(r: Rng) -> Art:
     a = Art()
@@ -1208,17 +1215,13 @@ def acc_beret(r: Rng) -> Art:
 
 def acc_straw(r: Rng) -> Art:
     a = Art()
-    a.put(dome(9.5, 6.0, 6.0, 3.2, 5), "b")
-    a.put(span(5, 4, 15), "s")
+    a.put(rows_spans({3: (6, 13), 4: (4, 15), 5: (3, 16)}), "b")
+    a.put(span(5, 3, 16), "l")
     a.put(span(6, 1, 18) | span(7, 1, 18) | span(8, 3, 16), "b")
     for x in range(2, 18, 3):
         a.put({(x, 6), (x + 1, 7)}, "l")
     a.put(span(8, 3, 16), "s")
     return a
-
-
-# --------------------------------------- 头带 / 发饰 ---------------------------------------
-
 
 def acc_headband(r: Rng) -> Art:
     a = Art()
@@ -1240,12 +1243,11 @@ def acc_ninja(r: Rng) -> Art:
 
 def acc_bandana(r: Rng) -> Art:
     a = Art()
-    a.put(dome(9.5, 6.4, 7.8, 4.4, 6) | span(7, 3, 16) | {(5, 8), (7, 8), (9, 8), (11, 8), (13, 8)}, "b")
-    for p in ((6, 4), (9, 3), (12, 4), (8, 6), (14, 6), (4, 6), (10, 5)):
+    a.put(std_dome(6) | span(7, 2, 17) | {(5, 8), (7, 8), (9, 8), (11, 8), (13, 8)}, "b")
+    for p in ((6, 4), (9, 3), (12, 4), (8, 6), (14, 6), (4, 5), (10, 5), (16, 5)):
         a.put({p}, "w")
-    a.put({(17, 7), (18, 8), (17, 9), (18, 9)}, "b")
+    a.put({(18, 7), (18, 8), (17, 9), (18, 9)}, "b")
     return a
-
 
 def acc_flowers(r: Rng) -> Art:
     a = Art()
@@ -1319,11 +1321,12 @@ def acc_antenna(r: Rng) -> Art:
 
 
 def acc_halo(r: Rng) -> Art:
+    """光环：亮边 + 暗芯的扁椭圆环，浮在头顶（压在发冠上方）。"""
     a = Art()
-    a.put(span(1, 6, 13) | span(2, 4, 15) | span(3, 6, 13), "l")
-    a.put(span(3, 6, 13), "b")
+    a.put(span(1, 6, 13) | span(2, 4, 15), "l")
+    a.put(span(2, 6, 13), "s")
+    a.put({(5, 2), (14, 2)}, "b")
     return a
-
 
 def acc_horns_devil(r: Rng) -> Art:
     a = Art()
@@ -1334,11 +1337,12 @@ def acc_horns_devil(r: Rng) -> Art:
 
 
 def acc_horns_ram(r: Rng) -> Art:
+    """羊角：从头顶两侧斜向外 → 向下卷成钩。"""
     a = Art()
-    ring_l = ellipse(3.0, 7.0, 3.0, 3.2) - ellipse(3.6, 7.0, 1.4, 1.5)
-    a.put(ring_l | mirror(ring_l), "b", back=True)
+    hook = strand([(6, 5), (5, 4), (4, 3), (3, 3), (2, 4), (2, 6), (3, 7), (4, 6)], [2, 2, 2, 2, 1, 1, 1])
+    a.put(hook | mirror(hook), "b")
+    a.put({(4, 3), (15, 3)}, "l")
     return a
-
 
 def acc_antlers(r: Rng) -> Art:
     a = Art()
@@ -1373,7 +1377,7 @@ def acc_unicorn(r: Rng) -> Art:
 
 def acc_wings(r: Rng) -> Art:
     a = Art()
-    wing = poly([(3.5, 9.5), (0.8, 5.0), (1.0, 12.5)]) | {(2, 6), (1, 7)}
+    wing = poly([(4.5, 10.5), (0.8, 4.0), (1.0, 13.5)]) | {(2, 5), (1, 6)}
     a.put(wing | mirror(wing), "w", back=True)
     return a
 
@@ -1501,28 +1505,22 @@ def acc_scarf(r: Rng) -> Art:
 
 def acc_bandage(r: Rng) -> Art:
     a = Art()
-    a.put(box(12, 13, 14, 14), "w")
-    a.put({(13, 13), (13, 14), (12, 13), (14, 14)}, "s")
+    a.put(box(9, 11, 10, 12), "w")
+    a.put({(9, 11), (10, 12)}, "s")
     return a
 
 
 def acc_freckles(r: Rng) -> Art:
     a = Art()
-    a.put({(5, 13), (7, 13), (6, 14), (12, 13), (14, 13), (13, 14), (6, 12)}, "m")
+    dots = {(5, 13), (7, 13), (6, 14)}
+    a.put(dots | mirror(dots), "m")
     return a
 
 
-def acc_face_paint(r: Rng) -> Art:
+def acc_sweat(r: Rng) -> Art:
     a = Art()
-    stripe = {(4, 12), (5, 13), (4, 13), (5, 14)}
-    a.put(stripe | mirror(stripe), "b")
-    return a
-
-
-def acc_scar(r: Rng) -> Art:
-    a = Art()
-    a.put({(4, 12), (5, 13), (6, 14)}, "m")
-    a.put({(5, 12), (5, 14)}, "w")
+    a.put({(16, 6), (16, 7), (15, 8), (16, 8)}, "l")
+    a.put({(16, 9)}, "b")
     return a
 
 
@@ -1596,8 +1594,6 @@ def accessory_recipes() -> list[tuple[str, Any, dict[str, Any]]]:
         ("scarf", acc_scarf, plain),
         ("bandage", acc_bandage, dict(outline=False)),
         ("freckles", acc_freckles, dict(outline=False, shade=False)),
-        ("face_paint", acc_face_paint, dict(outline=False, shade=False)),
-        ("scar", acc_scar, dict(outline=False, shade=False)),
         ("earrings", acc_earrings, plain),
         ("bowtie", acc_bowtie, plain),
     ]
@@ -1764,13 +1760,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def diagnose(parts: dict[str, Any], n: int, seed: int) -> None:
-    """随机 n 个（不过滤的）组合，统计每条规则的拒绝率，并列出“罪魁”素材。"""
+def diagnose(parts: dict[str, Any], n: int, seed: int, *, verbose: bool = True) -> dict[str, Any]:
+    """随机 n 个（不过滤的）组合，统计每条规则的拒绝率，并按“拒绝原因”列出最该背锅的素材（出现率远高于平均的）。"""
     ids = av.part_ids(parts)
     rng = Rng(f"diag/{seed}")
     reasons: Counter[str] = Counter()
-    blame: dict[str, Counter[str]] = {f: Counter() for f in av.FIELDS}
-    seen: dict[str, Counter[str]] = {f: Counter() for f in av.FIELDS}
+    by_reason: dict[str, Counter[tuple[str, str]]] = {}
+    seen: Counter[tuple[str, str]] = Counter()
     rejected = 0
     for _ in range(n):
         desc: dict[str, Any] = {"v": 1}
@@ -1779,20 +1775,29 @@ def diagnose(parts: dict[str, Any], n: int, seed: int) -> None:
             desc[f] = opts[rng.randrange(len(opts))]
         bad = check_description(parts, desc)
         for f in av.FIELDS:
-            seen[f][desc[f]] += 1
+            seen[(f, desc[f])] += 1
         if bad:
             rejected += 1
-            for r in bad:
-                reasons[r] += 1
-            for f in ("face", "hair", "eyes", "mouth", "accessory"):
-                blame[f][desc[f]] += 1
-    print(f"随机 {n} 个组合：被质量过滤拒绝 {rejected}（{rejected * 100.0 / n:.1f}%）")
-    for r, c in reasons.most_common():
-        print(f"  {r:18s} {c:6d}  {c * 100.0 / n:5.1f}%  {av.REASONS.get(r, '')}")
-    for f in ("face", "hair", "eyes", "mouth", "accessory"):
-        rates = sorted(((blame[f][i] / max(1, seen[f][i]), i) for i in ids[f]), reverse=True)
-        top = "，".join(f"{i}:{r * 100:.0f}%" for r, i in rates[:8])
-        print(f"  最易被拒的{f}：{top}")
+        for r in bad:
+            reasons[r] += 1
+            by_reason.setdefault(r, Counter())
+            for f in av.FIELDS:
+                by_reason[r][(f, desc[f])] += 1
+    summary = {"n": n, "rejected": rejected, "rate": rejected / n, "reasons": dict(reasons)}
+    if verbose:
+        print(f"随机 {n} 个组合：被质量过滤拒绝 {rejected}（{rejected * 100.0 / n:.1f}%）")
+        for r, c in reasons.most_common():
+            print(f"  {r:18s} {c:6d}  {c * 100.0 / n:5.1f}%  {av.REASONS.get(r, '')}")
+            base = c / n
+            offenders = []
+            for (f, v), k in by_reason[r].items():
+                rate = k / max(1, seen[(f, v)])
+                if rate >= max(0.25, 2.0 * base) and seen[(f, v)] >= 5:
+                    offenders.append((rate, f, v))
+            offenders.sort(reverse=True)
+            if offenders:
+                print("      罪魁：" + "，".join(f"{f}:{v}={rate * 100:.0f}%" for rate, f, v in offenders[:9]))
+    return summary
 
 
 if __name__ == "__main__":

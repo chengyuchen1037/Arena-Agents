@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import colorsys
 import hashlib
 import json
 import random
@@ -254,12 +255,12 @@ def validate_description(desc: Any, parts: dict[str, Any] | None = None) -> dict
     extra = sorted(str(k) for k in desc if k != "v" and k not in FIELDS)
     if extra:
         raise ValueError(f"头像描述含有不允许的键：{'、'.join(extra)}（只能有 v 和 {'、'.join(FIELDS)}）")
-    version = desc.get("v")
-    if isinstance(version, bool) or version != DESC_VERSION:
-        raise ValueError(f"头像描述的版本 v 必须是 {DESC_VERSION}，收到 {version!r}")
-    missing = [k for k in FIELDS if k not in desc]
+    missing = [k for k in ("v", *FIELDS) if k not in desc]
     if missing:
         raise ValueError(f"头像描述缺少键：{'、'.join(missing)}")
+    version = desc["v"]
+    if isinstance(version, bool) or version != DESC_VERSION:
+        raise ValueError(f"头像描述的版本 v 必须是 {DESC_VERSION}，收到 {version!r}")
     parts = parts if parts is not None else load_parts()
     ids = part_ids(parts)
     out: dict[str, Any] = {"v": DESC_VERSION}
@@ -403,20 +404,24 @@ def description_hash(desc: dict[str, Any], parts: dict[str, Any] | None = None) 
 # ----------------------------------------------------------------------------------------------------------------
 
 #: 过滤规则的阈值（经 tools/avatar_lab.py --diag 在样本上校准）
-HAIR_SKIN_MIN_DIST = 58.0  # 发色与肤色的 RGB 距离下限
-EYE_COVER_MAX = 0.30  # 眼睛像素被头发 / 配饰前景遮住的比例上限
+HAIR_SKIN_MIN_DIST = 56.0  # 发色与肤色的 RGB 距离下限
+EYE_COVER_MAX = 0.30  # 眼睛本体（第 10-12 行）被头发 / 配饰前景遮住的比例上限
 MOUTH_COVER_MAX = 0.34
-FACE_VISIBLE_MIN = 0.36  # 可见肤色像素 / 脸部填充像素
-FACE_VISIBLE_MIN_PX = 34
+FACE_VISIBLE_MIN = 0.34  # 可见的脸（肤色 + 眼 + 嘴 + 腮红）/ 脸部填充像素
+FACE_VISIBLE_MIN_COVERING = 0.20  # 眼镜 / 口罩 / 胡子这类“有意遮脸”的配饰：放宽
+FACE_VISIBLE_MIN_PX = 30
 LEAK_MAX = 0  # 轮廓漏口（不透明非描边像素的上下左右有透明像素）的上限
 HOLE_MAX = 0  # 被不透明像素围住的透明空洞的上限
 LUMA_MIN = 64.0  # 整体亮度（可见非描边像素的平均亮度）范围
 LUMA_MAX = 222.0
-HAIR_OVER_HAT_MAX = 1  # 头发穿出帽子上沿的像素数上限
-ACCESSORY_VISIBLE_MIN = 0.5  # 配饰可见像素比例下限
+HAIR_OVER_HAT_MAX = 1  # 头发高过帽子最高一行的像素数上限（“穿出来”）
+HAIR_FLANK_MAX = 16  # 帽子两侧露出的头发（比帽子同列的最高像素更高、但没有高过帽顶）的像素数上限
+BACK_VISIBLE_MIN = 0.30  # back 层配饰（光环、翅膀……）可见像素比例下限
 ACCESSORY_BLEND_DIST = 46.0  # 配饰与被它盖住的底色（头发 / 肤色）的最小 RGB 距离
 EYE_CONTRAST_MIN = 46.0  # 肤色亮度 - 瞳孔亮度
-#: 眼睛所在的行带 / 嘴所在的行带（所有脸型共用同一套眼口位置）；用来判断配饰是不是“有意盖住”眼睛 / 嘴的那种
+#: 所有脸型共用同一套眼口位置：眼睛本体在第 10..12 行，嘴在第 13..15 行
+EYE_ROWS = (10, 12)
+#: 判断配饰是不是“有意盖住”眼睛 / 嘴的那种（眼镜、口罩……）用的行带
 EYE_BAND = (9, 13)
 MOUTH_BAND = (13, 17)
 
@@ -451,6 +456,9 @@ def _dist(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
 FACE_COLS = (4, 15)
 #: 头顶行（y <= CROWN_ROW 的像素算“盖在头顶的东西”：帽子、冠、耳朵；头带 / 护目镜在额头，不算）
 CROWN_ROW = 4
+#: 帽子是否“盖住了头顶的头发”：头发前景在 y <= CROWN_COVER_ROW 的像素里被配饰盖住的比例 >= CROWN_COVER_MIN
+CROWN_COVER_ROW = 6
+CROWN_COVER_MIN = 0.45
 
 
 def _acc_kind(front: tuple[tuple[int, int, str], ...]) -> dict[str, int]:
@@ -468,45 +476,45 @@ def analyze_description(parts: dict[str, Any], desc: dict[str, Any]) -> dict[str
     pal = parts["palettes"]
     skin = _palette(pal["skin"][desc["skin"]]) or {}
     hair = _palette(pal["hair_color"][desc["hair_color"]]) or {}
-    acc_pal = _palette(pal["accessory_color"].get(desc["accessory_color"])) if desc["accessory"] not in ("none", NO_ACCESSORY) else None
+    has_acc = desc["accessory"] not in ("none", NO_ACCESSORY)
+    acc_pal = _palette(pal["accessory_color"].get(desc["accessory_color"])) if has_acc else None
     out: dict[str, Any] = {"dist_hair_skin": _dist(hair["b"], skin["b"]) if desc["hair"] != NO_HAIR else 999.0}
 
-    grid_of = [layer[0] for layer in layers]
-    sp = [(_sparse(g) if g is not None else ()) for g in grid_of]
-    eyes_px = [(x, y) for x, y, _c in sp[_L_EYES]]
+    sp = [(_sparse(layer[0]) if layer[0] is not None else ()) for layer in layers]
+    eyes_all = [(x, y) for x, y, _c in sp[_L_EYES]]
+    eyes_core = [(x, y) for x, y in eyes_all if EYE_ROWS[0] <= y <= EYE_ROWS[1]]
     mouth_px = [(x, y) for x, y, _c in sp[_L_MOUTH]]
     face_fill = {(x, y) for x, y, c in sp[_L_FACE] if c in "bsl"}
     face_all = {(x, y) for x, y, _c in sp[_L_FACE]}
+    hair_front = {(x, y) for x, y, _c in sp[_L_HAIR_FRONT]}
 
-    kind = _acc_kind(sp[_L_ACC_FRONT]) if sp[_L_ACC_FRONT] else {"top": 0, "eyes": 0, "low": 0, "all": 0}
+    kind = _acc_kind(sp[_L_ACC_FRONT])
     eyewear = kind["eyes"] >= 6
     mouthwear = kind["low"] >= 6
     headwear = kind["top"] >= 10 and not eyewear
+    out["eyewear"], out["mouthwear"], out["headwear"] = eyewear, mouthwear, headwear
 
     def covered(points: list[tuple[int, int]], by_acc: bool) -> float:
         if not points:
             return 0.0
-        layers_ = (_L_HAIR_FRONT, _L_ACC_FRONT) if by_acc else (_L_HAIR_FRONT,)
-        n = sum(1 for x, y in points if src[y * SIZE + x] in layers_)
-        return n / len(points)
+        covering = (_L_HAIR_FRONT, _L_ACC_FRONT) if by_acc else (_L_HAIR_FRONT,)
+        return sum(1 for x, y in points if src[y * SIZE + x] in covering) / len(points)
 
-    out["eyes_cover_hair"] = covered(eyes_px, False)
-    out["eyes_cover_all"] = covered(eyes_px, True)
+    out["eyes_cover_hair"] = covered(eyes_core, False)
+    out["eyes_cover_all"] = covered(eyes_core, True)
     out["mouth_cover_hair"] = covered(mouth_px, False)
     out["mouth_cover_all"] = covered(mouth_px, True)
-    out["eyewear"], out["mouthwear"], out["headwear"] = eyewear, mouthwear, headwear
-    out["eyes_off"] = sum(1 for p in eyes_px if p not in face_fill)
+    out["eyes_off"] = sum(1 for p in eyes_all if p not in face_fill)
     out["mouth_off"] = sum(1 for p in mouth_px if p not in face_fill)
 
-    visible_skin = sum(1 for i in range(SIZE * SIZE) if src[i] == _L_FACE and chars[i] in "bsl")
-    out["face_visible"] = visible_skin
-    out["face_visible_ratio"] = visible_skin / max(1, len(face_fill))
+    shown = sum(1 for i in range(SIZE * SIZE) if src[i] in (_L_FACE, _L_EYES, _L_MOUTH) and chars[i] != "o")
+    out["face_visible"] = shown
+    out["face_visible_ratio"] = shown / max(1, len(face_fill))
 
     # 轮廓：漏口（有色非描边像素的 4 邻有透明或出界）与空洞（被围住的透明区）
     leaks = 0
     for i in range(SIZE * SIZE):
-        ch = chars[i]
-        if ch in ".o":
+        if chars[i] in ".o":
             continue
         x, y = i % SIZE, i // SIZE
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -531,42 +539,49 @@ def analyze_description(parts: dict[str, Any], desc: dict[str, Any]) -> dict[str
 
     # 亮度：可见的非描边像素的平均亮度
     total, count = 0.0, 0
+    palette_of = {_L_FACE: skin, _L_EYES: skin, _L_MOUTH: skin, _L_HAIR_BACK: hair, _L_HAIR_FRONT: hair, _L_ACC_BACK: acc_pal, _L_ACC_FRONT: acc_pal}
     for i in range(SIZE * SIZE):
         ch = chars[i]
-        if ch == ".":
+        if ch in ".o":
             continue
-        rgb = fixed.get(_FIXED_CHARS.get(ch, "")) if ch not in "bsl" else (_pal_of(i, src, skin, hair, acc_pal) or {}).get(ch)
-        if ch == "o" or rgb is None:
-            continue
-        total += _luma(rgb)
-        count += 1
+        rgb = (palette_of.get(src[i]) or {}).get(ch) if ch in "bsl" else fixed.get(_FIXED_CHARS.get(ch, ""))
+        if rgb is not None:
+            total += _luma(rgb)
+            count += 1
     out["luma"] = total / count if count else 0.0
 
-    # 头发穿出帽子上沿：同一列里，配饰前景的最高像素之上还有头发前景像素
-    over = 0
-    if headwear and sp[_L_HAIR_FRONT]:
+    # 头发与帽子：高过帽子最高一行的头发是“穿出来”；帽子确实盖住了头顶大部分头发时（帽子，不是头上的小装饰），
+    # 帽子同列最高像素之上、帽顶之下露出来的头发算“两侧露发”
+    over = flank = 0
+    if headwear and hair_front:
         top_of: dict[int, int] = {}
         for x, y, _c in sp[_L_ACC_FRONT]:
             if x not in top_of or y < top_of[x]:
                 top_of[x] = y
-        for x, y, _c in sp[_L_HAIR_FRONT]:
-            if x in top_of and y < top_of[x] and src[y * SIZE + x] == _L_HAIR_FRONT:
+        hat_top = min(top_of.values())
+        x_lo, x_hi = min(top_of), max(top_of)
+        crown = [(x, y) for x, y in hair_front if y <= CROWN_COVER_ROW]
+        covers = bool(crown) and sum(1 for x, y in crown if src[y * SIZE + x] == _L_ACC_FRONT) >= CROWN_COVER_MIN * len(crown)
+        for x, y in hair_front:
+            if src[y * SIZE + x] != _L_HAIR_FRONT:
+                continue
+            if not covers:
+                continue
+            if x_lo <= x <= x_hi and y < hat_top:
                 over += 1
-    out["hair_over_hat"] = over
+            elif x in top_of and y < top_of[x]:
+                flank += 1
+    out["hair_over_hat"], out["hair_flank"] = over, flank
 
-    # 配饰可见比例
-    acc_total = len(sp[_L_ACC_BACK]) + len(sp[_L_ACC_FRONT])
-    if acc_total:
-        acc_vis = sum(1 for i in range(SIZE * SIZE) if src[i] in (_L_ACC_BACK, _L_ACC_FRONT))
-        out["accessory_visible"] = acc_vis / acc_total
-    else:
-        out["accessory_visible"] = 1.0
+    # back 层配饰（光环、翅膀……）有多少看得见
+    back_total = len(sp[_L_ACC_BACK])
+    out["back_visible"] = (sum(1 for i in range(SIZE * SIZE) if src[i] == _L_ACC_BACK) / back_total) if back_total else 1.0
 
     # 配饰与底色太接近：配饰 b 像素压在头发 / 肤色上时，颜色要有足够差别
     blend = False
     if acc_pal is not None:
-        on_hair = sum(1 for x, y, c in sp[_L_ACC_FRONT] if c == "b" and (x, y) in _hair_front_set(sp))
-        on_skin = sum(1 for x, y, c in sp[_L_ACC_FRONT] if c == "b" and (x, y) in face_all and (x, y) not in _hair_front_set(sp))
+        on_hair = sum(1 for x, y, c in sp[_L_ACC_FRONT] if c == "b" and (x, y) in hair_front)
+        on_skin = sum(1 for x, y, c in sp[_L_ACC_FRONT] if c == "b" and (x, y) in face_all and (x, y) not in hair_front)
         if on_hair >= 8 and desc["hair"] != NO_HAIR and _dist(acc_pal["b"], hair["b"]) < ACCESSORY_BLEND_DIST:
             blend = True
         if on_skin >= 8 and _dist(acc_pal["b"], skin["b"]) < ACCESSORY_BLEND_DIST:
@@ -576,19 +591,6 @@ def analyze_description(parts: dict[str, Any], desc: dict[str, Any]) -> dict[str
     pupil = fixed.get("pupil") or (0, 0, 0)
     out["eye_contrast"] = _luma(skin["b"]) - _luma(pupil)
     return out
-
-
-def _hair_front_set(sp: list) -> set[tuple[int, int]]:
-    return {(x, y) for x, y, _c in sp[_L_HAIR_FRONT]}
-
-
-def _pal_of(index: int, src: list[int], skin: dict, hair: dict, acc: dict | None) -> dict | None:
-    layer = src[index]
-    if layer in (_L_FACE, _L_EYES, _L_MOUTH):
-        return skin
-    if layer in (_L_HAIR_BACK, _L_HAIR_FRONT):
-        return hair
-    return acc
 
 
 def check_description(parts: dict[str, Any], desc: dict[str, Any]) -> list[str]:
@@ -605,7 +607,8 @@ def check_description(parts: dict[str, Any], desc: dict[str, Any]) -> list[str]:
         bad.append("eyes_off_face")
     if m["mouth_off"]:
         bad.append("mouth_off_face")
-    if m["face_visible"] < FACE_VISIBLE_MIN_PX or m["face_visible_ratio"] < FACE_VISIBLE_MIN:
+    need = FACE_VISIBLE_MIN_COVERING if (m["eyewear"] or m["mouthwear"]) else FACE_VISIBLE_MIN
+    if m["face_visible"] < FACE_VISIBLE_MIN_PX or m["face_visible_ratio"] < need:
         bad.append("face_hidden")
     if m["leaks"] > LEAK_MAX:
         bad.append("silhouette_leak")
@@ -615,9 +618,9 @@ def check_description(parts: dict[str, Any], desc: dict[str, Any]) -> list[str]:
         bad.append("too_dark")
     if m["luma"] > LUMA_MAX:
         bad.append("too_bright")
-    if m["hair_over_hat"] > HAIR_OVER_HAT_MAX:
+    if m["hair_over_hat"] > HAIR_OVER_HAT_MAX or m["hair_flank"] > HAIR_FLANK_MAX:
         bad.append("hair_over_hat")
-    if m["accessory_visible"] < ACCESSORY_VISIBLE_MIN:
+    if m["back_visible"] < BACK_VISIBLE_MIN:
         bad.append("accessory_hidden")
     if m["accessory_blends"]:
         bad.append("accessory_blends")
@@ -632,6 +635,8 @@ def check_description(parts: dict[str, Any], desc: dict[str, Any]) -> list[str]:
 
 #: 随机挑配饰时“无配饰”的概率（其余配饰均匀）
 NO_ACCESSORY_PROB = 0.22
+#: 奇幻肤色（灰 / 绿 / 蓝 / 紫……）相对天然肤色的抽中权重（天然 = 1）
+FANTASY_SKIN_WEIGHT = 0.3
 MIN_DIFFERENT_FIELDS = 3  # 名册里任意两个头像至少有几项不同
 
 
@@ -677,14 +682,32 @@ def _spread(parts: dict[str, Any], cand: dict[str, Any], others: Sequence[dict[s
     return best
 
 
+def _skin_weight(rgb: tuple[int, int, int]) -> float:
+    """天然肤色（色相 0–44°、饱和度不太高、不太暗）权重 1，其余（奇幻色）``FANTASY_SKIN_WEIGHT``。"""
+    h, s, v = colorsys.rgb_to_hsv(rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0)
+    hue = h * 360.0
+    natural = hue <= 44.0 and s <= 0.70 and v >= 0.5 and not (s > 0.5 and hue < 12.0)
+    return 1.0 if natural else FANTASY_SKIN_WEIGHT
+
+
 def random_description(parts: dict[str, Any], rng: Any, *, max_tries: int = 600) -> dict[str, Any]:
     """随机挑一项各类素材，经质量过滤后返回；``rng`` 是 ``random.Random`` 或同样有 ``random()`` / ``randrange()`` 的对象。"""
     ids = part_ids(parts)
+    skin_weights = [_skin_weight(_color(parts, "skin", sid)) for sid in ids["skin"]]
+    skin_total = sum(skin_weights)
     for _ in range(max_tries):
         desc: dict[str, Any] = {"v": DESC_VERSION}
         for field in FIELDS:
             options = ids[field]
-            if field == "accessory" and NO_ACCESSORY in options:
+            if field == "skin":
+                pick, acc = rng.random() * skin_total, 0.0
+                desc[field] = options[-1]
+                for sid, w in zip(options, skin_weights):
+                    acc += w
+                    if pick < acc:
+                        desc[field] = sid
+                        break
+            elif field == "accessory" and NO_ACCESSORY in options:
                 rest = [o for o in options if o != NO_ACCESSORY]
                 desc[field] = NO_ACCESSORY if (rng.random() < NO_ACCESSORY_PROB or not rest) else rest[rng.randrange(len(rest))]
             else:
