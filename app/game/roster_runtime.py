@@ -40,8 +40,9 @@ from app.world.types import MODERATOR_ID, UiEvent
 logger = logging.getLogger(__name__)
 
 BUDGET_PUSH_INTERVAL_S = 1.0
-REFINE_MAX_TOKENS = 2000
-REVIEW_MAX_TOKENS = 2000
+# Reasoning models count their thinking against the limit: leave room for it (the text itself is a few hundred tokens).
+REFINE_MAX_TOKENS = 6000
+REVIEW_MAX_TOKENS = 6000
 REVIEW_TIMEOUT_S = 180.0
 
 

@@ -64,6 +64,15 @@ def parse_args() -> argparse.Namespace:
         help="download the LiteLLM price table and price the bound models with it (in the scratch copy only), so the "
         "report shows what the provider really bills; also a live test of the price-source feature",
     )
+    parser.add_argument(
+        "--oneshots",
+        type=int,
+        default=0,
+        metavar="N",
+        help="after the game: also try the two calls outside the game loop with the real models - the moderator's "
+        "\"complete it\" (persona + memory drafts) and the post-game review of the first N players (the paused game is "
+        "treated as finished, so the reviews read what was really played)",
+    )
     parser.add_argument("--keep", action="store_true", help="keep the scratch directory (it holds an encrypted copy of the providers)")
     return parser.parse_args()
 
@@ -187,6 +196,8 @@ async def main() -> int:
                 break
         await asyncio.sleep(0.5)
         report(orch, calls, time.monotonic() - started)
+        if args.oneshots > 0:
+            await exercise_oneshots(orch, args.oneshots)
         return 0
     finally:
         try:
@@ -198,6 +209,32 @@ async def main() -> int:
             print("scratch kept at", scratch)
         else:
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+async def exercise_oneshots(orch, count: int) -> None:
+    """Real-model check of the calls outside the game loop: "complete it" and the post-game review."""
+    print("\n=== one-shot calls (refine / review) ===")
+    for agent_id, kind, notes in (("N1", "persona", "爱说冷笑话，遇事不慌"), ("N2", "memory", "上局被 N5 骗过；常因为太早跳身份被刀")):
+        try:
+            draft = await orch.refine_text(agent_id, kind, notes)
+            print(f"refine {kind:7s} of {agent_id}: {len(draft)} chars: {draft[:260]!r}")
+        except Exception as exc:  # noqa: BLE001 - this is a probe: report, go on
+            print(f"refine {kind} of {agent_id} FAILED: {type(exc).__name__}: {exc}")
+    # pretend the paused game has ended: the reviews read the real history of what was played
+    orch.session.status = "finished"
+    orch.world.state.status = "finished"
+    orch.world.state.winner = "好人阵营"
+    ids = [p.id for p in orch.session.participants][:count]
+    started = await orch.start_review(ids)
+    deadline = time.monotonic() + 300
+    while orch._review_running and time.monotonic() < deadline:
+        await asyncio.sleep(1.0)
+    print(f"review started for {started}; done: {sorted(orch.session.review_done)}")
+    for agent_id in started:
+        memory = orch._roster().entry(agent_id)["memory"]
+        print(f"--- {agent_id} memory ({len(memory)} chars) ---\n{memory[:900]}")
+    usage = orch.usage.actor("roster")
+    print(f"one-shot refine calls: {usage.calls}, tokens {usage.prompt_tokens}+{usage.cache_read_tokens}+{usage.completion_tokens}")
 
 
 async def apply_price_source(orch) -> None:
