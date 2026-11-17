@@ -4296,13 +4296,15 @@ html[data-layout="phone"] .brand-group {
 }
 
 html[data-layout="phone"] .brand-title {
-  overflow: hidden;
+  flex: none;
   font-size: 17px;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* the title never shrinks; the version badge gives way (ellipsis) on a 360 px screen */
 html[data-layout="phone"] .version-badge {
+  flex: 0 1 auto;
+  min-width: 0;
   max-width: 124px;
   overflow: hidden;
   font-size: 11px;
@@ -4371,7 +4373,14 @@ html[data-layout="phone"] .topbar-status > .usage-telemetry-pill {
 }
 
 html[data-layout="phone"] .mod-chip {
-  padding-right: 8px;
+  min-width: 48px;
+  min-height: 40px;
+  justify-content: center;
+  padding: 2px 8px 2px 6px;
+}
+
+html[data-layout="phone"] .mod-chip .avatar-img {
+  --av: 20px;
 }
 
 html[data-layout="phone"] .mod-chip-name {

@@ -147,9 +147,9 @@ async def refine(agent_id: str, req: RefineRequest) -> dict[str, Any]:
     """Expand the user's notes with the moderator's model.  Returns a draft; nothing is saved."""
     try:
         return {"draft": await orchestrator.refine_text(agent_id, req.kind, req.text)}
-    except (RosterError, StorageError, RuntimeError) as exc:
+    except (RosterError, StorageError) as exc:  # our own refusals; anything else comes from the model call
         raise _fail(exc) from exc
-    except Exception as exc:  # noqa: BLE001 - provider / network problems of the model call
+    except Exception as exc:  # noqa: BLE001 - provider / network problems of the model call: never echoed
         logger.warning("Refine failed: %s", type(exc).__name__)
         raise HTTPException(status_code=502, detail="调用主持人模型失败，请检查模型绑定和网络后重试。") from exc
 
