@@ -4,13 +4,17 @@
 用算法**程序化生成**全部素材（脸型、肤色、发型、发色、眼睛、嘴、配饰、配饰颜色），写出 ``static/avatar/parts.json``；
 头像 = 从各类素材里随机挑一项组合。生成是确定性的：固定种子，重跑得到逐字节相同的文件。
 
-用法（项目 venv 即可，纯标准库）::
+用法（项目 venv 即可，纯标准库，没有 Pillow 也能出样张）::
 
-    python tools/avatar_lab.py                      # 重新生成 static/avatar/parts.json
-    python tools/avatar_lab.py --check              # 只检查仓库里的 parts.json 与生成结果是否逐字节相同
-    python tools/avatar_lab.py --sheet 120 --out .demo-data/shots/avatar-sheet.png [--seed 7] [--cols 12]
+    python tools/avatar_lab.py                      # 重新生成 static/avatar/parts.json（不带任何动作参数时才写文件）
+    python tools/avatar_lab.py --check              # 只检查仓库里的 parts.json 与生成结果是否逐字节相同（退出码 0 / 1）
+    python tools/avatar_lab.py --sheet 120 --out .demo-data/shots/avatar-sheet.png [--seed 7] [--cols 12] [--scale 6]
+    python tools/avatar_lab.py --sheet 12  --out .demo-data/shots/avatar-sheet12.png   # N<=12：按“一桌名册”挑（两两至少 3 项不同）
     python tools/avatar_lab.py --gallery .demo-data/shots/gallery      # 每类素材一张总览图（调试素材用）
     python tools/avatar_lab.py --diag 3000          # 随机 3000 个组合，统计各条质量规则的拒绝率与“罪魁”素材
+    python tools/avatar_lab.py --rejects 60         # 被质量过滤拒绝的 60 个组合：样张 + 拒绝原因（查误杀 / 漏网）
+
+--sheet / --gallery / --diag / --rejects 默认只在内存里生成素材，不改仓库里的 parts.json；要同时写文件加 --write。
 
 素材的画法（全部是“带参数的形状函数 + 随机扰动 + 左右对称 + 自动描边 / 明暗着色”）：
 
@@ -172,7 +176,7 @@ FIXED = {
     "blush": "#ff8fa3",
     "eye_white": "#ffffff",
     "pupil": "#24243e",
-    "mouth": "#8a2b3b",
+    "mouth": "#a8283f",
     "tooth": "#ffffff",
 }
 
@@ -203,10 +207,6 @@ def mirror(s: Iterable[Pt]) -> PxSet:
 def sym(s: Iterable[Pt]) -> PxSet:
     s = set(s)
     return s | mirror(s)
-
-
-def shift(s: Iterable[Pt], dx: int, dy: int) -> PxSet:
-    return {(x + dx, y + dy) for x, y in s}
 
 
 def clip(s: Iterable[Pt]) -> PxSet:
@@ -288,20 +288,6 @@ def rows_of(px: PxMap) -> list[str]:
     return ["".join(r) for r in grid]
 
 
-def from_cols(cols: dict[int, tuple[int, int] | list[tuple[int, int]]], *, mirrored: bool = True) -> PxSet:
-    """列区间剖面 -> 像素集合：``cols[x] = (y0, y1)`` 或 ``[(y0, y1), …]``（含两端）；mirrored 时按 x -> 19 - x 镜像。"""
-    out: PxSet = set()
-    for x, spans in cols.items():
-        if isinstance(spans, tuple):
-            spans = [spans]
-        for y0, y1 in spans:
-            for y in range(y0, y1 + 1):
-                out.add((x, y))
-                if mirrored:
-                    out.add((mx(x), y))
-    return clip(out)
-
-
 # ---------------------------------------------------------------------------------------------------------------
 # 脸型：行宽度剖面（圆顶 + 下颌曲线），左右对称；眼口位置对所有脸型相同
 # ---------------------------------------------------------------------------------------------------------------
@@ -378,7 +364,7 @@ FACE_SPECS: list[tuple[str, dict[str, Any]]] = [
     ("square", dict(top=5, bot=16, cmax=6, ctop=5, cbot=5, ywide=8, jaw="square")),
     ("narrow", dict(top=5, bot=16, cmax=5, ctop=3, cbot=3, ywide=9)),
     ("chubby", dict(top=6, bot=16, cmax=8, ctop=5, cbot=4, ywide=11)),
-    ("pointed", dict(top=5, bot=17, cmax=6, ctop=3, cbot=1, ywide=12, jaw="linear")),
+    ("pointed", dict(top=5, bot=17, cmax=6, ctop=3, cbot=2, ywide=11, jaw="linear")),
     ("trapezoid", dict(top=5, bot=16, cmax=6, ctop=4, cbot=5, ywide=15, dome="linear", jaw="square")),
     ("heart", dict(top=5, bot=17, cmax=6, ctop=4, cbot=2, ywide=9, jaw="soft")),
     ("small", dict(top=6, bot=16, cmax=5, ctop=3, cbot=3, ywide=10)),
@@ -543,9 +529,9 @@ MOUTH_SPECS: list[dict[str, Any]] = [
     dict(name="smirk_l", rows=["m...", ".mmm"], dy=0),
     dict(name="fangs", rows=["m..m", "tmmt"], dy=0),
     dict(name="clench", rows=["mttm"], dy=0),
-    dict(name="wavy", rows=["m.m.m.", ".m.m.m"], dy=0),
+    dict(name="grin_teeth", rows=["m....m", ".mttm."], dy=0),
     dict(name="kiss", rows=["xx"], dy=0),
-    dict(name="cat", rows=["m.m.m.", ".m.m.m"], dy=0),
+    dict(name="cat", rows=["mm..mm", ".mmmm."], dy=0),
 ]
 
 
@@ -846,17 +832,6 @@ def _cap(rng: Rng, **kw: Any) -> PxSet:
     return hair_cap(rng, **kw)
 
 
-def _back_curtain(rows: tuple[int, int], x_out: int, bottoms: dict[int, int]) -> PxSet:
-    """脑后的长发：x = x_out..9 的整块（左半，镜像），第 ``rows[0]`` 行起；``bottoms`` 给出外侧几列的垂到行。"""
-    out: PxSet = set()
-    for x in range(x_out, 10):
-        y1 = bottoms.get(x, rows[1])
-        for y in range(rows[0], y1 + 1):
-            out.add((x, y))
-            out.add((mx(x), y))
-    return out
-
-
 def _back_profile(first_row: int, bottoms: list[int], x_start: int = 1) -> PxSet:
     """脑后的头发：列 x_start.. 起各自垂到 bottoms[i] 行（左半，镜像），从 first_row 行开始；越往中间越短（被脸挡住）。"""
     out: PxSet = set()
@@ -1054,11 +1029,6 @@ def rows_spans(spec: dict[int, tuple[int, int]]) -> PxSet:
     for y, (x0, x1) in spec.items():
         out |= span(y, x0, x1)
     return out
-
-
-def with_brim(spec: dict[int, tuple[int, int]], brim_y: int, wide: int = 1) -> PxSet:
-    """帽檐：第 brim_y 行最宽（x = wide..19-wide），下一行收窄 1 格。"""
-    return span(brim_y, wide, W - 1 - wide) | span(brim_y + 1, wide + 1, W - 2 - wide)
 
 
 # --------------------------------------- 帽子 ---------------------------------------
@@ -1376,14 +1346,15 @@ def acc_unicorn(r: Rng) -> Art:
 
 
 def acc_wings(r: Rng) -> Art:
+    """小翅膀：从头顶两侧的后方探出来的一对羽翼（back 层，被头发和脸挡住大半，只露出外沿与上沿；用配饰色板着色）。"""
     a = Art()
-    wing = poly([(4.5, 10.5), (0.8, 4.0), (1.0, 13.5)]) | {(2, 5), (1, 6)}
-    a.put(wing | mirror(wing), "w", back=True)
+    wing = poly([(6.0, 9.5), (3.5, 3.0), (1.2, 0.5), (1.2, 5.0), (1.2, 9.5), (3.5, 12.5)])
+    a.put(wing | mirror(wing), "b", back=True)
+    top = {(1, 1), (2, 1), (2, 2), (3, 3)}
+    a.put(top | mirror(top), "l", back=True)
+    feather = {(2, 4), (2, 7), (2, 10)}
+    a.put(feather | mirror(feather), "s", back=True)
     return a
-
-
-# --------------------------------------- 眼镜 / 眼罩 ---------------------------------------
-
 
 def _lens_frame(x0: int) -> tuple[PxSet, PxSet]:
     """左镜片：外框 x0..x0+5、y 9..13（四角去掉），内部 4×3 留空。"""
@@ -1517,10 +1488,62 @@ def acc_freckles(r: Rng) -> Art:
     return a
 
 
-def acc_sweat(r: Rng) -> Art:
+def acc_beak(r: Rng) -> Art:
+    """鸟喙 / 鸭嘴：盖住嘴的位置的扁喙（上喙亮、下喙暗），两个鼻孔。"""
     a = Art()
-    a.put({(16, 6), (16, 7), (15, 8), (16, 8)}, "l")
-    a.put({(16, 9)}, "b")
+    a.put(box(7, 13, 12, 14), "b")
+    a.put(span(14, 6, 13), "b")
+    a.put(span(15, 7, 12), "s")
+    a.put({(8, 13), (11, 13)}, "p")
+    a.put({(7, 13), (8, 14)}, "l")
+    return a
+
+
+def acc_sprout(r: Rng) -> Art:
+    """头顶冒出的一对嫩叶。"""
+    a = Art()
+    a.put(ellipse(7.2, 2.4, 2.3, 1.4) | ellipse(12.8, 2.4, 2.3, 1.4), "b")
+    a.put({(6, 2), (7, 2)}, "l")
+    a.put(box(9, 3, 10, 5), "s")
+    return a
+
+
+def acc_gem(r: Rng) -> Art:
+    """额头上的宝石（红点 / 印堂）。"""
+    a = Art()
+    a.put({(9, 6), (10, 6), (9, 7), (10, 7)}, "b")
+    a.put({(9, 6)}, "l")
+    return a
+
+
+def acc_officer(r: Rng) -> Art:
+    """大盖帽：平顶帽身 + 帽檐 + 帽徽。"""
+    a = Art()
+    a.put(rows_spans({2: (3, 16), 3: (2, 17), 4: (2, 17), 5: (2, 17)}), "b")
+    a.put(span(5, 2, 17), "s")
+    a.put(span(6, 3, 16) | span(7, 4, 15), "s")
+    a.put(span(6, 4, 15), "l")
+    a.put({(9, 3), (10, 3), (9, 4), (10, 4)}, "w")
+    return a
+
+
+def acc_headset(r: Rng) -> Art:
+    """头戴耳麦：细头梁 + 左耳罩 + 伸向嘴角的麦杆。"""
+    a = Art()
+    band = ellipse(9.5, 8.0, 8.6, 7.0) - ellipse(9.5, 8.0, 7.4, 5.9)
+    a.put({p for p in band if p[1] <= 8}, "b")
+    a.put(box(1, 8, 3, 12) | box(16, 8, 18, 12), "b")
+    a.put({(1, 9), (2, 9)}, "l")
+    a.put(line(3, 12, 4, 14) + line(4, 14, 6, 15), "b")
+    a.put({(6, 15), (7, 15)}, "p")
+    return a
+
+
+def acc_cheek_star(r: Rng) -> Art:
+    """脸颊上的星星贴纸。"""
+    a = Art()
+    a.put({(12, 14), (14, 14), (13, 13), (13, 15)}, "b")
+    a.put({(13, 14)}, "w")
     return a
 
 
@@ -1528,13 +1551,6 @@ def acc_earrings(r: Rng) -> Art:
     a = Art()
     hoop = ellipse(2.0, 12.6, 1.0, 1.7)
     a.put(hoop | mirror(hoop), "l")
-    return a
-
-
-def acc_bowtie(r: Rng) -> Art:
-    a = Art()
-    a.put(poly([(6, 16.5), (9, 18), (6, 19.4)]) | poly([(13, 16.5), (10, 18), (13, 19.4)]) | box(9, 17, 10, 18), "b")
-    a.put(box(9, 17, 10, 18), "s")
     return a
 
 
@@ -1595,7 +1611,12 @@ def accessory_recipes() -> list[tuple[str, Any, dict[str, Any]]]:
         ("bandage", acc_bandage, dict(outline=False)),
         ("freckles", acc_freckles, dict(outline=False, shade=False)),
         ("earrings", acc_earrings, plain),
-        ("bowtie", acc_bowtie, plain),
+        ("beak", acc_beak, plain),
+        ("sprout", acc_sprout, plain),
+        ("gem", acc_gem, plain),
+        ("officer", acc_officer, hat),
+        ("headset", acc_headset, plain),
+        ("cheek_star", acc_cheek_star, dict(outline=False, shade=False)),
     ]
 
 
@@ -1719,7 +1740,7 @@ def sample_descs(parts: dict[str, Any], count: int, seed: int, *, roster: bool |
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="像素头像素材库生成器（见模块文档）")
-    ap.add_argument("--out", type=Path, help="样张 PNG 的输出路径（配合 --sheet）")
+    ap.add_argument("--out", type=Path, help="样张 PNG 的输出路径（配合 --sheet；默认 .demo-data/shots/avatar-sheet.png，N≤12 时 avatar-sheet12.png）")
     ap.add_argument("--sheet", type=int, metavar="N", help="随机组合 N 个头像，渲染成一张样张（N≤12 时按一桌名册挑选）")
     ap.add_argument("--independent", action="store_true", help="--sheet 时每个头像独立随机（不做名册的两两区分）")
     ap.add_argument("--seed", type=int, default=7, help="样张 / 诊断的随机种子（默认 7）")
@@ -1728,8 +1749,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dark", action="store_true", help="样张用深色背景")
     ap.add_argument("--gallery", type=Path, metavar="DIR", help="每类素材输出一张总览图到目录 DIR")
     ap.add_argument("--diag", type=int, metavar="N", help="随机 N 个组合，统计质量过滤的拒绝率与‘罪魁’素材")
+    ap.add_argument("--rejects", type=int, metavar="N", help="随机挑 N 个被质量过滤拒绝的组合渲染成样张（--out 指定路径，默认 .demo-data/shots/avatar-rejects.png），并在终端列出每个的拒绝原因；用来检查过滤器有没有误杀 / 漏网")
     ap.add_argument("--check", action="store_true", help="只检查仓库里的 parts.json 是否与生成结果逐字节相同")
-    ap.add_argument("--no-write", action="store_true", help="不写 parts.json（只在内存里生成并继续后面的操作）")
+    ap.add_argument("--write", action="store_true", help="同时写 parts.json（不带任何动作参数时默认就写；--sheet / --gallery / --diag / --rejects 时默认只在内存里生成，不动仓库文件）")
+    ap.add_argument("--no-write", action="store_true", help="（兼容旧参数）不写 parts.json")
     args = ap.parse_args(argv)
 
     if args.check:
@@ -1739,25 +1762,52 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{PARTS_PATH}: {'与生成结果一致' if ok else '与生成结果不一致，请重新运行 tools/avatar_lab.py'}")
         return 0 if ok else 1
 
-    parts = build_parts() if args.no_write else write_parts()
+    acting = bool(args.sheet or args.gallery or args.diag or args.rejects)
+    write = (args.write or not acting) and not args.no_write
+    parts = write_parts() if write else build_parts()
     counts = part_counts(parts)
     print("素材数量：" + "、".join(f"{k} {v}" for k, v in counts.items()))
-    if not args.no_write:
+    if write:
         print(f"已写入 {PARTS_PATH}（{PARTS_PATH.stat().st_size / 1024:.0f} KB）")
 
     if args.gallery:
         for p in write_gallery(parts, args.gallery, scale=args.scale, cols=args.cols or 10, dark=args.dark):
             print("总览图：", p)
     if args.sheet:
-        if not args.out:
-            ap.error("--sheet 需要同时给出 --out")
+        out = args.out or (ROOT / ".demo-data" / "shots" / ("avatar-sheet12.png" if args.sheet <= 12 else "avatar-sheet.png"))
         descs = sample_descs(parts, args.sheet, args.seed, roster=False if args.independent else None)
         cols = args.cols or (6 if args.sheet <= 12 else 12)
-        write_png(render_sheet(parts, descs, scale=args.scale, cols=cols, dark=args.dark), args.out)
-        print(f"样张：{args.out}（{len(descs)} 个头像）")
+        write_png(render_sheet(parts, descs, scale=args.scale, cols=cols, dark=args.dark), out)
+        print(f"样张：{out}（{len(descs)} 个头像，种子 {args.seed}）")
     if args.diag:
         diagnose(parts, args.diag, args.seed)
+    if args.rejects:
+        out = args.out if (args.out and not args.sheet) else ROOT / ".demo-data" / "shots" / "avatar-rejects.png"
+        write_rejects(parts, args.rejects, args.seed, out, scale=args.scale, cols=args.cols or 10)
     return 0
+
+
+def write_rejects(parts: dict[str, Any], n: int, seed: int, out: Path, *, scale: int = 6, cols: int = 10) -> None:
+    """随机组合里被质量过滤拒绝的前 n 个：渲染样张 + 在终端列出（编号、拒绝原因、描述）。"""
+    ids = av.part_ids(parts)
+    rng = Rng(f"rejects/{seed}")
+    descs: list[dict[str, Any]] = []
+    why: list[list[str]] = []
+    guard = 0
+    while len(descs) < n and guard < n * 200:
+        guard += 1
+        desc: dict[str, Any] = {"v": 1}
+        for f in av.FIELDS:
+            opts = ids[f]
+            desc[f] = opts[rng.randrange(len(opts))]
+        bad = check_description(parts, desc)
+        if bad:
+            descs.append(desc)
+            why.append(bad)
+    write_png(render_sheet(parts, descs, scale=scale, cols=cols), out)
+    print(f"被拒绝的组合样张：{out}（{len(descs)} 个）")
+    for i, (desc, bad) in enumerate(zip(descs, why), start=1):
+        print(f"  {i:03d} {','.join(bad):42s} " + " ".join(f"{desc[f]}" for f in av.FIELDS))
 
 
 def diagnose(parts: dict[str, Any], n: int, seed: int, *, verbose: bool = True) -> dict[str, Any]:
@@ -1801,4 +1851,9 @@ def diagnose(parts: dict[str, Any], n: int, seed: int, *, verbose: bool = True) 
 
 
 if __name__ == "__main__":
+    for _stream in (sys.stdout, sys.stderr):  # 终端 / 管道不是 UTF-8 时（Windows 默认 GBK / cp1252）也能打印中文
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     raise SystemExit(main())

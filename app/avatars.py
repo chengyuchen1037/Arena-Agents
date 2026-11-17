@@ -270,6 +270,9 @@ def validate_description(desc: Any, parts: dict[str, Any] | None = None) -> dict
             raise ValueError(f"头像描述的 {field}（{_FIELD_LABEL[field]}）必须是字符串，收到 {type(value).__name__}")
         if field == "accessory" and value == "none":
             value = NO_ACCESSORY
+        if field == "accessory_color" and value == "" and out["accessory"] == NO_ACCESSORY:
+            out[field] = value  # 没有配饰时，配饰颜色没有意义，允许留空
+            continue
         if value not in ids[field]:
             raise ValueError(f"头像描述的 {field}（{_FIELD_LABEL[field]}）含有未知的 id：{value!r}")
         out[field] = value
@@ -298,24 +301,23 @@ def _palette(entry: Any) -> dict[str, tuple[int, int, int]] | None:
 
 
 def _lookup(parts: dict[str, Any], desc: dict[str, Any]) -> tuple[list, dict]:
-    """把描述解析成 7 层 ``[(grid 或 None, 调色板 或 None)]`` 与 fixed 颜色表。"""
+    """把描述解析成 7 层 ``[(grid 或 None, 调色板 或 None)]`` 与 fixed 颜色表。
+
+    与前端 ``renderPixels`` 同样宽容：缺少脸型 / 肤色才失败（前端返回 null，这里抛 ``ValueError``）；缺发型、眼睛、嘴、
+    发色、配饰色板时，对应的层或 b/s/l 像素被跳过（描边等固定色像素照画）。
+    """
     sprites, pal = parts["parts"], parts["palettes"]
     fixed = {k: _hex_rgb(pal["fixed"].get(k)) for k in _FIXED_KEYS}
     picked: dict[str, Any] = {}
     for cat in _SPRITE_CATEGORIES:
         sid = desc[cat]
-        if cat == "accessory" and sid == "none":
-            picked[cat] = None
-            continue
-        entry = sprites[cat].get(sid)
-        if not isinstance(entry, dict):
-            raise ValueError(f"素材库里没有 {_FIELD_LABEL[cat]} {sid!r}")
-        picked[cat] = entry
-    palettes = {}
-    for field, key in _PALETTE_FIELDS.items():
-        palettes[field] = _palette(pal[key].get(desc[field]))
-        if palettes[field] is None and (field != "accessory_color" or picked["accessory"] is not None):
-            raise ValueError(f"素材库里没有{_FIELD_LABEL[field]} {desc[field]!r}")
+        entry = None if (cat == "accessory" and sid == "none") else sprites[cat].get(sid)
+        picked[cat] = entry if isinstance(entry, dict) else None
+    palettes = {field: _palette(pal[key].get(desc[field])) for field, key in _PALETTE_FIELDS.items()}
+    if picked["face"] is None:
+        raise ValueError(f"素材库里没有{_FIELD_LABEL['face']} {desc['face']!r}")
+    if palettes["skin"] is None:
+        raise ValueError(f"素材库里没有{_FIELD_LABEL['skin']} {desc['skin']!r}")
     layers = []
     for _name, cat, side, pal_field in _LAYERS:
         entry = picked[cat]
@@ -416,9 +418,12 @@ LUMA_MIN = 64.0  # 整体亮度（可见非描边像素的平均亮度）范围
 LUMA_MAX = 222.0
 HAIR_OVER_HAT_MAX = 1  # 头发高过帽子最高一行的像素数上限（“穿出来”）
 HAIR_FLANK_MAX = 16  # 帽子两侧露出的头发（比帽子同列的最高像素更高、但没有高过帽顶）的像素数上限
-BACK_VISIBLE_MIN = 0.30  # back 层配饰（光环、翅膀……）可见像素比例下限
+BACK_VISIBLE_MIN = 0.25  # back 层配饰（翅膀……）可见像素比例下限（被头发 / 脸挡住太多就拒绝）
 ACCESSORY_BLEND_DIST = 46.0  # 配饰与被它盖住的底色（头发 / 肤色）的最小 RGB 距离
 EYE_CONTRAST_MIN = 46.0  # 肤色亮度 - 瞳孔亮度
+DARK_SKIN_LUMA = 112.0  # 肤色亮度低于它算“深肤色”：深色的瞳孔 / 线条眼睛会看不清，必须有 >= EYE_BRIGHT_MIN 个亮像素（眼白 / 高光 / 粉色）
+EYE_BRIGHT_MIN = 2
+MOUTH_CONTRAST_MIN = 50.0  # 嘴的颜色与肤色基色的最小 RGB 距离
 #: 所有脸型共用同一套眼口位置：眼睛本体在第 10..12 行，嘴在第 13..15 行
 EYE_ROWS = (10, 12)
 #: 判断配饰是不是“有意盖住”眼睛 / 嘴的那种（眼镜、口罩……）用的行带
@@ -441,6 +446,7 @@ REASONS = {
     "accessory_hidden": "配饰几乎被头发或脸挡住",
     "accessory_blends": "配饰与底色太接近",
     "eye_contrast": "眼睛与肤色对比太弱",
+    "mouth_contrast": "嘴与肤色对比太弱",
 }
 
 
@@ -456,9 +462,9 @@ def _dist(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
 FACE_COLS = (4, 15)
 #: 头顶行（y <= CROWN_ROW 的像素算“盖在头顶的东西”：帽子、冠、耳朵；头带 / 护目镜在额头，不算）
 CROWN_ROW = 4
-#: 帽子是否“盖住了头顶的头发”：头发前景在 y <= CROWN_COVER_ROW 的像素里被配饰盖住的比例 >= CROWN_COVER_MIN
+#: 帽子是否“盖住了头顶的头发”：头发前景在 y <= CROWN_COVER_ROW 的像素里被配饰【填充】（不含描边）盖住的比例 >= CROWN_COVER_MIN
 CROWN_COVER_ROW = 6
-CROWN_COVER_MIN = 0.45
+CROWN_COVER_MIN = 0.40
 
 
 def _acc_kind(front: tuple[tuple[int, int, str], ...]) -> dict[str, int]:
@@ -561,7 +567,7 @@ def analyze_description(parts: dict[str, Any], desc: dict[str, Any]) -> dict[str
         hat_top = min(top_of.values())
         x_lo, x_hi = min(top_of), max(top_of)
         crown = [(x, y) for x, y in hair_front if y <= CROWN_COVER_ROW]
-        covers = bool(crown) and sum(1 for x, y in crown if src[y * SIZE + x] == _L_ACC_FRONT) >= CROWN_COVER_MIN * len(crown)
+        covers = bool(crown) and sum(1 for x, y in crown if src[y * SIZE + x] == _L_ACC_FRONT and chars[y * SIZE + x] != "o") >= CROWN_COVER_MIN * len(crown)
         for x, y in hair_front:
             if src[y * SIZE + x] != _L_HAIR_FRONT:
                 continue
@@ -590,6 +596,9 @@ def analyze_description(parts: dict[str, Any], desc: dict[str, Any]) -> dict[str
 
     pupil = fixed.get("pupil") or (0, 0, 0)
     out["eye_contrast"] = _luma(skin["b"]) - _luma(pupil)
+    bright = sum(1 for _x, _y, c in sp[_L_EYES] if c in "wx")
+    out["eye_dark_on_dark"] = _luma(skin["b"]) < DARK_SKIN_LUMA and bright < EYE_BRIGHT_MIN
+    out["mouth_contrast"] = _dist(fixed.get("mouth") or (0, 0, 0), skin["b"])
     return out
 
 
@@ -624,8 +633,10 @@ def check_description(parts: dict[str, Any], desc: dict[str, Any]) -> list[str]:
         bad.append("accessory_hidden")
     if m["accessory_blends"]:
         bad.append("accessory_blends")
-    if m["eye_contrast"] < EYE_CONTRAST_MIN:
+    if m["eye_contrast"] < EYE_CONTRAST_MIN or m["eye_dark_on_dark"]:
         bad.append("eye_contrast")
+    if m["mouth_contrast"] < MOUTH_CONTRAST_MIN:
+        bad.append("mouth_contrast")
     return bad
 
 
