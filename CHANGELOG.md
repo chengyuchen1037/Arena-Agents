@@ -1,6 +1,6 @@
 # Release Notes
 
-## 0.12.1 — in development (branch `dev/v0.12.0`, not yet released)
+## 0.12.1 — (branch `dev/v0.12.0`, not yet pushed or tagged)
 
 0.12.1 keeps the 0.12 architecture and changes its philosophy: **the engine no longer saves money for
 you.** Every limit that used to throttle the agents (ambient messages, debounce, per-run round caps, the
@@ -63,6 +63,28 @@ contract: [docs/v0.12-contracts.md](docs/v0.12-contracts.md) section 10.
 
 - Responsive down to a phone in portrait (platform detection), participants and statistics in one bar,
   coloured private channels, request cards in the feed, a spending-limit button next to the token counter.
+
+- **Phone / tablet / desktop layouts** (`data-platform` / `data-layout`), a bottom tab bar and drawers on a
+  phone, avatar rail on narrow screens, the four token kinds everywhere, a roster menu (export / import with a
+  preview / clear), review buttons, a price-source bar in the Provider dialog, and the **moderator's own
+  random avatar** in the chip, in its messages and in its panel (re-rolled alone or with the players).
+- The agent-metrics stream now also covers the calls outside the game loop (post-game review, "complete it"),
+  so the token / cost pill always equals what the server adds up. The game starts with the persona / memory
+  *files as they are at that moment* (they may have been edited outside the app while it was idle).
+
+### Developer tools
+
+- `tools/dev_server.py --demo | --copy-providers-from <.arena> [--price-source]` — isolated instances (the
+  user's workspace is never opened); `--price-source` prices the scratch copy's models with the LiteLLM table.
+- `tools/real_smoke.py` — live-model smoke test with a hard call budget; reports the four token kinds, cache hit
+  rate, activations and merges, compaction events; `--price-source`, `--window N` (pretend a small context
+  window), `--resume-calls K` (pause -> resume: does the prompt cache survive?), `--oneshots N` (live check of
+  "complete it" and the review).
+- `tools/live_replay.py` — plays a whole demo game on a running instance and checks, with the real client store,
+  that the SSE events add up to exactly the session the server reports (names, avatars, agent states, requests
+  with answers and results, budget, review, token counters).
+- `tools/avatar_lab.py` — generates `static/avatar/parts.json` and sample sheets (`--sheet 120`).
+- `tools/mock_ui_server.py` — a scripted UI mock that speaks the 0.12.1 contract (also the browser-test backend).
 
 ### Compatibility
 
