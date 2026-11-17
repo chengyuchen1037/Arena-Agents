@@ -102,6 +102,7 @@ def test_a_whole_game_runs_to_the_end(monkeypatch: pytest.MonkeyPatch) -> None:
         assert orch.world.state.winner == "测试队"
 
         public = orch.public_session()
+        assert public["demo"] is False
         assert public["status"] == "finished" and public["winner"] == "测试队"
         assert any(m["kind"] == "announce" for m in public["messages"])
         assert public["usage_stats"]["total_tokens"] > 0

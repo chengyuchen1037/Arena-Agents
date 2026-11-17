@@ -105,6 +105,7 @@ class GameOrchestrator(SessionRuntimeMixin):
     _supervisor: Supervisor | None = None
     _reload_deferred: bool = False
     llm_port_factory: Callable[["GameOrchestrator"], Any] | None = None
+    demo_mode: bool = False
 
     def __init__(self) -> None:
         self.cfg = load_config()
@@ -238,6 +239,7 @@ class GameOrchestrator(SessionRuntimeMixin):
         personas = {p.id: p.persona for p in self.session.participants}
         brain = ArenaBrain(self.world, self.spec, self.cfg, personas=personas)
         trace = TraceLog(self._logs_root(), self.session.session_id)
+        self._register_trace_secrets(trace)
         agent_config = AgentConfig(
             debounce_s=float(rt.get("debounce", 1.5)),
             execution_depth=self.session.execution_depth,
@@ -277,6 +279,25 @@ class GameOrchestrator(SessionRuntimeMixin):
             usage=self.usage,
             trace=trace,
         )
+
+    def _register_trace_secrets(self, trace: TraceLog) -> None:
+        """The trace log is plaintext: make sure no bound provider's API key can ever be written to it."""
+        try:
+            store = self._providers()
+            seen: set[str] = set()
+            for binding in self.session.model_bindings.values():
+                if binding.provider_id in seen:
+                    continue
+                seen.add(binding.provider_id)
+                try:
+                    provider, _entry = store.resolve(binding)
+                except Exception:  # noqa: BLE001 - an unresolved binding has no key to protect
+                    continue
+                key = str(getattr(provider, "api_key", "") or "")
+                if key:
+                    trace.add_secret(key)
+        except Exception:  # noqa: BLE001 - logging hygiene must never stop a game
+            logger.warning("Could not register provider keys with the trace scrubber", exc_info=True)
 
     def _logs_root(self) -> Path:
         from app.storage.paths import get_data_dir
@@ -471,6 +492,7 @@ class GameOrchestrator(SessionRuntimeMixin):
             "restore_notice": s.restore_notice,
             "autosave_error": s.autosave_error,
             "execution_depth": s.execution_depth,
+            "demo": bool(getattr(self, "demo_mode", False)),  # scripted bots, no models
         }
 
     # ---------------------------------------------------------------- persistence ---

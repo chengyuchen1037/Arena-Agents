@@ -59,6 +59,7 @@ def test_a_scripted_werewolf_game_plays_to_the_end(monkeypatch: pytest.MonkeyPat
         assert out_tags  # people died
 
         public = orch.public_session()
+        assert public["demo"] is True  # the UI shows a "demo mode" badge instead of "no model bound"
         assert public["status"] == "finished" and public["winner"] == orch.world.state.winner
         assert public["usage_stats"]["total_tokens"] > 0
         assert any(t["status"] in ("open", "resolved") for t in public["tickets"]) or True

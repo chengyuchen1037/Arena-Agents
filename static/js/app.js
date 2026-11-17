@@ -303,7 +303,7 @@
     const s = state.session;
     elAppTitle.textContent = s.title || "Arena-Agents";
     const ver = state.appVersion || s.version || "";
-    if (elAppVersion) elAppVersion.textContent = ver;
+    if (elAppVersion) elAppVersion.textContent = s.demo ? `${ver} · 演示模式` : ver;
 
     elStatusText.textContent = View.statusText(s);
     if (elStatusText.setAttribute) elStatusText.setAttribute("title", View.statusText(s));

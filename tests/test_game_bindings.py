@@ -188,3 +188,20 @@ async def test_a_game_with_all_bindings_starts_through_the_real_check(monkeypatc
     assert orch.session.status == "running"
     await orch.shutdown()
     assert asyncio.get_running_loop() is not None
+
+
+@async_test
+async def test_provider_keys_are_registered_with_the_plaintext_trace_scrubber(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = "totally-custom-key-without-a-known-shape-123"
+    orch = real_orch(monkeypatch, defaults=all_bound(), providers=(provider_with(key=secret),))
+    bots_for(orch, idle_moderator)
+    await orch.start_or_resume()
+    try:
+        trace = orch._supervisor.trace  # type: ignore[union-attr]
+        trace.write("content", "p01", text=f"the model echoed {secret} by accident")
+        import json as _json
+
+        line = trace.current_path.read_text(encoding="utf-8").splitlines()[-1]
+        assert secret not in line and "echoed" in _json.loads(line)["text"]
+    finally:
+        await orch.shutdown()

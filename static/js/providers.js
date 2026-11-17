@@ -286,6 +286,13 @@
 
     function renderStatus() {
       if (!el.statusLabel) return;
+      const current = getSession();
+      if (current && current.demo) {
+        // Demo mode: scripted bots play, no model is needed.
+        el.statusLabel.textContent = "演示模式 · 脚本机器人";
+        if (el.statusDot) el.statusDot.className = "api-dot configured";
+        return;
+      }
       const b = effectiveBinding("moderator");
       const provider = b ? Core.findProvider(st.providers, b.provider_id) : null;
       const model = provider ? Core.findModel(provider, b.model_id) : null;
