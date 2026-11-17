@@ -23,7 +23,10 @@ contract: [docs/v0.12-contracts.md](docs/v0.12-contracts.md) section 10.
   the full board + memory + history; later ones get only what is new (new entries, what changed on the
   board, why you were woken). Messages arriving during a run are merged into it at the next round boundary.
 - **Compaction on demand** — at 60 % of the model window the agent is asked to call `compact_context`; at
-  90 % the oldest complete rounds are trimmed. No round cap anywhere.
+  90 % the oldest complete rounds are trimmed. No round cap anywhere. A conversation that is itself the
+  product of a compaction is only reminded again after it has grown by 10 % of the window, so a window too
+  small for the opening cannot make an agent compact in a loop (live check with a 12 000-token window:
+  moderator compactions 16 -> 2 per ~95 calls, prompt-cache hit rate 85 % -> 92 %).
 - **Requests got friends** — `share_answers` (recipients see each other's current answers and may change
   them), `auto_close = all_answered | unanimous | deadline`. `open_floor` / `update_channel` take one
   `limits` whose keys depend on the mode (a wrong key now gets a precise error). `enable_ability` /
