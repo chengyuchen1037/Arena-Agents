@@ -1,5 +1,8 @@
 # 异步 LLM Agent（前台 Actor + 后台 Worker）相关开源项目与设计调研报告
 
+> 状态：**历史资料**——这是 v0.12 设计**之前**写的调研笔记，仅作背景保留，**不代表引擎现在的做法**。报告里的一些建议，例如“事件分级 + 防抖”“低优先级事件（LOW，引擎里曾叫 ambient）只入缓冲”，**不是**引擎今天的行为：v0.12.0 曾实现 urgent / normal / ambient 三级和 1.5 秒防抖，v0.12.1 又把它们全部取消了——现在每一条送达的消息都会立刻唤醒收件的 agent，没有防抖、没有 ambient 级别，也没有轮数上限。第 5 节的“推荐方案”只是当时的设想，实际设计与它有不少出入。
+> 当前的 Actor / Worker 设计见 [architecture.md](../architecture.md)；决策记录见 [v0.12-async-agents-plan.md](../v0.12-async-agents-plan.md)（v0.12.0，正文已标注被 v0.12.1 修订的地方）和 [v0.12.1-plan.md](../v0.12.1-plan.md)。
+
 > 调研目标：为 FastAPI + asyncio + SSE 的多 LLM Agent 游戏竞技场（12 名玩家 + 1 名 LLM 主持人，规则以 Markdown 场景描述、引擎与游戏无关）寻找可借鉴的“前台 actor 永远可收发 + 后台 worker 负责 LLM 思考/工具调用”的设计。所有网页内容仅作为数据参考；标注“（据公开资料/经验）”的条目未在本次检索中逐行核实源码。
 
 ## 1. Actor 模型框架
