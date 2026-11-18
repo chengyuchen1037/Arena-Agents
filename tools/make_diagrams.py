@@ -406,7 +406,7 @@ def overview(c: Canvas) -> None:
     c.chips(X + 16, y2 + 40, ["/api/state", "/api/events", "/api/control/*", "/api/roster*", "/api/budget", "/api/pricing/*"], "blue", mono=True, size=11.5, pad=8, gap=6, max_x=R - 16)
     # ---- Row 3: orchestrator
     c.card(X, y3, W, h3, "GameOrchestrator · app/game", "slate")
-    c.chips(X + 16, y3 + 40, [c.L("开始 / 暂停 / 继续", "start / pause / resume"), c.L("按局预算", "per-game budget"), c.L("名册 · 复盘 · 完善", "roster · review · refine"), c.L("存档 v4 · 自动保存", "save v4 · autosave")], "slate", max_x=R - 16)
+    c.chips(X + 16, y3 + 40, [c.L("开始 / 暂停 / 继续", "start / pause / resume"), c.L("按局预算", "per-game budget"), c.L("名册 · 复盘 · 完善", "roster · review · refine"), c.L("存档 v5 · 自动保存", "save v5 · autosave")], "slate", max_x=R - 16)
     c.chips(X + 16, y3 + 68, [c.L("工作区切换", "workspace switch"), c.L("模型绑定", "model bindings"), c.L("演示机器人", "demo bots")], "slate", max_x=R - 16)
     # ---- Row 4: runtime
     c.card(X, y4, W, h4, c.L("Runtime · app/runtime（asyncio）", "Runtime · app/runtime (asyncio)"), "indigo", sub=c.L("13 个 Agent = Actor + Worker", "13 agents = Actor + Worker"))

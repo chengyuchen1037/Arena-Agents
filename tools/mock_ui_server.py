@@ -988,7 +988,7 @@ def build_session(session_id: str, bindings: dict[str, Any], roster: MockRoster,
     b.update({"used_tokens": 0, "used_cost_usd": 0.0, "state": "ok"})
     return {
         "session_id": session_id,
-        "schema_version": 4,
+        "schema_version": 5,
         "version": "v0.12.1",
         "title": "Arena-Agents",
         "scenario_name": "werewolf_12p",

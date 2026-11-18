@@ -515,7 +515,7 @@ async def test_the_cost_limit_counts_money_not_tokens(monkeypatch):
 async def test_the_public_session_has_the_v3_fields_and_no_execution_depth(monkeypatch):
     orch = make_orch(monkeypatch)
     s = orch.public_session()
-    assert s["schema_version"] == 4 and s["version"] == "v0.12.1" and "execution_depth" not in s
+    assert s["schema_version"] == 5 and s["version"] == "v0.12.1" and "execution_depth" not in s
     assert s["budget"]["state"] == "ok" and s["memory_enabled"] is True and s["review"] == {"available": False, "done": [], "running": False}
     moderator = s["moderator"]
     assert s["stall_notice"] == "" and {k: moderator[k] for k in ("id", "name", "state", "sleep_until")} == {

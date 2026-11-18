@@ -64,7 +64,7 @@ async def test_persist_saves_a_full_json_snapshot_and_then_moves_the_pointer(mon
     assert await orch.persist_session("manual") is True
 
     saved = orch.session_store.data[session.session_id]
-    assert saved["schema_version"] == SESSION_SCHEMA_VERSION == 4
+    assert saved["schema_version"] == SESSION_SCHEMA_VERSION == 5
     assert saved["world"]["ledger"] and saved["world"]["state"]["players"]  # the whole game, dealt
     assert saved["scenario_spec"]["id"] == "minimal_test"
     assert saved["model_bindings"]["p01"]["model_id"] == "big"

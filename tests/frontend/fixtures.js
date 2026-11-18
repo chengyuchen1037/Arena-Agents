@@ -150,7 +150,7 @@ const answer = (player_id, value, label, extra = {}) => ({ player_id, value, lab
 function makeSession(over = {}) {
   const session = {
     session_id: "s-test",
-    schema_version: 4,
+    schema_version: 5,
     version: "v0.12.1",
     title: "Arena-Agents",
     scenario_name: "werewolf_12p",
