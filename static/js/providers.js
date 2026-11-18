@@ -1496,9 +1496,10 @@
     function noticeFor(s) {
       if (!s) return "";
       const parts = [];
-      if (s.restored_from_save) {
-        parts.push(s.restore_notice || "已恢复上次对局（已暂停）");
-      }
+      // The server explains itself whenever it has something to say - not only after a restore: the last game
+      // was saved by an older version (kept, never touched), it could not be read, or the workspace did not open.
+      const restoreText = s.restore_notice || (s.restored_from_save ? "已恢复上次对局（已暂停）" : "");
+      if (restoreText) parts.push(restoreText);
       const issues = Array.isArray(s.binding_issues) ? s.binding_issues : [];
       if (issues.length) {
         parts.push(

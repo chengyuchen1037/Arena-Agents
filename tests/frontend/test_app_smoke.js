@@ -686,9 +686,32 @@ test("restored session shows a notice, never auto-starts, and can be dismissed",
   assert.equal(backend.calls.filter((c) => c.url.includes("/control/")).length, 0);
   env.el("btn-dismiss-notice").dispatch("click");
   assert.equal(env.el("restore-notice").hidden, true);
-  // a fresh, non-restored snapshot keeps it hidden
-  env.sse("snapshot", { session: { ...session, restored_from_save: false, binding_issues: [] } }, 50);
+  // a fresh, non-restored snapshot keeps it hidden (the server clears the notice together with the flag when the game starts)
+  env.sse("snapshot", { session: { ...session, restored_from_save: false, restore_notice: "", binding_issues: [] } }, 50);
   assert.equal(env.el("restore-notice").hidden, true);
+});
+
+test("a notice the server sends WITHOUT a restore (old save, unreadable save, workspace failure) is shown too", async () => {
+  // v0.12.1 starts a blank game and says why when the last game was saved by an older version (the save is kept)
+  const notice = "上次的对局来自旧版本引擎（v0.12.0 及更早），v0.12.1 不兼容，已保留在存档列表中、未被改动；已为你新建了一局。";
+  const session = F.makeSession({ status: "idle", restored_from_save: false, restore_notice: notice });
+  const { env, backend } = await H.bootLive({ session });
+  assert.equal(env.el("restore-notice").hidden, false, "the explanation is not hidden just because nothing was restored");
+  assert.equal(env.el("restore-notice-text").textContent, notice);
+  assert.equal(backend.calls.filter((c) => c.url.includes("/control/")).length, 0, "and nothing is started on the user's behalf");
+  env.el("btn-dismiss-notice").dispatch("click");
+  assert.equal(env.el("restore-notice").hidden, true);
+  // starting / creating a game clears it on the server: the next snapshot has no notice and the bar stays hidden
+  env.sse("snapshot", { session: { ...session, restore_notice: "" } }, 50);
+  assert.equal(env.el("restore-notice").hidden, true);
+  // an unreadable last save and a workspace that did not open say so in the same way
+  const broken = F.makeSession({ status: "idle", restore_notice: "工作文件夹初始化失败：不可用。已有数据未被改动或删除；请选择一个可用的工作文件夹后继续。" });
+  const second = await H.bootLive({ session: broken });
+  assert.match(second.env.el("restore-notice-text").textContent, /工作文件夹初始化失败/);
+  assert.equal(second.env.el("restore-notice").hidden, false);
+  // nothing to say, nothing shown
+  const quiet = await H.bootLive({ session: F.makeSession({ status: "idle" }) });
+  assert.equal(quiet.env.el("restore-notice").hidden, true);
 });
 
 test("/api/state top-level restored=true also raises the notice", async () => {
