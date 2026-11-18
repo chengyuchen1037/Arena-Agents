@@ -81,6 +81,20 @@ DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000
 LEGACY_PROVIDER_ID = "legacy"
 
 
+def _price_fields(model: Any) -> dict[str, float]:
+    """The four price numbers of a ``ModelEntry`` (empty cache prices are billed like input tokens)."""
+    snapshot = getattr(model, "price_snapshot", None)
+    if callable(snapshot):
+        return dict(snapshot())
+    price = float(model.input_price_per_m)
+    return {
+        "input_price_per_m": price,
+        "output_price_per_m": float(model.output_price_per_m),
+        "cache_read_price_per_m": price,
+        "cache_write_price_per_m": price,
+    }
+
+
 class LLMClient:
     """Streaming chat client for every supported protocol.
 
@@ -231,6 +245,8 @@ class LLMClient:
                 model_id=str(model),
                 input_price_per_m=self.input_price_per_m,
                 output_price_per_m=self.output_price_per_m,
+                cache_read_price_per_m=self.input_price_per_m,
+                cache_write_price_per_m=self.input_price_per_m,
                 context_window_tokens=self.context_window_tokens,
                 reasoning_depth=self._resolve_effort(is_moderator),
                 extra_body=dict(self.extra_body),
@@ -272,8 +288,7 @@ class LLMClient:
             base_url=provider.base_url,
             api_key=api_key,
             model_id=model.id,
-            input_price_per_m=float(model.input_price_per_m),
-            output_price_per_m=float(model.output_price_per_m),
+            **_price_fields(model),
             context_window_tokens=min(windows) if windows else DEFAULT_CONTEXT_WINDOW_TOKENS,
             reasoning_depth=str(getattr(binding, "reasoning_depth", "") or ""),
             extra_body=extra_body,
@@ -343,6 +358,8 @@ class LLMClient:
         resp.model_id = target.model_id
         resp.input_price_per_m = target.input_price_per_m
         resp.output_price_per_m = target.output_price_per_m
+        resp.cache_read_price_per_m = target.cache_read_price_per_m
+        resp.cache_write_price_per_m = target.cache_write_price_per_m
         resp.context_window_tokens = target.context_window_tokens
         if resp.provider_private:
             resp.provider_private = {

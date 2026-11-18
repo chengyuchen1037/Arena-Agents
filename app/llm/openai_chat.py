@@ -13,6 +13,7 @@ from app.llm.common import (
     StreamAccumulator,
     StreamProgress,
     estimate_completion_tokens,
+    openai_usage_parts,
 )
 from app.llm.messages import strip_private
 from app.llm.types import LLMResponse, StreamCallback, Target, ToolCallData
@@ -81,6 +82,7 @@ class OpenAIChatAdapter(ProtocolAdapter):
         tool_calls_by_index: dict[int, ToolCallData] = {}
         tool_arg_parts: dict[int, list[str]] = {}
         usage_prompt_tokens = 0
+        usage_cache_read = 0
         usage_completion_tokens = 0
         last_finish_reason = ""
 
@@ -88,7 +90,7 @@ class OpenAIChatAdapter(ProtocolAdapter):
         async for chunk in stream:
             u = getattr(chunk, "usage", None)
             if u is not None:
-                usage_prompt_tokens = int(getattr(u, "prompt_tokens", 0) or 0)
+                usage_prompt_tokens, usage_cache_read = openai_usage_parts(u)
                 usage_completion_tokens = int(getattr(u, "completion_tokens", 0) or 0)
             if not chunk.choices:
                 continue
@@ -156,9 +158,10 @@ class OpenAIChatAdapter(ProtocolAdapter):
             tool_calls=ordered_tools,
             prompt_tokens=usage_prompt_tokens,
             completion_tokens=usage_completion_tokens,
+            cache_read_tokens=usage_cache_read,
             finish_reason=last_finish_reason,
         )
-        if resp.prompt_tokens <= 0:
+        if resp.prompt_tokens <= 0 and resp.cache_read_tokens <= 0:
             resp.prompt_tokens = self.estimate_prompt_tokens(request)
         if resp.completion_tokens <= 0:
             resp.completion_tokens = estimate_completion_tokens(resp)

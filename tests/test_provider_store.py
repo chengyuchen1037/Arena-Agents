@@ -159,3 +159,46 @@ def test_old_provider_payload_defaults_auto_append_path_to_true(tmp_path) -> Non
 
     reopened = ProviderStore(data_dir).get_provider(provider.id)
     assert reopened.auto_append_path is True
+
+
+# ------------------------------------------------------------------------------ v0.12.1: four prices
+def test_a_registry_written_before_the_cache_prices_existed_still_loads_and_bills_like_before(tmp_path) -> None:
+    from app.storage.crypto import encrypt_json
+
+    data_dir = tmp_path / "external"
+    old_registry = {
+        "schema_version": 1,
+        "providers": [
+            {
+                "id": uuid.uuid4().hex, "name": "Old", "protocol": "openai_chat", "base_url": "https://example.invalid",
+                "api_key": "old-key", "read_only": False, "source": "encrypted", "auto_append_path": True,
+                "models": [{"id": "m", "input_price_per_m": 0.5, "output_price_per_m": 2.0, "context_window_tokens": 64000}],
+            }
+        ],
+    }
+    data_dir.mkdir()
+    (data_dir / "providers.v1.enc").write_bytes(encrypt_json(old_registry, "providers.v1", data_dir=data_dir))
+
+    store = ProviderStore(data_dir)
+    model = store.list_providers()[0].models[0]
+    assert (model.cache_read_price_per_m, model.cache_write_price_per_m, model.price_source) == (None, None, "manual")
+    assert model.price_snapshot() == {  # an empty cache price is billed like an input token: nothing changes for old data
+        "input_price_per_m": 0.5, "output_price_per_m": 2.0, "cache_read_price_per_m": 0.5, "cache_write_price_per_m": 0.5,
+    }
+    # the first edit rewrites the registry in the new shape
+    store.update_model(store.list_providers()[0].id, "m", cache_read_price_per_m=0.05, price_source="litellm:m")
+    again = ProviderStore(data_dir).list_providers()[0].models[0]
+    assert (again.cache_read_price_per_m, again.cache_write_price_per_m, again.price_source) == (0.05, None, "litellm:m")
+
+
+def test_cache_prices_can_be_set_cleared_and_left_alone(tmp_path) -> None:
+    store = make_store(tmp_path)
+    provider = create_provider(store)
+    model = store.add_model(provider.id, "m", 1.0, 4.0, cache_read_price_per_m=0.1, cache_write_price_per_m=1.25, price_source="litellm:m")
+    assert (model.cache_read_price_per_m, model.cache_write_price_per_m, model.price_source) == (0.1, 1.25, "litellm:m")
+    untouched = store.update_model(provider.id, "m", output_price_per_m=5.0)
+    assert (untouched.cache_read_price_per_m, untouched.cache_write_price_per_m) == (0.1, 1.25)  # not given: left alone
+    cleared = store.update_model(provider.id, "m", cache_read_price_per_m=None)
+    assert cleared.cache_read_price_per_m is None and cleared.cache_write_price_per_m == 1.25  # None: back to the input price
+    with pytest.raises(ProviderError):
+        store.update_model(provider.id, "m", cache_write_price_per_m=-1.0)

@@ -4,6 +4,7 @@ import os
 import threading
 import uuid
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -43,6 +44,10 @@ def _provider_from_data(data: dict) -> ProviderConfig:
     if not provider.api_key.strip():
         raise ProviderError("api_key must not be empty")
     return provider
+
+
+#: Marker for "argument not given" where ``None`` is a meaningful value (a cleared cache price).
+UNSET: Any = object()
 
 
 def _model_from_data(data: dict) -> ModelEntry:
@@ -351,6 +356,10 @@ class ProviderStore:
         input_price_per_m,
         output_price_per_m,
         context_window_tokens=DEFAULT_CONTEXT_WINDOW_TOKENS,
+        *,
+        cache_read_price_per_m=None,
+        cache_write_price_per_m=None,
+        price_source="manual",
     ) -> ModelEntry:
         provider_id = _required_text(provider_id, "provider_id")
         model = _model_from_data(
@@ -358,7 +367,10 @@ class ProviderStore:
                 "id": model_id,
                 "input_price_per_m": input_price_per_m,
                 "output_price_per_m": output_price_per_m,
+                "cache_read_price_per_m": cache_read_price_per_m,
+                "cache_write_price_per_m": cache_write_price_per_m,
                 "context_window_tokens": context_window_tokens,
+                "price_source": price_source,
             }
         )
         with self._lock:
@@ -379,7 +391,11 @@ class ProviderStore:
         input_price_per_m=None,
         output_price_per_m=None,
         context_window_tokens=None,
+        cache_read_price_per_m=UNSET,
+        cache_write_price_per_m=UNSET,
+        price_source=None,
     ) -> ModelEntry:
+        """Change a model.  ``UNSET`` leaves a cache price alone; ``None`` clears it (= the input price)."""
         provider_id = _required_text(provider_id, "provider_id")
         model_id = _required_text(model_id, "model_id")
         with self._lock:
@@ -392,6 +408,12 @@ class ProviderStore:
                         data["input_price_per_m"] = input_price_per_m
                     if output_price_per_m is not None:
                         data["output_price_per_m"] = output_price_per_m
+                    if cache_read_price_per_m is not UNSET:
+                        data["cache_read_price_per_m"] = cache_read_price_per_m
+                    if cache_write_price_per_m is not UNSET:
+                        data["cache_write_price_per_m"] = cache_write_price_per_m
+                    if price_source is not None:
+                        data["price_source"] = price_source
                     if context_window_tokens is not None:
                         data["context_window_tokens"] = context_window_tokens
                     updated = _model_from_data(data)
@@ -445,6 +467,7 @@ def reset_provider_store() -> None:
 
 
 __all__ = [
+    "UNSET",
     "ENV_PROVIDER_ID",
     "ModelNotFound",
     "ProviderError",

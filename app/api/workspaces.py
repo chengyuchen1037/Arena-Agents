@@ -37,7 +37,7 @@ from app.api.security import (
     require_local_client,
     verify_api_access,
 )
-from app.engine.orchestrator import orchestrator
+from app.game.orchestrator import orchestrator
 
 logger = logging.getLogger(__name__)
 

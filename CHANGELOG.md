@@ -1,6 +1,170 @@
 # Release Notes
 
-## 0.11 — current
+## 0.12.1
+
+0.12.1 keeps the 0.12 architecture and changes its philosophy: **the engine no longer saves money for
+you.** Every limit that used to throttle the agents (ambient messages, debounce, per-run round caps, the
+"execution depth" selector, the watchdog's automatic pause) is gone. Tokens are managed by *orchestration*
+— persistent conversations, prompt caching, in-flight merging and on-demand compaction — and what a game
+may cost is a decision of the user (a per-game spending limit). Plan and decisions: [docs/v0.12.1-plan.md](docs/v0.12.1-plan.md);
+contract: [docs/v0.12-contracts.md](docs/v0.12-contracts.md) section 10.
+
+### Engine and agents
+
+- **Every message wakes** every agent that can see it (the sender excepted); messages delivered in the same
+  pump are one activation. Players that are out are woken only by events addressed to them. Wolves can
+  agree on the knife at any time (one shared request that closes when they are unanimous), the white wolf
+  can explode at any time.
+- **Three states** — thinking / acting / sleeping. `sleep(seconds?)` replaces `wait` (the old name still
+  works as a hidden alias): any new message wakes the agent, and the optional alarm (game clock, frozen
+  while paused) wakes it when the time is up.
+- **Persistent, append-only conversations** — one per agent, kept across pause / resume (not saved). `system`
+  and `tools` never change after the first message, so provider prefix caches hit. The first activation gets
+  the full board + memory + history; later ones get only what is new (new entries, what changed on the
+  board, why you were woken). Messages arriving during a run are merged into it at the next round boundary.
+- **Compaction on demand** — at 60 % of the model window the agent is asked to call `compact_context`; at
+  90 % the oldest complete rounds are trimmed. No round cap anywhere. A conversation that is itself the
+  product of a compaction is only reminded again after it has grown by 10 % of the window, so a window too
+  small for the opening cannot make an agent compact in a loop (live check with a 12 000-token window:
+  moderator compactions 16 -> 2 per ~95 calls, prompt-cache hit rate 85 % -> 92 %).
+- **Requests got friends** — `share_answers` (recipients see each other's current answers and may change
+  them), `auto_close = all_answered | unanimous | deadline`. `open_floor` / `update_channel` take one
+  `limits` whose keys depend on the mode (a wrong key now gets a precise error). `enable_ability` /
+  `disable_ability` with `holders` do what they say.
+- **Werewolf manual 2.1** — the wolves' night is one free discussion plus one shared unanimous request, one
+  nudge on timeout, then a majority (ties: the front-most wolf's choice) announced to the wolf channel only.
+- **Watchdog** wakes only the moderator and shows a warning banner; it never pauses the game.
+
+### Billing, limits and prices
+
+- **Four token classes** (uncached input, cache read, cache write, output) parsed from all three protocols
+  (OpenAI `cached_tokens`, DeepSeek `prompt_cache_hit_tokens`, Anthropic cache counters); Anthropic requests
+  carry cache breakpoints (retried without them if an upstream rejects them). Cost uses four prices.
+- **Per-game spending limit** — tokens and / or USD, optional "stop when reached"; the game is paused with
+  the reason *budget*, and cannot be resumed until the limit is raised or the stop option is switched off.
+- **Price source** — `/api/pricing/*`: a LiteLLM-style table downloaded safely (https, no redirects, SSRF
+  guard, size cap), matched to models (exact id → provider-prefixed → without date suffix → case-insensitive),
+  suggested while fetching model lists and editable before saving. Models remember where prices came from.
+
+### Roster
+
+- **Seats `N1`–`N12`**, default names Alice…Leo (no digits), editable and persistent. Models see
+  "`N3 Carol`"; the UI shows names.
+- **Pixel avatars** — random combinations from a procedurally generated parts library
+  (`tools/avatar_lab.py` → `static/avatar/parts.json`); regenerate one or all. **The moderator gets a
+  random avatar too** (it is not a seat: it has no name, persona or memory to edit, only an avatar that is
+  rolled together with the twelve players so that all thirteen look different).
+- **Persona and memory** are plain files in the workspace (`roster/N1.persona.md`, `N1.memory.md`), empty by
+  default; import / export (zip) / clear; a per-game "load memory" switch; "complete it" asks the moderator's
+  model for a draft you confirm. **Reviews are manual**: after a game each player writes a first-person note
+  with his own model; the record (games, wins, per-role) is kept by the engine.
+
+### Interface
+
+- Responsive down to a phone in portrait (platform detection), participants and statistics in one bar,
+  coloured private channels, request cards in the feed, a spending-limit button next to the token counter.
+
+- **Phone / tablet / desktop layouts** (`data-platform` / `data-layout`), a bottom tab bar and drawers on a
+  phone, avatar rail on narrow screens, the four token kinds everywhere, a roster menu (export / import with a
+  preview / clear), review buttons, a price-source bar in the Provider dialog, and the **moderator's own
+  random avatar** in the chip, in its messages and in its panel (re-rolled alone or with the players).
+- The agent-metrics stream now also covers the calls outside the game loop (post-game review, "complete it"),
+  so the token / cost pill always equals what the server adds up. The game starts with the persona / memory
+  *files as they are at that moment* (they may have been edited outside the app while it was idle).
+- The notice bar shows whatever notice the server sends — a game saved by an older version that was kept aside,
+  an unreadable save, a workspace that did not open — not only after a restore (it used to be hidden unless the
+  game had been restored).
+
+### Documentation
+
+- **Architecture pictures** — the Actor / Worker design is drawn in four pictures (overview, the Actor's
+  decision tree, the Worker loop with the persistent conversation and compaction, a wake-up timeline), in
+  Chinese and in English, embedded in both READMEs and in `docs/architecture.md` / `docs/architecture.en.md`
+  (new). They are SVGs generated by `tools/make_diagrams.py` (standard library only; a label that would overflow
+  its box is refused), so the two languages cannot drift apart.
+- README (both languages), the architecture pages and `docs/ui-guide.md` were checked line by line against the
+  code and corrected; `docs/v0.12-contracts.md` sections 1–9 now describe the current contract (section 10 stays as
+  the revision log); the v0.12 plan and the research note are marked as history. The workspace and bindings
+  screenshots were re-taken from the mock server (fictional paths).
+- `tests/test_docs.py` keeps it that way: links and images resolve, repository paths named in the docs exist, the
+  pictures equal what the generator writes, the numbers in them are the code defaults, the version is the same
+  everywhere and no local path leaks.
+
+### Developer tools
+
+- `tools/dev_server.py --demo | --copy-providers-from <.arena> [--price-source]` — isolated instances (the
+  user's workspace is never opened); `--price-source` prices the scratch copy's models with the LiteLLM table.
+- `tools/real_smoke.py` — live-model smoke test with a hard call budget; reports the four token kinds, cache hit
+  rate, activations and merges, compaction events; `--price-source`, `--window N` (pretend a small context
+  window), `--resume-calls K` (pause -> resume: does the prompt cache survive?), `--oneshots N` (live check of
+  "complete it" and the review).
+- `tools/live_replay.py` — plays a whole demo game on a running instance and checks, with the real client store,
+  that the SSE events add up to exactly the session the server reports (names, avatars, agent states, requests
+  with answers and results, budget, review, token counters).
+- `tools/avatar_lab.py` — generates `static/avatar/parts.json` and sample sheets (`--sheet 120`).
+- `tools/mock_ui_server.py` — a scripted UI mock that speaks the 0.12.1 contract (also the browser-test backend);
+  the workspace paths it reports are fictional, so screenshots taken from it cannot leak a real path.
+- `tools/make_diagrams.py` — generates the architecture pictures (`--check` fails when a committed picture differs).
+
+### Compatibility
+
+- **Saves from 0.12.0 and earlier cannot be opened** (save format v4); they stay in the saved-game list.
+- Default model bindings saved for `p01`…`p12` are read as `N1`…`N12`. `execution_depth` is gone from the
+  session and the API; `config.yml` no longer has `runtime.debounce` / `max_rounds` / `llm.execution_depth`
+  (concurrency limits default to *unlimited*; `compact_at` / `trim_at` are new).
+
+## 0.12.0 — a development milestone, never released on its own (everything in it ships in 0.12.1)
+
+The 0.12 line rebuilds the game loop: **every player and the moderator is now an asynchronous
+agent**, the moderator is an LLM that drives the game by following the scenario's manual, and the
+engine shrinks to a game-agnostic "physical layer". See
+[docs/v0.12-async-agents-plan.md](docs/v0.12-async-agents-plan.md) for the decision log (D1–D25) and
+[docs/v0.12-contracts.md](docs/v0.12-contracts.md) for the implementation contract.
+
+### Highlights
+
+- **Actor + Worker agents** — a front actor with a mailbox (never blocked by thinking or tools,
+  priority wake-ups, debounce, injection between rounds, cancellation with anti-starvation) and a
+  back worker running the "LLM → tools" loop. Conversations are rebuilt from the world on every run.
+- **Commit gate + append-only ledger** — every action is validated at the moment it is committed
+  (membership, floor, character limits, staleness, quotas) and answered with a receipt such as
+  `NO_FLOOR`, `NOT_MEMBER`, `CHANNEL_CLOSED`, `STALE` or `QUOTA_EXCEEDED`.
+- **LLM moderator** — turn taking is a moderator announcement plus floor management
+  (`open_floor`, `set_floor_queue`, `close_floor`, …); requests (sealed votes, defaults, tallies),
+  templates (sensitive announcements only via templates), abilities that freeze a channel, player
+  state changes (including reviving), random draws and `end_game` are all tools. The moderator cannot
+  rewrite history or control other agents.
+- **Challenges** — players can privately challenge the moderator at any time; the moderator must
+  resolve each ticket and may close a harassing player's private channel (and reopen it later).
+- **Speaking limits** — time *and* character limits; over-long messages are truncated, not rejected.
+- **Scenario schema v2** — identity pool, public tags, templates, abilities, check expressions,
+  default limits, rules text and a moderator-only manual in one Markdown file. The bundled
+  12-player Werewolf scenario was rewritten for it.
+- **Minimal spectator UI** — tiny glyph tiles with a short id and tag (click for tool-call, thinking
+  and token statistics), a speech-only feed rendered whole (no streaming, no chain of thought or
+  tool calls), channel floor indicators, challenge tickets, god view or any player's view.
+- **SSE v2** — numbered incremental events with `Last-Event-ID` resume and a snapshot fallback.
+- **Pause / resume / continue after the end** — timers freeze while paused; a finished game can be
+  resumed from the UI and the moderator is told.
+- **Plaintext trace log** — thoughts, tool calls and receipts go to `<workspace>/.arena/logs/…`;
+  secrets are scrubbed and files roll over at about 20 MB.
+- **Demo mode** — `ARENA_DEMO=1` plays a full game with scripted bots (no model, no cost).
+- **Hardened for real models** — generous per-call token limits (reasoning models count their thinking
+  against them) with a one-shot recovery when a call is cut off, a `wait` guard that reminds a player
+  who still has an unanswered request or holds the floor, moderator-only reference documents hidden from
+  players, and every bound provider key registered with the trace scrubber.
+- **Dev tools** — `tools/dev_server.py` (isolated demo / real-model instances) and `tools/real_smoke.py`
+  (real-model smoke test with a hard call budget and a floor timeline report).
+
+### Compatibility
+
+- **Saves from 0.11 and earlier cannot be opened** (save format v3). They stay in the saved-game list
+  and are never modified; a fresh game is created and the UI says why.
+- Providers, templates, bindings and workspaces are unchanged. The moderator now always needs a model
+  binding.
+- The old director, the legacy LLM moderator and the workflow DSL were removed.
+
+## 0.11
 
 Arena-Agents is an AI Werewolf (狼人杀) and multi-agent social-deduction arena: executable Markdown
 rules, LLM players, a moderator/engine, live spectators and encrypted local data.
@@ -30,5 +194,4 @@ rules, LLM players, a moderator/engine, live spectators and encrypted local data
 ## Earlier iterations
 
 Arena-Agents began as an AI Werewolf prototype. Earlier releases are intentionally summarized
-rather than itemized in public release notes. The current release is the supported public
-baseline.
+rather than itemized in public release notes. The last public release is 0.11.

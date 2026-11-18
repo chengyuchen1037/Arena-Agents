@@ -150,6 +150,49 @@ test("joinUrl / buildEventsUrl", () => {
   assert.equal(Core.buildEventsUrl("/x/", "a b&c"), "/x/api/events?token=a%20b%26c");
 });
 
+test("buildEventsUrl carries the SSE v2 resume point as ?last_event_id= (a re-created EventSource sends no Last-Event-ID)", () => {
+  assert.equal(Core.buildEventsUrl("/", "", 42), "/api/events?last_event_id=42");
+  assert.equal(Core.buildEventsUrl("/", "tok", 42), "/api/events?token=tok&last_event_id=42");
+  assert.equal(Core.buildEventsUrl("/arena/", "", "7"), "/arena/api/events?last_event_id=7");
+  assert.equal(Core.buildEventsUrl("/", "", 12.9), "/api/events?last_event_id=12");
+  // nothing useful to resume from: a plain URL (the server answers with a snapshot)
+  for (const none of [0, -3, NaN, null, undefined, "", "abc", Infinity]) {
+    assert.equal(Core.buildEventsUrl("/", "", none), "/api/events", String(none));
+  }
+});
+
+// --- v0.12 formatting --------------------------------------------------------
+test("formatCount / formatTokensCount / formatCost", () => {
+  assert.equal(Core.formatCount(0), "0");
+  assert.equal(Core.formatCount(999), "999");
+  assert.equal(Core.formatCount(6057), "6,057");
+  assert.equal(Core.formatCount(12345), "12.3K");
+  assert.equal(Core.formatCount(2_500_000), "2.50M");
+  assert.equal(Core.formatCount(3_100_000_000), "3.10B");
+  assert.equal(Core.formatCount("<b>"), "0");
+  assert.equal(Core.formatCount(null), "0");
+  assert.equal(Core.formatTokensCount(0), "0 Tokens");
+  assert.equal(Core.formatTokensCount(1500), "1.5K Tokens");
+  assert.equal(Core.formatTokensCount(2_930_000), "2.93M Tokens");
+  assert.equal(Core.formatTokensCount(undefined), "0 Tokens");
+  assert.equal(Core.formatCost(0), "$0.0000");
+  assert.equal(Core.formatCost(0.0123456), "$0.0123");
+  assert.equal(Core.formatCost(12.5, 2), "$12.50");
+  assert.equal(Core.formatCost(-1), "$0.0000");
+  assert.equal(Core.formatCost("x"), "$0.0000");
+});
+
+test("formatClockTime shows HH:MM:SS of a ledger timestamp and never throws", () => {
+  const local = new Date(2026, 10, 17, 8, 5, 9);
+  assert.equal(Core.formatClockTime(local.toISOString()), "08:05:09"); // local time of the viewer
+  assert.equal(Core.formatClockTime("2026-11-17T08:05:09.123"), "08:05:09"); // naive timestamps are local
+  assert.equal(Core.formatClockTime(""), "");
+  assert.equal(Core.formatClockTime(null), "");
+  assert.equal(Core.formatClockTime(undefined), "");
+  assert.equal(Core.formatClockTime("12:34:56 whatever"), "12:34:56"); // not a date: pick the time out
+  assert.equal(Core.formatClockTime("garbage"), "");
+});
+
 // --- backoff -----------------------------------------------------------------
 test("computeBackoff: exponential, capped at 30s, jittered", () => {
   const noJitter = { rand: () => 0 };
@@ -440,11 +483,17 @@ test("validatePrice: required, never defaults to 0, finite and non-negative", ()
   assert.deepEqual(Core.validatePrice(3), { ok: true, value: 3 });
 });
 
-test("buildModelPayload: both prices mandatory, single model only", () => {
+test("buildModelPayload: input + output prices mandatory, cache prices optional (null = input price), single model only", () => {
   const ok = Core.buildModelPayload({ model_id: " m1 ", input_price_per_m: "1", output_price_per_m: "2" });
   assert.deepEqual(ok, {
     ok: true,
-    payload: { model_id: "m1", input_price_per_m: 1, output_price_per_m: 2 },
+    payload: {
+      model_id: "m1",
+      input_price_per_m: 1,
+      cache_read_price_per_m: null,
+      cache_write_price_per_m: null,
+      output_price_per_m: 2,
+    },
   });
   const noIn = Core.buildModelPayload({ model_id: "m1", input_price_per_m: "", output_price_per_m: "2" });
   assert.equal(noIn.ok, false);
@@ -665,53 +714,50 @@ function memoryStorage(init) {
   };
 }
 
-test("normalizeLayoutState clamps widths, validates height, defaults everything", () => {
+test("normalizeLayoutState clamps the channel width, validates height, defaults everything (no right column any more)", () => {
   assert.deepEqual(Core.normalizeLayoutState(null), {
     boardCollapsed: false,
     leftCollapsed: false,
-    rightCollapsed: false,
     boardHeight: null,
     leftWidth: Core.LAYOUT_DEFAULTS.leftWidth,
-    rightWidth: Core.LAYOUT_DEFAULTS.rightWidth,
   });
   const s = Core.normalizeLayoutState({
     boardCollapsed: 1,
     leftCollapsed: "x",
     leftWidth: 5,
     rightWidth: 99999,
+    rightCollapsed: true,
     boardHeight: 40,
   });
   assert.equal(s.boardCollapsed, true);
   assert.equal(s.leftCollapsed, true);
   assert.equal(s.leftWidth, Core.PANEL_LIMITS.left.min);
-  assert.equal(s.rightWidth, Core.PANEL_LIMITS.right.max);
+  assert.equal("rightWidth" in s || "rightCollapsed" in s, false);
+  assert.equal(Core.PANEL_LIMITS.right, undefined);
   assert.equal(s.boardHeight, null); // below the minimum => natural height
   assert.equal(Core.normalizeLayoutState({ boardHeight: 320 }).boardHeight, 320);
   assert.equal(Core.normalizeLayoutState({ boardHeight: "abc" }).boardHeight, null);
 });
 
-test("layout state + card size round-trip through storage; broken JSON falls back", () => {
+test("layout state round-trips through storage; broken JSON falls back (card size tiers are gone)", () => {
   const storage = memoryStorage();
   assert.equal(Core.loadLayoutState(storage).boardCollapsed, false);
   const saved = Core.saveLayoutState(storage, {
     boardCollapsed: true,
     leftCollapsed: true,
-    rightCollapsed: false,
     boardHeight: 240,
     leftWidth: 300,
-    rightWidth: 280,
   });
   assert.equal(saved.boardCollapsed, true);
   assert.deepEqual(Core.loadLayoutState(storage), saved);
   storage.setItem(Core.LAYOUT_STORAGE_KEY, "{not json");
   assert.deepEqual(Core.loadLayoutState(storage), Core.normalizeLayoutState(null));
 
-  assert.equal(Core.loadCardSize(memoryStorage()), "standard");
-  assert.equal(Core.saveCardSize(storage, "compact"), "compact");
-  assert.equal(Core.loadCardSize(storage), "compact");
-  assert.equal(Core.saveCardSize(storage, "gigantic"), "standard");
-  assert.equal(Core.normalizeCardSize("xlarge"), "xlarge");
-  assert.deepEqual(Core.CARD_SIZES.map((c) => c.id), ["compact", "standard", "large", "xlarge"]);
+  // v0.12 removed the four card-size tiers: players are fixed-size tiles
+  for (const gone of ["CARD_SIZES", "CARD_SIZE_STORAGE_KEY", "normalizeCardSize", "loadCardSize", "saveCardSize"]) {
+    assert.equal(Core[gone], undefined, gone);
+  }
+  assert.equal(Object.keys(Core.normalizeLayoutState({ cardSize: "large" })).includes("cardSize"), false);
 });
 
 // --- v0.11: provider auto_append_path + endpoint preview ----------------------
@@ -972,6 +1018,242 @@ test("buildWorkspaceSelectPayload adds optional flags only when ticked", () => {
     assert.equal(Core.workspaceSwitchBlocked({ status: st }), false, String(st));
   }
   assert.equal(Core.workspaceSwitchBlocked(null), false);
+});
+
+
+// --- v0.12.1: four prices, price source, suggestions ---------------------------------------
+test("validateOptionalPrice: empty means null (input price); anything else must be a valid price", () => {
+  for (const empty of ["", "  ", null, undefined]) assert.deepEqual(Core.validateOptionalPrice(empty), { ok: true, value: null });
+  assert.deepEqual(Core.validateOptionalPrice("0.3"), { ok: true, value: 0.3 });
+  assert.deepEqual(Core.validateOptionalPrice("0"), { ok: true, value: 0 });
+  for (const bad of ["abc", "-1", "NaN", "1,5"]) assert.equal(Core.validateOptionalPrice(bad, "缓存读取价格").ok, false, bad);
+  assert.match(Core.validateOptionalPrice("x", "缓存读取价格").error, /缓存读取价格/);
+});
+
+test("buildModelPayload with all four prices; invalid cache prices block the save", () => {
+  const all = Core.buildModelPayload({
+    model_id: "m",
+    input_price_per_m: "3",
+    cache_read_price_per_m: "0.3",
+    cache_write_price_per_m: "3.75",
+    output_price_per_m: "15",
+    context_window_tokens: "200000",
+  });
+  assert.deepEqual(all.payload, {
+    model_id: "m",
+    input_price_per_m: 3,
+    cache_read_price_per_m: 0.3,
+    cache_write_price_per_m: 3.75,
+    output_price_per_m: 15,
+    context_window_tokens: 200000,
+  });
+  const bad = Core.buildModelPayload({ model_id: "m", input_price_per_m: "1", output_price_per_m: "1", cache_read_price_per_m: "-2", cache_write_price_per_m: "x" });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.errors.length, 2);
+  // the cache prices may be zero (free cache reads) and stay zero, not null
+  assert.equal(Core.buildModelPayload({ model_id: "m", input_price_per_m: "1", output_price_per_m: "1", cache_read_price_per_m: "0" }).payload.cache_read_price_per_m, 0);
+});
+
+test("price source: the default URL, normalisation, https-only validation and the status line", () => {
+  assert.equal(Core.DEFAULT_PRICING_SOURCE_URL, "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json");
+  const n = Core.normalizePricingSource({ url: "https://x/y.json", fetched_at: "2026-11-17T08:00:00Z", entries: "2345", error: null });
+  assert.deepEqual([n.url, n.entries, n.error, n.default_url], ["https://x/y.json", 2345, null, Core.DEFAULT_PRICING_SOURCE_URL]);
+  const empty = Core.normalizePricingSource(null);
+  assert.deepEqual([empty.url, empty.entries, empty.fetched_at, empty.error], ["", 0, null, null]);
+  assert.equal(Core.normalizePricingSource({ error: { message: "x" } }).error.includes("[object"), false);
+  for (const ok of ["https://raw.githubusercontent.com/a/b.json", " https://example.com/p.json "]) assert.equal(Core.validatePricingSourceUrl(ok).ok, true, ok);
+  for (const bad of ["", "http://example.com/p.json", "ftp://x", "not a url", "https://u:p@x.com/p.json", "https://x.com/\nfoo", "javascript:alert(1)"]) {
+    assert.equal(Core.validatePricingSourceUrl(bad).ok, false, JSON.stringify(bad));
+  }
+  assert.equal(Core.validatePricingSourceUrl(" https://example.com/p.json ").value, "https://example.com/p.json");
+  const ok = Core.pricingSourceStatus({ entries: 2345, fetched_at: "2026-11-17T08:00:00Z" });
+  assert.equal(ok.kind, "ok");
+  assert.match(ok.text, /已加载 2,345 条 · 获取于 \d{4}-\d\d-\d\d \d\d:\d\d/);
+  assert.equal(Core.pricingSourceStatus({ entries: 0 }).kind, "none");
+  const err = Core.pricingSourceStatus({ entries: 10, error: "连接超时" });
+  assert.equal(err.kind, "error");
+  assert.match(err.text, /连接超时/);
+  assert.match(err.text, /仍使用上次的 10 条/);
+  assert.equal(Core.formatDateTime("garbage"), "");
+  assert.equal(Core.formatDateTime(null), "");
+  assert.match(Core.formatDateTime(1763366400), /^\d{4}-\d\d-\d\d \d\d:\d\d$/); // epoch seconds
+  assert.match(Core.formatDateTime(1763366400000), /^\d{4}-\d\d-\d\d \d\d:\d\d$/); // epoch milliseconds
+});
+
+test("suggestions: normalised numbers (null for missing), both discover-models shapes, and the form values", () => {
+  const raw = { key: "deepseek/deepseek-chat", input_price_per_m: 0.27, output_price_per_m: 1.1, cache_read_price_per_m: 0.07, cache_write_price_per_m: null, context_window_tokens: 128000 };
+  assert.deepEqual(Core.normalizeSuggestion(raw), { ...raw });
+  assert.equal(Core.normalizeSuggestion(null), null);
+  assert.equal(Core.normalizeSuggestion([]), null);
+  assert.equal(Core.normalizeSuggestion({ matched: false }), null);
+  assert.equal(Core.normalizeSuggestion({ matched: true, input_price_per_m: null, output_price_per_m: null }), null, "no price at all = no match");
+  assert.equal(Core.normalizeSuggestion({ input_price_per_m: "x", output_price_per_m: 2 }).input_price_per_m, null);
+  assert.equal(Core.normalizeSuggestion({ input_price_per_m: -1, output_price_per_m: 2 }).input_price_per_m, null);
+  assert.equal(Core.normalizeSuggestion({ input_price_per_m: 1, output_price_per_m: 2, price_source: "litellm:x" }).key, "litellm:x");
+
+  // shape 1: per-model objects
+  const a = Core.parseDiscoveredModels({ models: [{ id: "m1", suggested: raw }, { id: "m2", suggested: null }, "plain"], existing_models: [] });
+  assert.deepEqual(a.ids, ["m1", "m2", "plain"]);
+  assert.equal(a.suggestions.m1.input_price_per_m, 0.27);
+  assert.equal(a.suggestions.m2, null);
+  assert.equal(a.suggestions.plain, null);
+  // shape 2: a map next to the ids
+  const b = Core.parseDiscoveredModels({ models: ["m1", "m2"], suggested: { m1: raw, m2: null } });
+  assert.deepEqual(b.ids, ["m1", "m2"]);
+  assert.equal(b.suggestions.m1.context_window_tokens, 128000);
+  assert.equal(b.suggestions.m2, null);
+  // the old plain list still works
+  assert.deepEqual(Core.parseDiscoveredModels(["x", "y"]).ids, ["x", "y"]);
+  assert.deepEqual(Core.parseDiscoveredModels(null).ids, []);
+
+  assert.deepEqual(Core.suggestionToForm(Core.normalizeSuggestion(raw)), { input: "0.27", cacheRead: "0.07", cacheWrite: "", output: "1.1", ctx: "128000" });
+  assert.deepEqual(Core.suggestionToForm(null), { input: "", cacheRead: "", cacheWrite: "", output: "", ctx: "" });
+  assert.equal(Core.formatPrice(null), "—");
+  assert.equal(Core.formatPrice(undefined), "—");
+  assert.equal(Core.formatPrice(3), "$3");
+  assert.equal(Core.formatPrice(0.27), "$0.27");
+  assert.equal(Core.formatPrice(0.0125), "$0.0125");
+  assert.equal(Core.formatPrice(15), "$15");
+  assert.equal(Core.formatPrice(1250), "$1250");
+});
+
+// --- v0.12.1: token / cost budget ------------------------------------------------------------
+test("normalizeBudget repairs garbage; ratios and states follow the 80 % / 100 % rules", () => {
+  assert.deepEqual(Core.normalizeBudget(null), { max_tokens: null, max_cost_usd: null, force_stop: false, used_tokens: 0, used_cost_usd: 0, state: "ok" });
+  const b = Core.normalizeBudget({ max_tokens: "1000.7", max_cost_usd: "2.5", force_stop: 1, used_tokens: 400, used_cost_usd: 0.5, state: "warning" });
+  assert.deepEqual(b, { max_tokens: 1000, max_cost_usd: 2.5, force_stop: true, used_tokens: 400, used_cost_usd: 0.5, state: "warning" });
+  assert.equal(Core.normalizeBudget({ max_tokens: 0 }).max_tokens, null);
+  assert.equal(Core.budgetRatio({ max_tokens: 1000, used_tokens: 250 }), 0.25);
+  assert.equal(Core.budgetRatio({ max_tokens: 1000, used_tokens: 250, max_cost_usd: 1, used_cost_usd: 0.5 }), 0.5, "the larger ratio wins");
+  assert.equal(Core.budgetRatio({}), null);
+  assert.equal(Core.budgetStateOf({ max_tokens: 1000, used_tokens: 799 }), "ok");
+  assert.equal(Core.budgetStateOf({ max_tokens: 1000, used_tokens: 800 }), "warning");
+  assert.equal(Core.budgetStateOf({ max_tokens: 1000, used_tokens: 999 }), "warning");
+  assert.equal(Core.budgetStateOf({ max_tokens: 1000, used_tokens: 1000 }), "reached");
+  assert.equal(Core.budgetStateOf({ max_tokens: 1000, used_tokens: 5000 }), "reached");
+  assert.equal(Core.budgetStateOf({ used_tokens: 5000 }), "ok", "no limit: never a warning");
+  assert.equal(Core.BUDGET_WARN_RATIO, 0.8);
+});
+
+test("the budget form: empty = no limit; positive numbers only; tokens are whole numbers; 'force stop' is a flag", () => {
+  const ok = Core.buildBudgetPayload({ max_tokens: " 2,000,000 ", max_cost_usd: "5.5", force_stop: true });
+  assert.deepEqual(ok, { ok: true, payload: { max_tokens: 2000000, max_cost_usd: 5.5, force_stop: true } });
+  assert.deepEqual(Core.buildBudgetPayload({ max_tokens: "", max_cost_usd: "   ", force_stop: false }).payload, { max_tokens: null, max_cost_usd: null, force_stop: false });
+  assert.deepEqual(Core.buildBudgetPayload({}).payload, { max_tokens: null, max_cost_usd: null, force_stop: false });
+  for (const bad of [{ max_tokens: "0" }, { max_tokens: "-5" }, { max_tokens: "1.5" }, { max_tokens: "abc" }, { max_tokens: "1e3" }, { max_cost_usd: "0" }, { max_cost_usd: "-1" }, { max_cost_usd: "x" }, { max_tokens: "99999999999999999999" }]) {
+    const r = Core.buildBudgetPayload(bad);
+    assert.equal(r.ok, false, JSON.stringify(bad));
+    assert.ok(r.errors.length >= 1);
+  }
+  assert.equal(Core.buildBudgetPayload({ max_tokens: "x", max_cost_usd: "y" }).errors.length, 2);
+  assert.equal(Core.parseBudgetField("3.", "cost").value, 3);
+  assert.equal(Core.parseBudgetField(".5", "cost").value, 0.5);
+  assert.equal(Core.formatPercent(0.8), "80%");
+  assert.equal(Core.formatPercent(0.1234, 1), "12.3%");
+  assert.equal(Core.formatPercent(-1), "0%");
+  assert.equal(Core.formatPercent(500), "999%");
+  assert.equal(Core.formatPercent("x"), "0%");
+});
+
+// --- v0.12.1: roster ------------------------------------------------------------------------------
+test("nicknames: 1-20 characters (an emoji counts once), no control characters, unique among the others", () => {
+  assert.deepEqual(Core.validateNickname("  Alice  ", []), { ok: true, value: "Alice" });
+  assert.equal(Core.validateNickname("", []).ok, false);
+  assert.equal(Core.validateNickname("   ", []).ok, false);
+  assert.equal(Core.validateNickname("a".repeat(20), []).ok, true);
+  assert.equal(Core.validateNickname("a".repeat(21), []).ok, false);
+  assert.match(Core.validateNickname("a".repeat(21), []).error, /20/);
+  assert.equal(Core.validateNickname("😀".repeat(20), []).ok, true, "20 emoji are 20 characters");
+  assert.equal(Core.validateNickname("😀".repeat(21), []).ok, false);
+  assert.equal(Core.validateNickname("小明小红小刚", []).ok, true);
+  assert.equal(Core.validateNickname("a\u0000b", []).ok, false);
+  assert.equal(Core.validateNickname("a\nb", []).ok, false);
+  assert.equal(Core.validateNickname("Bob", ["Alice", "Bob"]).ok, false);
+  assert.match(Core.validateNickname("Bob", ["Alice", "Bob"]).error, /已被其他玩家使用/);
+  assert.equal(Core.validateNickname(" Bob ", ["Alice", "Bob"]).ok, false, "trimmed before the uniqueness check");
+  assert.equal(Core.validateNickname("bob", ["Bob"]).ok, true, "names are case sensitive");
+  assert.equal(Core.charLength("a😀b"), 3);
+  assert.equal(Core.NICKNAME_MAX, 20);
+});
+
+test("normalizeRoster tolerates partial payloads", () => {
+  const r = Core.normalizeRoster({
+    memory_enabled: false,
+    editable: true,
+    seats: [{ seat: 1, id: "N1", name: "Alice", default_name: "Alice", avatar: { v: 1 }, persona: "p", memory: "m" }, { id: "N2" }, null, { seat: 3 }],
+  });
+  assert.equal(r.memory_enabled, false);
+  assert.equal(r.seats.length, 2);
+  assert.deepEqual(r.seats[0], { seat: 1, id: "N1", name: "Alice", default_name: "Alice", avatar: { v: 1 }, persona: "p", memory: "m" });
+  assert.deepEqual(r.seats[1], { seat: 0, id: "N2", name: "N2", default_name: "", avatar: null, persona: "", memory: "" });
+  assert.deepEqual(Core.normalizeRoster(null), { memory_enabled: true, editable: true, seats: [] });
+  assert.equal(Core.normalizeRoster({ editable: false }).editable, false);
+});
+
+// --- v0.12.1: game clock, sleeping ---------------------------------------------------------------------
+test("the game clock estimate runs only while the game runs; seconds / countdown formatting", () => {
+  assert.equal(Core.gameClockNow({ clock: 10, at: 1000, running: true }, 4500), 13.5);
+  assert.equal(Core.gameClockNow({ clock: 10, at: 1000, running: false }, 99999), 10, "paused: the game clock stands still (D18)");
+  assert.equal(Core.gameClockNow({ clock: 10, at: 5000, running: true }, 1000), 10, "never runs backwards");
+  assert.equal(Core.gameClockNow(null, 1), 0);
+  assert.equal(Core.formatSeconds(0), "0 秒");
+  assert.equal(Core.formatSeconds(5.2), "6 秒");
+  assert.equal(Core.formatSeconds(65), "1 分 05 秒");
+  assert.equal(Core.formatSeconds(3700), "1 时 01 分");
+  assert.equal(Core.formatSeconds(-3), "0 秒");
+  assert.equal(Core.formatCountdown(0), "0:00");
+  assert.equal(Core.formatCountdown(59.2), "1:00");
+  assert.equal(Core.formatCountdown(90), "1:30");
+  assert.equal(Core.formatCountdown(-5), "0:00");
+  assert.equal(Core.sleepLabel(null, 10), "等待新消息");
+  assert.equal(Core.sleepLabel(undefined, 10), "等待新消息");
+  assert.equal(Core.sleepLabel(40, 10), "定时醒来：剩余 30 秒");
+  assert.equal(Core.sleepLabel(10, 12), "即将醒来");
+  assert.equal(Core.formatTokensShort(950), "950");
+  assert.equal(Core.formatTokensShort(272900), "272.9K");
+  assert.equal(Core.formatTokensShort(2930000), "2.93M");
+  assert.equal(Core.formatTokensCount(272900), "272.9K Tokens");
+});
+
+// --- v0.12.1: downloads / raw uploads (the memory pack) -----------------------------------------------------
+test("filenameFromDisposition prefers filename*=UTF-8'' and copes with quotes and nothing", () => {
+  assert.equal(Core.filenameFromDisposition('attachment; filename="arena-memory.zip"'), "arena-memory.zip");
+  assert.equal(Core.filenameFromDisposition("attachment; filename=plain.zip"), "plain.zip");
+  assert.equal(Core.filenameFromDisposition("attachment; filename=\"fallback.zip\"; filename*=UTF-8''%E8%AE%B0%E5%BF%86.zip"), "记忆.zip");
+  assert.equal(Core.filenameFromDisposition(""), "");
+  assert.equal(Core.filenameFromDisposition(null), "");
+  assert.equal(Core.filenameFromDisposition("inline"), "");
+});
+
+test("api: upload sends the raw bytes with their content type; download returns the blob + file name; errors stay readable", async () => {
+  const seen = [];
+  const { client } = makeClient((url, init) => {
+    seen.push({ url, init });
+    if (url.endsWith("memory:export")) {
+      return {
+        status: 200,
+        ok: true,
+        headers: { get: (k) => (k.toLowerCase() === "content-disposition" ? 'attachment; filename="m.zip"' : null) },
+        blob: async () => ({ size: 3 }),
+        text: async () => "",
+      };
+    }
+    if (url.includes("bad")) return fakeResponse(400, { detail: "不是有效的 zip 记忆包" });
+    return fakeResponse(200, { ok: true });
+  });
+  const bytes = new Uint8Array([80, 75, 3, 4]);
+  await client.upload("api/roster/memory:import?dry_run=true", bytes, "application/zip");
+  assert.equal(seen[0].init.method, "POST");
+  assert.equal(seen[0].init.body, bytes, "the body is not JSON-encoded");
+  assert.equal(seen[0].init.headers["Content-Type"], "application/zip");
+  const dl = await client.download("api/roster/memory:export");
+  assert.deepEqual(dl, { blob: { size: 3 }, filename: "m.zip" });
+  assert.equal(seen[1].init.method, "GET");
+  await assert.rejects(client.upload("api/bad", bytes, "application/zip"), (e) => /zip/.test(e.message) && e.status === 400);
+  // JSON requests are unchanged
+  await client.post("api/x", { a: 1 });
+  assert.equal(seen[seen.length - 1].init.headers["Content-Type"], "application/json");
+  assert.equal(seen[seen.length - 1].init.body, '{"a":1}');
 });
 
 // --- runner --------------------------------------------------------------------

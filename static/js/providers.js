@@ -2,6 +2,15 @@
    Arena-Agents v0.10 — Provider / model / binding / session-list UI
    Loaded after core.js and before app.js. Exposes window.ArenaProviderUI.create(ctx).
    ctx: { api, Core, showToast, getSession, onChange }
+
+   v0.12.1 (E11, E12): the Provider dialog gained
+     - the price source (one URL for everything, default: the litellm price table) with
+       "刷新价格表" and its status line  (GET/PUT api/pricing/source, POST api/pricing/refresh)
+     - four prices per model (input = cache miss, cache read, cache write, output; $ / 1M tokens;
+       the two cache prices may stay empty = input price) and the price source of every model
+     - suggestions: "获取模型" brings a `suggested` price set per model; picking a model fills the
+       four prices and the context window, the user may still edit them; no match = empty fields
+       and a hint (GET api/pricing/match for a hand-typed model id)
    ========================================================================== */
 
 (function (root) {
@@ -42,10 +51,19 @@
       modelForm: $("model-form"),
       modelId: $("input-model-id"),
       priceIn: $("input-model-price-in"),
+      priceCacheRead: $("input-model-price-cache-read"),
+      priceCacheWrite: $("input-model-price-cache-write"),
       priceOut: $("input-model-price-out"),
+      priceHint: $("model-price-hint"),
+      btnMatchPrice: $("btn-match-price"),
       ctxWindow: $("input-model-ctx"),
       modelError: $("model-form-error"),
       btnSubmitModel: $("btn-submit-model"),
+
+      pricingUrl: $("input-pricing-url"),
+      pricingStatus: $("pricing-status"),
+      btnSavePricing: $("btn-save-pricing-url"),
+      btnRefreshPricing: $("btn-refresh-pricing"),
 
       bindingsModal: $("bindings-modal"),
       bindingsTable: $("bindings-table"),
@@ -73,11 +91,16 @@
       noticeText: $("restore-notice-text"),
     };
 
+    const DEFAULT_PRICE_HINT = "价格单位：美元 / 1M Tokens。缓存读取、缓存写入留空时按输入价计费。";
+
     const st = {
       providers: [],
       bindings: {}, // server defaults from GET /settings/bindings
       selectedId: null, // provider id | "new" | null
       discovered: [],
+      suggestions: {}, // model id -> price suggestion | null (from "获取模型" / the match endpoint)
+      pricing: Core.normalizePricingSource(null), // price source: url, entries, fetched_at, error
+      pricingBusy: false,
       rows: [],
       sessions: [],
       dismissedNotice: "",
@@ -95,6 +118,14 @@
     };
 
     const locked = () => Core.bindingsLocked(getSession());
+
+    /** Nickname of an actor id for messages ("界面一律显示昵称"): the moderator, a player, else the id itself. */
+    function actorName(id) {
+      if (id === "moderator") return "主持人";
+      const s = getSession();
+      const p = s && Array.isArray(s.participants) ? s.participants.find((x) => x.id === id) : null;
+      return p ? p.name : String(id === undefined || id === null ? "" : id);
+    }
     const current = () => Core.findProvider(st.providers, st.selectedId);
     const running = () => Boolean(getSession() && getSession().status === "running");
 
@@ -286,6 +317,13 @@
 
     function renderStatus() {
       if (!el.statusLabel) return;
+      const current = getSession();
+      if (current && current.demo) {
+        // Demo mode: scripted bots play, no model is needed.
+        el.statusLabel.textContent = "演示模式 · 脚本机器人";
+        if (el.statusDot) el.statusDot.className = "api-dot configured";
+        return;
+      }
       const b = effectiveBinding("moderator");
       const provider = b ? Core.findProvider(st.providers, b.provider_id) : null;
       const model = provider ? Core.findModel(provider, b.model_id) : null;
@@ -408,15 +446,20 @@
       const running = locked();
       el.modelList.innerHTML =
         p.models.length === 0
-          ? `<div class="empty-placeholder">尚未添加模型。先「获取模型」，单选一个并填写价格后添加。</div>`
+          ? `<div class="empty-placeholder">尚未添加模型。先「获取模型」，单选一个（价格会按价格源自动填好）后添加。</div>`
           : p.models
               .map(
                 (m) => `
           <div class="model-item" data-model-id="${esc(m.id)}">
-            <span class="model-item-id">${esc(m.id)}</span>
-            <span class="model-item-price">输入 $${Core.numText(m.input_price_per_m)} · 输出 $${Core.numText(
-                  m.output_price_per_m
-                )} / 1M · 窗口 ${Core.numText(m.context_window_tokens)}</span>
+            <div class="model-item-main">
+              <span class="model-item-id">${esc(m.id)}</span>
+              <span class="model-item-price" title="美元 / 1M Tokens；缓存价为空表示按输入价计">输入 ${esc(
+                Core.formatPrice(m.input_price_per_m)
+              )} · 缓存读 ${esc(Core.formatPrice(m.cache_read_price_per_m))} · 缓存写 ${esc(
+                Core.formatPrice(m.cache_write_price_per_m)
+              )} · 输出 ${esc(Core.formatPrice(m.output_price_per_m))} / 1M · 窗口 ${Core.numText(m.context_window_tokens)}</span>
+              <span class="model-item-source" title="价格来源">来源 ${esc(m.price_source || "manual")}</span>
+            </div>
             <button type="button" class="btn btn-xs" data-action="edit-model" ${
               readOnly ? "disabled" : ""
             }>编辑价格</button>
@@ -427,7 +470,16 @@
               )
               .join("");
       const lock = readOnly;
-      [el.modelId, el.priceIn, el.priceOut, el.ctxWindow, el.btnSubmitModel].forEach((x) => {
+      [
+        el.modelId,
+        el.priceIn,
+        el.priceCacheRead,
+        el.priceCacheWrite,
+        el.priceOut,
+        el.ctxWindow,
+        el.btnSubmitModel,
+        el.btnMatchPrice,
+      ].forEach((x) => {
         if (x) x.disabled = lock;
       });
       renderDiscoverAvailability();
@@ -478,32 +530,85 @@
       return mode;
     }
 
+    function setPriceHint(text, kind) {
+      if (!el.priceHint) return;
+      el.priceHint.textContent = text || DEFAULT_PRICE_HINT;
+      el.priceHint.className = kind ? `form-hint price-hint ${kind}` : "form-hint price-hint";
+    }
+
+    /** The five fields of the model form (strings; "" = empty). */
+    function setPriceFields(f) {
+      if (el.priceIn) el.priceIn.value = f.input;
+      if (el.priceCacheRead) el.priceCacheRead.value = f.cacheRead;
+      if (el.priceCacheWrite) el.priceCacheWrite.value = f.cacheWrite;
+      if (el.priceOut) el.priceOut.value = f.output;
+      if (el.ctxWindow) el.ctxWindow.value = f.ctx;
+    }
+
     function clearModelForm() {
       if (el.modelId) el.modelId.value = "";
-      if (el.priceIn) el.priceIn.value = "";
-      if (el.priceOut) el.priceOut.value = "";
-      if (el.ctxWindow) el.ctxWindow.value = "";
+      setPriceFields(Core.suggestionToForm(null));
+      setPriceHint("");
       setError(el.modelError, "");
       updateModelMode();
     }
 
-    /** Put one model into the form; existing models prefill prices for editing. */
+    /** Fill the form from a price suggestion (E12) and say where it came from. */
+    function applySuggestion(modelId, s) {
+      setPriceFields(Core.suggestionToForm(s));
+      if (s) {
+        const from = s.key ? `价格源条目「${s.key}」` : "价格源";
+        setPriceHint(`已按${from}自动填写四个价格和上下文窗口，可以再修改。`, "ok");
+      } else {
+        setPriceHint("价格源里没有匹配到这个模型：请手动填写价格（缓存读取 / 缓存写入可留空）。", "warn");
+      }
+    }
+
+    /** Put one model into the form; existing models prefill their prices for editing. */
     function pickModel(modelId) {
       const p = current();
       if (el.modelId) el.modelId.value = modelId;
       const existing = p ? Core.findModel(p, modelId) : null;
       if (existing) {
-        if (el.priceIn) el.priceIn.value = String(existing.input_price_per_m);
-        if (el.priceOut) el.priceOut.value = String(existing.output_price_per_m);
-        if (el.ctxWindow) el.ctxWindow.value = String(existing.context_window_tokens ?? "");
+        const str = (v) => (v === null || v === undefined ? "" : String(v));
+        setPriceFields({
+          input: str(existing.input_price_per_m),
+          cacheRead: str(existing.cache_read_price_per_m),
+          cacheWrite: str(existing.cache_write_price_per_m),
+          output: str(existing.output_price_per_m),
+          ctx: str(existing.context_window_tokens),
+        });
+        setPriceHint(`价格来源：${existing.price_source || "manual"}。可以直接修改后保存。`);
+      } else if (Object.prototype.hasOwnProperty.call(st.suggestions, modelId)) {
+        // a new model that came with a suggestion from "获取模型": fill it in (may be null = no match)
+        applySuggestion(modelId, st.suggestions[modelId]);
       } else {
-        // New model: prices must be typed explicitly, never carried over.
-        if (el.priceIn) el.priceIn.value = "";
-        if (el.priceOut) el.priceOut.value = "";
-        if (el.ctxWindow) el.ctxWindow.value = "";
+        setPriceFields(Core.suggestionToForm(null));
+        setPriceHint("");
       }
       setError(el.modelError, "");
       updateModelMode();
+    }
+
+    /** Hand-typed model id: ask the server which price-table entry matches. */
+    async function matchPrice() {
+      const p = current();
+      const modelId = el.modelId ? el.modelId.value.trim() : "";
+      if (!p || !modelId) {
+        setPriceHint("请先填写模型 ID，再点「自动匹配价格」。", "warn");
+        return;
+      }
+      setPriceHint("正在按价格源匹配…");
+      try {
+        const res = await api.get(
+          `api/pricing/match?provider_id=${enc(p.id)}&model_id=${enc(modelId)}`
+        );
+        const s = Core.normalizeSuggestion(res);
+        st.suggestions[modelId] = s;
+        applySuggestion(modelId, s);
+      } catch (e) {
+        setPriceHint(`匹配失败：${e.message}`, "warn");
+      }
     }
 
     function renderProviderPanel() {
@@ -520,6 +625,7 @@
     function selectProvider(id) {
       st.selectedId = id;
       st.discovered = [];
+      st.suggestions = {};
       st.preview = Core.normalizeEndpointPreview(null);
       st.previewSig = "";
       if (el.discoverStatus) el.discoverStatus.textContent = "";
@@ -544,11 +650,14 @@
       }
       st.selectedId = st.providers.length ? st.providers[0].id : "new";
       st.discovered = [];
+      st.suggestions = {};
       st.preview = Core.normalizeEndpointPreview(null);
       st.previewSig = "";
       clearModelForm();
       show(el.providerModal);
       renderProviderPanel();
+      renderPricing();
+      loadPricing(); // the price source is global: shown above the provider list
     }
 
     async function submitProvider(evt) {
@@ -626,15 +735,19 @@
       if (el.btnDiscover) el.btnDiscover.disabled = true;
       try {
         const res = await api.post(`api/providers/${enc(p.id)}/discover-models`);
-        st.discovered = Core.normalizeModelIds(res);
+        const parsed = Core.parseDiscoveredModels(res);
+        st.discovered = parsed.ids;
+        st.suggestions = parsed.suggestions;
         if (el.discoverStatus) {
+          const matched = parsed.ids.filter((id) => parsed.suggestions[id]).length;
           el.discoverStatus.textContent = st.discovered.length
-            ? `共获取 ${st.discovered.length} 个模型：每次单选一个，填写价格后添加。`
+            ? `共获取 ${st.discovered.length} 个模型，其中 ${matched} 个在价格源里匹配到价格：每次单选一个，价格会自动填好，可再修改后添加。`
             : "服务商没有返回任何模型，可手动输入模型 ID。";
         }
         renderDiscover();
       } catch (e) {
         st.discovered = [];
+        st.suggestions = {};
         renderDiscover();
         if (el.discoverStatus) el.discoverStatus.textContent = `获取失败：${e.message}`;
         showToast(`获取模型失败：${e.message}`);
@@ -650,6 +763,8 @@
       const built = Core.buildModelPayload({
         model_id: el.modelId.value,
         input_price_per_m: el.priceIn.value,
+        cache_read_price_per_m: el.priceCacheRead ? el.priceCacheRead.value : "",
+        cache_write_price_per_m: el.priceCacheWrite ? el.priceCacheWrite.value : "",
         output_price_per_m: el.priceOut.value,
         context_window_tokens: el.ctxWindow.value,
       });
@@ -688,12 +803,100 @@
       }
     }
 
+    // -----------------------------------------------------------------------
+    // v0.12.1: price source (E12)
+    // -----------------------------------------------------------------------
+
+    function renderPricing() {
+      const info = st.pricing;
+      if (el.pricingUrl && document.activeElement !== el.pricingUrl) {
+        el.pricingUrl.value = info.url || info.default_url;
+      }
+      if (el.pricingStatus) {
+        const status = Core.pricingSourceStatus(info);
+        el.pricingStatus.textContent = status.text;
+        el.pricingStatus.className = `pricing-bar-status form-hint ${status.kind}`;
+      }
+      if (el.btnRefreshPricing) el.btnRefreshPricing.disabled = st.pricingBusy;
+      if (el.btnSavePricing) el.btnSavePricing.disabled = st.pricingBusy;
+    }
+
+    /** GET api/pricing/source (an older backend has no such endpoint: the bar just says so). */
+    async function loadPricing() {
+      try {
+        st.pricing = Core.normalizePricingSource(await api.get("api/pricing/source"));
+      } catch (e) {
+        st.pricing = Core.normalizePricingSource({ error: `价格源接口不可用：${e.message}` });
+      }
+      renderPricing();
+    }
+
+    /** PUT/POST responses carry the same object as GET; anything else means "read it again". */
+    function adoptPricing(res) {
+      if (res && typeof res === "object" && ("entries" in res || "url" in res || "error" in res)) {
+        st.pricing = Core.normalizePricingSource(res);
+        renderPricing();
+        return Promise.resolve();
+      }
+      return loadPricing();
+    }
+
+    async function savePricingUrl() {
+      const checked = Core.validatePricingSourceUrl(el.pricingUrl ? el.pricingUrl.value : "");
+      if (!checked.ok) {
+        st.pricing = { ...st.pricing, error: checked.error };
+        renderPricing();
+        showToast(checked.error);
+        return false;
+      }
+      st.pricingBusy = true;
+      renderPricing();
+      try {
+        await adoptPricing(await api.put("api/pricing/source", { url: checked.value }));
+        showToast("价格源 URL 已保存");
+        return true;
+      } catch (e) {
+        st.pricing = { ...st.pricing, error: e.message };
+        showToast(e.message);
+        return false;
+      } finally {
+        st.pricingBusy = false;
+        renderPricing();
+      }
+    }
+
+    async function refreshPricing() {
+      // the typed URL is what the user wants refreshed: save it first when it changed
+      const typed = el.pricingUrl ? el.pricingUrl.value.trim() : "";
+      if (typed && typed !== (st.pricing.url || st.pricing.default_url)) {
+        const ok = await savePricingUrl();
+        if (!ok) return;
+      }
+      st.pricingBusy = true;
+      if (el.pricingStatus) el.pricingStatus.textContent = "正在由服务端拉取价格表…";
+      renderPricing();
+      try {
+        await adoptPricing(await api.post("api/pricing/refresh"));
+        const s = Core.pricingSourceStatus(st.pricing);
+        showToast(s.kind === "ok" ? `价格表已刷新：${st.pricing.entries.toLocaleString("en-US")} 条` : s.text);
+      } catch (e) {
+        st.pricing = { ...st.pricing, error: e.message };
+        showToast(`刷新价格表失败：${e.message}`);
+      } finally {
+        st.pricingBusy = false;
+        renderPricing();
+      }
+    }
+
     function closestAttr(target, selector, attr) {
       const node = target && target.closest ? target.closest(selector) : null;
       return node ? node.getAttribute(attr) : null;
     }
 
     function wireProviderModal() {
+      if (el.btnSavePricing) el.btnSavePricing.addEventListener("click", savePricingUrl);
+      if (el.btnRefreshPricing) el.btnRefreshPricing.addEventListener("click", refreshPricing);
+      if (el.btnMatchPrice) el.btnMatchPrice.addEventListener("click", matchPrice);
       if (el.btnNewProvider) el.btnNewProvider.addEventListener("click", () => selectProvider("new"));
       if (el.providerList) {
         el.providerList.addEventListener("click", (evt) => {
@@ -760,7 +963,7 @@
       const actors = [{ id: "moderator", label: "主持人" }].concat(
         ((s && s.participants) || []).map((p) => ({
           id: p.id,
-          label: `${p.name}（${p.seat} 号 · ${p.id}）`,
+          label: `${p.seat} 号 · ${p.name}`,
         }))
       );
       return actors.map((a) => {
@@ -1015,7 +1218,7 @@
       if (el.bindingsHint) {
         el.bindingsHint.textContent = running
           ? "对局运行中：模型与思考深度已锁定，请先暂停后再修改。"
-          : "思考深度（low/medium/high/xhigh）是模型的推理强度，与顶部的“执行深度”（工具调用预算）不同。";
+          : "思考深度（low/medium/high/xhigh）是模型的推理强度，按角色设置；agent 在一次激活里可以连续调用工具，没有轮数上限。";
       }
       if (el.btnSaveBindings) el.btnSaveBindings.disabled = running;
       if (el.btnApplyAll) el.btnApplyAll.disabled = running;
@@ -1026,7 +1229,7 @@
       if (el.bindingsIssues) {
         el.bindingsIssues.hidden = issues.length === 0;
         el.bindingsIssues.innerHTML = issues
-          .map((i) => `<div>⚠ ${esc(i.actor_id)}：${esc(i.message)}</div>`)
+          .map((i) => `<div>⚠ ${esc(actorName(i.actor_id))}：${esc(i.message)}</div>`)
           .join("");
       }
 
@@ -1293,16 +1496,17 @@
     function noticeFor(s) {
       if (!s) return "";
       const parts = [];
-      if (s.restored_from_save) {
-        parts.push(s.restore_notice || "已恢复上次对局（已暂停）");
-      }
+      // The server explains itself whenever it has something to say - not only after a restore: the last game
+      // was saved by an older version (kept, never touched), it could not be read, or the workspace did not open.
+      const restoreText = s.restore_notice || (s.restored_from_save ? "已恢复上次对局（已暂停）" : "");
+      if (restoreText) parts.push(restoreText);
       const issues = Array.isArray(s.binding_issues) ? s.binding_issues : [];
       if (issues.length) {
         parts.push(
           `有 ${issues.length} 项模型绑定需要处理：` +
             issues
               .slice(0, 3)
-              .map((i) => `${i.actor_id}（${i.message}）`)
+              .map((i) => `${actorName(i.actor_id)}（${i.message}）`)
               .join("；") +
             (issues.length > 3 ? "…" : "")
         );

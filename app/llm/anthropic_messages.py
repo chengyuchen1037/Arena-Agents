@@ -11,6 +11,7 @@ from app.llm.common import (
     StreamAccumulator,
     StreamProgress,
     UpstreamStreamError,
+    anthropic_usage_parts,
     estimate_completion_tokens,
 )
 from app.llm.messages import (
@@ -211,6 +212,7 @@ class AnthropicMessagesAdapter(ProtocolAdapter):
             request["max_tokens"] = max(request["max_tokens"], budget + ANSWER_HEADROOM)
         elif temperature is not None:
             request["temperature"] = min(1.0, max(0.0, float(temperature)))
+        add_cache_breakpoints(request)
         return request
 
     @staticmethod
@@ -223,6 +225,9 @@ class AnthropicMessagesAdapter(ProtocolAdapter):
 
     def downgrade(self, exc: BaseException, request: dict[str, Any]) -> bool:
         changed = super().downgrade(exc, request)
+        if not changed and _rejects_cache_control(exc) and strip_cache_control(request):
+            logger.warning("Upstream rejected cache_control; retrying without prompt-cache breakpoints.")
+            return True  # thinking blocks are untouched: only the cache markers were removed
         if changed:
             strip_thinking_blocks(request["messages"])
             if not request["messages"] or request["messages"][0]["role"] != "user":
@@ -244,7 +249,9 @@ class AnthropicMessagesAdapter(ProtocolAdapter):
         arg_parts: dict[int, list[str]] = {}
         thinking_blocks: dict[int, dict[str, Any]] = {}
         thinking_order: list[int] = []
-        input_tokens = 0
+        input_tokens = 0  # fresh input (excludes the cache counters)
+        cache_read_tokens = 0
+        cache_write_tokens = 0
         output_tokens = 0
         stop_reason = ""
 
@@ -262,7 +269,10 @@ class AnthropicMessagesAdapter(ProtocolAdapter):
             etype = getattr(event, "type", "") or ""
             if etype == "message_start":
                 usage = getattr(getattr(event, "message", None), "usage", None)
-                input_tokens = _prompt_tokens(usage) or input_tokens
+                fresh, c_read, c_write = anthropic_usage_parts(usage)
+                input_tokens = fresh or input_tokens
+                cache_read_tokens = c_read or cache_read_tokens
+                cache_write_tokens = c_write or cache_write_tokens
                 output_tokens = int(getattr(usage, "output_tokens", 0) or 0) or output_tokens
             elif etype == "content_block_start":
                 idx = int(getattr(event, "index", 0) or 0)
@@ -330,9 +340,10 @@ class AnthropicMessagesAdapter(ProtocolAdapter):
                 out = int(getattr(usage, "output_tokens", 0) or 0)
                 if out:
                     output_tokens = out
-                in_tokens = _prompt_tokens(usage)
-                if in_tokens:
-                    input_tokens = in_tokens
+                fresh, c_read, c_write = anthropic_usage_parts(usage)
+                input_tokens = fresh or input_tokens
+                cache_read_tokens = c_read or cache_read_tokens
+                cache_write_tokens = c_write or cache_write_tokens
             elif etype == "error":
                 err = getattr(event, "error", None)
                 err_type = str(getattr(err, "type", "") or "")
@@ -355,10 +366,12 @@ class AnthropicMessagesAdapter(ProtocolAdapter):
             tool_calls=[calls[k] for k in sorted(calls)],
             prompt_tokens=input_tokens,
             completion_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
             finish_reason=_STOP_REASONS.get(stop_reason, stop_reason),
             provider_private={"blocks": blocks} if blocks else {},
         )
-        if resp.prompt_tokens <= 0:
+        if resp.prompt_tokens <= 0 and resp.cache_read_tokens <= 0 and resp.cache_write_tokens <= 0:
             resp.prompt_tokens = self.estimate_prompt_tokens(request)
         if resp.completion_tokens <= 0:
             resp.completion_tokens = estimate_completion_tokens(resp)
@@ -366,12 +379,58 @@ class AnthropicMessagesAdapter(ProtocolAdapter):
 
 
 def _prompt_tokens(usage: Any) -> int:
-    """Total prompt tokens: fresh input plus cache writes and reads."""
-    if usage is None:
-        return 0
-    total = 0
-    for name in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
-        value = getattr(usage, name, 0)
-        if isinstance(value, (int, float)):
-            total += int(value)
-    return total
+    """Total input tokens of a call: fresh input plus cache writes and reads."""
+    return sum(anthropic_usage_parts(usage))
+
+
+_CACHE_MARK = {"type": "ephemeral"}
+
+
+def _rejects_cache_control(exc: BaseException) -> bool:
+    from app.llm.common import error_text, is_status_error, status_code_of
+
+    return is_status_error(exc) and status_code_of(exc) in (400, 422) and "cache_control" in error_text(exc)
+
+
+def strip_cache_control(request: dict[str, Any]) -> bool:
+    """Remove every ``cache_control`` marker from ``request`` (an upstream that does not know them)."""
+    found = False
+
+    def walk(node: Any) -> None:
+        nonlocal found
+        if isinstance(node, dict):
+            if "cache_control" in node:
+                del node["cache_control"]
+                found = True
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(request)
+    return found
+
+
+def add_cache_breakpoints(request: dict[str, Any]) -> None:
+    """Mark the stable prefix of an Anthropic request for prompt caching (v0.12.1).
+
+    Three of the four allowed breakpoints: the system prompt, the last tool and the last block of the
+    last message.  With the append-only conversation of the runtime, every call then reads the previous
+    call's prefix from the cache and only pays full price for what was appended.
+    """
+    system = request.get("system")
+    if isinstance(system, str) and system:
+        request["system"] = [{"type": "text", "text": system, "cache_control": dict(_CACHE_MARK)}]
+    tools = request.get("tools")
+    if isinstance(tools, list) and tools and isinstance(tools[-1], dict):
+        tools[-1] = {**tools[-1], "cache_control": dict(_CACHE_MARK)}
+    messages = request.get("messages")
+    if isinstance(messages, list) and messages:
+        last = messages[-1]
+        content = last.get("content") if isinstance(last, dict) else None
+        if isinstance(content, str) and content:
+            last["content"] = [{"type": "text", "text": content, "cache_control": dict(_CACHE_MARK)}]
+        elif isinstance(content, list) and content and isinstance(content[-1], dict):
+            if content[-1].get("type") not in ("thinking", "redacted_thinking"):
+                content[-1] = {**content[-1], "cache_control": dict(_CACHE_MARK)}

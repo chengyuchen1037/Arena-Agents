@@ -68,3 +68,8 @@ scratch/
 node_modules/
 pip-*/
 tmp_*/
+
+# local dev artifacts (v0.12)
+.demo-data/
+.pytest_tmp/
+tmp_*/

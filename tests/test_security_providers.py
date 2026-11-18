@@ -26,7 +26,15 @@ PROVIDER_KEYS = {
     "api_key_set",
     "auto_append_path",
 }
-MODEL_KEYS = {"id", "input_price_per_m", "output_price_per_m", "context_window_tokens"}
+MODEL_KEYS = {
+    "id",
+    "input_price_per_m",
+    "output_price_per_m",
+    "cache_read_price_per_m",
+    "cache_write_price_per_m",
+    "context_window_tokens",
+    "price_source",
+}
 ENV_NAMES = (
     "ARENA_API_TOKEN",
     "ARENA_ALLOWED_ORIGINS",
@@ -466,7 +474,11 @@ def test_discover_models_returns_names_and_marks_existing(client, env):
     provider = env.providers.seed(models=("m1",))
     response = client.post(f"/api/providers/{provider.id}/discover-models")
     assert response.status_code == 200
-    assert response.json() == {"models": ["m1", "m2"], "existing_models": ["m1"]}
+    assert response.json() == {
+        "models": ["m1", "m2"],
+        "existing_models": ["m1"],
+        "suggested": {"m1": None, "m2": None},  # no price table has been downloaded in this data dir
+    }
     env.discover.assert_awaited_once()
     assert env.discover.await_args.args[0].id == provider.id
 
@@ -654,7 +666,10 @@ def test_add_model_one_at_a_time_with_required_prices(client, env):
         "id": "gpt-x",
         "input_price_per_m": 1.5,
         "output_price_per_m": 6.0,
+        "cache_read_price_per_m": None,
+        "cache_write_price_per_m": None,
         "context_window_tokens": 128000,
+        "price_source": "manual",
     }
     assert [m.id for m in env.providers.providers[provider.id].models] == ["gpt-x"]
 

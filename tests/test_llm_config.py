@@ -27,7 +27,9 @@ def test_removed_dead_keys_stay_removed(cfg: dict) -> None:
     assert "extract_think_tags" not in cfg["llm"]["thinking"]
     assert "default_theme" not in cfg["app"]
     assert "interrupt_evaluation" not in cfg["prompts"]
-    assert set(cfg["initial_state"]) == {"phase_text"}
+    # v0.12: the flow is driven by the moderator agent, not by kickoff texts / an initial phase
+    assert "initial_state" not in cfg
+    assert "kickoff_instruction" not in cfg["prompts"] and "resume_instruction" not in cfg["prompts"]
 
 
 def test_keys_that_are_still_read_are_kept(cfg: dict) -> None:
@@ -35,9 +37,13 @@ def test_keys_that_are_still_read_are_kept(cfg: dict) -> None:
     assert cfg["scenario"]["path"]
     assert cfg["knowledge_base"]["docs_dir"]
     assert cfg["prompts"]["moderator_system"] and cfg["prompts"]["participant_system"]
-    assert cfg["prompts"]["kickoff_instruction"] and cfg["prompts"]["resume_instruction"]
-    assert cfg["initial_state"]["phase_text"]
-    assert cfg["llm"]["execution_depth"] in {"low", "medium", "high", "xhigh"}
+    runtime = cfg["runtime"]
+    # v0.12.1: the engine saves nothing - no debounce, no round caps, no execution depth; concurrency is unlimited by default
+    assert runtime["llm_concurrency"] == 0 and runtime["llm_concurrency_per_provider"] == 0 and runtime["watchdog"] > 0
+    assert 0 < runtime["compact_at"] < runtime["trim_at"] < 1
+    for gone in ("debounce", "max_rounds", "ambient_cap"):
+        assert gone not in runtime
+    assert "execution_depth" not in cfg["llm"]
     assert cfg["participants"] and cfg["tag_styles"]
 
 

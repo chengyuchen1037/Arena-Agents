@@ -10,12 +10,14 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.pricing import router as pricing_router
 from app.api.providers import router as providers_router
+from app.api.roster import router as roster_router
 from app.api.routes import router as api_router
 from app.api.security import warn_if_exposed
 from app.api.workspaces import router as workspaces_router
 from app.config import APP_VERSION, BASE_DIR
-from app.engine.orchestrator import get_orchestrator
+from app.game.orchestrator import get_orchestrator
 from app.storage.errors import StorageError
 
 logger = logging.getLogger(__name__)
@@ -121,6 +123,8 @@ async def health() -> dict[str, str]:
 
 app.include_router(api_router)
 app.include_router(providers_router)
+app.include_router(pricing_router)
+app.include_router(roster_router)
 app.include_router(workspaces_router)
 
 STATIC_DIR = BASE_DIR / "static"

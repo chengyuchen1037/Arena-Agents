@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,29 @@ from app.storage.paths import get_data_dir
 
 _SETTINGS_FILE = "settings.json"
 _SCHEMA_VERSION = 2
+# v0.12.0 named the seats ``p01``..``p12``; v0.12.1 uses ``N1``..``N12``.  Bindings saved under the old
+# names are read as the new ones where the game has such a seat (the file itself is only rewritten when the
+# user changes the bindings).
+_LEGACY_ACTOR_ID = re.compile(r"^p(\d{2})$")
+
+
+def migrate_legacy_actor_ids(bindings: dict[str, Any], known_ids: Any) -> dict[str, Any]:
+    """``{"p03": b}`` -> ``{"N3": b}`` for the seats in ``known_ids`` that have no binding under the new name.
+
+    A key that is itself a seat of the game (a custom ``config.yml`` may still use ``p03``) is left alone."""
+    known = set(known_ids)
+    migrated: dict[str, Any] = {}
+    renamed: dict[str, Any] = {}
+    for actor_id, binding in bindings.items():
+        match = _LEGACY_ACTOR_ID.match(actor_id)
+        new_id = f"N{int(match.group(1))}" if match else None
+        if new_id is not None and actor_id not in known and new_id in known:
+            renamed[new_id] = binding
+        else:
+            migrated[actor_id] = binding
+    for actor_id, binding in renamed.items():
+        migrated.setdefault(actor_id, binding)
+    return migrated
 
 
 def _default_settings() -> dict[str, Any]:
@@ -190,6 +214,21 @@ class SettingsStore:
             ]
             self._write(payload)
 
+    # v0.12.1: the user's default spending limit (copied into every new game).  It lives in the free-form
+    # ``ui`` dict of the settings, so the settings schema is unchanged.
+    def get_budget_defaults(self) -> dict[str, Any]:
+        with self._lock:
+            raw = self._read()["ui"].get("budget_defaults")
+        return copy.deepcopy(raw) if isinstance(raw, dict) else {}
+
+    def save_budget_defaults(self, budget: dict[str, Any]) -> None:
+        if not isinstance(budget, dict):
+            raise TypeError("budget must be a dict")
+        with self._lock:
+            payload = self._read()
+            payload["ui"] = {**payload["ui"], "budget_defaults": copy.deepcopy(budget)}
+            self._write(payload)
+
     def get_last_session_id(self) -> str | None:
         with self._lock:
             return self._read()["last_session_id"]
@@ -242,6 +281,14 @@ def save_model_templates(templates) -> None:
     get_settings_store().save_model_templates(templates)
 
 
+def get_budget_defaults() -> dict:
+    return get_settings_store().get_budget_defaults()
+
+
+def save_budget_defaults(budget: dict) -> None:
+    get_settings_store().save_budget_defaults(budget)
+
+
 def get_last_session_id() -> str | None:
     return get_settings_store().get_last_session_id()
 
@@ -252,12 +299,15 @@ def set_last_session_id(session_id) -> None:
 
 __all__ = [
     "SettingsStore",
+    "migrate_legacy_actor_ids",
+    "get_budget_defaults",
     "get_default_bindings",
     "get_last_session_id",
     "get_model_templates",
     "get_settings",
     "get_settings_store",
     "reset_settings_store",
+    "save_budget_defaults",
     "save_default_bindings",
     "save_model_templates",
     "set_last_session_id",

@@ -1,23 +1,36 @@
 /* ==========================================================================
-   Arena-Agents v0.11 Frontend Controller
-   (Executable Markdown Scenarios · Game-Agnostic Runtime)
-   Pure helpers live in core.js (window.ArenaCore).
+   Arena-Agents v0.12.1 Frontend Controller
+   (async agents · SSE v2 · player cards with pixel avatars · request cards · responsive)
+
+   Pure logic lives in
+     core.js      escaping / API client / formatting / budget + price helpers
+     avatar.js    pixel avatars (sprite library static/avatar/parts.json, canvas -> data URL)
+     store.js     SSE event application on a PublicSession v3 object
+     view.js      viewpoint filtering, cards, channels, request cards, banners
+     platform.js  desktop / tablet / phone detection (<html data-platform>)
+   Panels with their own state: roster.js (detail panel, roster menu), budget.js (limit dialog),
+   providers.js (Provider / price source / bindings), layout.js, workspace.js.
+   This file wires them to the DOM.
+
+   What is NOT here (v0.12 -> v0.12.1): the 🎤 / ✋ / ■ card states and their legend, the execution
+   depth select, the "全部" channel, the right-hand "对局状态" column (it became the summary strip of
+   the participant bar). Still not here: streaming drafts, chain-of-thought, tool-call cards.
    ========================================================================== */
 
 (() => {
   const Core = window.ArenaCore;
+  const Avatar = window.ArenaAvatar;
+  const Store = window.ArenaStore;
+  const View = window.ArenaView;
+  const Platform = window.ArenaPlatform || null;
   if (!Core) {
     throw new Error("core.js 未加载：请确认 static/js/core.js 可访问");
   }
-  const {
-    escapeHtml,
-    numText,
-    safeNum,
-    stripMarkdownForPreview,
-    renderFormattedText,
-    renderFormattedBlocks,
-    boundedSet,
-  } = Core;
+  if (!Avatar || !Store || !View) {
+    throw new Error("avatar.js / store.js / view.js 未加载：请确认 static/js 下的脚本可访问");
+  }
+  const { escapeHtml, numText } = Core;
+  const MOD = View.MODERATOR_ID;
 
   // URL prefix the app is served under (supports sub-path reverse proxies).
   const SCRIPT_SRC = document.currentScript && document.currentScript.src;
@@ -30,29 +43,56 @@
   })();
 
   const TOKEN_KEY = "arena_api_token";
+  const VIEWPOINT_KEY = "arena_viewpoint_v1";
+  const MESSAGE_HTML_CACHE_MAX = 5000;
+  const FLASH_MS = 3000;
+  const LONG_PRESS_MS = 450;
   let providerUI = null; // v0.10 provider/binding/session-list UI (providers.js)
-  let layoutUI = null; // v0.11 collapse/resize/card-size UI (layout.js)
+  let layoutUI = null; // v0.11 collapse/resize UI (layout.js)
   let workspaceUI = null; // v0.11 workspace (工作文件夹) UI (workspace.js)
-  const MAX_EXPAND_ENTRIES = 5000;
+  let rosterUI = null; // v0.12.1 detail panel + roster menu (roster.js)
+  let budgetUI = null; // v0.12.1 token / cost limit dialog (budget.js)
+  let platformCtl = null; // platform.js controller
 
   const state = {
-    session: null,
-    selectedChannel: "all", // "engine" | "all" | channel.id
-    showToolCalls: true,
-    level1Expanded: new Map(), // action_id -> boolean (Level 1 action card, default true)
-    level2Expanded: new Map(), // record_id -> boolean (Level 2 subitem: message default true, thought/tool default false)
+    session: Store.emptySession(), // PublicSession v3, updated in place by SSE events
+    loaded: false, // a first session (HTTP or SSE) has arrived
+    sessionKey: null,
+    viewpointPref: View.GOD, // what the user chose (kept even while the game has no players yet)
+    viewpoint: View.GOD, // effective viewpoint: "god" | player id
+    selectedChannel: null, // channel id; null while there is no channel (the default is picked automatically)
+    channelChosen: false, // false: the selection is automatic (public channel, else the first one) and follows new channels
+    dmGroupOpen: false,
+    ticketPopOpen: false,
+    phoneTab: "feed", // phone layout: "feed" | "channels" | "players"
+    platform: null, // platform.js result
     autoScroll: true,
+    autoScrollTop: null, // scrollTop of the feed right after our own scroll-to-bottom
+    read: { baseline: 0, seqs: {} }, // unread watermarks per channel
+    flash: new Map(), // actor id -> expiry (ms): briefly highlights a card (ability.used)
+    clockSync: { clock: 0, at: 0, running: false }, // estimate of the game clock (sleep timers, request deadlines)
+    // SSE
     sse: null,
     sseAttempt: 0,
     sseTimer: null,
     sseConnected: false,
-    lastChannelsSig: "",
-    lastRecordsSig: "",
+    lastEventId: 0, // highest event id reflected in state.session
+    sseResumeId: 0, // last id received over the stream (resume point for reconnects)
+    appVersion: "",
+    avatarEpoch: 0, // bumps when the sprite library arrives (avatars change from circles to pixel art)
+    rosterSig: "", // names + avatars: part of every cache key that contains them
+    // render caches (skip DOM writes when nothing changed)
     lastBoardHtml: null,
-    appVersion: "", // application version from /api/state (not the restored session's version)
-    lastDashboardSig: null,
-    sessionKey: null,
-    draftNodes: new Map(), // draft key -> { el, sig }
+    lastSummaryHtml: null,
+    lastChannelsHtml: null,
+    lastViewpointHtml: null,
+    lastHintsHtml: null,
+    lastBannerHtml: null,
+    lastModHtml: null,
+    lastTabbarHtml: null,
+    lastTicketPopHtml: null,
+    feed: { key: "", rows: [] },
+    msgHtml: new Map(),
   };
 
   // ---------------------------------------------------------------------------
@@ -101,52 +141,55 @@
     return api.post(path, body);
   }
 
-  // DOM Elements
-  const elAppTitle = document.getElementById("app-title");
-  const elAppVersion = document.getElementById("app-version");
-  const elScenarioName = document.getElementById("scenario-name");
-  const elBtnTheme = document.getElementById("btn-theme");
-  const elStatusDot = document.getElementById("active-status-dot");
-  const elStatusText = document.getElementById("active-status-text");
-  const elPhasePill = document.getElementById("phase-pill");
+  // ---------------------------------------------------------------------------
+  // DOM elements
+  // ---------------------------------------------------------------------------
 
-  const elSelectExecDepth = document.getElementById("select-exec-depth");
-  const elUsagePill = document.getElementById("usage-telemetry-pill");
-  const elUsageTokensText = document.getElementById("usage-tokens-text");
-  const elUsageCostText = document.getElementById("usage-cost-text");
+  const $ = (id) => document.getElementById(id);
+  const elAppTitle = $("app-title");
+  const elAppVersion = $("app-version");
+  const elBtnTheme = $("btn-theme");
+  const elStatusDot = $("active-status-dot");
+  const elStatusText = $("active-status-text");
+  const elPhasePill = $("phase-pill");
+  const elRequestHints = $("request-hints");
+  const elStatusBanner = $("status-banner");
+  const elSelectViewpoint = $("select-viewpoint");
+  const elFeedViewing = $("feed-viewing");
+  const elModChip = $("mod-chip");
+  const elTopbarStatus = $("topbar-status");
 
-  const elModeratorStatusPill = document.getElementById("moderator-status-pill");
-  const elModeratorStatusText = document.getElementById("moderator-status-text");
+  const elUsagePill = $("usage-telemetry-pill");
+  const elUsageTokensText = $("usage-tokens-text");
+  const elUsageCostText = $("usage-cost-text");
 
-  const elBtnNew = document.getElementById("btn-new");
-  const elBtnSave = document.getElementById("btn-save");
-  const elBtnStart = document.getElementById("btn-start");
-  const elBtnPause = document.getElementById("btn-pause");
-  const elBtnResume = document.getElementById("btn-resume");
-  const elBtnForcePause = document.getElementById("btn-force-pause");
-  const elBtnShuffle = document.getElementById("btn-shuffle-identities");
+  const elBtnNew = $("btn-new");
+  const elBtnSave = $("btn-save");
+  const elBtnStart = $("btn-start");
+  const elBtnPause = $("btn-pause");
+  const elBtnResume = $("btn-resume");
+  const elBtnMore = $("btn-more");
+  const elMoreMenu = $("more-menu");
+  const elMoreMenuList = $("more-menu-list");
 
-  const elParticipantsGrid = document.getElementById("participants-grid");
-  const elChannelsList = document.getElementById("channels-list");
-  const elFeedChannelLabel = document.getElementById("feed-channel-label");
-  const elChkShowTools = document.getElementById("chk-show-tools");
-  const elBtnResetDefault = document.getElementById("btn-reset-default");
-  const elBtnExpandAll = document.getElementById("btn-expand-all");
-  const elBtnCollapseAll = document.getElementById("btn-collapse-all");
-  const elFeedList = document.getElementById("feed-list");
-  const elFeedRecordsContainer = document.getElementById("feed-records-container");
-  const elFeedStreamingContainer = document.getElementById("feed-streaming-container");
+  const elMain = $("main-container");
+  const elTabbar = $("tabbar");
+  const elParticipantsGrid = $("participants-grid");
+  const elBoardSummary = $("board-summary");
+  const elChannelsList = $("channels-list");
+  const elFeedChannelLabel = $("feed-channel-label");
+  const elFeedList = $("feed-list");
+  const elFeedRecords = $("feed-records-container");
+  const elTicketPop = $("ticket-pop");
+  const elTouchTip = $("touch-tip");
+  const elToastContainer = $("toast-container");
 
-  const elFactionsList = document.getElementById("factions-list");
-  const elTagStatsList = document.getElementById("tag-stats-list");
-  const elToastContainer = document.getElementById("toast-container");
-
-  const elConnBanner = document.getElementById("conn-banner");
-  const elTokenModal = document.getElementById("token-modal");
-  const elTokenForm = document.getElementById("token-form");
-  const elTokenInput = document.getElementById("input-api-token");
-  const elTokenMessage = document.getElementById("token-modal-message");
-  const elBtnCancelToken = document.getElementById("btn-cancel-token");
+  const elConnBanner = $("conn-banner");
+  const elTokenModal = $("token-modal");
+  const elTokenForm = $("token-form");
+  const elTokenInput = $("input-api-token");
+  const elTokenMessage = $("token-modal-message");
+  const elBtnCancelToken = $("btn-cancel-token");
 
   function showToast(msg) {
     const toast = document.createElement("div");
@@ -162,979 +205,1204 @@
     }, 3200);
   }
 
-  function renderToolCallContent(rec) {
-    if (!rec || rec.kind !== "tool_call" || !rec.tool_name) {
-      return renderFormattedText(rec ? rec.content : "");
+  /** event.target.closest that tolerates text nodes and the node-test stubs. */
+  function closestFrom(target, selector) {
+    let node = target;
+    // A text node has no closest(): walk up to its element.
+    if (node && typeof node.closest !== "function" && node.parentElement) node = node.parentElement;
+    return node && typeof node.closest === "function" ? node.closest(selector) : null;
+  }
+
+  const isPhone = () => Boolean(state.platform && state.platform.platform === "phone");
+
+  /** Set an element's innerHTML only when it changed (keeps hover / focus, saves work). */
+  function setHtml(node, html, cacheKey) {
+    if (!node) return;
+    if (state[cacheKey] === html) return;
+    state[cacheKey] = html;
+    node.innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Game clock estimate (sleep timers, request deadlines)
+  // ---------------------------------------------------------------------------
+
+  function clockNow() {
+    return Core.gameClockNow(state.clockSync, Date.now());
+  }
+
+  /** The server told us the clock (snapshot / session.updated): trust it and run from now on. */
+  function syncClock(session) {
+    state.clockSync = { clock: Number(session.clock) || 0, at: Date.now(), running: session.status === "running" };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-game UI state (unread watermarks, selection)
+  // ---------------------------------------------------------------------------
+
+  function lastMessageSeq(session) {
+    const m = session.messages;
+    return m.length ? m[m.length - 1].seq : 0;
+  }
+
+  function resetReadState(session) {
+    // History that exists when a game is loaded counts as read.
+    state.read = { baseline: lastMessageSeq(session), seqs: {} };
+  }
+
+  function markChannelRead(channelId) {
+    if (!channelId) return;
+    state.read.seqs[channelId] = Math.max(
+      state.read.seqs[channelId] || 0,
+      View.latestSeq(state.session, channelId)
+    );
+  }
+
+  function onMessageSeen(msg) {
+    // A message that arrives in the channel being read is not unread.
+    if (msg.channel_id && msg.channel_id === state.selectedChannel) {
+      state.read.seqs[msg.channel_id] = Math.max(state.read.seqs[msg.channel_id] || 0, msg.seq);
     }
-    const argsStr = JSON.stringify(rec.tool_args || {}, null, 2);
-    const resRaw = (rec.tool_result || "").trim();
-    let resHtml = "";
-    if (resRaw.startsWith("{") || resRaw.startsWith("[")) {
-      try {
-        const parsed = JSON.parse(resRaw);
-        resHtml = `<pre class="fmt-pre"><code>${escapeHtml(
-          JSON.stringify(parsed, null, 2)
-        )}</code></pre>`;
-      } catch {
-        resHtml = renderFormattedText(resRaw);
+  }
+
+  /**
+   * The selected channel is always a visible one (there is no "all" any more): keep the user's choice
+   * while it is valid, otherwise fall back to the public channel (or the first one).
+   */
+  function ensureSelectedChannel() {
+    // an automatic selection re-evaluates the default every time (the public channel appears after
+    // the game starts: it replaces the first private chat that was selected before)
+    const next = state.channelChosen
+      ? View.normalizeSelectedChannel(state.session, state.viewpoint, state.selectedChannel)
+      : View.defaultChannelId(state.session, state.viewpoint);
+    if (next !== state.selectedChannel) {
+      state.selectedChannel = next;
+      if (next) markChannelRead(next);
+      state.autoScroll = true;
+    }
+    return next;
+  }
+
+  function flashActor(info) {
+    if (!info || !info.actor_id) return;
+    state.flash.set(info.actor_id, Date.now() + FLASH_MS);
+    const s = state.session;
+    showToast(
+      `⚡ ${View.displayName(s, info.actor_id)} 发动了能力${info.ability_id ? `：${info.ability_id}` : ""}`
+    );
+    setTimeout(() => {
+      state.flash.delete(info.actor_id);
+      scheduleRender({ board: true });
+    }, FLASH_MS);
+  }
+
+  /** Names + avatars: every cached HTML that contains them is keyed by this. */
+  function computeRosterSig(s) {
+    return (
+      `${state.avatarEpoch}|` +
+      s.participants.map((p) => `${p.id}:${p.name}:${Avatar.descriptionKey(p.avatar)}`).join("|") +
+      `|${s.moderator.name}:${Avatar.descriptionKey(s.moderator.avatar)}`
+    );
+  }
+
+  /** An <img> for any actor (moderator / engine / player). */
+  function avatarImg(id, size, className) {
+    const a = View.actorAvatar(state.session, id);
+    return Avatar.imgHtml(id, a.seat, a.desc, { size, className });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering: top bar
+  // ---------------------------------------------------------------------------
+
+  function renderViewpointSelect(s) {
+    if (!elSelectViewpoint) return;
+    const options = View.viewpointOptions(s);
+    const html = options
+      .map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.label)}</option>`)
+      .join("");
+    if (html !== state.lastViewpointHtml) {
+      state.lastViewpointHtml = html;
+      elSelectViewpoint.innerHTML = html;
+    }
+    if (elSelectViewpoint.value !== state.viewpoint) elSelectViewpoint.value = state.viewpoint;
+  }
+
+  function renderRequestHints(s) {
+    if (!elRequestHints) return;
+    const hints = View.requestHints(s, state.viewpoint);
+    const shown = hints.slice(0, 3);
+    let html = shown
+      .map(
+        (h) =>
+          `<span class="req-pill" title="${escapeHtml(h.question)}${
+            h.sealed ? "（密封：关闭前不公开答案）" : ""
+          }"><span class="req-icon" aria-hidden="true">${h.icon}</span>${escapeHtml(
+            h.label
+          )} <strong>${numText(h.answered)}/${numText(h.total)}</strong></span>`
+      )
+      .join("");
+    if (hints.length > shown.length) {
+      html += `<span class="req-pill req-more">+${numText(hints.length - shown.length)}</span>`;
+    }
+    setHtml(elRequestHints, html, "lastHintsHtml");
+  }
+
+  function renderBanner(s) {
+    if (!elStatusBanner) return;
+    const lines = View.statusBanners(s);
+    const html = lines
+      .map((l) => {
+        // a phone shows the short sentence (CSS switches by <html data-layout>)
+        const body = l.short
+          ? `<span class="banner-full">${escapeHtml(l.text)}</span><span class="banner-short">${escapeHtml(l.short)}</span>`
+          : escapeHtml(l.text);
+        return `<span class="banner-line banner-${escapeHtml(l.kind)}">${body}</span>`;
+      })
+      .join("");
+    if (html !== state.lastBannerHtml) {
+      state.lastBannerHtml = html;
+      elStatusBanner.innerHTML = html;
+      elStatusBanner.className = `status-banner${lines.length ? ` banner-${lines[0].kind}` : ""}`;
+    }
+    elStatusBanner.hidden = lines.length === 0;
+  }
+
+  /** The moderator is a small chip at the end of the status row (not a card). */
+  function renderModeratorChip(s) {
+    if (!elModChip) return;
+    const t = View.moderatorTile(s, state.viewpoint, { clockNow: clockNow() });
+    const html =
+      `${avatarImg(MOD, 20, "mod-chip-avatar")}` +
+      `<span class="mod-chip-name">${escapeHtml(t.name)}</span>` +
+      (t.state
+        ? `<span class="mod-chip-state st-${t.state}" title="${escapeHtml(t.stateTitle)}">${t.stateIcon}</span>`
+        : "");
+    setHtml(elModChip, html, "lastModHtml");
+    if (elModChip.setAttribute) elModChip.setAttribute("title", t.title);
+    elModChip.classList.toggle("popover-open", Boolean(rosterUI && rosterUI.openId() === MOD));
+  }
+
+  function usageTitle(budget) {
+    if (!budget.hasLimit) return "点击打开模型绑定（费用按每次调用的价格快照累加）。点「上限」可设置 token / 费用上限。";
+    const parts = [];
+    if (budget.tokens.max) parts.push(`token ${Core.formatPercent(budget.tokens.ratio)}`);
+    if (budget.cost.max) parts.push(`费用 ${Core.formatPercent(budget.cost.ratio)}`);
+    const word = budget.state === "reached" ? "已达到上限" : budget.state === "warning" ? "已超过 80%" : "预算";
+    return `${word}：${parts.join("，")}${budget.forceStop ? "（达到上限后强制停止）" : ""}。点击打开模型绑定。`;
+  }
+
+  function renderTopbar() {
+    const s = state.session;
+    elAppTitle.textContent = s.title || "Arena-Agents";
+    const ver = state.appVersion || s.version || "";
+    if (elAppVersion) elAppVersion.textContent = s.demo ? `${ver} · 演示模式` : ver;
+
+    elStatusText.textContent = View.statusText(s);
+    if (elStatusText.setAttribute) elStatusText.setAttribute("title", View.statusText(s));
+    elPhasePill.textContent = s.phase_text || "未开始";
+    // before the game starts the phase repeats the status ("未开始 …"): a phone has no room for both
+    if (elPhasePill.classList) elPhasePill.classList.toggle("is-idle", s.status === "idle");
+    elStatusDot.className = `status-dot ${View.statusDotClass(s)}`;
+
+    // Top-right token & cost telemetry (the cost is accumulated server-side per call);
+    // yellow from 80 % of the limit, red when it is reached.
+    if (elUsageTokensText && elUsageCostText) {
+      const u = s.usage_stats || {};
+      const total = u.total_tokens > 0 ? u.total_tokens : 0;
+      // the number only: the unit " Tokens" is its own element (hidden when the top bar is tight)
+      elUsageTokensText.textContent = Core.formatTokensShort(total);
+      elUsageCostText.textContent = `$${Core.sessionCostUsd(u).toFixed(4)}`;
+    }
+    if (elUsagePill) {
+      const budget = View.budgetView(s);
+      if (elUsagePill.setAttribute) {
+        elUsagePill.setAttribute("data-budget", budget.state);
+        elUsagePill.setAttribute("title", usageTitle(budget));
       }
-    } else {
-      resHtml = renderFormattedText(resRaw);
     }
-    return `
-      <div class="tool-detail-grid">
-        <div class="tool-detail-row">
-          <span class="tool-detail-label">调用参数</span>
-          <pre class="fmt-pre tool-args-pre"><code>${escapeHtml(argsStr)}</code></pre>
-        </div>
-        ${
-          resRaw
-            ? `<div class="tool-detail-row">
-                <span class="tool-detail-label">返回结果</span>
-                <div class="tool-detail-result">${resHtml}</div>
-              </div>`
-            : ""
-        }
-      </div>
-    `;
-  }
 
-  function getBadgeVariantClass(badge) {
-    if (!badge) return "";
-    const b = String(badge);
-    if (b.includes("战略") || b.includes("规划") || b.includes("复盘")) {
-      return "badge-strategic";
-    }
-    if (b.includes("问讯") || b.includes("私聊")) {
-      return "badge-inquiry";
-    }
-    if (b.includes("自爆") || b.includes("插话")) {
-      return "badge-interrupt";
-    }
-    if (b.includes("投票")) {
-      return "badge-vote";
-    }
-    return "";
-  }
+    // Start only on a fresh game; Resume also works after the game finished (D8).
+    const ctl = View.controlState(s);
+    elBtnStart.disabled = !ctl.start;
+    elBtnPause.disabled = !ctl.pause;
+    elBtnResume.disabled = !ctl.resume;
 
-  // Cost is accumulated server-side from each call's price snapshot (v0.10):
-  // changing a price later never rewrites history.
-  function computeSessionUsage(s) {
-    const u = s.usage_stats || {};
-    if (typeof u.total_tokens === "number" && u.total_tokens > 0) {
-      return { totalTokens: u.total_tokens, costUsd: Core.sessionCostUsd(u) };
+    renderViewpointSelect(s);
+    renderRequestHints(s);
+    renderBanner(s);
+    renderModeratorChip(s);
+    if (elFeedViewing) {
+      elFeedViewing.textContent = `视角：${View.viewpointLabel(s, state.viewpoint)}`;
+      elFeedViewing.classList.toggle("is-player", state.viewpoint !== View.GOD);
     }
-    return { totalTokens: 0, costUsd: Core.sessionCostUsd(u) };
+    if (elSelectViewpoint) elSelectViewpoint.classList.toggle("is-player", state.viewpoint !== View.GOD);
+    if (budgetUI) budgetUI.onSession(s);
+    if (rosterUI) rosterUI.renderControls();
   }
 
   // ---------------------------------------------------------------------------
-  // Rendering Functions
+  // Rendering: player cards (E17: identity is the main tag; badges; three agent states)
   // ---------------------------------------------------------------------------
 
-  function ensureValidSelectedChannel(s) {
-    if (state.selectedChannel === "all" || state.selectedChannel === "engine") {
+  function tileHtml(t) {
+    const classes = ["pcard"];
+    if (t.out) classes.push("out");
+    if (t.viewing) classes.push("viewing");
+    if (t.state) classes.push(`st-${t.state}`);
+    if (state.flash.has(t.id)) classes.push("flash");
+    if (rosterUI && rosterUI.openId() === t.id) classes.push("popover-open");
+
+    const badges = t.badges
+      .map(
+        (b) =>
+          `<span class="pbadge pbadge-${escapeHtml(b.variant)}" title="${escapeHtml(b.tag)}">${escapeHtml(b.text)}</span>`
+      )
+      .join("");
+    const tag =
+      `<span class="pcard-tag tag-${escapeHtml(t.main.variant)}${t.main.known ? "" : " unknown"}"` +
+      ` title="${t.main.known ? escapeHtml(t.main.text) : "当前视角看不到这名玩家的身份"}">${escapeHtml(t.main.text)}</span>`;
+    const stateEl = t.state
+      ? `<span class="pcard-state st-${t.state}" title="${escapeHtml(t.stateTitle)}">${t.stateIcon}</span>`
+      : "";
+    const until = t.sleepUntil === null || t.sleepUntil === undefined ? "" : numText(t.sleepUntil);
+    // Layout: [number]            [badges]
+    //                 [avatar]
+    //                 [name]
+    //                 [identity tag]      [state]
+    return (
+      `<div class="${classes.join(" ")}" data-actor="${escapeHtml(t.id)}" data-state="${escapeHtml(t.state)}"` +
+      ` data-until="${until}" role="button" tabindex="0" title="${escapeHtml(t.title)}"` +
+      ` aria-label="${escapeHtml(t.name)}，${numText(t.seat)} 号">` +
+      `<span class="pcard-num">${numText(t.seat)}</span>` +
+      `<span class="pcard-badges">${badges}</span>` +
+      `<span class="pcard-avatar">${avatarImg(t.id, 40)}</span>` +
+      `<span class="pcard-text"><span class="pcard-name">${escapeHtml(t.name)}</span>${tag}</span>` +
+      `${stateEl}</div>`
+    );
+  }
+
+  function renderBoard() {
+    const s = state.session;
+    const tiles = View.boardTiles(s, state.viewpoint, { clockNow: clockNow() });
+    const html = tiles.map(tileHtml).join("");
+    // Skip the DOM write when nothing changed (keeps hover / focus, saves work).
+    setHtml(elParticipantsGrid, html, "lastBoardHtml");
+    if (rosterUI && rosterUI.isOpen()) rosterUI.position();
+  }
+
+  /** "狼 2/4 · 神 4/4 · 民 3/4 · 警长 Grace": the god view's compact summary at the end of the bar. */
+  function renderSummary() {
+    if (!elBoardSummary) return;
+    const sum = View.boardSummary(state.session, state.viewpoint);
+    const html = sum
+      ? `<span class="sum-label">对局状态</span>` +
+        sum.items
+          .map(
+            (i) =>
+              `<span class="sum-chip sum-${escapeHtml(i.variant)}" title="${escapeHtml(i.title)}">${escapeHtml(i.text)}</span>`
+          )
+          .join("")
+      : "";
+    setHtml(elBoardSummary, html, "lastSummaryHtml");
+    elBoardSummary.hidden = !sum;
+  }
+
+  // Hover: the sleeping timer in the tooltip must be fresh (the board is not repainted every second).
+  function refreshCardTitle(card) {
+    if (!card || typeof card.getAttribute !== "function") return;
+    if (card.getAttribute("data-state") !== "sleeping") return;
+    const id = card.getAttribute("data-actor");
+    const p = View.participantOf(state.session, id);
+    if (!p) return;
+    const tip = View.stateTitle("sleeping", p.sleep_until, clockNow());
+    const t = View.tileModel(state.session, state.viewpoint, p, { clockNow: clockNow() });
+    card.setAttribute("title", t.title);
+    const icon = card.querySelector ? card.querySelector(".pcard-state") : null;
+    if (icon && icon.setAttribute) icon.setAttribute("title", tip);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering: channel bar (floor status, unread, tickets) — no "all" channel
+  // ---------------------------------------------------------------------------
+
+  function unreadBadge(n, cls = "channel-unread") {
+    return n > 0
+      ? `<span class="${cls}" title="${numText(n)} 条未读">${numText(n > 99 ? 99 : n)}${n > 99 ? "+" : ""}</span>`
+      : "";
+  }
+
+  function channelItemHtml(ch, unread) {
+    const s = state.session;
+    const m = View.channelModel(s, state.viewpoint, ch);
+    const sum = m.summary;
+    const active = state.selectedChannel === ch.id;
+    const n = unread.byChannel[ch.id] || 0;
+    const isDm = m.kind === "dm";
+    // A private chat is normally "free": the chip is only worth showing when it is muted / frozen.
+    const showChip = Boolean(sum.icon) && !(isDm && sum.kind === "free");
+    const tipText = `${m.title}${showChip ? `｜${sum.icon} ${sum.text}${sum.detail ? `（${sum.detail}）` : ""}` : ""}`;
+    const hue = Avatar.HUES[Avatar.hashString(ch.id) % Avatar.HUES.length];
+    const avatar = isDm
+      ? avatarImg(m.avatarId, 40, "chan-avatar-img")
+      : `<span class="chan-glyph" style="--gh:${hue}" aria-hidden="true">${escapeHtml(m.glyph)}</span>`;
+    const chip = showChip
+      ? `<span class="floor-chip floor-${escapeHtml(sum.kind)}" title="${escapeHtml(sum.detail || sum.text)}">` +
+        `<span class="chip-icon">${sum.icon}</span><span class="chip-text">${escapeHtml(sum.text)}</span></span>`
+      : "";
+    const detail = sum.detail && showChip ? `<span class="channel-detail">${escapeHtml(sum.detail)}</span>` : "";
+    const members = isDm ? "" : `<span class="channel-members">${numText(m.memberCount)} 人</span>`;
+    return (
+      `<div class="channel-item${isDm ? " is-dm" : " is-group"}${active ? " active" : ""}${n ? " has-unread" : ""}"` +
+      ` data-channel="${escapeHtml(ch.id)}" data-title="${escapeHtml(tipText)}" title="${escapeHtml(tipText)}" role="button" tabindex="0">` +
+      `<span class="chan-avatar">${avatar}` +
+      `${showChip ? `<span class="chan-ov ov-state">${sum.icon}</span>` : ""}${unreadBadge(n, "chan-ov ov-unread")}</span>` +
+      `<span class="chan-body"><span class="chan-row"><span class="channel-name">${escapeHtml(m.title)}</span>${unreadBadge(n)}</span>` +
+      `<span class="channel-meta">${chip}${members}</span>${detail}</span></div>`
+    );
+  }
+
+  function ticketHtml(t) {
+    const s = state.session;
+    const st = View.ticketStatus(t);
+    const preview = String(t.preview || "");
+    return (
+      `<div class="ticket-item ticket-${st.cls}" data-ticket="${escapeHtml(t.id)}" data-channel="${escapeHtml(
+        View.ticketChannelId(s, t)
+      )}" title="点击定位到该玩家与主持人的对话">` +
+      `<div class="ticket-row"><span class="ticket-id">${escapeHtml(t.id)}</span>` +
+      `<span class="ticket-who">${escapeHtml(View.displayName(s, t.player_id))}</span>` +
+      `<span class="ticket-status ts-${st.cls}">${escapeHtml(st.text)}</span></div>` +
+      `<div class="ticket-preview">${escapeHtml(preview)}</div></div>`
+    );
+  }
+
+  function renderChannels() {
+    const s = state.session;
+    const vp = state.viewpoint;
+    ensureSelectedChannel();
+    const unread = View.unreadCounts(s, vp, state.read);
+    const { groups, dms } = View.channelGroups(s, vp);
+    const tickets = View.visibleTickets(s, vp);
+
+    const html = [];
+    if (groups.length === 0 && dms.length === 0) {
+      html.push(`<div class="empty-placeholder channels-empty">暂无频道<br/>对局启动后由主持人建立</div>`);
+    }
+    for (const ch of groups) html.push(channelItemHtml(ch, unread));
+
+    // Challenge tickets are their own group, right below the channels (the private chats follow).
+    // Wide: a titled list. Avatar rail: one icon with the number (opens the list as a popover).
+    if (tickets.length) {
+      const openCount = tickets.filter((t) => t.status !== "resolved").length;
+      html.push(
+        `<div class="channel-group-title tickets-title">质询工单 <span class="group-count">${numText(
+          tickets.length
+        )}</span>${openCount ? `<span class="ticket-open-count">${numText(openCount)} 待处理</span>` : ""}</div>`
+      );
+      for (const t of tickets) html.push(ticketHtml(t));
+      html.push(
+        `<button type="button" class="rail-tickets${openCount ? " has-open" : ""}" data-tickets-toggle` +
+          ` title="质询工单：共 ${numText(tickets.length)} 条，${numText(openCount)} 条待处理">` +
+          `<span class="rail-icon" aria-hidden="true">❓</span><span class="rail-count">${numText(tickets.length)}</span></button>`
+      );
+    }
+
+    if (dms.length) {
+      const selectedIsDm = dms.some((c) => c.id === state.selectedChannel);
+      const open = state.dmGroupOpen || selectedIsDm;
+      const dmUnread = dms.reduce((n, c) => n + (unread.byChannel[c.id] || 0), 0);
+      html.push(
+        `<div class="channel-group-title dm-title" data-dm-toggle role="button" tabindex="0" aria-expanded="${open}"` +
+          ` title="${open ? "收起" : "展开"}私聊频道（${numText(dms.length)} 个）">` +
+          `<span class="group-caret">${open ? "▼" : "▶"}</span><span class="group-icon" aria-hidden="true">✉</span>` +
+          `<span class="group-label">私聊</span> <span class="group-count">${numText(dms.length)}</span>${
+            open ? "" : unreadBadge(dmUnread)
+          }</div>`
+      );
+      if (open) for (const ch of dms) html.push(channelItemHtml(ch, unread));
+    }
+
+    const out = html.join("");
+    setHtml(elChannelsList, `${out}`, "lastChannelsHtml");
+    renderTabbar(unread.total);
+    renderTicketPop(tickets);
+  }
+
+  /** The ticket list as a popover (avatar-rail mode), kept in sync while it is open. */
+  function renderTicketPop(tickets) {
+    if (!elTicketPop) return;
+    const list = tickets || View.visibleTickets(state.session, state.viewpoint);
+    if (!state.ticketPopOpen || !list.length) {
+      elTicketPop.hidden = true;
       return;
     }
-    const exists = (s.channels || []).some((ch) => ch.id === state.selectedChannel);
-    if (!exists) {
-      state.selectedChannel = "all";
+    setHtml(
+      elTicketPop,
+      `<div class="ticket-pop-title">质询工单 <span class="group-count">${numText(list.length)}</span></div>` +
+        list.map(ticketHtml).join(""),
+      "lastTicketPopHtml"
+    );
+    elTicketPop.hidden = false;
+  }
+
+  function positionTicketPop(anchor) {
+    if (!elTicketPop || !anchor || typeof anchor.getBoundingClientRect !== "function") return;
+    const r = anchor.getBoundingClientRect();
+    const vw = Number(window.innerWidth) || 1280;
+    const vh = Number(window.innerHeight) || 800;
+    const pw = Math.min(elTicketPop.offsetWidth || 280, vw - 16);
+    elTicketPop.style.left = `${Math.round(Math.min(Math.max(8, r.right + 8), Math.max(8, vw - pw - 8)))}px`;
+    elTicketPop.style.top = `${Math.round(Math.min(Math.max(8, r.top), Math.max(8, vh - 260)))}px`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering: phone tab bar
+  // ---------------------------------------------------------------------------
+
+  const TABS = [
+    { id: "feed", icon: "💬", label: "信息流" },
+    { id: "channels", icon: "#", label: "频道" },
+    { id: "players", icon: "👥", label: "玩家" },
+  ];
+
+  function renderTabbar(unreadTotal) {
+    if (!elTabbar) return;
+    const total = unreadTotal === undefined ? View.unreadCounts(state.session, state.viewpoint, state.read).total : unreadTotal;
+    const html = TABS.map((t) => {
+      const on = state.phoneTab === t.id;
+      const badge = t.id === "channels" && total > 0 ? `<span class="tab-badge">${numText(total > 99 ? 99 : total)}</span>` : "";
+      return (
+        `<button type="button" class="tab-btn${on ? " active" : ""}" role="tab" aria-selected="${on}" data-tab="${t.id}">` +
+        `<span class="tab-icon" aria-hidden="true">${t.icon}</span><span class="tab-label">${t.label}</span>${badge}</button>`
+      );
+    }).join("");
+    setHtml(elTabbar, html, "lastTabbarHtml");
+  }
+
+  function setPhoneTab(tab) {
+    if (!TABS.some((t) => t.id === tab)) return;
+    state.phoneTab = tab;
+    if (elMain && elMain.setAttribute) elMain.setAttribute("data-phone-tab", tab);
+    state.lastTabbarHtml = null;
+    renderTabbar();
+    if (tab === "feed") {
+      state.autoScroll = true;
+      scheduleRender({ ...Store.newDirty(false), feed: true });
     }
+    if (rosterUI) rosterUI.close();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Rendering: feed (speech + request cards, one block per committed message)
+  // ---------------------------------------------------------------------------
+
+  function appendEllipsis(html) {
+    const mark = `<span class="msg-trunc" title="发言超出字数上限，已被截断">…</span>`;
+    return /<\/p>$/.test(html) ? html.replace(/<\/p>$/, `${mark}</p>`) : html + mark;
+  }
+
+  function messageHtml(m) {
+    const s = state.session;
+    const cacheKey = `${m.seq}\u0001${state.rosterSig}`;
+    const cached = state.msgHtml.get(cacheKey);
+    if (cached !== undefined) return cached;
+
+    const info = View.messageKindInfo(m.kind);
+    const sender = View.participantOf(s, m.from);
+    // the live nickname (roster) wins over the name frozen into the message
+    const name = sender ? sender.name : m.from === MOD || m.from === View.ENGINE_ID ? View.displayName(s, m.from) : m.from_name || m.from;
+    const time = Core.formatClockTime(m.ts);
+    let body = Core.renderFormattedText(m.content) || `<p class="fmt-p"></p>`;
+    if (Store.isTruncated(m)) body = appendEllipsis(body);
+    // "N3" in the text keeps its characters and gets the hover text "N3 Carol"
+    body = View.annotateIdRefs(body, s);
+
+    const classes = ["msg", `msg-kind-${info.cls}`];
+    if (m.from === MOD) classes.push("msg-moderator");
+    if (m.from === View.ENGINE_ID) classes.push("msg-engine");
+    const label = info.label
+      ? `<span class="msg-kind-badge kind-${info.cls}"${
+          m.template_id ? ` title="模板：${escapeHtml(m.template_id)}"` : ""
+        }>${escapeHtml(info.label)}</span>`
+      : "";
+    const ticket = m.ticket_id
+      ? `<span class="msg-ticket" title="质询工单">#${escapeHtml(m.ticket_id)}</span>`
+      : "";
+
+    const html =
+      `<article class="${classes.join(" ")}" data-seq="${numText(m.seq)}"` +
+      ` data-from="${escapeHtml(m.from)}"${m.ticket_id ? ` data-ticket-msg="${escapeHtml(m.ticket_id)}"` : ""}>` +
+      `<div class="msg-avatar">${avatarImg(m.from, 40, "msg-avatar-img")}</div>` +
+      `<div class="msg-main"><div class="msg-head"><span class="msg-name">${escapeHtml(name)}</span>` +
+      `${label}${ticket}<span class="msg-time">${escapeHtml(time)}</span></div>` +
+      `<div class="msg-body formatted-text">${body}</div></div></article>`;
+    Core.boundedSet(state.msgHtml, cacheKey, html, MESSAGE_HTML_CACHE_MAX);
+    return html;
+  }
+
+  const AUTO_CLOSE_LABELS = { unanimous: "全员一致才结束", deadline: "到时才结束" };
+
+  /** Request card (E18 / E25): question, recipients with their (visible) answers, countdown, result. */
+  function requestHtml(c) {
+    const s = state.session;
+    const kindLabel = c.shareAnswers ? "商议" : c.kind === "choice" ? "投票" : "问答";
+    const icon = c.kind === "choice" ? "🗳" : "✍";
+    const chips = [];
+    if (c.sealed) chips.push(`<span class="req-chip sealed" title="密封：关闭前其他玩家看不到答案">🔒 密封</span>`);
+    if (c.shareAnswers) chips.push(`<span class="req-chip share" title="收件人实时看到彼此的选择，关闭前可以改答">👥 组内可见</span>`);
+    if (AUTO_CLOSE_LABELS[c.autoClose]) chips.push(`<span class="req-chip auto">${AUTO_CLOSE_LABELS[c.autoClose]}</span>`);
+    const timer =
+      c.deadlineClock !== null && c.deadlineClock !== undefined
+        ? `<span class="req-timer" title="剩余时间（游戏时钟，暂停时冻结）">⏱ <span class="req-count" data-deadline="${numText(c.deadlineClock)}"></span></span>`
+        : "";
+    const pct = c.total > 0 ? Math.min(100, Math.round((c.answeredCount / c.total) * 100)) : 0;
+    const rows = c.recipients
+      .map((r) => {
+        let ans;
+        if (r.answer) {
+          const revised = r.answer.changes > 0 ? `<span class="req-revised" title="改答 ${numText(r.answer.changes)} 次">↻${numText(r.answer.changes)}</span>` : "";
+          const lock = c.sealed ? `<span class="req-lock" title="密封请求：只有上帝视角能看到答案">🔒</span>` : "";
+          const text = escapeHtml(r.answer.label);
+          ans = `<span class="req-ans answered${r.answer.defaulted ? " defaulted" : ""}"><span class="req-ans-label" title="${escapeHtml(
+            r.answer.reason || r.answer.label
+          )}">${r.answer.defaulted ? "（默认）" : ""}${text}</span>${revised}${lock}</span>`;
+        } else if (r.hidden) {
+          ans = `<span class="req-ans submitted" title="已作答（答案不公开）">✓ 已提交</span>`;
+        } else {
+          ans = `<span class="req-ans pending">…</span>`;
+        }
+        return (
+          `<li class="req-row${r.answered ? " answered" : ""}"><span class="req-who">${avatarImg(r.id, 20, "req-avatar")}` +
+          `<span class="req-name">${escapeHtml(r.name)}</span></span>${ans}</li>`
+        );
+      })
+      .join("");
+    let result = "";
+    if (c.status !== "open") {
+      if (c.result) {
+        const max = Math.max(1, ...c.result.tally.map((t) => t.count));
+        const tally = c.result.tally
+          .map(
+            (t) =>
+              `<li class="${t.leader ? "leader" : ""}"><span class="tally-label">${escapeHtml(t.label)}</span>` +
+              `<span class="tally-bar"><span style="width:${Math.round((t.count / max) * 100)}%"></span></span>` +
+              `<span class="tally-n">${numText(t.count)} 票</span></li>`
+          )
+          .join("");
+        const notes = [];
+        if (c.result.zeroCount > 0) notes.push(`其余 ${numText(c.result.zeroCount)} 项 0 票`);
+        if (c.result.leaders.length) notes.push(`最高：${c.result.leaders.map(escapeHtml).join("、")}`);
+        if (c.result.defaulted.length) notes.push(`默认答案：${c.result.defaulted.map(escapeHtml).join("、")}`);
+        if (c.result.missing.length) notes.push(`未作答：${c.result.missing.map(escapeHtml).join("、")}`);
+        result =
+          `<div class="req-result"><div class="req-result-title">结果</div>` +
+          `${tally ? `<ul class="req-tally">${tally}</ul>` : ""}` +
+          `${notes.length ? `<div class="req-result-note">${notes.join(" · ")}</div>` : ""}</div>`;
+      } else if (c.status === "closed") {
+        result = `<div class="req-result"><div class="req-result-note">已关闭，共 ${numText(c.answeredCount)} 人作答${
+          c.answersHidden ? "（密封请求的结果由主持人公布）" : ""
+        }</div></div>`;
+      }
+    }
+    const question = View.annotateIdRefs(Core.renderInlineFormatting(c.question), s);
+    return (
+      `<article class="req-card req-${escapeHtml(c.status)}${c.sealed ? " is-sealed" : ""}${c.shareAnswers ? " is-share" : ""}" data-req="${escapeHtml(c.id)}">` +
+      `<div class="req-head"><span class="req-icon" aria-hidden="true">${icon}</span><span class="req-kind">${kindLabel}请求</span>` +
+      `<span class="req-status st-${escapeHtml(c.status)}">${escapeHtml(c.statusLabel)}</span>${chips.join("")}${timer}</div>` +
+      `<div class="req-question">${question || "（没有问题文本）"}</div>` +
+      `<div class="req-progress"><span class="req-progress-text">${numText(c.answeredCount)}/${numText(c.total)} 已作答</span>` +
+      `<span class="req-bar"><span class="req-bar-fill" style="width:${pct}%"></span></span></div>` +
+      `<ul class="req-rows">${rows}</ul>${result}</article>`
+    );
+  }
+
+  function appendMessageNode(html) {
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    const node = tpl.content && tpl.content.firstElementChild;
+    if (node) elFeedRecords.appendChild(node);
+  }
+
+  /** Replace the i-th block in place (a request card changed); false when the DOM cannot do it. */
+  function replaceRow(i, html) {
+    const node = elFeedRecords.children && elFeedRecords.children[i];
+    if (!node || typeof elFeedRecords.replaceChild !== "function") return false;
+    const tpl = document.createElement("template");
+    tpl.innerHTML = html;
+    const fresh = tpl.content && tpl.content.firstElementChild;
+    if (!fresh) return false;
+    elFeedRecords.replaceChild(fresh, node);
+    return true;
+  }
+
+  function emptyFeedHtml(s) {
+    if (!state.selectedChannel) {
+      return `<div class="empty-placeholder">当前暂无频道 — 点击「开始」后，主持人会建立频道并推进对局</div>`;
+    }
+    if (state.viewpoint !== View.GOD) {
+      return `<div class="empty-placeholder">${escapeHtml(
+        View.viewpointLabel(s, state.viewpoint)
+      )} 在这个频道里还没有看到任何内容</div>`;
+    }
+    return `<div class="empty-placeholder">这个频道里还没有发言 — 这里显示发言与请求卡片；思维链与工具调用只写入日志</div>`;
+  }
+
+  function tickCountdowns() {
+    if (elFeedRecords && typeof elFeedRecords.querySelectorAll === "function") {
+      const now = clockNow();
+      for (const n of Array.from(elFeedRecords.querySelectorAll("[data-deadline]"))) {
+        const d = Number(n.getAttribute("data-deadline"));
+        n.textContent = Core.formatCountdown(d - now);
+      }
+    }
+  }
+
+  function renderFeed(force = false) {
+    const s = state.session;
+    const vp = state.viewpoint;
+    const sel = ensureSelectedChannel();
+    if (elFeedChannelLabel) {
+      elFeedChannelLabel.textContent = sel ? View.channelTitle(s, vp, sel) : "";
+    }
+
+    const clock = clockNow();
+    const entries = sel ? View.feedEntries(s, vp, sel) : [];
+    const rows = entries.map((e) => ({
+      key: e.key,
+      html: e.kind === "msg" ? messageHtml(e.ref) : requestHtml(View.requestCard(s, vp, e.ref, { clockNow: clock })),
+    }));
+    const key = `${s.session_id}|${vp}|${sel}|${state.rosterSig}`;
+    const prev = state.feed.rows;
+
+    const rebuild = () => {
+      elFeedRecords.innerHTML = rows.length ? rows.map((r) => r.html).join("") : emptyFeedHtml(s);
+    };
+
+    if (force || state.feed.key !== key) {
+      rebuild();
+    } else {
+      // Whole blocks arrive one at a time: append the new ones; a request card is repainted in place.
+      let i = 0;
+      let ok = true;
+      for (; i < prev.length && i < rows.length; i++) {
+        if (prev[i].key !== rows[i].key) break;
+        if (prev[i].html !== rows[i].html && !replaceRow(i, rows[i].html)) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok || i < prev.length) rebuild();
+      else for (let j = i; j < rows.length; j++) appendMessageNode(rows[j].html);
+      if (prev.length === 0 && rows.length > 0 && ok && i === 0) {
+        // the empty-feed placeholder must go when the first block arrives
+        rebuild();
+      }
+    }
+    state.feed = { key, rows: rows.map((r) => ({ key: r.key, html: r.html })) };
+    tickCountdowns();
+
+    if (state.autoScroll) {
+      elFeedList.scrollTop = elFeedList.scrollHeight;
+      state.autoScrollTop = elFeedList.scrollTop; // the (clamped) position we scrolled to
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Detail panel (roster.js owns it; this only forwards)
+  // ---------------------------------------------------------------------------
+
+  function renderPopover() {
+    if (rosterUI) rosterUI.render();
+  }
+
+  function openPopover(actorId) {
+    if (rosterUI) rosterUI.open(actorId);
+    renderBoard();
+    renderModeratorChip(state.session);
+  }
+
+  function closePopover() {
+    if (!rosterUI || !rosterUI.isOpen()) return;
+    rosterUI.close();
+    renderBoard();
+    renderModeratorChip(state.session);
+  }
+
+  function togglePopover(actorId) {
+    if (rosterUI && rosterUI.openId() === actorId) closePopover();
+    else openPopover(actorId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render scheduling (coalesce bursts of SSE events: at most one paint per frame)
+  // ---------------------------------------------------------------------------
+
+  const renderQueue = { pending: false, run: null, dirty: Store.newDirty(false), force: false };
+
+  function renderNow(dirty, force = false) {
+    const d = dirty || Store.newDirty(true);
+    state.rosterSig = computeRosterSig(state.session);
+    if (d.topbar) renderTopbar();
+    if (d.board) renderBoard();
+    if (d.board || d.dashboard) renderSummary();
+    if (d.channels || d.feed) {
+      if (d.channels) renderChannels();
+      else ensureSelectedChannel();
+    }
+    if (d.feed) renderFeed(force);
+    if (d.popover) renderPopover();
   }
 
   function renderAll(force = false) {
-    const s = state.session;
-    if (!s) return;
-    ensureValidSelectedChannel(s);
-    renderTopbar(s);
-    renderParticipantsBoard(s);
-    renderChannelsSidebar(s, force);
-    renderFeed(s, force);
-    renderDashboard(s);
+    renderNow(Store.newDirty(true), force);
   }
 
-  function renderStreamChunkOnly(s) {
-    if (!s) return;
-    renderTopbar(s);
-    updateParticipantHighlightsInPlace(s);
-    updateEngineChannelWorkingState(s);
-    renderStreamingDraft(s);
-    if (state.autoScroll) {
-      elFeedList.scrollTop = elFeedList.scrollHeight;
-    }
-  }
+  const pageHidden = () =>
+    document.visibilityState === "hidden" || document.hidden === true;
 
-  // Coalesce bursts of SSE events into at most one render per animation frame.
-  // A pending full render always wins over a stream-chunk-only render.
-  const renderQueue = { handle: null, full: false, force: false, stream: false };
-
-  function scheduleRender(kind, force = false) {
-    if (kind === "full") {
-      renderQueue.full = true;
-      renderQueue.force = renderQueue.force || force;
-    } else {
-      renderQueue.stream = true;
-    }
-    if (renderQueue.handle !== null) return;
+  function scheduleRender(dirty, force = false) {
+    Store.mergeDirty(renderQueue.dirty, dirty);
+    renderQueue.force = renderQueue.force || force;
+    if (renderQueue.pending) return;
+    renderQueue.pending = true;
     const run = () => {
-      renderQueue.handle = null;
-      const full = renderQueue.full;
-      const force = renderQueue.force;
-      const stream = renderQueue.stream;
-      renderQueue.full = renderQueue.force = renderQueue.stream = false;
-      if (!state.session) return;
+      // rAF and the timer fallback below race: whichever comes first paints, the other is a no-op.
+      if (!renderQueue.pending || renderQueue.run !== run) return;
+      renderQueue.pending = false;
+      renderQueue.run = null;
+      const d = renderQueue.dirty;
+      const f = renderQueue.force;
+      renderQueue.dirty = Store.newDirty(false);
+      renderQueue.force = false;
       try {
-        if (full) renderAll(force);
-        else if (stream) renderStreamChunkOnly(state.session);
+        renderNow(d, f);
       } catch (e) {
         console.error("Render failed", e);
       }
     };
-    renderQueue.handle =
-      typeof window.requestAnimationFrame === "function"
-        ? window.requestAnimationFrame(run)
-        : window.setTimeout(run, 16);
-  }
-
-  // Single entry point for every new session snapshot (SSE or API response).
-  // Resets per-game UI state when a different game is loaded.
-  function setSession(s) {
-    if (!s) return;
-    const key = s.session_id || null;
-    const prevCount = state.session && state.session.records ? state.session.records.length : 0;
-    const newCount = s.records ? s.records.length : 0;
-    if (
-      state.session &&
-      (key !== state.sessionKey || newCount < prevCount)
-    ) {
-      resetExpandState();
-    }
-    state.sessionKey = key;
-    state.session = s;
-    if (providerUI) providerUI.onSession(s);
-    if (workspaceUI) workspaceUI.onSession(s);
-  }
-
-  function resetExpandState() {
-    state.level1Expanded.clear();
-    state.level2Expanded.clear();
-    state.lastRecordsSig = "";
-  }
-
-  function formatTokensCount(num) {
-    if (typeof num !== "number" || isNaN(num)) return "0 Tokens";
-    if (num >= 1_000_000_000) {
-      return `${(num / 1_000_000_000).toFixed(2)}B Tokens`;
-    }
-    if (num >= 1_000_000) {
-      return `${(num / 1_000_000).toFixed(2)}M Tokens`;
-    }
-    if (num >= 1_000) {
-      return `${(num / 1_000).toFixed(1)}K Tokens`;
-    }
-    return `${num.toLocaleString()} Tokens`;
-  }
-
-  function renderTopbar(s) {
-    elAppTitle.textContent = s.title || "Arena-Agents";
-    const ver = state.appVersion || s.engine_version || s.version || "";
-    if (elAppVersion) {
-      elAppVersion.textContent = ver;
-    }
-    if (elScenarioName) {
-      elScenarioName.textContent = s.scenario_name || ver;
-    }
-    elStatusText.textContent = s.active_status_text || "等待开局";
-    elPhasePill.textContent = s.phase_text || "未开始";
-
-    if (
-      elSelectExecDepth &&
-      s.execution_depth &&
-      document.activeElement !== elSelectExecDepth
-    ) {
-      elSelectExecDepth.value = s.execution_depth;
-    }
-
-    // Update top-right Token & Cost ($) telemetry (auto convert to M and B units)
-    if (elUsageTokensText && elUsageCostText) {
-      const usage = computeSessionUsage(s);
-      elUsageTokensText.textContent = formatTokensCount(usage.totalTokens);
-      elUsageCostText.textContent = `$${usage.costUsd.toFixed(4)}`;
-    }
-
-    elStatusDot.className = "status-dot";
-    if (s.status === "running" || s.active_actor_id || s.moderator_active) {
-      elStatusDot.classList.add("active");
-    } else if (s.status === "paused") {
-      elStatusDot.classList.add("paused");
+    renderQueue.run = run;
+    // requestAnimationFrame never fires in a hidden / occluded tab, which would leave the DOM stale
+    // (automation, background windows): use a plain timer there.
+    if (!pageHidden() && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(run);
     } else {
-      elStatusDot.classList.add("idle");
-    }
-
-    // Moderator status pill in the top-right of the board
-    if (elModeratorStatusPill && elModeratorStatusText) {
-      const rawStatus = s.moderator_status || "待命 · 等待开局";
-      const cleanStatus = rawStatus.replace(/^主持人[:：]\s*/, "");
-      elModeratorStatusText.textContent = cleanStatus;
-      if (s.moderator_active) {
-        elModeratorStatusPill.classList.add("active");
-      } else {
-        elModeratorStatusPill.classList.remove("active");
-      }
-    }
-
-    const isRunning = s.status === "running";
-    const isPaused = s.status === "paused";
-
-    elBtnStart.disabled = isRunning || (isPaused && s.records && s.records.length > 0);
-    elBtnPause.disabled = !isRunning;
-    elBtnResume.disabled = !isPaused;
-    elBtnForcePause.disabled = !isRunning && !s.active_actor_id && !s.moderator_active;
-    if (elBtnShuffle) elBtnShuffle.disabled = isRunning;
-  }
-
-  // Short "Provider / model · depth" label for a seat card (v0.10 bindings).
-  function bindingLabelFor(s, actorId) {
-    const b = (s.model_bindings && s.model_bindings[actorId]) || null;
-    const providers = providerUI ? providerUI.getProviders() : [];
-    if (b && providers.length === 0) return `${b.model_id || "未绑定"} · ${b.reasoning_depth || "high"}`;
-    return Core.bindingSummary(b, providers);
-  }
-
-  function renderParticipantsBoard(s) {
-    const tagStyles = s.tag_styles || {};
-    const html = (s.participants || [])
-      .map((p) => {
-        const leftTags = [];
-        const rightTags = [];
-        let grayOut = false;
-
-        const tags = p.tags || [];
-        if (tags.length === 0) {
-          leftTags.push(`<span class="tag-badge muted">待主持人分配</span>`);
-        } else {
-          tags.forEach((tag) => {
-            const st = tagStyles[tag] || { slot: "right", variant: "neutral" };
-            if (st.gray_out_card) grayOut = true;
-            const badgeHtml = `<span class="tag-badge ${escapeHtml(
-              st.variant || "neutral"
-            )}">${escapeHtml(tag)}</span>`;
-            if (st.slot === "left") {
-              leftTags.push(badgeHtml);
-            } else {
-              rightTags.push(badgeHtml);
-            }
-          });
-        }
-
-        const isWorking = Boolean(p.generating || p.active_stage);
-        const stageText = p.active_stage || (p.generating ? "思考中" : "");
-        const cardClasses = ["player-card"];
-        if (isWorking) cardClasses.push("generating");
-        if (grayOut) cardClasses.push("grayed-out");
-
-        return `
-          <div class="${cardClasses.join(" ")}" data-player-id="${escapeHtml(p.id)}">
-            <div class="card-top-row">
-              <span>${escapeHtml(p.seat)} &middot; ${escapeHtml(p.id)}</span>
-              <span class="card-generating-label">${
-                isWorking ? escapeHtml(stageText) : ""
-              }</span>
-            </div>
-            <div class="card-name">${escapeHtml(p.name)}</div>
-            <div class="card-binding" data-bind-actor="${escapeHtml(p.id)}" title="点击设置此玩家的模型与思考深度">${escapeHtml(
-              bindingLabelFor(s, p.id)
-            )}</div>
-            <div class="card-tags-row">
-              <div class="tags-slot-left">${leftTags.join("")}</div>
-              <div class="tags-slot-right">${rightTags.join("")}</div>
-            </div>
-          </div>
-        `;
-      })
-      .join("");
-
-    // Skip the DOM write when nothing changed (keeps hover/selection, saves work).
-    if (html !== state.lastBoardHtml) {
-      state.lastBoardHtml = html;
-      elParticipantsGrid.innerHTML = html;
+      window.setTimeout(run, pageHidden() ? 120 : 16);
     }
   }
 
-  elParticipantsGrid.addEventListener("click", (evt) => {
-    const node = evt.target && evt.target.closest ? evt.target.closest(".card-binding[data-bind-actor]") : null;
-    if (node && providerUI) providerUI.openBindings(node.getAttribute("data-bind-actor"));
+  // A render that was queued on rAF when the page went hidden would wait until it is visible again.
+  document.addEventListener("visibilitychange", () => {
+    if (renderQueue.pending && renderQueue.run && pageHidden()) window.setTimeout(renderQueue.run, 120);
   });
 
-  function updateParticipantHighlightsInPlace(s) {
-    (s.participants || []).forEach((p) => {
-      const card = elParticipantsGrid.querySelector(
-        `.player-card[data-player-id="${CSS.escape(p.id)}"]`
-      );
+  // ---------------------------------------------------------------------------
+  // Session store glue
+  // ---------------------------------------------------------------------------
+
+  function loadViewpointPref() {
+    try {
+      const v = localStorage.getItem(VIEWPOINT_KEY);
+      if (v) state.viewpointPref = v;
+    } catch {
+      /* storage unavailable: default to god */
+    }
+  }
+
+  function saveViewpointPref(v) {
+    try {
+      localStorage.setItem(VIEWPOINT_KEY, v);
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Switch the spectator viewpoint. Pure front-end: nothing is requested from the server. */
+  function setViewpoint(id, persist = true) {
+    const vp = View.normalizeViewpoint(state.session, id);
+    state.viewpointPref = vp;
+    state.viewpoint = vp;
+    if (persist) saveViewpointPref(vp);
+    state.selectedChannel = state.channelChosen
+      ? View.normalizeSelectedChannel(state.session, vp, state.selectedChannel)
+      : View.defaultChannelId(state.session, vp);
+    markChannelRead(state.selectedChannel);
+    state.autoScroll = true;
+    state.feed.key = ""; // different message set: re-render the feed
+    renderAll(true);
+  }
+
+  /** Replace the whole session (snapshot, state fetch, control / import / load response). */
+  function replaceSession(next) {
+    const prevKey = state.sessionKey;
+    const key = next.session_id || null;
+    state.session = next;
+    state.sessionKey = key;
+    state.loaded = true;
+    syncClock(next);
+    // Whole-session replacement: never trust per-message HTML cached from the previous object.
+    state.msgHtml.clear();
+    if (key !== prevKey) {
+      // A different game: forget selection and unread marks.
+      state.selectedChannel = null;
+      state.channelChosen = false;
+      resetReadState(next);
+    } else if (!state.read.baseline) {
+      resetReadState(next);
+    }
+    state.viewpoint = View.normalizeViewpoint(next, state.viewpointPref);
+    state.selectedChannel = state.channelChosen
+      ? View.normalizeSelectedChannel(next, state.viewpoint, state.selectedChannel)
+      : View.defaultChannelId(next, state.viewpoint);
+    if (state.selectedChannel && key !== prevKey) markChannelRead(state.selectedChannel);
+    if (rosterUI && rosterUI.openId() && rosterUI.openId() !== MOD && !View.participantOf(next, rosterUI.openId())) {
+      rosterUI.close();
+    }
+    if (providerUI) providerUI.onSession(next);
+    if (workspaceUI) workspaceUI.onSession(next);
+    if (rosterUI) rosterUI.onSession(next);
+    // The feed compares what it already shows (view key + blocks), so an identical
+    // snapshot after a reconnect does not rebuild the list or move the scroll position.
+    scheduleRender(Store.newDirty(true));
+  }
+
+  /** A whole session from an HTTP response; ignored when the SSE stream is already ahead of it. */
+  function adoptHttpSession(raw, opts = {}) {
+    if (!raw || typeof raw !== "object") return false;
+    const incoming = Store.normalizeSession(raw);
+    if (!opts.force && !Store.shouldAdoptHttpSession(state.session, incoming, state.lastEventId)) {
+      return false;
+    }
+    const differentGame = incoming.session_id !== state.session.session_id;
+    if (differentGame) state.lastEventId = incoming.event_id > 0 ? incoming.event_id : 0;
+    else if (incoming.event_id > state.lastEventId) state.lastEventId = incoming.event_id;
+    replaceSession(incoming);
+    return true;
+  }
+
+  const PROVIDER_RELEVANT = new Set(["session.updated", "game.status"]);
+
+  /** roster.js / the store change names and avatars through the same code path as roster.updated. */
+  function patchParticipants(list) {
+    // the moderator is not a participant: its entry travels as ``data.moderator`` (exactly like the SSE event)
+    const moderator = list.find((x) => x && x.id === MOD);
+    const data = { participants: list.filter((x) => !(x && x.id === MOD)) };
+    if (moderator) data.moderator = moderator;
+    const res = Store.applyEvent(state.session, { type: "roster.updated", data });
+    scheduleRender(res.dirty);
+  }
+
+  /** Apply one SSE v2 event {id, type, data}. */
+  function handleEvent(payload) {
+    if (!payload || typeof payload !== "object" || !payload.type) return;
+    if (Store.isStaleEvent(state.lastEventId, payload)) return; // replayed after a reconnect
+    const id = Store.eventIdOf(payload, NaN);
+    const prevStatus = state.session.status;
+    const before = clockNow();
+    const result = Store.applyEvent(state.session, payload, { clockNow: before });
+
+    if (result.replaced) {
+      state.lastEventId = Number.isFinite(id) ? id : result.session.event_id;
+      state.sseResumeId = state.lastEventId;
+      replaceSession(result.session);
+      return;
+    }
+    if (Number.isFinite(id) && id > 0) {
+      if (id > state.lastEventId) state.lastEventId = id;
+      if (id > state.sseResumeId) state.sseResumeId = id;
+      if (id > state.session.event_id) state.session.event_id = id;
+    }
+    if (result.reload) {
+      // A workspace switch changes providers, templates and sessions for the whole
+      // server process; every tab must rebuild its UI instead of merging a session.
+      if (typeof window.location.reload === "function") window.location.reload();
+      return;
+    }
+    // the game clock stops while the game is not running (D18): freeze / resume our estimate
+    const s = state.session;
+    if (payload.type === "session.updated" && payload.data && payload.data.clock !== undefined) {
+      syncClock(s);
+    } else if (s.status !== prevStatus) {
+      state.clockSync = { clock: before, at: Date.now(), running: s.status === "running" };
+    }
+    if (result.toast) showToast(result.toast);
+    if (result.message) onMessageSeen(result.message);
+    if (result.flash) flashActor(result.flash);
+    if (result.budgetEvent === "warning") showToast("⚠ 预算已用到上限的 80%");
+    if (result.budgetEvent === "reached") showToast("⛔ 已达到预算上限");
+    if (result.reviewEvent) {
+      const ev = result.reviewEvent;
+      if (ev.state === "done" && rosterUI) rosterUI.onReviewDone();
+      if (ev.state === "error") showToast(`复盘失败（${View.displayName(s, ev.id)}）：${ev.message || "未知错误"}`);
+    }
+    if (PROVIDER_RELEVANT.has(payload.type)) {
+      if (providerUI) providerUI.onSession(state.session);
+      if (workspaceUI) workspaceUI.onSession(state.session);
+    }
+    scheduleRender(result.dirty);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Event delegation (immune to the periodic DOM refreshes)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Activate on mousedown AND click. The board / channel list can be repainted
+   * between a mousedown and its mouseup, which would swallow the click; the click
+   * that does arrive right after a handled mousedown is skipped.
+   */
+  function bindPress(container, selector, keyAttr, handler) {
+    if (!container) return;
+    let recent = { key: null, at: 0 };
+    container.addEventListener("mousedown", (evt) => {
+      if (evt.button !== undefined && evt.button !== 0) return;
+      const node = closestFrom(evt.target, selector);
+      if (!node) return;
+      recent = { key: node.getAttribute(keyAttr), at: Date.now() };
+      handler(node, evt);
+    });
+    container.addEventListener("click", (evt) => {
+      const node = closestFrom(evt.target, selector);
+      if (!node) return;
+      const key = node.getAttribute(keyAttr);
+      if (recent.key !== null && recent.key === key && Date.now() - recent.at < 800) {
+        recent = { key: null, at: 0 };
+        return;
+      }
+      handler(node, evt);
+    });
+  }
+
+  function selectChannel(id) {
+    const next = View.normalizeSelectedChannel(state.session, state.viewpoint, id);
+    state.selectedChannel = next;
+    state.channelChosen = true;
+    markChannelRead(next);
+    state.autoScroll = true;
+    state.ticketPopOpen = false;
+    renderNow({ ...Store.newDirty(false), channels: true, feed: true }, true);
+    if (isPhone() && state.phoneTab !== "feed") setPhoneTab("feed");
+  }
+
+  function locateTicket(ticketId, channelId) {
+    state.ticketPopOpen = false;
+    selectChannel(channelId);
+    state.autoScroll = false;
+    const node =
+      elFeedRecords && typeof elFeedRecords.querySelector === "function"
+        ? elFeedRecords.querySelector(`[data-ticket-msg="${cssEscape(ticketId)}"]`)
+        : null;
+    if (node) {
+      if (typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "center" });
+      node.classList.add("msg-flash");
+      setTimeout(() => node.classList.remove("msg-flash"), 1800);
+    }
+  }
+
+  const cssEscape = (value) =>
+    typeof CSS !== "undefined" && CSS && typeof CSS.escape === "function"
+      ? CSS.escape(String(value))
+      : String(value).replace(/["\\]/g, "\\$&");
+
+  bindPress(elChannelsList, ".channel-item[data-channel]", "data-channel", (node) =>
+    selectChannel(node.getAttribute("data-channel"))
+  );
+  bindPress(elChannelsList, ".ticket-item[data-ticket]", "data-ticket", (node) =>
+    locateTicket(node.getAttribute("data-ticket"), node.getAttribute("data-channel"))
+  );
+  bindPress(elChannelsList, "[data-dm-toggle]", "data-dm-toggle", () => {
+    state.dmGroupOpen = !state.dmGroupOpen;
+    renderNow({ ...Store.newDirty(false), channels: true });
+  });
+  bindPress(elChannelsList, "[data-tickets-toggle]", "data-tickets-toggle", (node) => {
+    state.ticketPopOpen = !state.ticketPopOpen;
+    state.lastTicketPopHtml = null;
+    renderTicketPop();
+    if (state.ticketPopOpen) positionTicketPop(node);
+  });
+  if (elTicketPop) {
+    elTicketPop.addEventListener("click", (evt) => {
+      const node = closestFrom(evt.target, ".ticket-item[data-ticket]");
+      if (node) locateTicket(node.getAttribute("data-ticket"), node.getAttribute("data-channel"));
+    });
+  }
+
+  // a player card (or the moderator chip) opens the detail panel / drawer
+  bindPress(elParticipantsGrid, ".pcard[data-actor]", "data-actor", (node) =>
+    togglePopover(node.getAttribute("data-actor"))
+  );
+  bindPress(elTopbarStatus, "#mod-chip", "data-actor", (node) =>
+    togglePopover(node.getAttribute("data-actor") || MOD)
+  );
+  if (elParticipantsGrid) {
+    elParticipantsGrid.addEventListener("keydown", (evt) => {
+      if (!evt || (evt.key !== "Enter" && evt.key !== " ")) return;
+      const card = closestFrom(evt.target, ".pcard[data-actor]");
       if (!card) return;
-      const isWorking = Boolean(p.generating || p.active_stage);
-      const stageText = p.active_stage || (p.generating ? "思考中" : "");
-      const labelEl = card.querySelector(".card-generating-label");
-      const labelText = isWorking ? stageText : "";
-      if (
-        card.classList.contains("generating") !== isWorking ||
-        (labelEl && labelEl.textContent !== labelText)
-      ) {
-        // DOM now diverges from the last full render; force the next one to rewrite it.
-        state.lastBoardHtml = null;
-      }
-      card.classList.toggle("generating", isWorking);
-      if (labelEl && labelEl.textContent !== labelText) {
-        labelEl.textContent = labelText;
-      }
+      if (typeof evt.preventDefault === "function") evt.preventDefault();
+      togglePopover(card.getAttribute("data-actor"));
+    });
+    elParticipantsGrid.addEventListener("mouseover", (evt) => {
+      refreshCardTitle(closestFrom(evt.target, ".pcard[data-actor]"));
     });
   }
 
-  function updateEngineChannelWorkingState(s) {
-    const engineItem = elChannelsList.querySelector('.channel-item[data-channel="engine"]');
-    if (engineItem) {
-      engineItem.classList.toggle("working", Boolean(s.moderator_active));
-    }
-  }
-
-  function renderChannelsSidebar(s, force = false) {
-    const records = s.records || [];
-    const engineCount = records.filter((r) => r.stream === "engine").length;
-    const totalCount = records.length;
-
-    const sigParts = [
-      state.selectedChannel,
-      state.showToolCalls ? "tools1" : "tools0",
-      s.moderator_active ? "mod1" : "mod0",
-      `eng:${engineCount}`,
-      `tot:${totalCount}`,
-    ];
-
-    (s.channels || []).forEach((ch) => {
-      const chCount = records.filter(
-        (r) =>
-          r.channel_id === ch.id &&
-          (r.stream === "channel" || (state.showToolCalls && r.kind === "tool_call"))
-      ).length;
-      const qSig = Object.values(ch.interrupt_quotas || {})
-        .map((q) => `${q.player_id}:${q.used}/${q.max_count}`)
-        .join(",");
-      sigParts.push(`${ch.id}:${ch.status}:${(ch.members || []).length}:${chCount}:${qSig}`);
-    });
-
-    const sig = sigParts.join("|");
-    if (!force && sig === state.lastChannelsSig) {
-      return;
-    }
-    state.lastChannelsSig = sig;
-
-    const itemsHtml = [];
-
-    // 1. 主持人处理流 (Engine Stream)
-    const engineClasses = ["channel-item", "engine-stream"];
-    if (state.selectedChannel === "engine") engineClasses.push("active");
-    if (s.moderator_active) engineClasses.push("working");
-
-    itemsHtml.push(`
-      <div class="${engineClasses.join(" ")}" data-channel="engine">
-        <div class="channel-row-top">
-          <span class="channel-name">主持人处理流</span>
-          <span class="channel-badge engine">引擎</span>
-        </div>
-        <div class="channel-meta">分析与工具调用 &middot; ${engineCount} 条</div>
-        <div class="channel-members-preview">非频道 &middot; 无成员 &middot; 玩家永不可见</div>
-      </div>
-    `);
-
-    // 2. 全部 (All Records)
-    itemsHtml.push(`
-      <div class="channel-item ${
-        state.selectedChannel === "all" ? "active" : ""
-      }" data-channel="all">
-        <div class="channel-row-top">
-          <span class="channel-name">全部</span>
-        </div>
-        <div class="channel-meta">${totalCount} 条记录</div>
-      </div>
-    `);
-
-    // 3. Dynamic Channels created by Moderator
-    const channels = s.channels || [];
-    if (channels.length === 0) {
-      itemsHtml.push(`
-        <div class="empty-placeholder">
-          暂无会话频道<br/>对局启动后由主持人调用工具动态建立
-        </div>
-      `);
-    } else {
-      channels.forEach((ch) => {
-        const chRecords = records.filter(
-          (r) =>
-            r.channel_id === ch.id &&
-            (r.stream === "channel" || (state.showToolCalls && r.kind === "tool_call"))
-        );
-        const memberNames = (ch.members || []).map((m) =>
-          getActorDisplayName(s, m)
-        );
-        const statusLabel = ch.status === "open" ? "开放" : "关闭";
-
-        const quotas = Object.values(ch.interrupt_quotas || {});
-        const quotaHtml = quotas
-          .map(
-            (q) =>
-              `<div class="channel-interrupt-pill">插话权: ${escapeHtml(
-                q.player_name
-              )}(${numText(q.used)}/${numText(q.max_count)})</div>`
-          )
-          .join("");
-
-        itemsHtml.push(`
-          <div class="channel-item ${
-            state.selectedChannel === ch.id ? "active" : ""
-          }" data-channel="${escapeHtml(ch.id)}">
-            <div class="channel-row-top">
-              <span class="channel-name">${escapeHtml(ch.name)}</span>
-              <span class="channel-badge ${escapeHtml(ch.status)}">${statusLabel}</span>
-            </div>
-            <div class="channel-meta">${escapeHtml(ch.type)} &middot; ${numText(
-          memberNames.length
-        )} 人 &middot; ${numText(chRecords.length)} 条</div>
-            <div class="channel-members-preview">${escapeHtml(
-              memberNames.join("、")
-            )}</div>
-            ${quotaHtml}
-          </div>
-        `);
-      });
-    }
-
-    elChannelsList.innerHTML = itemsHtml.join("");
-  }
-
-  function getActorDisplayName(s, actorId) {
-    if (actorId === "moderator") return "主持人";
-    const p = (s.participants || []).find((x) => x.id === actorId);
-    return p ? p.name : actorId;
-  }
-
-  function groupRecordsIntoActionBundles(records) {
-    const bundles = [];
-    let curBundle = null;
-
-    for (let i = 0; i < records.length; i++) {
-      const r = records[i];
-      const aid = r.action_id || `legacy_${r.actor_id}_${r.id}`;
-
-      if (curBundle && curBundle.action_id === aid) {
-        curBundle.records.push(r);
-        curBundle.end_time = r.timestamp || curBundle.end_time;
-      } else {
-        if (curBundle) {
-          bundles.push(curBundle);
-        }
-        curBundle = {
-          action_id: aid,
-          action_type:
-            r.action_type || (r.actor_id === "moderator" ? "moderator" : "speak"),
-          actor_id: r.actor_id,
-          actor_name: r.actor_name,
-          channel_id: r.channel_id,
-          stream: r.stream,
-          start_time: r.timestamp,
-          end_time: r.timestamp,
-          records: [r],
-        };
-      }
-    }
-    if (curBundle) {
-      bundles.push(curBundle);
-    }
-    return bundles;
-  }
-
-  function isLevel1Expanded(actionId) {
-    if (state.level1Expanded.has(actionId)) {
-      return state.level1Expanded.get(actionId);
-    }
-    return true; // Level 1 default: expanded
-  }
-
-  function isLevel2Expanded(r) {
-    if (r && state.level2Expanded.has(r.id)) {
-      return state.level2Expanded.get(r.id);
-    }
-    // Level 2 default: only speech message is expanded; thoughts, tool calls, and notes are collapsed
-    return r && r.kind === "message";
-  }
-
-  function renderSubitem(r, isMod) {
-    const isSubExpanded = isLevel2Expanded(r);
-    const isMsg = r.kind === "message";
-    const isThought = r.kind === "thought";
-    const isTool = r.kind === "tool_call";
-    const isNote = r.kind === "note";
-
-    // Subitem header badge
-    let badgeHtml = "";
-    if (isMsg) {
-      badgeHtml = `<span class="subitem-tag-speech">发言</span>`;
-    } else if (isThought) {
-      const cls = isMod ? "badge-mod-thought" : "badge-player-thought";
-      badgeHtml = `<span class="${cls}">思维链</span>`;
-    } else if (isTool) {
-      const cls = isMod ? "badge-mod-tool" : "badge-player-tool";
-      badgeHtml = `<span class="${cls}">工具调用</span>${
-        r.tool_name ? ` <strong class="tool-name">${escapeHtml(r.tool_name)}</strong>` : ""
-      }`;
-    } else if (isNote) {
-      const cls = isMod ? "badge-mod-thought" : "badge-player-thought";
-      badgeHtml = `<span class="${cls}">内部记录</span>`;
-    } else {
-      badgeHtml = `<span class="tag-badge neutral">${escapeHtml(r.kind || "记录")}</span>`;
-    }
-
-    // Subitem preview when collapsed
-    let subPreview = "";
-    if (!isSubExpanded) {
-      if (isTool) {
-        const argsStr = r.tool_args ? JSON.stringify(r.tool_args) : "";
-        subPreview = argsStr.length > 70 ? argsStr.slice(0, 70) + "..." : argsStr;
-      } else {
-        subPreview = stripMarkdownForPreview(r.content || "");
-        if (subPreview.length > 70) {
-          subPreview = subPreview.slice(0, 70) + "...";
-        }
-      }
-    }
-
-    // Subitem body when expanded
-    let bodyHtml = "";
-    if (isSubExpanded) {
-      if (isTool) {
-        bodyHtml = renderToolCallContent(r);
-      } else {
-        bodyHtml = renderFormattedText(r.content);
-      }
-    }
-
-    const subitemCls = [
-      "action-subitem",
-      isMsg ? "subitem-message" : isTool ? "subitem-tool" : isThought ? "subitem-thought" : "subitem-note",
-      isSubExpanded ? "expanded" : "collapsed",
-    ].join(" ");
-
-    return `
-      <div class="${subitemCls}" data-record-id="${escapeHtml(r.id)}">
-        <div class="subitem-header">
-          <span class="subitem-caret">${isSubExpanded ? "▼" : "▶"}</span>
-          ${badgeHtml}
-          ${!isSubExpanded ? `<span class="subitem-preview">${escapeHtml(subPreview)}</span>` : ""}
-          <span class="subitem-time">${escapeHtml(r.timestamp || "")}</span>
-        </div>
-        ${isSubExpanded ? `<div class="subitem-body formatted-text">${bodyHtml}</div>` : ""}
-      </div>
-    `;
-  }
-
-  function renderActionCard(b, isStreaming = false) {
-    const isMod = b.actor_id === "moderator";
-    const isCardExpanded = isLevel1Expanded(b.action_id);
-
-    // First preview text when Level 1 is collapsed
-    let previewText = "";
-    if (!isCardExpanded) {
-      const firstMsg = b.records.find((r) => r.kind === "message");
-      if (firstMsg) {
-        previewText = stripMarkdownForPreview(firstMsg.content);
-      } else if (b.records.length > 0) {
-        const firstRec = b.records[0];
-        if (firstRec.kind === "tool_call") {
-          previewText = `[工具调用: ${firstRec.tool_name || ""}]`;
-        } else {
-          previewText = stripMarkdownForPreview(firstRec.content || "");
-        }
-      }
-      if (previewText.length > 70) {
-        previewText = previewText.slice(0, 70) + "...";
-      }
-    }
-
-    const cardClass = [
-      "action-card",
-      isMod ? "moderator" : "player",
-      isCardExpanded ? "expanded" : "collapsed",
-      isStreaming ? "streaming" : "",
-    ].join(" ");
-
-    return `
-      <div class="${cardClass}" data-action-id="${escapeHtml(b.action_id)}">
-        <div class="action-card-header" data-action-id="${escapeHtml(b.action_id)}">
-          <span class="action-caret">${isCardExpanded ? "▼" : "▶"}</span>
-          <span class="action-actor-name">${escapeHtml(
-            b.actor_name || b.actor_id
-          )}</span>
-          ${
-            b.channel_id
-              ? `<span class="action-channel-pill">${escapeHtml(
-                  b.channel_id
-                )}</span>`
-              : ""
-          }
-          ${
-            !isCardExpanded
-              ? `<span class="action-preview">${escapeHtml(previewText)}</span>`
-              : ""
-          }
-          <span class="action-time">${escapeHtml(
-            b.end_time || b.start_time || ""
-          )}</span>
-        </div>
-
-        ${
-          isCardExpanded
-            ? `
-          <div class="action-card-body">
-            ${b.records.map((r) => renderSubitem(r, isMod)).join("")}
-          </div>
-        `
-            : ""
-        }
-      </div>
-    `;
-  }
-
-  function filterFeedRecords(s) {
-    const records = s.records || [];
-    const sel = state.selectedChannel;
-
-    return records.filter((rec) => {
-      if (rec.kind === "tool_call" && !state.showToolCalls && sel !== "engine") {
-        return false;
-      }
-      if (sel === "engine") {
-        return rec.stream === "engine";
-      }
-      if (sel === "all") {
-        return true;
-      }
-      return rec.channel_id === sel;
+  // phone: the bottom tab bar
+  if (elTabbar) {
+    elTabbar.addEventListener("click", (evt) => {
+      const node = closestFrom(evt.target, "[data-tab]");
+      if (node) setPhoneTab(node.getAttribute("data-tab"));
     });
   }
 
-  // Make `container`'s element children match `htmlList` (one root element per
-  // entry), touching only entries whose HTML differs from the previous call.
-  function patchChildren(container, htmlList) {
-    const prev = container.__patchHtml || [];
-    const tpl = document.createElement("template");
-    for (let i = 0; i < htmlList.length; i++) {
-      const existing = container.children[i];
-      if (existing && prev[i] === htmlList[i]) continue;
-      tpl.innerHTML = htmlList[i];
-      // Every entry must yield exactly one element so indexes stay aligned.
-      const node = tpl.content.firstElementChild || document.createElement("span");
-      if (existing) container.replaceChild(node, existing);
-      else container.appendChild(node);
-    }
-    while (container.children.length > htmlList.length) {
-      container.lastElementChild.remove();
-    }
-    container.__patchHtml = htmlList.slice();
+  // touch: a long press on a channel (or a rail avatar) shows its name
+  let tipTimer = null;
+  let tipHideTimer = null;
+  function hideTip() {
+    if (tipTimer !== null) window.clearTimeout(tipTimer);
+    tipTimer = null;
+    if (elTouchTip) elTouchTip.hidden = true;
   }
-
-  function renderFeed(s, force = false) {
-    const sel = state.selectedChannel;
-    if (sel === "engine") {
-      elFeedChannelLabel.textContent = "频道: 主持人处理流 (内部引擎)";
-    } else if (sel === "all") {
-      elFeedChannelLabel.textContent = "频道: 全部记录";
-    } else {
-      elFeedChannelLabel.textContent = `频道: ${sel}`;
-    }
-
-    const filtered = filterFeedRecords(s);
-    const bundles = groupRecordsIntoActionBundles(filtered);
-    const expandedSig = bundles
-      .map(
-        (b) =>
-          `${b.action_id}:${isLevel1Expanded(b.action_id) ? 1 : 0}:[${b.records
-            .map((r) => `${r.id}:${isLevel2Expanded(r) ? 1 : 0}`)
-            .join(",")}]`
-      )
-      .join(";");
-    const recordsSig = `${sel}|${state.showToolCalls ? 1 : 0}|${filtered.length}|${expandedSig}`;
-
-    if (force || recordsSig !== state.lastRecordsSig) {
-      state.lastRecordsSig = recordsSig;
-      const blocksHtml = [];
-
-      if (bundles.length === 0 && !s.streaming_draft) {
-        blocksHtml.push(`
-          <div class="empty-placeholder">
-            当前暂无发言或思考记录 — 点击右上角「开始」后，主持人将深度学习游戏规则并调用工具创建频道、分配身份、推进对局
-          </div>
-        `);
-      } else {
-        bundles.forEach((bundle) => {
-          blocksHtml.push(renderActionCard(bundle));
-        });
-      }
-
-      // Patch only the cards that changed instead of rewriting the whole feed.
-      patchChildren(elFeedRecordsContainer, blocksHtml);
-    }
-
-    renderStreamingDraft(s);
-
-    if (state.autoScroll) {
-      elFeedList.scrollTop = elFeedList.scrollHeight;
-    }
-  }
-
-  // Replace `container`'s children with the given blocks, rewriting only the
-  // blocks whose HTML changed (streaming text grows by appending, so usually
-  // just the last block is touched).
-  function patchBlocks(container, blocks) {
-    patchChildren(container, blocks);
-  }
-
-  function draftStructureSig(d, aid, expanded) {
-    return [
-      expanded ? 1 : 0,
-      d.actor_id === "moderator" ? "m" : "p",
-      d.actor_name || d.actor_id || "",
-      d.channel_id || "",
-      d.thought_text ? 1 : 0,
-      d.content_text ? 1 : 0,
-      aid,
-    ].join("\u0001");
-  }
-
-  function buildDraftCardHtml(d, aid, expanded) {
-    const isMod = d.actor_id === "moderator";
-    const subitems = [];
-    if (expanded && d.thought_text) {
-      subitems.push(`
-        <div class="action-subitem subitem-thought expanded" data-record-id="${escapeHtml(aid)}_thought">
-          <div class="subitem-header">
-            <span class="subitem-caret">▼</span>
-            <span class="${isMod ? "badge-mod-thought" : "badge-player-thought"}">思维链</span>
-            <span class="subitem-time">思考中...</span>
-          </div>
-          <div class="subitem-body formatted-text" data-draft-part="thought"></div>
-        </div>`);
-    }
-    if (expanded && d.content_text) {
-      subitems.push(`
-        <div class="action-subitem subitem-message expanded" data-record-id="${escapeHtml(aid)}_content">
-          <div class="subitem-header">
-            <span class="subitem-caret">▼</span>
-            <span class="subitem-tag-speech">发言</span>
-            <span class="subitem-time">发言生成中...</span>
-          </div>
-          <div class="subitem-body formatted-text" data-draft-part="content"></div>
-        </div>`);
-    }
-    return `
-      <div class="action-card ${isMod ? "moderator" : "player"} streaming ${
-      expanded ? "expanded" : "collapsed"
-    }" data-action-id="${escapeHtml(aid)}">
-        <div class="action-card-header" data-action-id="${escapeHtml(aid)}">
-          <span class="action-caret">${expanded ? "▼" : "▶"}</span>
-          <span class="action-actor-name">${escapeHtml(d.actor_name || d.actor_id)}</span>
-          ${
-            d.channel_id
-              ? `<span class="action-channel-pill">${escapeHtml(d.channel_id)}</span>`
-              : ""
-          }
-          <span class="action-time">行动中...</span>
-        </div>
-        ${expanded ? `<div class="action-card-body">${subitems.join("")}</div>` : ""}
-      </div>`;
-  }
-
-  // Streaming drafts are updated in place: a card is only rebuilt when its
-  // structure changes; per-chunk updates patch the changed text blocks only.
-  function renderStreamingDraft(s) {
-    const sel = state.selectedChannel;
-    const drafts = [];
-    if (s.streaming_draft) {
-      drafts.push(s.streaming_draft);
-    }
-    if (
-      s.concurrent_streaming_drafts &&
-      typeof s.concurrent_streaming_drafts === "object"
-    ) {
-      Object.values(s.concurrent_streaming_drafts).forEach((d) => {
-        if (d && !drafts.some((x) => x.actor_id === d.actor_id)) {
-          drafts.push(d);
+  if (elChannelsList && elTouchTip) {
+    elChannelsList.addEventListener("pointerdown", (evt) => {
+      if (evt.pointerType === "mouse") return;
+      const item = closestFrom(evt.target, ".channel-item[data-title]");
+      if (!item) return;
+      hideTip();
+      tipTimer = window.setTimeout(() => {
+        tipTimer = null;
+        elTouchTip.textContent = item.getAttribute("data-title") || "";
+        elTouchTip.hidden = false;
+        if (typeof item.getBoundingClientRect === "function") {
+          const r = item.getBoundingClientRect();
+          const vw = Number(window.innerWidth) || 390;
+          elTouchTip.style.left = `${Math.round(Math.min(r.right + 8, Math.max(8, vw - (elTouchTip.offsetWidth || 160) - 8)))}px`;
+          elTouchTip.style.top = `${Math.round(Math.max(8, r.top + 4))}px`;
+        }
+        if (tipHideTimer !== null) window.clearTimeout(tipHideTimer);
+        tipHideTimer = window.setTimeout(hideTip, 2200);
+      }, LONG_PRESS_MS);
+    });
+    for (const type of ["pointerup", "pointercancel", "pointerleave"]) {
+      elChannelsList.addEventListener(type, () => {
+        if (tipTimer !== null) {
+          window.clearTimeout(tipTimer);
+          tipTimer = null;
         }
       });
     }
+  }
 
-    const visibleDrafts = drafts.filter((d) => {
-      if (sel === "all") return true;
-      if (sel === "engine") return d.stream === "engine";
-      return d.channel_id === sel;
-    });
-
-    const container = elFeedStreamingContainer;
-    if (visibleDrafts.length === 0) {
-      if (state.draftNodes.size > 0 || container.firstChild) {
-        while (container.lastElementChild) container.lastElementChild.remove();
-        state.draftNodes.clear();
+  // Click outside the ticket popover closes it; the detail panel / roster menu close themselves (roster.js).
+  if (typeof document.addEventListener === "function") {
+    // the event path is computed at dispatch time: a handler that repaints (detaches) the clicked
+    // button must not turn an inside click into an "outside" one
+    const inPath = (evt, selector) => {
+      const path = evt && typeof evt.composedPath === "function" ? evt.composedPath() : [];
+      if (path.length) return path.some((n) => n && typeof n.matches === "function" && n.matches(selector));
+      return Boolean(closestFrom(evt && evt.target, selector));
+    };
+    document.addEventListener("click", (evt) => {
+      if (state.ticketPopOpen && !inPath(evt, "#ticket-pop") && !inPath(evt, "[data-tickets-toggle]")) {
+        state.ticketPopOpen = false;
+        renderTicketPop();
       }
-      return;
-    }
-
-    const seen = new Set();
-    visibleDrafts.forEach((d, idx) => {
-      const aid = d.action_id || `draft_${d.actor_id}`;
-      let key = aid;
-      while (seen.has(key)) key += "#";
-      seen.add(key);
-
-      const expanded = isLevel1Expanded(aid);
-      const sig = draftStructureSig(d, aid, expanded);
-      let entry = state.draftNodes.get(key);
-
-      if (!entry || entry.sig !== sig || !entry.el.isConnected) {
-        const tpl = document.createElement("template");
-        tpl.innerHTML = buildDraftCardHtml(d, aid, expanded);
-        const el = tpl.content.firstElementChild;
-        if (entry && entry.el.parentNode === container) {
-          container.replaceChild(el, entry.el);
-        } else {
-          container.appendChild(el);
+      if (elMoreMenu && !elMoreMenu.hidden && !inPath(evt, "#more-menu") && !inPath(evt, "#btn-more")) {
+        setMoreMenu(false);
+      }
+    });
+    document.addEventListener("keydown", (evt) => {
+      if (evt && evt.key === "Escape") {
+        if (elMoreMenu && !elMoreMenu.hidden) setMoreMenu(false);
+        if (state.ticketPopOpen) {
+          state.ticketPopOpen = false;
+          renderTicketPop();
         }
-        entry = { el, sig };
-        state.draftNodes.set(key, entry);
-      }
-
-      // Keep DOM order equal to draft order.
-      if (container.children[idx] !== entry.el) {
-        container.insertBefore(entry.el, container.children[idx] || null);
-      }
-
-      if (expanded) {
-        const thoughtEl = entry.el.querySelector('[data-draft-part="thought"]');
-        if (thoughtEl) patchBlocks(thoughtEl, renderFormattedBlocks(d.thought_text));
-        const contentEl = entry.el.querySelector('[data-draft-part="content"]');
-        if (contentEl) patchBlocks(contentEl, renderFormattedBlocks(d.content_text));
       }
     });
-
-    // Drop cards for drafts that finished or are no longer visible.
-    for (const [key, entry] of Array.from(state.draftNodes.entries())) {
-      if (!seen.has(key)) {
-        entry.el.remove();
-        state.draftNodes.delete(key);
-      }
-    }
   }
 
-  function renderDashboard(s) {
-    const dash = s.dashboard || {};
-    const factions = dash.factions || [];
-    const tagStats = dash.tag_stats || [];
+  elFeedList.addEventListener("scroll", () => {
+    // Scroll events arrive a frame late. If new messages were appended after our own scroll-to-bottom,
+    // the position would look "not at the bottom" and silently switch following off: events that
+    // merely report where WE scrolled to are ignored; only a real user scroll changes the mode.
+    if (state.autoScrollTop !== null && Math.abs(elFeedList.scrollTop - state.autoScrollTop) <= 1) return;
+    const nearBottom =
+      elFeedList.scrollHeight - elFeedList.scrollTop - elFeedList.clientHeight < 60;
+    state.autoScroll = nearBottom;
+    state.autoScrollTop = null;
+  });
 
-    const factionsHtml =
-      factions.length === 0
-        ? `<div class="empty-placeholder">待主持人调用工具初始化</div>`
-        : factions
-            .map(
-              (f) => `
-          <div class="stat-row">
-            <span>${escapeHtml(f.name)}</span>
-            <span class="stat-value ${escapeHtml(f.variant || "neutral")}">${numText(
-                f.alive
-              )} / ${numText(f.total)}</span>
-          </div>
-        `
-            )
-            .join("");
+  // ---------------------------------------------------------------------------
+  // Phone: the "⋯" menu takes the secondary buttons of the top bar
+  // ---------------------------------------------------------------------------
 
-    const tagStatsHtml =
-      tagStats.length === 0
-        ? `<div class="empty-placeholder">待主持人调用工具初始化</div>`
-        : tagStats
-            .map(
-              (t) => `
-          <div class="stat-row">
-            <span>${escapeHtml(t.name)}</span>
-            <span class="stat-value ${escapeHtml(t.variant || "neutral")}">${numText(
-                t.count
-              )}</span>
-          </div>
-        `
-            )
-            .join("");
+  // Real elements are moved (so their listeners keep working) and put back when the screen widens.
+  const RELOCATIONS = [
+    { id: "btn-open-workspace-modal", slot: "menu" },
+    { id: "btn-theme", slot: "menu" },
+    { id: "viewpoint-picker", slot: "menu" },
+    { id: "btn-open-budget-modal", slot: "menu" },
+    { id: "btn-new", slot: "menu" },
+    { id: "btn-save", slot: "menu" },
+    { id: "btn-import-session", slot: "menu" },
+    { id: "btn-open-sessions-modal", slot: "menu" },
+    { id: "btn-open-bindings-modal", slot: "menu" },
+    { id: "btn-open-provider-modal", slot: "menu" },
+    { id: "usage-telemetry-pill", slot: "status" },
+  ];
+  let relocated = false;
 
-    const sig = factionsHtml + "\u0001" + tagStatsHtml;
-    if (sig === state.lastDashboardSig) return;
-    state.lastDashboardSig = sig;
-    elFactionsList.innerHTML = factionsHtml;
-    elTagStatsList.innerHTML = tagStatsHtml;
+  function relocateTopbar(phone) {
+    if (phone === relocated) return;
+    for (const r of RELOCATIONS) {
+      const node = $(r.id);
+      if (!node || !node.parentNode) continue;
+      if (phone) {
+        if (!r.marker) {
+          r.marker = typeof document.createComment === "function" ? document.createComment(`home:${r.id}`) : document.createElement("span");
+          node.parentNode.insertBefore(r.marker, node);
+        }
+        const target = r.slot === "menu" ? elMoreMenuList : elTopbarStatus;
+        if (!target) continue;
+        if (r.slot === "status" && elModChip && elModChip.parentNode === target) target.insertBefore(node, elModChip);
+        else target.appendChild(node);
+      } else if (r.marker && r.marker.parentNode) {
+        r.marker.parentNode.insertBefore(node, r.marker);
+      }
+    }
+    relocated = phone;
+    if (!phone) setMoreMenu(false);
+  }
+
+  function setMoreMenu(open) {
+    if (!elMoreMenu) return;
+    elMoreMenu.hidden = !open;
+    if (elBtnMore && elBtnMore.setAttribute) elBtnMore.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  if (elBtnMore) elBtnMore.addEventListener("click", () => setMoreMenu(Boolean(elMoreMenu && elMoreMenu.hidden)));
+  if (elMoreMenu) {
+    elMoreMenu.addEventListener("click", (evt) => {
+      // an action closes the menu; the select / checkbox-like rows keep it open until the user is done
+      const btn = closestFrom(evt.target, "button");
+      if (btn && btn.id !== "btn-theme") setMoreMenu(false);
+    });
+  }
+
+  function onPlatformChange(info) {
+    state.platform = info;
+    relocateTopbar(info.platform === "phone");
+    if (layoutUI) layoutUI.apply(); // the avatar rail follows the layout
+    if (rosterUI) rosterUI.render();
+    renderTabbar();
+    hideTip();
+    state.ticketPopOpen = false;
+    renderTicketPop();
   }
 
   // ---------------------------------------------------------------------------
-  // Event Delegation (Immune to SSE DOM Refreshes)
-  // ---------------------------------------------------------------------------
-
-  function handleChannelSelectEvent(evt) {
-    if (evt.type === "mousedown" && evt.button !== 0) return;
-    const item = evt.target.closest(".channel-item[data-channel]");
-    if (!item) return;
-    const chId = item.getAttribute("data-channel");
-    if (chId && state.selectedChannel !== chId) {
-      state.selectedChannel = chId;
-      if (state.session) {
-        renderChannelsSidebar(state.session, true);
-        renderFeed(state.session, true);
-      }
-    }
-  }
-
-  elChannelsList.addEventListener("mousedown", handleChannelSelectEvent);
-  elChannelsList.addEventListener("click", handleChannelSelectEvent);
-
-  function handleFeedClick(evt) {
-    if (
-      window.getSelection &&
-      window.getSelection().toString().trim().length > 0
-    ) {
-      return;
-    }
-
-    // Level 2 toggle: clicking a subitem header inside an action
-    const subHeader = evt.target.closest(".subitem-header");
-    if (subHeader) {
-      const subitem = subHeader.closest(".action-subitem");
-      const rid = subitem ? subitem.getAttribute("data-record-id") : null;
-      if (rid && state.session) {
-        const rec = (state.session.records || []).find((x) => x.id === rid);
-        const curExpanded = isLevel2Expanded(rec || { id: rid, kind: "message" });
-        boundedSet(state.level2Expanded, rid, !curExpanded, MAX_EXPAND_ENTRIES);
-        renderFeed(state.session, true);
-        return;
-      }
-    }
-
-    // Level 1 toggle: clicking action card header
-    const cardHeader = evt.target.closest(".action-card-header");
-    if (cardHeader) {
-      const aid = cardHeader.getAttribute("data-action-id");
-      if (aid && state.session) {
-        boundedSet(state.level1Expanded, aid, !isLevel1Expanded(aid), MAX_EXPAND_ENTRIES);
-        renderFeed(state.session, true);
-        return;
-      }
-    }
-  }
-
-  elFeedRecordsContainer.addEventListener("click", handleFeedClick);
-  elFeedStreamingContainer.addEventListener("click", handleFeedClick);
-
-  // ---------------------------------------------------------------------------
-  // Event Handlers & API Calls
+  // Controls
   // ---------------------------------------------------------------------------
 
   elBtnTheme.addEventListener("click", () => {
@@ -1144,31 +1412,47 @@
     htmlEl.setAttribute("data-theme", next);
   });
 
-  elBtnNew.addEventListener("click", async () => {
+  if (elSelectViewpoint) {
+    elSelectViewpoint.addEventListener("change", () => setViewpoint(elSelectViewpoint.value));
+  }
+
+  /** POST a control endpoint and adopt the session in its response. */
+  async function control(path, okMessage) {
     try {
-      const res = await apiPost("api/control/new");
-      setSession(res.session);
-      resetExpandState();
-      state.selectedChannel = "all";
-      renderAll(true);
-      showToast("已重置为空白未开始对局，点击「开始」由主持人初始化并推进");
+      const res = await apiPost(path);
+      if (res && res.session) adoptHttpSession(res.session, { force: path === "api/control/new" });
+      if (okMessage) showToast(okMessage);
+      return true;
     } catch (err) {
       showToast(err.message);
+      return false;
+    }
+  }
+
+  elBtnNew.addEventListener("click", async () => {
+    const ok = await control("api/control/new", "已重置为空白未开始对局，点击「开始」由主持人初始化并推进");
+    if (ok) {
+      state.selectedChannel = null;
+      state.channelChosen = false;
+      renderAll(true);
     }
   });
 
-  if (elBtnShuffle) {
-    elBtnShuffle.addEventListener("click", async () => {
-      try {
-        const res = await apiPost("api/control/shuffle-identities");
-        setSession(res.session);
-        renderAll(true);
-        showToast("已刷新初始身份洗牌种子");
-      } catch (err) {
-        showToast(err.message);
-      }
-    });
-  }
+  elBtnStart.addEventListener("click", () =>
+    control("api/control/start", "对局已启动 — 主持人开始建立频道并推进对局")
+  );
+
+  elBtnResume.addEventListener("click", () => {
+    const finished = state.session.status === "finished";
+    return control(
+      "api/control/start",
+      finished ? "已在终局后继续：主持人和玩家重新开始行动" : "对局已继续运行"
+    );
+  });
+
+  elBtnPause.addEventListener("click", () =>
+    control("api/control/pause", "已暂停：所有 Agent 已休眠，计时冻结")
+  );
 
   elBtnSave.addEventListener("click", async () => {
     try {
@@ -1193,117 +1477,8 @@
     }
   });
 
-  elBtnStart.addEventListener("click", async () => {
-    try {
-      const res = await apiPost("api/control/start");
-      setSession(res.session);
-      renderAll(true);
-      showToast("对局已启动 — 主持人正在深度学习规则并初始化全场");
-    } catch (err) {
-      showToast(err.message);
-    }
-  });
-
-  elBtnResume.addEventListener("click", async () => {
-    try {
-      const res = await apiPost("api/control/start");
-      setSession(res.session);
-      renderAll(true);
-      showToast("对局已继续运行");
-    } catch (err) {
-      showToast(err.message);
-    }
-  });
-
-  elBtnPause.addEventListener("click", async () => {
-    try {
-      const res = await apiPost("api/control/pause");
-      setSession(res.session);
-      renderAll(true);
-      showToast("已请求在当前步骤完成后暂停");
-    } catch (err) {
-      showToast(err.message);
-    }
-  });
-
-  elBtnForcePause.addEventListener("click", async () => {
-    try {
-      const res = await apiPost("api/control/force-pause");
-      setSession(res.session);
-      renderAll(true);
-      showToast("已强制中断当前生成并暂停");
-    } catch (err) {
-      showToast(err.message);
-    }
-  });
-
-  elChkShowTools.addEventListener("change", () => {
-    state.showToolCalls = elChkShowTools.checked;
-    if (state.session) {
-      renderChannelsSidebar(state.session, true);
-      renderFeed(state.session, true);
-    }
-  });
-
-  if (elBtnResetDefault) {
-    elBtnResetDefault.addEventListener("click", () => {
-      resetExpandState();
-      if (state.session) {
-        renderFeed(state.session, true);
-      }
-      showToast("已恢复默认折叠：一级行动展开，二级仅发言展开，思维链与工具折叠");
-    });
-  }
-
-  if (elBtnExpandAll) {
-    elBtnExpandAll.addEventListener("click", () => {
-      if (!state.session) return;
-      const bundles = groupRecordsIntoActionBundles(filterFeedRecords(state.session));
-      bundles.forEach((b) => {
-        boundedSet(state.level1Expanded, b.action_id, true, MAX_EXPAND_ENTRIES);
-        b.records.forEach((r) => {
-          boundedSet(state.level2Expanded, r.id, true, MAX_EXPAND_ENTRIES);
-        });
-      });
-      renderFeed(state.session, true);
-      showToast("已全展开（一级行动与二级思维链/工具/发言全部展开）");
-    });
-  }
-
-  if (elBtnCollapseAll) {
-    elBtnCollapseAll.addEventListener("click", () => {
-      if (!state.session) return;
-      const bundles = groupRecordsIntoActionBundles(filterFeedRecords(state.session));
-      bundles.forEach((b) => {
-        boundedSet(state.level1Expanded, b.action_id, false, MAX_EXPAND_ENTRIES);
-      });
-      renderFeed(state.session, true);
-      showToast("已全折叠（一级行动卡片全部折叠）");
-    });
-  }
-
-  if (elSelectExecDepth) {
-    elSelectExecDepth.addEventListener("change", async () => {
-      const val = elSelectExecDepth.value;
-      try {
-        await apiPost("api/session/execution-depth", {
-          execution_depth: val,
-        });
-        showToast(`已将执行链深度切换为: ${val}`);
-      } catch (err) {
-        showToast(err.message);
-      }
-    });
-  }
-
-  elFeedList.addEventListener("scroll", () => {
-    const nearBottom =
-      elFeedList.scrollHeight - elFeedList.scrollTop - elFeedList.clientHeight < 60;
-    state.autoScroll = nearBottom;
-  });
-
   // ---------------------------------------------------------------------------
-  // Session Import
+  // Session import
   // ---------------------------------------------------------------------------
   const elBtnImportSession = document.getElementById("btn-import-session");
   const elFileImportSession = document.getElementById("file-import-session");
@@ -1312,6 +1487,13 @@
     elUsagePill.addEventListener("click", () => {
       if (providerUI) providerUI.openBindings();
     });
+  }
+
+  function handleSessionLoaded(session) {
+    adoptHttpSession(session, { force: true });
+    state.selectedChannel = null;
+    state.channelChosen = false;
+    renderAll(true);
   }
 
   if (elBtnImportSession && elFileImportSession) {
@@ -1330,11 +1512,7 @@
           throw new Error("文件不是有效的 JSON");
         }
         const res = await apiPost("api/session/import", json);
-        setSession(res.session);
-        // A different game was loaded: forget every folded/expanded card.
-        resetExpandState();
-        state.selectedChannel = "all";
-        renderAll(true);
+        handleSessionLoaded(res.session);
         showToast(`已成功导入存档: ${file.name}`);
       } catch (err) {
         showToast(`导入失败: ${err.message}`);
@@ -1346,15 +1524,8 @@
 
   if (window.ArenaLayout) {
     // Layout is pure DOM/state: create it before the first render so the saved
-    // card size / collapsed panels are applied immediately.
+    // collapsed panels are applied immediately.
     layoutUI = window.ArenaLayout.create({ Core });
-  }
-
-  function handleSessionLoaded(session) {
-    setSession(session);
-    resetExpandState();
-    state.selectedChannel = "all";
-    renderAll(true);
   }
 
   if (window.ArenaProviderUI) {
@@ -1364,10 +1535,49 @@
       showToast,
       getSession: () => state.session,
       onSessionLoaded: handleSessionLoaded,
-      // Providers/bindings changed: repaint the seat cards that show their model.
-      onChange: () => {
-        state.lastBoardHtml = null;
-        if (state.session) renderParticipantsBoard(state.session);
+      // Providers/bindings changed: the detail panel shows the model of an agent.
+      onChange: () => scheduleRender({ ...Store.newDirty(false), popover: true }),
+    });
+  }
+
+  function bindingText(actorId) {
+    const b = providerUI ? providerUI.getBindingsFor(actorId) : (state.session.model_bindings || {})[actorId];
+    if (!b) return "未绑定";
+    const providers = providerUI ? providerUI.getProviders() : [];
+    if (providers.length === 0) return `${b.model_id || "未绑定"} · ${b.reasoning_depth || "high"}`;
+    return Core.bindingSummary(b, providers);
+  }
+
+  if (window.ArenaRosterUI) {
+    rosterUI = window.ArenaRosterUI.create({
+      api,
+      Core,
+      Avatar,
+      View,
+      showToast,
+      getSession: () => state.session,
+      getViewpoint: () => state.viewpoint,
+      getClockNow: clockNow,
+      bindingText,
+      openBindings: (id) => {
+        if (providerUI) providerUI.openBindings(id);
+      },
+      setViewpoint: (id) => setViewpoint(id),
+      patchParticipants,
+      onChange: () => scheduleRender({ ...Store.newDirty(false), board: true, topbar: true, channels: true, feed: true }),
+    });
+  }
+
+  if (window.ArenaBudgetUI) {
+    budgetUI = window.ArenaBudgetUI.create({
+      api,
+      Core,
+      View,
+      showToast,
+      getSession: () => state.session,
+      onBudget: (budget) => {
+        state.session.budget = budget;
+        scheduleRender({ ...Store.newDirty(false), topbar: true });
       },
     });
   }
@@ -1461,7 +1671,7 @@
   }
 
   // ---------------------------------------------------------------------------
-  // SSE Real-time Connection (exponential backoff + jitter, single timer)
+  // SSE v2 (exponential backoff + jitter, single timer, resume with last_event_id)
   // ---------------------------------------------------------------------------
 
   const SSE_DISABLED = window.location.search.includes("nosse=1");
@@ -1519,7 +1729,8 @@
 
   function connectSSE() {
     closeSSE();
-    const es = new EventSource(Core.buildEventsUrl(URL_PREFIX, getToken()));
+    // A re-created EventSource does not send Last-Event-ID by itself: resume via the query string.
+    const es = new EventSource(Core.buildEventsUrl(URL_PREFIX, getToken(), state.sseResumeId));
     state.sse = es;
 
     es.onopen = () => {
@@ -1530,23 +1741,9 @@
       if (state.sse !== es) return;
       markSseConnected();
       try {
-        const payload = JSON.parse(evt.data);
-        // A workspace switch changes providers, templates and sessions for the whole
-        // server process; other tabs must rebuild their entire UI, not merge a session.
-        if (payload.event === "workspace_changed") {
-          window.location.reload();
-          return;
-        }
-        if (payload.session) {
-          setSession(payload.session);
-          if (payload.event === "stream_chunk") {
-            scheduleRender("stream");
-          } else {
-            scheduleRender("full", payload.event === "initial");
-          }
-        }
+        handleEvent(JSON.parse(evt.data));
       } catch (e) {
-        console.error("Failed to parse SSE payload", e);
+        console.error("Failed to handle SSE payload", e);
       }
     };
 
@@ -1592,7 +1789,7 @@
         if (data.restored && !data.session.restored_from_save) {
           data.session.restored_from_save = true;
         }
-        setSession(data.session);
+        adoptHttpSession(data.session, { force: true });
         // v0.11: /api/state carries the workspace summary (name / path withheld
         // for remote clients); it is the cheapest way to label the top bar.
         if (workspaceUI) {
@@ -1608,10 +1805,31 @@
     }
   }
 
+  // 1 Hz: request countdowns and the sleep timers in the open detail panel (the game clock is an estimate
+  // between events; it stops while the game is paused).
+  function startTicker() {
+    if (typeof window.setInterval !== "function") return;
+    window.setInterval(() => {
+      tickCountdowns();
+      if (rosterUI && rosterUI.isOpen()) rosterUI.render({ live: true });
+    }, 1000);
+  }
+
   async function init() {
-    if (elChkShowTools) {
-      state.showToolCalls = elChkShowTools.checked;
-    }
+    loadViewpointPref();
+    // First paint of the (empty) shell so the layout never looks broken while loading.
+    renderAll(true);
+    // The sprite library is optional: without it every avatar is a coloured circle with the seat number.
+    Avatar.onChange(() => {
+      state.avatarEpoch += 1;
+      state.lastBoardHtml = null;
+      state.lastModHtml = null;
+      state.lastChannelsHtml = null;
+      state.feed.key = "";
+      state.msgHtml.clear();
+      scheduleRender(Store.newDirty(true), true);
+    });
+    Avatar.loadParts((...args) => window.fetch(...args), Core.joinUrl(URL_PREFIX, "static/avatar/parts.json"));
     // Both calls check resp.ok through the shared client. A 401 here is the
     // first moment the token modal can appear; with no token configured the
     // user is never bothered.
@@ -1628,10 +1846,38 @@
     if (workspaceUI) {
       workspaceUI.load().catch(() => {});
     }
+    if (rosterUI) rosterUI.load().catch(() => {});
     if (!SSE_DISABLED) {
       window.setTimeout(connectSSE, 300);
     }
+    startTicker();
   }
+
+  // Platform detection: <html data-platform> is already set by index.html's head script; start tracking
+  // rotations / resizes and move the phone-only pieces.
+  if (Platform) {
+    platformCtl = Platform.start({ window, document, onChange: onPlatformChange });
+    if (platformCtl && platformCtl.info()) onPlatformChange(platformCtl.info());
+  }
+
+  // Small surface for tests and for poking at the UI from the console.
+  window.ArenaApp = {
+    state,
+    handleEvent,
+    adoptHttpSession,
+    setViewpoint,
+    selectChannel,
+    setPhoneTab,
+    openPopover,
+    closePopover,
+    togglePopover,
+    renderAll,
+    renderNow,
+    patchParticipants,
+    platform: () => (platformCtl ? platformCtl.info() : null),
+    roster: () => rosterUI,
+    budget: () => budgetUI,
+  };
 
   init();
 })();

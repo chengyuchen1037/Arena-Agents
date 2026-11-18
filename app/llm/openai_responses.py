@@ -14,6 +14,7 @@ from app.llm.common import (
     StreamProgress,
     UpstreamStreamError,
     estimate_completion_tokens,
+    openai_usage_parts,
 )
 from app.llm.messages import (
     call_parts,
@@ -272,7 +273,7 @@ class OpenAIResponsesAdapter(ProtocolAdapter):
         tool_calls = [calls[k] for k in sorted(calls)]
 
         usage = getattr(final_response, "usage", None)
-        prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+        prompt_tokens, cache_read = openai_usage_parts(usage, details="input_tokens_details")
         completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
         if tool_calls:
             finish = "tool_calls"
@@ -291,10 +292,11 @@ class OpenAIResponsesAdapter(ProtocolAdapter):
             tool_calls=tool_calls,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            cache_read_tokens=cache_read,
             finish_reason=finish,
             provider_private=private,
         )
-        if resp.prompt_tokens <= 0:
+        if resp.prompt_tokens <= 0 and resp.cache_read_tokens <= 0:
             resp.prompt_tokens = self.estimate_prompt_tokens(request)
         if resp.completion_tokens <= 0:
             resp.completion_tokens = estimate_completion_tokens(resp)
