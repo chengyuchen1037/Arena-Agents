@@ -612,14 +612,13 @@ test("buildProviderPayload: edit sends only changes; protocol/base_url change ne
   assert.deepEqual(protoKey.payload, { protocol: "anthropic_messages", api_key: "k" });
 });
 
-test("normalizeProviders / normalizeModelIds / normalizeSessions are tolerant", () => {
+test("normalizeProviders / normalizeModelIds are tolerant", () => {
   assert.equal(Core.normalizeProviders({ providers: PROVIDERS }).length, 2);
   assert.equal(Core.normalizeProviders(PROVIDERS).length, 2);
   assert.deepEqual(Core.normalizeProviders(null), []);
   assert.deepEqual(Core.normalizeProviders([{ id: "x" }])[0].models, []);
   assert.deepEqual(Core.normalizeModelIds({ models: ["a", "a", { id: "b" }, "", 5, null] }), ["a", "b"]);
   assert.deepEqual(Core.normalizeModelIds(["z"]), ["z"]);
-  assert.deepEqual(Core.normalizeSessions({ sessions: [{ id: "s1" }, { session_id: "s2" }, {}] }).map((s) => s.session_id), ["s1", "s2"]);
 });
 
 test("bindingsLocked only while running", () => {
@@ -951,75 +950,6 @@ test("buildTemplatesPayload skips untouched slots, rejects partial/invalid refs"
     ["moderator", "p02"]
   );
 });
-
-// --- v0.11: workspace ---------------------------------------------------------
-test("normalizeWorkspaceInfo falls back to the folder name and accepts remote payloads", () => {
-  assert.equal(Core.normalizeWorkspaceInfo(null), null);
-  assert.equal(Core.normalizeWorkspaceInfo({}), null);
-  const local = Core.normalizeWorkspaceInfo({
-    id: "w1",
-    name: "我的工作区",
-    path: "D:\\Arena-Workspace\\Mine",
-    last_session: "s1",
-    status: "ok",
-  });
-  assert.equal(local.name, "我的工作区");
-  assert.equal(local.path, "D:\\Arena-Workspace\\Mine");
-  assert.equal(local.last_session, "s1");
-  const remote = Core.normalizeWorkspaceInfo({ id: "w2", name: "Remote" });
-  assert.equal(remote.path, null);
-  assert.equal(Core.workspacePathDisplay(remote), "（远程访问不显示完整路径）");
-  const unnamed = Core.normalizeWorkspaceInfo({ path: "D:\\Arena-Workspace\\Default" });
-  assert.equal(unnamed.name, "Default");
-  assert.equal(Core.workspaceNameFromPath("/home/me/arena/"), "arena");
-
-  const all = Core.normalizeWorkspaces({
-    enabled: true,
-    current: { id: "w1", name: "N", path: "D:\\x" },
-    recent: [{ path: "D:\\x" }, { path: "D:\\x" }, { id: "w3", name: "Other" }, null],
-    default_path: "D:\\Arena-Workspace\\Default",
-    native_picker: false,
-  });
-  assert.equal(all.enabled, true);
-  assert.equal(all.recent.length, 2); // de-duplicated by path
-  assert.equal(all.native_picker, false);
-  assert.equal(all.default_path, "D:\\Arena-Workspace\\Default");
-});
-
-test("validateWorkspacePath only accepts absolute, non-root paths", () => {
-  for (const good of ["D:\\Arena-Workspace\\Mine", "C:/Users/me/arena", "/home/me/arena", "\\\\server\\share\\ws"]) {
-    assert.equal(Core.validateWorkspacePath(good).ok, true, good);
-  }
-  for (const bad of ["", "   ", "relative/path", "D:", "D:\\", "C:/", "/", "\\\\", "bad\u0000path"]) {
-    assert.equal(Core.validateWorkspacePath(bad).ok, false, JSON.stringify(bad));
-  }
-  assert.match(Core.validateWorkspacePath("").error, /绝对路径/);
-  assert.match(Core.validateWorkspacePath("D:\\").error, /磁盘根目录/);
-  assert.deepEqual(Core.validateWorkspacePath(" D:\\ws "), { ok: true, value: "D:\\ws" });
-});
-
-test("buildWorkspaceSelectPayload adds optional flags only when ticked", () => {
-  const plain = Core.buildWorkspaceSelectPayload({ path: "D:\\ws" });
-  assert.deepEqual(plain, { ok: true, payload: { path: "D:\\ws" } });
-  const flags = Core.buildWorkspaceSelectPayload({
-    path: "D:\\ws",
-    initialize_existing: true,
-    create_if_missing: true,
-  });
-  assert.deepEqual(flags.payload, {
-    path: "D:\\ws",
-    initialize_existing: true,
-    create_if_missing: true,
-  });
-  const bad = Core.buildWorkspaceSelectPayload({ path: "not-absolute" });
-  assert.equal(bad.ok, false);
-  assert.equal(Core.workspaceSwitchBlocked({ status: "running" }), true);
-  for (const st of ["paused", "idle", "finished", undefined]) {
-    assert.equal(Core.workspaceSwitchBlocked({ status: st }), false, String(st));
-  }
-  assert.equal(Core.workspaceSwitchBlocked(null), false);
-});
-
 
 // --- v0.12.1: four prices, price source, suggestions ---------------------------------------
 test("validateOptionalPrice: empty means null (input price); anything else must be a valid price", () => {

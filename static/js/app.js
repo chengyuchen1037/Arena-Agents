@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Arena-Agents v0.12.1 Frontend Controller
+   Arena-Agents v0.13.0 Frontend Controller
    (async agents · SSE v2 · player cards with pixel avatars · request cards · responsive)
 
    Pure logic lives in
@@ -9,7 +9,7 @@
      view.js      viewpoint filtering, cards, channels, request cards, banners
      platform.js  desktop / tablet / phone detection (<html data-platform>)
    Panels with their own state: roster.js (detail panel, roster menu), budget.js (limit dialog),
-   providers.js (Provider / price source / bindings), layout.js, workspace.js.
+   providers.js (Provider / price source / bindings), layout.js, archive.js (settings: export / import an archive).
    This file wires them to the DOM.
 
    What is NOT here (v0.12 -> v0.12.1): the 🎤 / ✋ / ■ card states and their legend, the execution
@@ -47,11 +47,15 @@
   const MESSAGE_HTML_CACHE_MAX = 5000;
   const FLASH_MS = 3000;
   const LONG_PRESS_MS = 450;
-  let providerUI = null; // v0.10 provider/binding/session-list UI (providers.js)
+  let providerUI = null; // v0.10 provider / binding UI (providers.js)
   let layoutUI = null; // v0.11 collapse/resize UI (layout.js)
-  let workspaceUI = null; // v0.11 workspace (工作文件夹) UI (workspace.js)
+  let archiveUI = null; // v0.13 settings dialog (export / import an archive) + the "old data found" notice (archive.js)
   let rosterUI = null; // v0.12.1 detail panel + roster menu (roster.js)
   let budgetUI = null; // v0.12.1 token / cost limit dialog (budget.js)
+  let historyUI = null; // v0.13 history of games: list, delete, continue, replay (history.js)
+  let replayUI = null; // v0.13 replay player: plays a saved game back in a session of its own (replay.js)
+  let takeoverUI = null; // v0.13 viewpoint bar / takeover bar / reshuffle reminder (takeover.js)
+  let composerUI = null; // v0.13 input box, abilities, request answers of the played seat (composer.js)
   let platformCtl = null; // platform.js controller
 
   const state = {
@@ -71,6 +75,7 @@
     read: { baseline: 0, seqs: {} }, // unread watermarks per channel
     flash: new Map(), // actor id -> expiry (ms): briefly highlights a card (ability.used)
     clockSync: { clock: 0, at: 0, running: false }, // estimate of the game clock (sleep timers, request deadlines)
+    replay: null, // v0.13: while a saved game is replayed: {live} - the live session is kept aside (replay.js)
     // SSE
     sse: null,
     sseAttempt: 0,
@@ -85,7 +90,6 @@
     lastBoardHtml: null,
     lastSummaryHtml: null,
     lastChannelsHtml: null,
-    lastViewpointHtml: null,
     lastHintsHtml: null,
     lastBannerHtml: null,
     lastModHtml: null,
@@ -164,7 +168,6 @@
   const elUsageCostText = $("usage-cost-text");
 
   const elBtnNew = $("btn-new");
-  const elBtnSave = $("btn-save");
   const elBtnStart = $("btn-start");
   const elBtnPause = $("btn-pause");
   const elBtnResume = $("btn-resume");
@@ -315,19 +318,6 @@
   // Rendering: top bar
   // ---------------------------------------------------------------------------
 
-  function renderViewpointSelect(s) {
-    if (!elSelectViewpoint) return;
-    const options = View.viewpointOptions(s);
-    const html = options
-      .map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.label)}</option>`)
-      .join("");
-    if (html !== state.lastViewpointHtml) {
-      state.lastViewpointHtml = html;
-      elSelectViewpoint.innerHTML = html;
-    }
-    if (elSelectViewpoint.value !== state.viewpoint) elSelectViewpoint.value = state.viewpoint;
-  }
-
   function renderRequestHints(s) {
     if (!elRequestHints) return;
     const hints = View.requestHints(s, state.viewpoint);
@@ -427,8 +417,11 @@
     elBtnStart.disabled = !ctl.start;
     elBtnPause.disabled = !ctl.pause;
     elBtnResume.disabled = !ctl.resume;
+    elBtnNew.disabled = Boolean(s.replay); // a replay is not the live game: nothing of the live controls applies
+    if (historyUI) historyUI.onSession();
 
-    renderViewpointSelect(s);
+    // v0.13: the viewpoint bar [视角▾][切换][接管] / the takeover bar / the reshuffle reminder (takeover.js)
+    if (takeoverUI) takeoverUI.render();
     renderRequestHints(s);
     renderBanner(s);
     renderModeratorChip(s);
@@ -436,7 +429,7 @@
       elFeedViewing.textContent = `视角：${View.viewpointLabel(s, state.viewpoint)}`;
       elFeedViewing.classList.toggle("is-player", state.viewpoint !== View.GOD);
     }
-    if (elSelectViewpoint) elSelectViewpoint.classList.toggle("is-player", state.viewpoint !== View.GOD);
+    // (the drop-down's own colour follows its pending choice: takeover.js)
     if (budgetUI) budgetUI.onSession(s);
     if (rosterUI) rosterUI.renderControls();
   }
@@ -541,7 +534,11 @@
     const isDm = m.kind === "dm";
     // A private chat is normally "free": the chip is only worth showing when it is muted / frozen.
     const showChip = Boolean(sum.icon) && !(isDm && sum.kind === "free");
-    const tipText = `${m.title}${showChip ? `｜${sum.icon} ${sum.text}${sum.detail ? `（${sum.detail}）` : ""}` : ""}`;
+    // v0.13 (F18): the channels that wait for the person who plays a seat (it holds the floor / has an open request)
+    const attention = Boolean(m.attention);
+    const tipText =
+      `${m.title}${showChip ? `｜${sum.icon} ${sum.text}${sum.detail ? `（${sum.detail}）` : ""}` : ""}` +
+      `${attention ? "｜✋ 待你操作" : ""}`;
     const hue = Avatar.HUES[Avatar.hashString(ch.id) % Avatar.HUES.length];
     const avatar = isDm
       ? avatarImg(m.avatarId, 40, "chan-avatar-img")
@@ -552,13 +549,19 @@
       : "";
     const detail = sum.detail && showChip ? `<span class="channel-detail">${escapeHtml(sum.detail)}</span>` : "";
     const members = isDm ? "" : `<span class="channel-members">${numText(m.memberCount)} 人</span>`;
+    const attn = attention
+      ? `<span class="attn-chip" title="轮到你发言，或有一个请求等你作答">待你操作</span>`
+      : "";
     return (
-      `<div class="channel-item${isDm ? " is-dm" : " is-group"}${active ? " active" : ""}${n ? " has-unread" : ""}"` +
+      `<div class="channel-item${isDm ? " is-dm" : " is-group"}${active ? " active" : ""}${n ? " has-unread" : ""}${
+        attention ? " needs-action" : ""
+      }"` +
       ` data-channel="${escapeHtml(ch.id)}" data-title="${escapeHtml(tipText)}" title="${escapeHtml(tipText)}" role="button" tabindex="0">` +
       `<span class="chan-avatar">${avatar}` +
-      `${showChip ? `<span class="chan-ov ov-state">${sum.icon}</span>` : ""}${unreadBadge(n, "chan-ov ov-unread")}</span>` +
+      `${showChip ? `<span class="chan-ov ov-state">${sum.icon}</span>` : ""}${unreadBadge(n, "chan-ov ov-unread")}` +
+      `${attention ? `<span class="chan-ov ov-attn" title="待你操作">✋</span>` : ""}</span>` +
       `<span class="chan-body"><span class="chan-row"><span class="channel-name">${escapeHtml(m.title)}</span>${unreadBadge(n)}</span>` +
-      `<span class="channel-meta">${chip}${members}</span>${detail}</span></div>`
+      `<span class="channel-meta">${chip}${attn}${members}</span>${detail}</span></div>`
     );
   }
 
@@ -806,14 +809,18 @@
       }
     }
     const question = View.annotateIdRefs(Core.renderInlineFormatting(c.question), s);
+    // v0.13 (F17): the person who plays a recipient answers right on the card
+    const action = composerUI && c.action ? composerUI.requestActionHtml(c) : "";
     return (
-      `<article class="req-card req-${escapeHtml(c.status)}${c.sealed ? " is-sealed" : ""}${c.shareAnswers ? " is-share" : ""}" data-req="${escapeHtml(c.id)}">` +
+      `<article class="req-card req-${escapeHtml(c.status)}${c.sealed ? " is-sealed" : ""}${c.shareAnswers ? " is-share" : ""}${
+        action ? " has-action" : ""
+      }" data-req="${escapeHtml(c.id)}">` +
       `<div class="req-head"><span class="req-icon" aria-hidden="true">${icon}</span><span class="req-kind">${kindLabel}请求</span>` +
       `<span class="req-status st-${escapeHtml(c.status)}">${escapeHtml(c.statusLabel)}</span>${chips.join("")}${timer}</div>` +
       `<div class="req-question">${question || "（没有问题文本）"}</div>` +
       `<div class="req-progress"><span class="req-progress-text">${numText(c.answeredCount)}/${numText(c.total)} 已作答</span>` +
       `<span class="req-bar"><span class="req-bar-fill" style="width:${pct}%"></span></span></div>` +
-      `<ul class="req-rows">${rows}</ul>${result}</article>`
+      `<ul class="req-rows">${rows}</ul>${action}${result}</article>`
     );
   }
 
@@ -821,7 +828,31 @@
     const tpl = document.createElement("template");
     tpl.innerHTML = html;
     const node = tpl.content && tpl.content.firstElementChild;
-    if (node) elFeedRecords.appendChild(node);
+    if (node) {
+      elFeedRecords.appendChild(node);
+      if (composerUI) composerUI.restoreRequestDrafts(node);
+    }
+  }
+
+  /**
+   * A text the person typed into a request card (data-draft-key): when the card is drawn again while the
+   * input has the focus, the caret must stay where it was.
+   */
+  function focusedDraft(node) {
+    const a = document.activeElement;
+    if (!a || !node || typeof node.contains !== "function" || !node.contains(a)) return null;
+    const key = typeof a.getAttribute === "function" ? a.getAttribute("data-draft-key") : null;
+    return key ? { key, start: a.selectionStart, end: a.selectionEnd } : null;
+  }
+
+  function refocusDraft(fresh, keep) {
+    if (!keep || typeof fresh.querySelector !== "function") return;
+    const box = fresh.querySelector(`[data-draft-key="${cssEscape(keep.key)}"]`);
+    if (!box) return;
+    if (typeof box.focus === "function") box.focus();
+    if (typeof box.setSelectionRange === "function" && keep.start !== undefined && keep.start !== null) {
+      box.setSelectionRange(keep.start, keep.end);
+    }
   }
 
   /** Replace the i-th block in place (a request card changed); false when the DOM cannot do it. */
@@ -832,7 +863,10 @@
     tpl.innerHTML = html;
     const fresh = tpl.content && tpl.content.firstElementChild;
     if (!fresh) return false;
+    const keep = focusedDraft(node);
     elFeedRecords.replaceChild(fresh, node);
+    if (composerUI) composerUI.restoreRequestDrafts(fresh);
+    refocusDraft(fresh, keep);
     return true;
   }
 
@@ -876,7 +910,10 @@
     const prev = state.feed.rows;
 
     const rebuild = () => {
+      const keep = focusedDraft(elFeedRecords);
       elFeedRecords.innerHTML = rows.length ? rows.map((r) => r.html).join("") : emptyFeedHtml(s);
+      if (composerUI) composerUI.restoreRequestDrafts(elFeedRecords);
+      refocusDraft(elFeedRecords, keep);
     };
 
     if (force || state.feed.key !== key) {
@@ -952,6 +989,8 @@
     }
     if (d.feed) renderFeed(force);
     if (d.popover) renderPopover();
+    // v0.13: the input box follows the selected channel and the seat's state (it only touches what changed)
+    if (composerUI) composerUI.render();
   }
 
   function renderAll(force = false) {
@@ -1017,8 +1056,17 @@
     }
   }
 
+  /**
+   * The viewpoint a session asks for: the seat a person plays is locked as the viewpoint (v0.13, F3); otherwise
+   * what the user chose.  (Front end only: the server still sends the god view's data, a known limit.)
+   */
+  function effectiveViewpoint(session) {
+    return View.normalizeViewpoint(session, View.takeoverSeat(session) || state.viewpointPref);
+  }
+
   /** Switch the spectator viewpoint. Pure front-end: nothing is requested from the server. */
   function setViewpoint(id, persist = true) {
+    if (View.takeoverSeat(state.session)) return; // locked while a seat is played
     const vp = View.normalizeViewpoint(state.session, id);
     state.viewpointPref = vp;
     state.viewpoint = vp;
@@ -1032,8 +1080,81 @@
     renderAll(true);
   }
 
+  /**
+   * The played seat changed (takeover.updated): the viewpoint becomes that seat, or - after leaving it - what
+   * the user had chosen before.  A different message set: the feed is drawn again.
+   */
+  function syncViewpointLock() {
+    const next = effectiveViewpoint(state.session);
+    if (next === state.viewpoint) return;
+    state.viewpoint = next;
+    state.selectedChannel = state.channelChosen
+      ? View.normalizeSelectedChannel(state.session, next, state.selectedChannel)
+      : View.defaultChannelId(state.session, next);
+    markChannelRead(state.selectedChannel);
+    state.autoScroll = true;
+    state.feed.key = "";
+    if (rosterUI && rosterUI.isOpen()) rosterUI.render();
+  }
+
+  // ---------------------------------------------------------------------------
+  // v0.13 (F36): replaying a saved game (replay.js).  While a replay runs, `state.session` IS the replayed session
+  // (so every renderer shows it); the live game is kept aside in `state.replay.live` and still follows the SSE
+  // stream, so leaving the replay shows the game exactly as it is now.
+  // ---------------------------------------------------------------------------
+
+  /** The live game's session (while a replay runs `state.session` is the replayed one). */
+  const liveSession = () => (state.replay ? state.replay.live : state.session);
+
+  /** Show `session` (a replay) instead of the live one; called again for every rebuild after a seek. */
+  function enterReplay(session) {
+    if (!state.replay) state.replay = { live: state.session, installing: false };
+    state.replay.installing = true;
+    try {
+      state.sessionKey = null; // a different "game": the selected channel and the unread marks start afresh
+      replaceSession(session);
+    } finally {
+      state.replay.installing = false;
+    }
+    state.clockSync = { clock: Number(session.clock) || 0, at: Date.now(), running: false }; // the replay sets the clock itself
+  }
+
+  /** Back to the live game. */
+  function leaveReplay() {
+    if (!state.replay) return;
+    const live = state.replay.live;
+    state.replay = null;
+    state.sessionKey = null;
+    replaceSession(live);
+    syncClock(live);
+    renderAll(true);
+  }
+
+  /** An event of the live stream while a replay is shown: it goes into the session kept aside, nothing is painted. */
+  function handleLiveEventDuringReplay(payload) {
+    const live = state.replay.live;
+    const id = Store.eventIdOf(payload, NaN);
+    const result = Store.applyEvent(live, payload, { clockNow: Number(live.clock) || 0 });
+    if (result.replaced) {
+      state.lastEventId = Number.isFinite(id) ? id : result.session.event_id;
+      state.sseResumeId = state.lastEventId;
+      state.replay.live = result.session;
+    } else if (Number.isFinite(id) && id > 0) {
+      if (id > state.lastEventId) state.lastEventId = id;
+      if (id > state.sseResumeId) state.sseResumeId = id;
+      if (id > live.event_id) live.event_id = id;
+    }
+    if (historyUI) historyUI.onSession();
+    // the settings dialog: archive import needs the LIVE game paused, whatever replay is on screen
+    if (archiveUI && (result.replaced || payload.type === "game.status" || payload.type === "session.updated")) archiveUI.onSession(state.replay.live);
+  }
+
   /** Replace the whole session (snapshot, state fetch, control / import / load response). */
   function replaceSession(next) {
+    if (state.replay && !state.replay.installing) {
+      state.replay.live = next; // a snapshot / HTTP answer of the LIVE game during a replay: kept aside, not shown
+      return;
+    }
     const prevKey = state.sessionKey;
     const key = next.session_id || null;
     state.session = next;
@@ -1050,7 +1171,7 @@
     } else if (!state.read.baseline) {
       resetReadState(next);
     }
-    state.viewpoint = View.normalizeViewpoint(next, state.viewpointPref);
+    state.viewpoint = effectiveViewpoint(next);
     state.selectedChannel = state.channelChosen
       ? View.normalizeSelectedChannel(next, state.viewpoint, state.selectedChannel)
       : View.defaultChannelId(next, state.viewpoint);
@@ -1058,8 +1179,10 @@
     if (rosterUI && rosterUI.openId() && rosterUI.openId() !== MOD && !View.participantOf(next, rosterUI.openId())) {
       rosterUI.close();
     }
-    if (providerUI) providerUI.onSession(next);
-    if (workspaceUI) workspaceUI.onSession(next);
+    // providers, bindings, the notice bar and the archive import concern the LIVE game (during a replay, `next` is the
+    // replayed one); the roster shows what is on screen
+    if (providerUI) providerUI.onSession(liveSession());
+    if (archiveUI) archiveUI.onSession(liveSession());
     if (rosterUI) rosterUI.onSession(next);
     // The feed compares what it already shows (view key + blocks), so an identical
     // snapshot after a reconnect does not rebuild the list or move the scroll position.
@@ -1070,10 +1193,11 @@
   function adoptHttpSession(raw, opts = {}) {
     if (!raw || typeof raw !== "object") return false;
     const incoming = Store.normalizeSession(raw);
-    if (!opts.force && !Store.shouldAdoptHttpSession(state.session, incoming, state.lastEventId)) {
+    const current = liveSession(); // (during a replay the live game is the one kept aside)
+    if (!opts.force && !Store.shouldAdoptHttpSession(current, incoming, state.lastEventId)) {
       return false;
     }
-    const differentGame = incoming.session_id !== state.session.session_id;
+    const differentGame = incoming.session_id !== current.session_id;
     if (differentGame) state.lastEventId = incoming.event_id > 0 ? incoming.event_id : 0;
     else if (incoming.event_id > state.lastEventId) state.lastEventId = incoming.event_id;
     replaceSession(incoming);
@@ -1096,6 +1220,21 @@
   function handleEvent(payload) {
     if (!payload || typeof payload !== "object" || !payload.type) return;
     if (Store.isStaleEvent(state.lastEventId, payload)) return; // replayed after a reconnect
+    if (payload.type === "archive.progress") {
+      // v0.13: an export / import job is not part of any game: handled the same with or without a replay on screen
+      const archiveResult = Store.applyEvent(state.session, payload, null);
+      const archiveEventId = Store.eventIdOf(payload, NaN);
+      if (Number.isFinite(archiveEventId) && archiveEventId > 0) {
+        if (archiveEventId > state.lastEventId) state.lastEventId = archiveEventId;
+        if (archiveEventId > state.sseResumeId) state.sseResumeId = archiveEventId;
+      }
+      if (archiveUI && archiveResult.archiveEvent) archiveUI.onEvent(archiveResult.archiveEvent);
+      return;
+    }
+    if (state.replay) {
+      handleLiveEventDuringReplay(payload); // a saved game is on screen: the live game follows in the background
+      return;
+    }
     const id = Store.eventIdOf(payload, NaN);
     const prevStatus = state.session.status;
     const before = clockNow();
@@ -1112,12 +1251,6 @@
       if (id > state.sseResumeId) state.sseResumeId = id;
       if (id > state.session.event_id) state.session.event_id = id;
     }
-    if (result.reload) {
-      // A workspace switch changes providers, templates and sessions for the whole
-      // server process; every tab must rebuild its UI instead of merging a session.
-      if (typeof window.location.reload === "function") window.location.reload();
-      return;
-    }
     // the game clock stops while the game is not running (D18): freeze / resume our estimate
     const s = state.session;
     if (payload.type === "session.updated" && payload.data && payload.data.clock !== undefined) {
@@ -1125,6 +1258,7 @@
     } else if (s.status !== prevStatus) {
       state.clockSync = { clock: before, at: Date.now(), running: s.status === "running" };
     }
+    if (result.takeoverChanged) syncViewpointLock();
     if (result.toast) showToast(result.toast);
     if (result.message) onMessageSeen(result.message);
     if (result.flash) flashActor(result.flash);
@@ -1137,7 +1271,7 @@
     }
     if (PROVIDER_RELEVANT.has(payload.type)) {
       if (providerUI) providerUI.onSession(state.session);
-      if (workspaceUI) workspaceUI.onSession(state.session);
+      if (archiveUI) archiveUI.onSession(state.session);
     }
     scheduleRender(result.dirty);
   }
@@ -1339,14 +1473,13 @@
 
   // Real elements are moved (so their listeners keep working) and put back when the screen widens.
   const RELOCATIONS = [
-    { id: "btn-open-workspace-modal", slot: "menu" },
+    { id: "btn-open-settings-modal", slot: "menu" },
     { id: "btn-theme", slot: "menu" },
-    { id: "viewpoint-picker", slot: "menu" },
+    // v0.13: the whole bar [视角▾][切换][接管] moves; the takeover bar (#takeover-bar) stays in the first row
+    { id: "viewpoint-bar", slot: "menu" },
     { id: "btn-open-budget-modal", slot: "menu" },
     { id: "btn-new", slot: "menu" },
-    { id: "btn-save", slot: "menu" },
-    { id: "btn-import-session", slot: "menu" },
-    { id: "btn-open-sessions-modal", slot: "menu" },
+    { id: "btn-open-history-modal", slot: "menu" },
     { id: "btn-open-bindings-modal", slot: "menu" },
     { id: "btn-open-provider-modal", slot: "menu" },
     { id: "usage-telemetry-pill", slot: "status" },
@@ -1412,9 +1545,7 @@
     htmlEl.setAttribute("data-theme", next);
   });
 
-  if (elSelectViewpoint) {
-    elSelectViewpoint.addEventListener("change", () => setViewpoint(elSelectViewpoint.value));
-  }
+  // (v0.13: the drop-down only chooses; "切换" / "接管" are wired in takeover.js)
 
   /** POST a control endpoint and adopt the session in its response. */
   async function control(path, okMessage) {
@@ -1454,34 +1585,9 @@
     control("api/control/pause", "已暂停：所有 Agent 已休眠，计时冻结")
   );
 
-  elBtnSave.addEventListener("click", async () => {
-    try {
-      const res = await apiPost("api/session/save");
-      const filename = (res && res.filename) || "arena_session.json";
-      if (res && res.session) {
-        const blob = new Blob([JSON.stringify(res.session, null, 2)], {
-          type: "application/json",
-        });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-      }
-      showToast(`对局已保存: ${filename}`);
-    } catch (err) {
-      showToast(err.message);
-    }
-  });
-
   // ---------------------------------------------------------------------------
-  // Session import
+  // Usage pill + adopting a session that an HTTP answer carries (v0.13: the single-game JSON import is gone)
   // ---------------------------------------------------------------------------
-  const elBtnImportSession = document.getElementById("btn-import-session");
-  const elFileImportSession = document.getElementById("file-import-session");
   if (elUsagePill) {
     // Cost breakdown lives with the model bindings.
     elUsagePill.addEventListener("click", () => {
@@ -1496,32 +1602,6 @@
     renderAll(true);
   }
 
-  if (elBtnImportSession && elFileImportSession) {
-    elBtnImportSession.addEventListener("click", () => {
-      elFileImportSession.click();
-    });
-    elFileImportSession.addEventListener("change", async (evt) => {
-      const file = evt.target.files && evt.target.files[0];
-      if (!file) return;
-      try {
-        const text = await file.text();
-        let json;
-        try {
-          json = JSON.parse(text);
-        } catch {
-          throw new Error("文件不是有效的 JSON");
-        }
-        const res = await apiPost("api/session/import", json);
-        handleSessionLoaded(res.session);
-        showToast(`已成功导入存档: ${file.name}`);
-      } catch (err) {
-        showToast(`导入失败: ${err.message}`);
-      } finally {
-        elFileImportSession.value = "";
-      }
-    });
-  }
-
   if (window.ArenaLayout) {
     // Layout is pure DOM/state: create it before the first render so the saved
     // collapsed panels are applied immediately.
@@ -1533,8 +1613,8 @@
       api,
       Core,
       showToast,
-      getSession: () => state.session,
-      onSessionLoaded: handleSessionLoaded,
+      // (v0.13: the providers, the bindings and the "未绑定模型" light concern the LIVE game, also while a replay is on screen)
+      getSession: () => liveSession(),
       // Providers/bindings changed: the detail panel shows the model of an agent.
       onChange: () => scheduleRender({ ...Store.newDirty(false), popover: true }),
     });
@@ -1563,8 +1643,88 @@
         if (providerUI) providerUI.openBindings(id);
       },
       setViewpoint: (id) => setViewpoint(id),
+      // v0.13 (F3): while a seat is played the viewpoint is locked: "以 X 的视角观看" is disabled
+      lockedSeat: () => View.takeoverSeat(state.session),
       patchParticipants,
       onChange: () => scheduleRender({ ...Store.newDirty(false), board: true, topbar: true, channels: true, feed: true }),
+    });
+  }
+
+  /** The shared modal of roster.js (confirmations, forms); the browser's confirm() when it is missing. */
+  function openDialog(options) {
+    if (rosterUI && typeof rosterUI.openDialog === "function") return rosterUI.openDialog(options);
+    const ok = typeof window.confirm === "function" ? window.confirm(String((options && options.title) || "确认")) : false;
+    return Promise.resolve({ ok, values: {} });
+  }
+
+  // v0.13 (F1-F5): the viewpoint bar [视角▾][切换][接管], the takeover bar, the reshuffle reminder
+  if (window.ArenaTakeoverUI) {
+    takeoverUI = window.ArenaTakeoverUI.create({
+      api,
+      Core,
+      View,
+      showToast,
+      getSession: () => state.session,
+      getViewpoint: () => state.viewpoint,
+      setViewpoint: (id) => setViewpoint(id),
+      openDialog,
+      adoptSession: (raw, opts) => adoptHttpSession(raw, opts),
+      refreshState: () => reloadState(),
+      isReplaying: () => Boolean(state.replay),
+    });
+  }
+
+  // v0.13 (F11-F17): the input box, the floor, abilities and the answers of request cards
+  if (window.ArenaComposerUI) {
+    composerUI = window.ArenaComposerUI.create({
+      api,
+      Core,
+      View,
+      showToast,
+      getSession: () => state.session,
+      getViewpoint: () => state.viewpoint,
+      getSelectedChannel: () => state.selectedChannel,
+      getClockNow: clockNow,
+      getFeedNode: () => elFeedRecords,
+      openDialog,
+      onSent: () => {
+        state.autoScroll = true; // the player's own message scrolls the feed to the bottom
+      },
+      onChange: () => scheduleRender({ ...Store.newDirty(false), topbar: true, channels: true, feed: true }),
+    });
+  }
+
+  // v0.13 (F34, F35): the history of games - list, delete, continue, replay
+  if (window.ArenaHistoryUI) {
+    historyUI = window.ArenaHistoryUI.create({
+      api,
+      Core,
+      showToast,
+      getSession: () => liveSession(),
+      openDialog,
+      isReplaying: () => Boolean(state.replay),
+      onLoaded: (session) => handleSessionLoaded(session),
+      onReplay: (data, game) => {
+        if (replayUI) replayUI.start(data, game);
+      },
+    });
+  }
+
+  // v0.13 (F36): the replay player (it works on a session of its own, see enterReplay / leaveReplay)
+  if (window.ArenaReplayUI) {
+    replayUI = window.ArenaReplayUI.create({
+      Core,
+      Store,
+      showToast,
+      enter: enterReplay,
+      leave: () => leaveReplay(),
+      render: (dirty) => scheduleRender(dirty),
+      renderAll: () => renderAll(true),
+      setClock: (gt) => {
+        state.clockSync = { clock: Number(gt) || 0, at: Date.now(), running: false };
+      },
+      onMessage: onMessageSeen,
+      onFlash: flashActor,
     });
   }
 
@@ -1574,21 +1734,32 @@
       Core,
       View,
       showToast,
-      getSession: () => state.session,
+      getSession: () => liveSession(), // the limit is the live game's, also while a replay is on screen
       onBudget: (budget) => {
-        state.session.budget = budget;
+        liveSession().budget = budget;
         scheduleRender({ ...Store.newDirty(false), topbar: true });
       },
     });
   }
 
-  if (window.ArenaWorkspaceUI) {
-    workspaceUI = window.ArenaWorkspaceUI.create({
+  if (window.ArenaArchiveUI) {
+    archiveUI = window.ArenaArchiveUI.create({
       api,
       Core,
       showToast,
-      getSession: () => state.session,
-      onSessionLoaded: handleSessionLoaded,
+      getSession: () => liveSession(), // (a replay on screen must not hide that the live game runs: import needs it paused)
+      getToken,
+      // XHR uploads send the token as a header; a download link cannot, so it carries ?token= (the server accepts it there)
+      buildUrl: (path, options) => {
+        const url = Core.joinUrl(URL_PREFIX, path);
+        const token = options && options.token ? getToken() : "";
+        return token ? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : url;
+      },
+      requestToken: requestAuthToken,
+      reload: () => {
+        if (typeof window.location.reload === "function") window.location.reload();
+      },
+      openDialog,
     });
   }
 
@@ -1790,11 +1961,8 @@
           data.session.restored_from_save = true;
         }
         adoptHttpSession(data.session, { force: true });
-        // v0.11: /api/state carries the workspace summary (name / path withheld
-        // for remote clients); it is the cheapest way to label the top bar.
-        if (workspaceUI) {
-          workspaceUI.onState(data.workspace || (data.session && data.session.workspace));
-        }
+        // v0.13 (F24): "old v0.12.1 data found" (the path is only sent to a client on the server's own machine)
+        if (archiveUI) archiveUI.onState(data.legacy_data);
         renderAll(true);
       }
       return true;
@@ -1812,6 +1980,8 @@
     window.setInterval(() => {
       tickCountdowns();
       if (rosterUI && rosterUI.isOpen()) rosterUI.render({ live: true });
+      // the seconds left of the played seat's floor (the hint under the input box)
+      if (composerUI && View.takeoverSeat(state.session)) composerUI.render();
     }, 1000);
   }
 
@@ -1841,11 +2011,6 @@
       return;
     }
     await reloadState();
-    // v0.11: fetch the workspace summary (name, recent list, native picker
-    // availability) without blocking the first render.
-    if (workspaceUI) {
-      workspaceUI.load().catch(() => {});
-    }
     if (rosterUI) rosterUI.load().catch(() => {});
     if (!SSE_DISABLED) {
       window.setTimeout(connectSSE, 300);
@@ -1877,6 +2042,12 @@
     platform: () => (platformCtl ? platformCtl.info() : null),
     roster: () => rosterUI,
     budget: () => budgetUI,
+    archive: () => archiveUI,
+    takeover: () => takeoverUI,
+    composer: () => composerUI,
+    history: () => historyUI,
+    replay: () => replayUI,
+    liveSession,
   };
 
   init();

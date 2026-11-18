@@ -1,7 +1,8 @@
 """Roster, memory, budget and review API (v0.12.1; contracts sections 10.4 and 10.8).
 
 Everything that changes something needs a trusted client (loopback, or the API token); the bodies are
-small JSON objects except the memory pack, which is a raw zip.
+small JSON objects.  (The memory pack - a zip of the persona / memory files - is gone in v0.13: the only way to
+take the memory somewhere else is the archive export.)
 """
 
 from __future__ import annotations
@@ -9,14 +10,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from app.api.security import require_trusted_client, verify_api_access
-from app.api.session_io import read_limited_body
 from app.game.orchestrator import orchestrator
 from app.storage.errors import StorageError
-from app.storage.roster import MAX_ZIP_BYTES, RosterError
+from app.storage.roster import RosterError
 
 logger = logging.getLogger(__name__)
 
@@ -82,28 +82,6 @@ async def get_roster() -> dict[str, Any]:
 async def put_memory_enabled(req: MemoryEnabledRequest) -> dict[str, Any]:
     try:
         return await orchestrator.set_memory_enabled(req.enabled)
-    except (RosterError, StorageError, RuntimeError) as exc:
-        raise _fail(exc) from exc
-
-
-@router.get("/roster/memory:export")
-async def export_memory() -> Response:
-    try:
-        data = orchestrator.export_memory()
-    except (RosterError, StorageError) as exc:
-        raise _fail(exc) from exc
-    return Response(
-        content=data,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="arena-memory.zip"', "Cache-Control": "no-store"},
-    )
-
-
-@router.post("/roster/memory:import", dependencies=[Depends(require_trusted_client)])
-async def import_memory(request: Request, dry_run: bool = False) -> dict[str, Any]:
-    body = await read_limited_body(request, MAX_ZIP_BYTES)
-    try:
-        return await orchestrator.import_memory(body, dry_run=dry_run)
     except (RosterError, StorageError, RuntimeError) as exc:
         raise _fail(exc) from exc
 

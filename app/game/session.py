@@ -24,7 +24,7 @@ from app.providers.models import ModelBinding
 from app.world.types import MODERATOR_ID
 
 SESSION_SCHEMA_VERSION = 5
-APP_ENGINE_VERSION = "v0.12.1"
+APP_ENGINE_VERSION = "v0.13.0"
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 __all__ = [
@@ -38,10 +38,12 @@ __all__ = [
     "IncompatibleSessionError",
     "Participant",
     "Takeover",
+    "utc_now_iso",
 ]
 
 
-def _utc_now_iso() -> str:
+def utc_now_iso() -> str:
+    """The current time as ISO-8601 UTC text (``created_at`` / ``started_at`` / ``finished_at`` of a game)."""
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -110,7 +112,7 @@ class GameSession(BaseModel):
     # v0.13 (F10, F22)
     takeover: Takeover = Field(default_factory=Takeover)  # the seat a person plays right now, if any
     human_spans: list[HumanSpan] = Field(default_factory=list)  # every stretch a person played a seat
-    created_at: str | None = Field(default_factory=_utc_now_iso)  # ISO-8601 UTC; when the game was created
+    created_at: str | None = Field(default_factory=utc_now_iso)  # ISO-8601 UTC; when the game was created
     started_at: str | None = None  # when it was first started
     finished_at: str | None = None  # when it last ended (cleared when it is continued)
 

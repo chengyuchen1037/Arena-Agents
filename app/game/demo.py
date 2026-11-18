@@ -515,14 +515,11 @@ def install_demo(orchestrator: Any, *, delay: float = 1.0, seed: int | None = No
             cache[key] = DemoLlm(orch.world, delay=delay, seed=seed)
         return cache[key]
 
+    # ``demo_mode`` is what the API layer looks at to skip the model-binding checks (``routes._require_complete_bindings``,
+    # ``providers.binding_issues``): nothing process-global is replaced, so installing the demo on one orchestrator
+    # (a test, say) cannot change how the API behaves for any other.
     orchestrator.demo_mode = True
     orchestrator.llm_port_factory = factory
     orchestrator.ensure_bindings_ready = lambda: None
     orchestrator.refresh_binding_issues = lambda: []
     orchestrator.session.binding_issues = []
-
-    import app.api.providers as providers_api
-    import app.api.routes as routes_api
-
-    routes_api._require_complete_bindings = lambda: None  # type: ignore[assignment]
-    providers_api.binding_issues = lambda: []  # type: ignore[assignment]

@@ -45,9 +45,12 @@ const cardClick = (env, id) => env.el("participants-grid").dispatch("click", { t
 const modClick = (env) => env.el("topbar-status").dispatch("click", { target: target({ "#mod-chip": { "data-actor": "moderator" } }) });
 const channelClick = (env, id) => env.el("channels-list").dispatch("click", { target: target({ ".channel-item": { "data-channel": id } }) });
 const panelText = (env) => textOf(env.el("detail-head").innerHTML + " " + env.el("detail-live").innerHTML + " " + env.el("detail-editors").innerHTML);
+// v0.13 (F1): the drop-down only chooses; the viewpoint changes when "切换" is pressed
 const selectViewpoint = (env, id) => {
   env.el("select-viewpoint").value = id;
   env.el("select-viewpoint").dispatch("change");
+  env.el("btn-viewpoint-switch").click();
+  env.flushRaf();
 };
 const setClock = (env, clock) => {
   env.app().state.clockSync = { clock, at: 0, running: false }; // a frozen game clock: deterministic timers
@@ -885,6 +888,33 @@ test("viewpoint select: god view + one entry per player (seat · nickname); swit
   assert.equal(env.app().state.viewpoint, "N1");
 });
 
+test("v0.13: choosing in the drop-down changes nothing; only the 切换 button applies the viewpoint (and is disabled when there is nothing to switch)", async () => {
+  const { env } = await live();
+  assert.equal(env.app().state.viewpoint, "god");
+  assert.equal(env.el("btn-viewpoint-switch").disabled, true, "already looking from there");
+  env.el("select-viewpoint").value = "N3";
+  env.el("select-viewpoint").dispatch("change");
+  assert.equal(env.app().state.viewpoint, "god", "the choice alone does not switch");
+  assert.equal(env.el("feed-viewing").textContent, "视角：上帝视角");
+  assert.equal(env.el("btn-viewpoint-switch").disabled, false, "a pending choice can be applied");
+  env.el("btn-viewpoint-switch").click();
+  env.flushRaf();
+  assert.equal(env.app().state.viewpoint, "N3");
+  assert.equal(env.el("feed-viewing").textContent, "视角：Carol");
+  assert.equal(env.el("btn-viewpoint-switch").disabled, true, "applied: nothing pending any more");
+  // a pending choice is kept while other things are repainted ...
+  env.el("select-viewpoint").value = "N5";
+  env.el("select-viewpoint").dispatch("change");
+  env.sse("phase.changed", { text: "第 2 天" });
+  assert.equal(env.el("select-viewpoint").value, "N5");
+  assert.equal(env.app().state.viewpoint, "N3");
+  // ... and dropped when the applied viewpoint moves under it (here: the detail panel's "view as")
+  env.el("select-viewpoint").value = "N7";
+  env.el("select-viewpoint").dispatch("change");
+  env.app().setViewpoint("N2");
+  assert.equal(env.el("select-viewpoint").value, "N2");
+});
+
 test("player viewpoint: only its messages, only its channels, other players' identities are '?'", async () => {
   const { env } = await live();
   selectViewpoint(env, "N3");
@@ -1037,9 +1067,9 @@ test("a stall notice is a warning banner (the game keeps running); it goes away 
 
 test("the demo badge stays: '演示模式' next to the version", async () => {
   const demo = await live({ demo: true });
-  assert.match(demo.env.el("app-version").textContent, /v0\.12\.1-test · 演示模式/);
+  assert.match(demo.env.el("app-version").textContent, /v0\.13\.0-test · 演示模式/);
   const normal = await live({ demo: false });
-  assert.equal(normal.env.el("app-version").textContent, "v0.12.1-test");
+  assert.equal(normal.env.el("app-version").textContent, "v0.13.0-test");
 });
 
 test("usage: the stats bar turns yellow at 80 % and red at 100 % of the limit; a budget pause says so in the top bar", async () => {

@@ -379,7 +379,8 @@ test("three agent states only: thinking / acting / sleeping; god sees all, a pla
   assert.equal(p02.N2.state, "acting"); // my own state is shown
   assert.equal(p02.N1.state, ""); // others' states would leak who is active
   assert.equal(View.moderatorTile(s, "N2").state, "");
-  assert.deepEqual(Object.keys(View.STATE_ICONS), ["thinking", "acting", "sleeping"]);
+  // (v0.13 adds "human": a seat a person plays; see the takeover tests)
+  assert.deepEqual(Object.keys(View.STATE_ICONS), ["thinking", "acting", "sleeping", "human"]);
   // the removed card states have no icon any more
   for (const gone of ["🎤", "✋", "▪", "stopped", "idle"]) assert.ok(!JSON.stringify(View.STATE_ICONS).includes(gone));
   assert.equal(View.stateBadge(GOD, "N1", "stopped"), "");

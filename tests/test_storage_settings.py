@@ -1,13 +1,9 @@
 from __future__ import annotations
 
-import os
-from pathlib import Path
-
 import pytest
 
 from app.providers.models import ModelBinding
 from app.storage.errors import StorageError
-from app.storage.paths import get_data_dir
 from app.storage.settings import SettingsStore
 
 
@@ -52,17 +48,18 @@ def test_settings_reject_invalid_bindings_session_ids_and_corruption(tmp_path) -
         store.get_settings()
 
 
-def test_data_dir_precedence_and_no_creation(tmp_path, monkeypatch) -> None:
-    override = tmp_path / "override"
-    monkeypatch.setenv("ARENA_DATA_DIR", str(override))
-    assert get_data_dir() == override.resolve()
-    assert not override.exists()
+def test_settings_follow_the_data_directory_of_the_process(tmp_path, monkeypatch) -> None:
+    from app.storage.settings import get_settings_store, reset_settings_store
 
-    monkeypatch.delenv("ARENA_DATA_DIR")
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
-    monkeypatch.setattr("app.storage.paths.platform.system", lambda: "Windows")
-    assert get_data_dir() == (tmp_path / "local" / "Arena-Agent").resolve()
-    assert not (tmp_path / "local").exists()
+    first, second = tmp_path / "first", tmp_path / "second"
+    monkeypatch.setenv("ARENA_DATA_DIR", str(first))
+    reset_settings_store()
+    get_settings_store().set_last_session_id("in-first")
+    assert (first / "settings.json").is_file()
+
+    monkeypatch.setenv("ARENA_DATA_DIR", str(second))  # no reset needed: the singleton notices the new directory
+    assert get_settings_store().get_last_session_id() is None
+    assert not (second / "settings.json").exists()  # reading never creates the file
 
 
 # ------------------------------------------------------------------------------ v0.12.1: seat renaming

@@ -50,7 +50,8 @@ CURRENT_DOCS = [
     ARCH_EN,
     ROOT / "docs" / "ui-guide.md",
     ROOT / "docs" / "providers.md",
-    ROOT / "docs" / "workspaces.md",
+    ROOT / "docs" / "storage.md",
+    ROOT / "docs" / "archive.md",
 ]
 
 DIAGRAMS = ("overview", "actor", "worker", "timeline")

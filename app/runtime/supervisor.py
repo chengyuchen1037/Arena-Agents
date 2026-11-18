@@ -180,6 +180,15 @@ class Supervisor:
         await asyncio.gather(*stopping, return_exceptions=True)  # wait (bounded) for the cancelled workers
         self._publish_metrics()
         self.pump(final=True)
+        # Let go of the trace file.  A paused or replaced game must not keep its log open: on Windows an open file
+        # blocks moving or deleting the logs folder (deleting the game from the history, replacing the data
+        # directory with an archive).  Closing is harmless - a later write simply reopens the file.
+        close = getattr(self.trace, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001 - never let logging hygiene break a stop
+                logger.debug("closing the trace log failed", exc_info=True)
 
     def flush(self) -> None:
         """Publish pending world events / ENGINE notices right now (agent deliveries are dropped once stopped).

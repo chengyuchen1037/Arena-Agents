@@ -162,7 +162,7 @@ def test_refresh_downloads_parses_saves_and_survives_a_restart(tmp_path):
 
     again = PriceStore(tmp_path)  # a "restart": the reduced table is on disk
     assert again.status()["entries"] == status["entries"] and again.match(provider, "deepseek-flash").key == "deepseek-flash"
-    raw = json.loads((tmp_path / "pricing.v1.json").read_text(encoding="utf-8"))
+    raw = json.loads((tmp_path / "pricing.json").read_text(encoding="utf-8"))
     assert raw["schema"] == 1 and len(raw["entries"]["deepseek-flash"]) == 6
 
 
@@ -243,9 +243,9 @@ def test_changing_the_url_forgets_the_old_table_and_an_empty_url_means_the_defau
 
 
 def test_a_corrupt_price_file_is_ignored_not_fatal(tmp_path):
-    (tmp_path / "pricing.v1.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "pricing.json").write_text("{not json", encoding="utf-8")
     assert PriceStore(tmp_path).status()["entries"] == 0
-    (tmp_path / "pricing.v1.json").write_text(json.dumps({"schema": 9, "entries": {}}), encoding="utf-8")
+    (tmp_path / "pricing.json").write_text(json.dumps({"schema": 9, "entries": {}}), encoding="utf-8")
     assert PriceStore(tmp_path).status()["entries"] == 0
 
 
@@ -253,7 +253,6 @@ def test_a_corrupt_price_file_is_ignored_not_fatal(tmp_path):
 @pytest.fixture
 def env(monkeypatch, tmp_path):
     monkeypatch.setenv("ARENA_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("ARENA_DISABLE_WORKSPACE", "1")
     from app.storage import clear_store_caches
 
     clear_store_caches()

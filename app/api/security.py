@@ -3,7 +3,8 @@
 Contract (see docs/architecture.md):
 
 * ``ARENA_API_TOKEN`` set  -> every ``/api/*`` request needs ``X-Arena-Token``
-  (``GET /api/events`` additionally accepts ``?token=`` because EventSource
+  (``GET /api/events`` and the archive download ``GET /api/archive/exports/<name>``
+  additionally accept ``?token=`` because EventSource and a plain download link
   cannot send headers).
 * no token                 -> state-changing configuration endpoints are
   restricted to loopback clients.
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN_HEADER = "X-Arena-Token"
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-DEFAULT_MAX_IMPORT_BYTES = 20 * 1024 * 1024
+DEFAULT_MAX_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 MAX_SECRET_CHARS = 2048
 MAX_URL_CHARS = 2048
 MAX_NAME_CHARS = 100
@@ -98,8 +99,16 @@ def origin_allowed(origin: str, host_header: str) -> bool:
     return False
 
 
+_EXPORT_DOWNLOAD = re.compile(r".*/api/archive/exports/arena-[0-9]{8}-[0-9]{6}\.arenaagents$")
+
+
 def _is_events_get(request: Request) -> bool:
     return request.method == "GET" and request.url.path.rstrip("/").endswith("/api/events")
+
+
+def _is_export_download(request: Request) -> bool:
+    """``GET /api/archive/exports/<name>``: opened by a plain link (a download), which cannot carry a header either."""
+    return request.method == "GET" and bool(_EXPORT_DOWNLOAD.fullmatch(request.url.path))
 
 
 def check_origin(request: Request) -> None:
@@ -123,7 +132,7 @@ def check_token(request: Request) -> bool:
     if not expected:
         return False
     supplied = request.headers.get(TOKEN_HEADER, "")
-    if not supplied and _is_events_get(request):
+    if not supplied and (_is_events_get(request) or _is_export_download(request)):
         supplied = request.query_params.get("token", "")
     if not supplied or not hmac.compare_digest(
         supplied.encode("utf-8"), expected.encode("utf-8")
@@ -170,14 +179,14 @@ def is_local_request(request: Request) -> bool:
 async def require_local_client(request: Request) -> None:
     """Strict guard: loopback only, EVEN when ARENA_API_TOKEN is set.
 
-    Used for operations that act on the server's own filesystem (picking / switching the
-    workspace folder): a remote caller, however authenticated, must never choose server paths.
+    Used for operations that act on the server's own filesystem: a remote caller, however
+    authenticated, must never choose server paths.
     """
 
     if not is_local_request(request):
         raise HTTPException(
             status_code=403,
-            detail="该操作只能在运行服务的本机上执行（远程客户端不能选择服务器上的文件夹）。",
+            detail="该操作只能在运行服务的本机上执行（远程客户端不能操作服务器上的文件夹）。",
         )
 
 
@@ -331,13 +340,14 @@ def redact(text: str, secrets: Iterable[str]) -> str:
 # --------------------------------------------------------------------------
 # Import limits
 # --------------------------------------------------------------------------
-def max_import_bytes() -> int:
-    raw = os.environ.get("ARENA_MAX_IMPORT_BYTES", "").strip()
+def max_archive_bytes() -> int:
+    """Largest ``.arenaagents`` upload (v0.13, F30): 2 GiB unless ``ARENA_MAX_ARCHIVE_BYTES`` says otherwise."""
+    raw = os.environ.get("ARENA_MAX_ARCHIVE_BYTES", "").strip()
     if raw:
         try:
             value = int(raw)
             if value > 0:
                 return value
         except ValueError:
-            logger.warning("Ignoring invalid ARENA_MAX_IMPORT_BYTES=%r", raw)
-    return DEFAULT_MAX_IMPORT_BYTES
+            logger.warning("Ignoring invalid ARENA_MAX_ARCHIVE_BYTES=%r", raw)
+    return DEFAULT_MAX_ARCHIVE_BYTES

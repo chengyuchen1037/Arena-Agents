@@ -3,7 +3,7 @@
 Mixed into :class:`~app.game.orchestrator.GameOrchestrator`.  It owns everything that is about *who the
 players are* and *what the user allows the game to cost*, and nothing about how a game is played:
 
-* the roster (names, avatars, persona, memory) is a template kept in the workspace; a game takes a copy
+* the roster (names, avatars, persona, memory) is a template kept in the data directory; a game takes a copy
   when it is created (names / avatars) and when it starts (persona / memory, so edits made while the game is
   still idle apply to it);
 * the spending limit (E10/E22) is checked after every accounted LLM call and may pause the game;
@@ -48,7 +48,7 @@ REVIEW_TIMEOUT_S = 180.0
 
 class RosterRuntimeMixin:
     # Class-level defaults so partially initialized instances (tests) stay valid.
-    roster_store: RosterStore | None = None  # injectable (tests); ``None`` = the workspace's store
+    roster_store: RosterStore | None = None  # injectable (tests); ``None`` = the data directory's store
     _budget_watch: budget_mod.BudgetWatch | None = None
     _budget_pushed_at: float = 0.0
     _review_task: asyncio.Task[Any] | None = None
@@ -74,8 +74,9 @@ class RosterRuntimeMixin:
             logger.warning("Could not generate avatars", exc_info=True)
 
     def _roster_io_allowed(self) -> bool:
-        """No roster file is read or created before the workspace is active, or when it could not be opened."""
-        return not self._roster_io_suspended and not getattr(self, "_workspace_failed", False)
+        """No roster file is read or created while the first game is built (the data directory is not locked
+        yet); ``startup()`` loads the roster afterwards."""
+        return not self._roster_io_suspended
 
     def _roster_snapshot(self) -> dict[str, Any]:
         """The roster as the next game takes it; falls back to the config's names when it cannot be read."""
@@ -115,37 +116,15 @@ class RosterRuntimeMixin:
         return players
 
     def _roster_for_write(self) -> RosterStore:
-        """The roster for a *change*: refused while the workspace is being switched or could not be opened (the
-        change would otherwise land in the legacy global directory)."""
-        self._ensure_not_switching()  # type: ignore[attr-defined]
+        """The roster for a *change*."""
         return self._roster()
 
     def roster_payload(self) -> dict[str, Any]:
         """``GET /api/roster``: the editable roster plus whether names / avatars may be changed now."""
-        if not self._roster_io_allowed():
-            # no usable workspace: show the defaults of ``config.yml``, read-only, and create nothing on disk
-            seats = [
-                {
-                    "seat": index,
-                    "id": str(item["id"]),
-                    "name": str(item.get("name") or default_name(index)),
-                    "default_name": default_name(index),
-                    "avatar": None,
-                    "persona": "",
-                    "memory": "",
-                }
-                for index, item in enumerate(self.cfg.get("participants", []), start=1)  # type: ignore[attr-defined]
-            ]
-            return {
-                "memory_enabled": True,
-                "seats": seats,
-                "moderator": {"id": MODERATOR_ID, "name": "主持人", "avatar": None},
-                "editable": False,
-            }
         roster = self._roster()
         self._ensure_avatars(roster)
         data = roster.get()
-        data["editable"] = self.session.status == "idle" and not getattr(self, "_switching_workspace", False)
+        data["editable"] = self.session.status == "idle"  # type: ignore[attr-defined]
         return data
 
     def _roster_event(self) -> UiEvent:
@@ -160,7 +139,6 @@ class RosterRuntimeMixin:
     def _require_idle(self, what: str) -> None:
         if self.session.status != "idle":
             raise RuntimeError(f"{what}只能在对局开始之前修改；请先新建对局。")
-        self._ensure_not_switching()  # type: ignore[attr-defined]
 
     async def _rebuild_idle_world(self) -> None:
         """Rename / re-avatar in an idle game: rebuild its world with the *same seed* (so the identities that
@@ -223,9 +201,9 @@ class RosterRuntimeMixin:
             self._refresh_idle_texts()
         return roster.entry(agent_id)
 
-    def _reload_fresh_game_from_workspace(self) -> None:
-        """At startup the first (idle) game was built before the workspace was active: take the roster and
-        the budget default from the workspace now.  Same dealt identities (same seed), nothing is saved."""
+    def _reload_fresh_game_from_data_dir(self) -> None:
+        """At startup the first (idle) game was built before the data directory was locked: take the roster and
+        the budget default from it now.  Same dealt identities (same seed), nothing is saved."""
         if self.session.status != "idle":  # type: ignore[attr-defined]
             return
         seed = self.world.state.rng.seed  # type: ignore[attr-defined]
@@ -297,18 +275,6 @@ class RosterRuntimeMixin:
         if self.session.status == "idle":
             self._refresh_idle_texts()
         return self.roster_payload()
-
-    def export_memory(self) -> bytes:
-        if not self._roster_io_allowed():
-            raise RosterError("工作文件夹不可用（初始化失败），没有可导出的记忆；请先选择一个工作文件夹。")
-        return self._roster().export_zip()
-
-    async def import_memory(self, data: bytes, *, dry_run: bool) -> dict[str, Any]:
-        roster = self._roster() if dry_run and self._roster_io_allowed() else self._roster_for_write()
-        changes = roster.preview_import(data) if dry_run else roster.import_zip(data)
-        if not dry_run and self.session.status == "idle":
-            self._refresh_idle_texts()
-        return {"dry_run": dry_run, "changes": changes}
 
     # --------------------------------------------------------------------- one-shot model calls ---
     def _oneshot_port(self) -> Any:

@@ -241,6 +241,20 @@ class SettingsStore:
             payload["last_session_id"] = session_id
             self._write(payload)
 
+    # v0.13: single user-interface preferences (for example "the old-data notice was dismissed") in the same free-form
+    # ``ui`` dict as the budget defaults.
+    def get_ui_pref(self, key: str, default: Any = None) -> Any:
+        with self._lock:
+            return copy.deepcopy(self._read()["ui"].get(key, default))
+
+    def set_ui_pref(self, key: str, value: Any) -> None:
+        if not isinstance(key, str) or not key:
+            raise ValueError("ui preference key must not be empty")
+        with self._lock:
+            payload = self._read()
+            payload["ui"] = {**payload["ui"], key: copy.deepcopy(value)}
+            self._write(payload)
+
 
 _store_lock = threading.RLock()
 _settings_store: SettingsStore | None = None
@@ -297,6 +311,14 @@ def set_last_session_id(session_id) -> None:
     get_settings_store().set_last_session_id(session_id)
 
 
+def get_ui_pref(key: str, default: Any = None) -> Any:
+    return get_settings_store().get_ui_pref(key, default)
+
+
+def set_ui_pref(key: str, value: Any) -> None:
+    get_settings_store().set_ui_pref(key, value)
+
+
 __all__ = [
     "SettingsStore",
     "migrate_legacy_actor_ids",
@@ -306,9 +328,11 @@ __all__ = [
     "get_model_templates",
     "get_settings",
     "get_settings_store",
+    "get_ui_pref",
     "reset_settings_store",
     "save_budget_defaults",
     "save_default_bindings",
     "save_model_templates",
     "set_last_session_id",
+    "set_ui_pref",
 ]

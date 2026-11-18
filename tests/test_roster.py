@@ -1,10 +1,10 @@
-"""v0.12.1 roster store (E13–E16, E21, E24): names, avatars, persona / memory files, memory pack, review."""
+"""v0.12.1 roster store (E13–E16, E21, E24): names, avatars, persona / memory files, review.
+
+(The memory pack - a zip of the persona / memory files - is gone in v0.13: F26.)"""
 
 from __future__ import annotations
 
-import io
 import json
-import zipfile
 
 import pytest
 
@@ -26,14 +26,6 @@ from app.storage.roster import (
 @pytest.fixture
 def store(tmp_path) -> RosterStore:
     return RosterStore(tmp_path)
-
-
-def make_zip(files: dict[str, str]) -> bytes:
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        for name, text in files.items():
-            archive.writestr(name, text)
-    return buffer.getvalue()
 
 
 # ------------------------------------------------------------------------------------ defaults
@@ -136,7 +128,7 @@ def test_the_moderator_has_no_name_persona_or_memory_to_set(store):
     with pytest.raises(RosterError):
         store.set_avatar("moderator", {})
     assert store.get()["moderator"]["name"] == "主持人"
-    assert "moderator" not in {row["id"] for row in store.get()["seats"]} and store.export_zip()  # no moderator.md in a pack
+    assert "moderator" not in {row["id"] for row in store.get()["seats"]}  # the moderator is not a seat
 
 
 def test_an_old_roster_without_a_moderator_gets_one_and_keeps_every_player(store):
@@ -213,73 +205,7 @@ def test_the_record_tally_counts_games_wins_and_per_role_wins():
     assert RecordTally().render().startswith("场次 0，胜 0，负 0，胜率 —")
 
 
-# ------------------------------------------------------------------------------------ the memory pack
-def test_export_then_import_gives_back_the_same_text(store, tmp_path):
-    store.set_persona("N1", "性格一")
-    store.set_memory("N1", "## 经验与印象\n记忆一")
-    store.set_memory("N7", "## 对局记忆\n记忆七")
-    pack = store.export_zip()
-    names = sorted(zipfile.ZipFile(io.BytesIO(pack)).namelist())
-    assert names == ["N1.memory.md", "N1.persona.md", "N7.memory.md"]  # empty seats are not packed
-
-    other = RosterStore(tmp_path / "elsewhere")
-    changes = other.import_zip(pack)
-    assert [(c["id"], c["persona"], c["memory"]) for c in changes] == [("N1", True, True), ("N7", False, True)]
-    assert other.entry("N1")["persona"] == "性格一" and other.entry("N7")["memory"] == "## 对局记忆\n记忆七"
-
-
-def test_the_dry_run_lists_what_would_change_without_touching_anything(store):
-    store.set_memory("N2", "旧记忆")
-    pack = make_zip({"N2.memory.md": "新记忆", "N3.persona.md": "新性格", "N4.memory.md": ""})
-    preview = store.preview_import(pack)
-    assert [(c["id"], c["name"], c["persona"], c["memory"]) for c in preview] == [("N2", "Bob", False, True), ("N3", "Carol", True, False)]
-    assert store.entry("N2")["memory"] == "旧记忆" and store.entry("N3")["persona"] == ""
-
-
-def test_importing_leaves_seats_that_are_not_in_the_pack_alone(store):
-    store.set_memory("N1", "留着")
-    store.import_zip(make_zip({"N2.memory.md": "新的"}))
-    assert store.entry("N1")["memory"] == "留着" and store.entry("N2")["memory"] == "新的"
-
-
-@pytest.mark.parametrize(
-    "data,message",
-    [
-        (b"", "空"),
-        (b"not a zip at all", "zip"),
-        (make_zip({"../evil.md": "x"}), "不认识的文件"),
-        (make_zip({"N1.memory.md": "x", "notes.txt": "y"}), "不认识的文件"),
-        (make_zip({"N01.memory.md": "x"}), "不认识的文件"),
-        (make_zip({"sub/N1.memory.md": "x"}), "不认识的文件"),
-        (make_zip({"N1.memory.md": "x" * (MAX_TEXT_CHARS * 4 + 1)}), "太大"),
-    ],
-)
-def test_a_bad_pack_is_refused_whole_and_nothing_is_imported(store, data, message):
-    store.set_memory("N1", "原样")
-    with pytest.raises(RosterError, match=message):
-        store.import_zip(data)
-    assert store.entry("N1")["memory"] == "原样"
-
-
-def test_oversized_and_non_utf8_packs_are_refused(store):
-    with pytest.raises(RosterError, match="过大"):
-        store.parse_zip(b"x" * (2 * 1024 * 1024 + 1))
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        archive.writestr("N1.memory.md", "坏字节".encode("gbk"))
-    with pytest.raises(RosterError, match="UTF-8"):
-        store.parse_zip(buffer.getvalue())
-    many = make_zip({f"N{i}.memory.md": "x" for i in range(1, 10)} | {f"N{i}.persona.md": "x" for i in range(1, 10)})
-    assert len(store.parse_zip(many)) == 9
-    with pytest.raises(RosterError, match="太多"):
-        store.parse_zip(make_zip({f"N{i % 99 + 1}.{kind}.md": "x" for i in range(60) for kind in ("memory", "persona")} | {f"N1.persona{i}": "x" for i in range(5)}))
-
-
-def test_seats_beyond_the_table_are_ignored_not_an_error(store):
-    store.import_zip(make_zip({"N40.memory.md": "远方", "N1.memory.md": "近处"}))
-    assert store.entry("N1")["memory"] == "近处"
-
-
+# ------------------------------------------------------------------------------------ clearing
 def test_clear_empties_the_memory_and_optionally_the_persona(store):
     store.set_persona("N1", "性格")
     store.set_memory("N1", "记忆")

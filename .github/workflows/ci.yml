@@ -47,7 +47,7 @@ jobs:
           pip install -r requirements.lock
           pip install "pytest>=8.0,<10.0"
 
-      # tests/conftest.py 会把 ARENA_DATA_DIR 指到临时目录；测试全部使用 mock，不访问真实 Provider。
+      # tests/conftest.py 会把 ARENA_DATA_DIR 指到临时目录（程序目录 data/ 不会被测试碰到）；测试全部使用 mock，不访问真实 Provider。
       - name: Run tests
         run: python -m pytest -q
 
@@ -81,7 +81,10 @@ jobs:
         run: |
           test "$(docker run --rm --entrypoint id arena-agents:ci -u)" = "10001"
           docker run --rm --entrypoint python arena-agents:ci -c "import cryptography, anthropic, openai, fastapi; import app.main"
-          # 本机缓存与密钥不得进入镜像
-          test "$(docker run --rm --entrypoint sh arena-agents:ci -c 'find /app \( -name __pycache__ -o -name "*.pyc" -o -name ".env" -o -name "*.enc" \) | wc -l')" = "0"
-          # /data 必须对 arena 可写，且默认指向 /data
-          docker run --rm --entrypoint sh arena-agents:ci -c 'test "$ARENA_DATA_DIR" = /data && touch /data/.w && rm /data/.w'
+          # 本机缓存、数据与密钥不得进入镜像
+          test "$(docker run --rm --entrypoint sh arena-agents:ci -c 'find /app \( -name __pycache__ -o -name "*.pyc" -o -name ".env" -o -name "*.enc" -o -name "*.arenaagents" \) | wc -l')" = "0"
+          test "$(docker run --rm --entrypoint sh arena-agents:ci -c 'ls -A /app/data | wc -l')" = "0"
+          # 数据目录是 /app/data（不需要任何环境变量）：对 arena 可写；/app 的其余部分只读
+          docker run --rm --entrypoint sh arena-agents:ci -c 'test -z "$ARENA_DATA_DIR" && test -z "$ARENA_WORKSPACE_DIR" && touch /app/data/.w && rm /app/data/.w'
+          docker run --rm --entrypoint sh arena-agents:ci -c '! touch /app/should-not-be-writable 2>/dev/null'
+          test "$(docker run --rm --entrypoint python arena-agents:ci -c 'from app.storage.paths import get_data_dir; print(get_data_dir())')" = /app/data

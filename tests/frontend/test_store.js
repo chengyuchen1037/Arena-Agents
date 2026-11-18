@@ -70,7 +70,7 @@ test("normalizeSession drops malformed list items, repairs types and sorts messa
 test("legacy agent states (idle / stopped) are not special any more: they count as sleeping", () => {
   const s = Store.normalizeSession({ participants: [{ id: "N1", state: "idle" }, { id: "N2", state: "stopped" }, { id: "N3", state: "thinking" }, { id: "N4", state: "acting" }] });
   assert.deepEqual(s.participants.map((p) => p.state), ["sleeping", "sleeping", "thinking", "acting"]);
-  assert.deepEqual(Store.AGENT_STATES, ["thinking", "acting", "sleeping"]);
+  assert.deepEqual(Store.AGENT_STATES, ["thinking", "acting", "sleeping", "human"]); // (v0.13: a seat a person plays)
 });
 
 test("normalizeRequest keeps the fields of RequestView and turns seconds_left into an absolute game-clock deadline", () => {
@@ -584,9 +584,19 @@ test("review.progress tracks running / done / error per player; done players are
   assert.equal(s.review.progress.N3.state, "running");
 });
 
-test("workspace.changed asks for a reload; error carries a toast; unknown / broken events are no-ops", () => {
+test("archive.progress is normalized and leaves the game alone; error carries a toast; unknown / broken events are no-ops", () => {
   const s = fresh();
-  assert.equal(apply(s, "workspace.changed", {}).reload, true);
+  const before = JSON.stringify(s);
+  const r0 = apply(s, "archive.progress", { job_id: "j1", kind: "import", phase: "replace", done: "3", total: 7, status: "running" });
+  assert.deepEqual(r0.archiveEvent, { job_id: "j1", kind: "import", phase: "replace", done: 3, total: 7, status: "running", message: "", code: "", result: null });
+  assert.equal(JSON.stringify(s), before, "the session is not touched");
+  assert.equal(Store.anyDirty(r0.dirty), false, "nothing to repaint");
+  // a finished job carries its result; an error its message and code; garbage is made harmless
+  const done = apply(s, "archive.progress", { job_id: "j1", kind: "export", status: "done", phase: "finalize", done: 1, total: 1, result: { name: "arena-x.arenaagents" } }).archiveEvent;
+  assert.deepEqual([done.status, done.result.name], ["done", "arena-x.arenaagents"]);
+  const bad = apply(s, "archive.progress", { job_id: "j2", kind: "weird", status: "weird", done: -4, total: "x", result: "nope" }).archiveEvent;
+  assert.deepEqual([bad.kind, bad.status, bad.done, bad.total, bad.result], ["export", "running", 0, 0, null]);
+  assert.equal(apply(s, "phase.changed", { text: "x" }).archiveEvent, null);
   const e = apply(s, "error", { message: "boom" });
   assert.equal(e.toast, "boom");
   assert.equal(apply(s, "error", {}).toast.length > 0, true);
@@ -603,7 +613,7 @@ test("workspace.changed asks for a reload; error carries a toast; unknown / brok
     { type: "tool_call", data: { name: "speak" } },
   ]) {
     const r = Store.applyEvent(s, bad);
-    assert.equal(r.reload, false);
+    assert.equal(r.archiveEvent, null);
     assert.equal(r.session, s);
     assert.equal(Store.anyDirty(r.dirty), false);
   }

@@ -9,13 +9,12 @@
        "性格设定" and "记忆" with "用主持人模型完善" (the draft is shown first, only a
        confirmation saves it), review of one player
      - the controls in the participant bar header: regenerate all avatars, the "名册" menu
-       (export / import with a preview / clear all memory / "本局加载记忆"), "复盘全部"
+       (clear all memory / "本局加载记忆"), "复盘全部"
 
    Server API (docs/v0.12-contracts.md §10.4):
      GET  api/roster                         PUT  api/roster/{id} {name?, avatar?, persona?, memory?}
      POST api/roster/{id}/avatar:regenerate  POST api/roster/avatars:regenerate
      POST api/roster/{id}/refine {kind, text} -> {draft}
-     GET  api/roster/memory:export (zip)     POST api/roster/memory:import?dry_run=true|false (zip body)
      POST api/roster/memory:clear {include_persona}      PUT api/roster/memory-enabled {enabled}
      POST api/game/review {ids?}
 
@@ -53,6 +52,7 @@
     const bindingText = opts.bindingText || (() => "未绑定");
     const openBindings = opts.openBindings || (() => {});
     const setViewpoint = opts.setViewpoint || (() => {});
+    const lockedSeat = opts.lockedSeat || (() => null); // v0.13: the seat a person plays (the viewpoint is locked to it)
     const patchParticipants = opts.patchParticipants || (() => {});
     const onChange = opts.onChange || (() => {});
     if (!Core || !Avatar || !View || !doc) return null;
@@ -72,12 +72,9 @@
       btnRegenAll: $("btn-regen-all-avatars"),
       btnRosterMenu: $("btn-roster-menu"),
       rosterMenu: $("roster-menu"),
-      btnExport: $("btn-roster-export"),
-      btnImport: $("btn-roster-import"),
       btnClear: $("btn-roster-clear"),
       chkMemory: $("chk-memory-enabled"),
       btnReviewAll: $("btn-review-all"),
-      fileMemory: $("file-import-memory"),
       dialog: $("dialog-modal"),
       dialogTitle: $("dialog-title"),
       dialogBody: $("dialog-body"),
@@ -108,7 +105,8 @@
     };
 
     const session = () => getSession() || {};
-    const isIdle = () => session().status === "idle";
+    // (a replayed game - session.replay - is never editable: the roster belongs to the live game)
+    const isIdle = () => session().status === "idle" && !session().replay;
     const isPhone = () => {
       const html = doc.documentElement;
       return Boolean(html && typeof html.getAttribute === "function" && html.getAttribute("data-platform") === "phone");
@@ -245,7 +243,14 @@
           `<button type="button" class="btn btn-xs" id="btn-detail-regen" data-detail-action="regen-avatar"${regenBusy ? " disabled" : ""}>🎲 重新生成头像</button>`
         );
       }
-      if (getViewpoint() !== id) {
+      if (lockedSeat()) {
+        // (F3) a played seat is the viewpoint until it is given back: looking from the others is not possible
+        if (lockedSeat() !== id) {
+          actions.push(
+            `<button type="button" class="btn btn-xs" data-detail-action="view-as" disabled title="接管期间视角已锁定为你扮演的座位；退出接管后才能切换">👁 以 ${esc(p.name)} 的视角观看</button>`
+          );
+        }
+      } else if (getViewpoint() !== id) {
         actions.push(`<button type="button" class="btn btn-xs" data-detail-action="view-as" title="只看这名玩家能看到的内容">👁 以 ${esc(p.name)} 的视角观看</button>`);
       }
       return (
@@ -656,7 +661,7 @@
           regenAvatar();
           break;
         case "view-as":
-          if (st.openId && st.openId !== MOD) setViewpoint(st.openId);
+          if (st.openId && st.openId !== MOD && !lockedSeat()) setViewpoint(st.openId);
           break;
         case "toggle-editor": {
           if (!st.openId || !KINDS.includes(kind)) break;
@@ -734,13 +739,17 @@
     // dialogs
     // -----------------------------------------------------------------------
 
-    /** A small modal: resolves {ok, values}. `collect()` reads the fields when the user confirms. */
+    // v0.13: `finish` of the dialog that is open right now (Esc answers it "no"; a new dialog answers the old one "no")
+    let activeFinish = null;
+
+    /** A small modal: resolves {ok, values}. `collect()` reads the fields when the user confirms; Esc = cancel. */
     function openDialog(o) {
       return new Promise((resolve) => {
         if (!el.dialog || !el.dialogBody) {
           resolve({ ok: typeof win.confirm === "function" ? win.confirm(String(o.title || "确认")) : false, values: {} });
           return;
         }
+        if (activeFinish) activeFinish(false); // never leave the promise of a replaced dialog hanging
         if (el.dialogTitle) el.dialogTitle.textContent = o.title || "确认";
         el.dialogBody.innerHTML = o.bodyHtml || "";
         if (el.dialogOk) {
@@ -753,18 +762,28 @@
           el.dialogCancel.hidden = Boolean(o.hideCancel);
         }
         el.dialog.style.display = "flex";
+        let done = false;
         const finish = (ok) => {
+          if (done) return;
+          done = true;
+          if (activeFinish === finish) activeFinish = null;
           el.dialog.style.display = "none";
           if (el.dialogOk) el.dialogOk.removeEventListener("click", onOk);
           if (el.dialogCancel) el.dialogCancel.removeEventListener("click", onCancel);
           if (el.dialogClose) el.dialogClose.removeEventListener("click", onCancel);
+          if (typeof doc.removeEventListener === "function") doc.removeEventListener("keydown", onKey);
           resolve({ ok, values: ok && typeof o.collect === "function" ? o.collect() : {} });
         };
         const onOk = () => finish(true);
         const onCancel = () => finish(false);
+        const onKey = (evt) => {
+          if (evt && evt.key === "Escape") finish(false);
+        };
         if (el.dialogOk) el.dialogOk.addEventListener("click", onOk);
         if (el.dialogCancel) el.dialogCancel.addEventListener("click", onCancel);
         if (el.dialogClose) el.dialogClose.addEventListener("click", onCancel);
+        if (typeof doc.addEventListener === "function") doc.addEventListener("keydown", onKey);
+        activeFinish = finish;
       });
     }
 
@@ -797,7 +816,7 @@
 
     function renderControls() {
       const s = session();
-      const idle = s.status === "idle";
+      const idle = isIdle();
       if (el.btnRegenAll) {
         el.btnRegenAll.disabled = !idle || !st.editable || !st.available || st.busyAll;
         el.btnRegenAll.title = idle
@@ -810,9 +829,7 @@
         el.chkMemory.disabled = !idle || !st.available;
       }
       const lock = !idle || !st.available;
-      if (el.btnImport) el.btnImport.disabled = lock;
       if (el.btnClear) el.btnClear.disabled = lock;
-      if (el.btnExport) el.btnExport.disabled = !st.available;
       if (el.btnReviewAll) {
         const rv = View.reviewView(s);
         el.btnReviewAll.hidden = !rv.visible;
@@ -854,89 +871,11 @@
       }
     }
 
-    function saveBlob(blob, filename) {
-      try {
-        const url = win.URL && win.URL.createObjectURL ? win.URL.createObjectURL(blob) : URL.createObjectURL(blob);
-        const a = doc.createElement("a");
-        a.href = url;
-        a.download = filename;
-        if (doc.body && typeof doc.body.appendChild === "function") doc.body.appendChild(a);
-        a.click();
-        if (typeof a.remove === "function") a.remove();
-        (win.URL || URL).revokeObjectURL(url);
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
-    async function exportMemory() {
-      try {
-        const res = await api.download("api/roster/memory:export");
-        const name = (res && res.filename) || "arena-memory.zip";
-        saveBlob(res.blob, name);
-        showToast(`已导出全部记忆：${name}`);
-      } catch (e) {
-        showToast(`导出失败：${e.message}`);
-      }
-    }
-
-    const nameOfId = (id) => {
-      const p = View.participantOf(session(), id);
-      return p ? p.name : id;
-    };
-
-    async function importMemory(file) {
-      if (!file) return;
-      let buf;
-      try {
-        buf = typeof file.arrayBuffer === "function" ? await file.arrayBuffer() : file;
-      } catch {
-        showToast("无法读取所选文件");
-        return;
-      }
-      let preview;
-      try {
-        preview = await api.upload("api/roster/memory:import?dry_run=true", buf, "application/zip");
-      } catch (e) {
-        showToast(`记忆包无法导入：${e.message}`);
-        return;
-      }
-      const changes = Array.isArray(preview && preview.changes) ? preview.changes : [];
-      if (!changes.length) {
-        showToast("记忆包里没有可导入的玩家内容");
-        return;
-      }
-      const rows = changes
-        .map((c) => {
-          const what = [c.persona ? "性格设定" : "", c.memory ? "记忆" : ""].filter(Boolean).join("、") || "（无变化）";
-          return `<li><strong>${esc(nameOfId(c.id))}</strong>：<span class="muted">${esc(what)}</span> 将被覆盖</li>`;
-        })
-        .join("");
-      const choice = await openDialog({
-        title: "导入记忆包",
-        bodyHtml:
-          `<div>导入后，下面这些玩家的内容会被记忆包里的版本<strong>覆盖</strong>（没有列出的玩家不受影响）：</div>` +
-          `<ul class="dialog-list">${rows}</ul>`,
-        okText: `确认导入 ${changes.length} 名玩家`,
-      });
-      if (!choice.ok) return;
-      try {
-        await api.upload("api/roster/memory:import?dry_run=false", buf, "application/zip");
-        await load();
-        render();
-        showToast(`已导入 ${changes.length} 名玩家的记忆`);
-        onChange();
-      } catch (e) {
-        showToast(`导入失败：${e.message}`);
-      }
-    }
-
     async function clearMemory() {
       const choice = await openDialog({
         title: "清除全部记忆",
         bodyHtml:
-          `<div>将清空<strong>全部 12 名玩家</strong>的记忆文件（战绩、对局记忆、经验与印象）。此操作不能撤销，建议先「导出全部记忆」。</div>` +
+          `<div>将清空<strong>全部 12 名玩家</strong>的记忆文件（战绩、对局记忆、经验与印象）。此操作不能撤销，建议先在「设置」里导出存档。</div>` +
           `<label class="checkbox-label dialog-check"><input type="checkbox" id="chk-dialog-include-persona" />` +
           `<span>同时清除性格设定</span></label>`,
         okText: "确认清除",
@@ -977,13 +916,7 @@
       const node = closestFrom(evt.target, "[data-roster-action]");
       if (!node) return;
       const action = node.getAttribute("data-roster-action");
-      if (action === "export") {
-        setMenu(false);
-        exportMemory();
-      } else if (action === "import") {
-        setMenu(false);
-        if (el.fileMemory && typeof el.fileMemory.click === "function") el.fileMemory.click();
-      } else if (action === "clear") {
+      if (action === "clear") {
         setMenu(false);
         clearMemory();
       }
@@ -1064,11 +997,6 @@
     on(el.btnRosterMenu, "click", () => setMenu(!menuOpen()));
     on(el.rosterMenu, "click", onMenuClick);
     on(el.chkMemory, "change", () => setMemoryEnabled(Boolean(el.chkMemory.checked)));
-    on(el.fileMemory, "change", (evt) => {
-      const file = evt && evt.target && evt.target.files && evt.target.files[0];
-      if (file) importMemory(file);
-      if (el.fileMemory) el.fileMemory.value = "";
-    });
     if (typeof doc.addEventListener === "function") {
       doc.addEventListener("click", (evt) => {
         if (menuOpen() && !inPath(evt, "#roster-menu") && !inPath(evt, "#btn-roster-menu")) {
@@ -1082,6 +1010,7 @@
       });
       doc.addEventListener("keydown", (evt) => {
         if (!evt || evt.key !== "Escape") return;
+        if (activeFinish) return; // a dialog is open: Esc answers it (see openDialog) and nothing behind it
         if (menuOpen()) setMenu(false);
         else if (st.openId) close();
       });
@@ -1108,8 +1037,6 @@
       seat: seatOf,
       closeMenu: () => setMenu(false),
       openDialog,
-      importMemory,
-      exportMemory,
       clearMemory,
       regenAll,
       _state: st,

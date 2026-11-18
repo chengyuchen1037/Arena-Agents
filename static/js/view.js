@@ -33,8 +33,9 @@
   const GOD = "god";
   const MODERATOR_ID = "moderator";
   const ENGINE_ID = "engine";
-  const STATE_ICONS = { thinking: "💭", acting: "⚡", sleeping: "💤" };
-  const STATE_LABELS = { thinking: "思考中", acting: "执行中", sleeping: "休眠" };
+  // v0.13 (F6): "human" is the card of a seat a person plays instead of its agent
+  const STATE_ICONS = { thinking: "💭", acting: "⚡", sleeping: "💤", human: "🎮" };
+  const STATE_LABELS = { thinking: "思考中", acting: "执行中", sleeping: "休眠", human: "人类操作中" };
   const BUDGET_WARN = 0.8;
 
   const num = (v, d = 0) => {
@@ -106,6 +107,109 @@
   function normalizeViewpoint(session, viewpoint) {
     if (!viewpoint || viewpoint === GOD) return GOD;
     return participantOf(session, viewpoint) ? String(viewpoint) : GOD;
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.13: playing a seat (F1-F5): the viewpoint bar [视角▾][切换][接管], the takeover bar, the reminder
+  // -------------------------------------------------------------------------
+
+  /** The seat a person plays right now (null: nobody). */
+  function takeoverSeat(session) {
+    const t = session && session.takeover;
+    return t && t.seat ? String(t.seat) : null;
+  }
+
+  /** "3 · Carol" */
+  function seatLabel(session, seat) {
+    const p = participantOf(session, seat);
+    return p ? `${p.seat} · ${p.name}` : String(seat);
+  }
+
+  /** Why a game in `status` cannot be acted in (the send button says it, hover texts repeat it). */
+  function notRunningText(status) {
+    if (status === "idle") return "对局还没有开始";
+    if (status === "finished") return "对局已结束";
+    return "对局已暂停";
+  }
+
+  /**
+   * May the seat chosen in the viewpoint drop-down be taken over (F2)?  Only a player seat, only while
+   * nobody is played yet, only while the game has not started or is paused.  `reason` is the tooltip.
+   */
+  function takeoverAvailability(session, seatId) {
+    if (session && session.replay) return { ok: false, reason: "重放中不能接管：请先退出重放" }; // (F36)
+    if (takeoverSeat(session)) return { ok: false, reason: "你已经在扮演一个座位：请先退出接管" };
+    if (!seatId || seatId === GOD) return { ok: false, reason: "先在下拉框里选一名玩家（上帝视角不能接管）" };
+    const p = participantOf(session, seatId);
+    if (!p) return { ok: false, reason: "这个座位不存在" };
+    const status = (session && session.status) || "idle";
+    if (status === "running") return { ok: false, reason: "对局进行中不能接管：请先点「暂停」" };
+    if (status === "finished") return { ok: false, reason: "对局已结束，不能接管" };
+    return {
+      ok: true,
+      reason: `接管 ${seatLabel(session, seatId)}：以这个座位参与对局，它的 agent 暂停（${
+        status === "idle" ? "对局未开始" : "对局已暂停"
+      }时可用）`,
+    };
+  }
+
+  /**
+   * The viewpoint bar: the drop-down only chooses what to look at ("切换" applies it), "接管" plays the chosen
+   * seat.  While a seat is played the bar is locked (the takeover bar replaces it).
+   *   draft      the drop-down's value (pending), viewpoint  the one that is applied
+   */
+  function viewpointBar(session, draft, viewpoint) {
+    const seat = takeoverSeat(session);
+    if (seat) {
+      return {
+        locked: true,
+        seat,
+        draft: seat,
+        canSwitch: false,
+        canTakeover: false,
+        switchTitle: "接管期间视角已锁定为你扮演的座位",
+        takeoverTitle: "你已经在扮演一个座位：请先退出接管",
+      };
+    }
+    const pending = normalizeViewpoint(session, draft === undefined || draft === null ? viewpoint : draft);
+    const applied = normalizeViewpoint(session, viewpoint);
+    const avail = takeoverAvailability(session, pending);
+    return {
+      locked: false,
+      seat: null,
+      draft: pending,
+      canSwitch: pending !== applied,
+      canTakeover: avail.ok,
+      switchTitle: pending !== applied ? "切换到所选的视角（只改变你看到的内容）" : "已经是这个视角；先在下拉框里选另一个",
+      takeoverTitle: avail.reason,
+    };
+  }
+
+  /** The bar that replaces the viewpoint bar while a seat is played: "🎮 正在扮演 3 · Carol  [退出接管]". */
+  function takeoverBar(session) {
+    const seat = takeoverSeat(session);
+    if (!seat) return null;
+    const running = Boolean(session) && session.status === "running";
+    const label = seatLabel(session, seat);
+    return {
+      seat,
+      label,
+      text: `🎮 正在扮演 ${label}`,
+      canRelease: !running,
+      releaseTitle: running
+        ? "对局进行中不能退出接管：请先点「暂停」"
+        : "退出接管：这个座位交还给它的 agent（你不会再看到锁定的视角）",
+    };
+  }
+
+  /**
+   * The reminder of a seat taken over before the game started (F5): the player knows the identity now and may
+   * deal again - never once the game has started (the server refuses it as well).
+   */
+  function reshuffleReminder(session) {
+    const t = session && session.takeover;
+    const visible = Boolean(t && t.seat && session.status === "idle" && t.reshuffle_available);
+    return { visible, text: "你已经知道自己的身份，建议点击「重新发牌」" };
   }
 
   function viewpointLabel(session, viewpoint) {
@@ -477,7 +581,10 @@
    */
   function channelModel(session, viewpoint, channel) {
     const dm = isDmChannel(channel);
-    const summary = floorSummary(session, channel);
+    // v0.13: for the seat a person plays, "muted" / "your turn" come from the server's seat state (F12, F18)
+    const mine = playedChannelState(session, viewpoint, channel.id);
+    const summary = personalFloorSummary(floorSummary(session, channel), mine);
+    const attention = mine !== null && list(session.takeover.attention).includes(channel.id);
     if (dm) {
       const others = dmCounterparts(session, viewpoint, channel);
       return {
@@ -487,6 +594,7 @@
         avatarId: others[0],
         glyph: "",
         summary,
+        attention,
         memberCount: list(channel.members).length,
         owner: channel.owner,
       };
@@ -499,9 +607,40 @@
       avatarId: null,
       glyph: Array.from(name)[0] || "#",
       summary,
+      attention,
       memberCount: list(channel.members).length,
       owner: null,
     };
+  }
+
+  /** The server's state of a channel for the seat a person plays, when `viewpoint` is that seat (else null). */
+  function playedChannelState(session, viewpoint, channelId) {
+    const seat = takeoverSeat(session);
+    if (!seat || viewpoint !== seat) return null;
+    return (session.takeover.channels && session.takeover.channels[channelId]) || null;
+  }
+
+  /**
+   * The floor chip of a channel for the seat a person plays: "🔇 禁言中" whenever the seat cannot write there
+   * (closed, listen-only, frozen, read-only, not its turn, quota used up: the server decides), the usual
+   * description of the channel after it; "🎤 轮到你" while it holds the floor.
+   */
+  function personalFloorSummary(base, state) {
+    if (!state) return base;
+    if (!state.can_write) {
+      const rest = base.kind === "closed" ? "" : [base.text, base.detail].filter(Boolean).join(" · ");
+      return { kind: "muted", icon: "🔇", text: "禁言中", detail: rest };
+    }
+    if (state.floor && state.floor.mine) {
+      const left = state.floor.messages_left;
+      return {
+        kind: "mine",
+        icon: "🎤",
+        text: "轮到你发言",
+        detail: left === null || left === undefined ? "" : `还可发 ${left} 条`,
+      };
+    }
+    return base;
   }
 
   /** Title of a channel (the feed header): group name, or the other party of a private chat. */
@@ -734,6 +873,41 @@
       result,
       // sealed requests keep their answers from the other players; god always sees them
       answersHidden: request.sealed && viewpoint !== GOD,
+      // v0.13 (F17): what the person who plays a recipient may do with the card (null: nothing)
+      action: requestAction(session, viewpoint, request),
+    };
+  }
+
+  /**
+   * The buttons / input of a request card for the seat a person plays (F17): a choice shows its options (the
+   * current answer marked, a click changes it - an open request can be answered again until it closes), a
+   * text request an input.  Only a recipient, only while the request is open; the card is clickable while the
+   * game runs and shows why not otherwise (a paused game freezes the clock of the request as well).
+   */
+  function requestAction(session, viewpoint, request) {
+    const seat = takeoverSeat(session);
+    if (!seat || viewpoint !== seat || !request || request.status !== "open") return null;
+    if (!list(request.to).includes(seat)) return null;
+    const row = list(session.takeover.requests).find((r) => r.id === request.id) || null;
+    let mine = row && row.my_answer ? row.my_answer : null;
+    if (!mine) {
+      const own = list(request.answers).find((a) => a.player_id === seat && !a.defaulted);
+      if (own) mine = { value: String(own.value), label: own.label || String(own.value), reason: own.reason || "" };
+    }
+    const status = (session && session.status) || "idle";
+    const enabled = status === "running";
+    return {
+      kind: request.kind,
+      enabled,
+      disabledReason: enabled ? "" : `${notRunningText(status)}，继续后才能作答（请求的计时也已暂停）`,
+      answered: mine !== null,
+      myAnswer: mine,
+      maxChars: row && row.max_chars ? row.max_chars : null,
+      options: list(request.options).map((o) => ({
+        id: o.id,
+        label: o.label || o.id,
+        selected: mine !== null && String(mine.value) === String(o.id),
+      })),
     };
   }
 
@@ -754,6 +928,132 @@
       entries.push({ key: `r${r.id}`, kind: "req", seq, order: 1 + n++, ref: r });
     }
     return entries.sort((a, b) => a.seq - b.seq || a.order - b.order);
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.13: the input box of a played seat (F13-F16)
+  // -------------------------------------------------------------------------
+
+  /** Characters as the server counts them (code points of the trimmed text, like the gate's truncation). */
+  function countChars(text) {
+    return Array.from(String(text === undefined || text === null ? "" : text).trim()).length;
+  }
+
+  /** "1:05" for the seconds left of a floor / request (clamped at 0). */
+  function clockText(seconds) {
+    const s = Math.max(0, Math.ceil(num(seconds, 0)));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }
+
+  /** Seconds left of the seat's token at the client's clock estimate (frozen value while the floor is paused). */
+  function floorSecondsLeft(floor, clockNow) {
+    if (!floor || !floor.mine) return null;
+    if (floor.deadline_clock !== null && floor.deadline_clock !== undefined) {
+      return Math.max(0, num(floor.deadline_clock) - num(clockNow, 0));
+    }
+    return floor.seconds_left === null || floor.seconds_left === undefined ? null : Math.max(0, num(floor.seconds_left));
+  }
+
+  /**
+   * One line under the input: what the seat has left of its floor ("轮到你发言 · 还可发 2 条 · 单条 ≤ 300 字 ·
+   * 剩余 1:05") or why it cannot speak.  The reasons are written out (a phone has no hover).
+   */
+  function composerHint(session, state, clockNow) {
+    const status = (session && session.status) || "idle";
+    if (status === "idle") return "对局还没有开始：开始后才能发言，现在可以先写草稿。";
+    if (status === "finished") return "对局已结束。";
+    if (status === "paused") return "对局已暂停：发言权和请求的计时都已冻结，继续后才能发送。";
+    if (!state) return "频道状态同步中……";
+    if (!state.can_write) return state.why_not || "现在不能在这个频道发言。";
+    const f = state.floor;
+    if (f && f.mine) {
+      const parts = ["轮到你发言"];
+      if (f.messages_left !== null && f.messages_left !== undefined) parts.push(`还可发 ${f.messages_left} 条`);
+      if (state.max_chars) parts.push(`单条 ≤ ${state.max_chars} 字`);
+      const left = floorSecondsLeft(f, clockNow);
+      if (left !== null) parts.push(`剩余 ${clockText(left)}`);
+      return parts.join(" · ");
+    }
+    if (f && f.kind === "free" && f.messages_left !== null && f.messages_left !== undefined) {
+      return `这次讨论你还可发 ${f.messages_left} 条`;
+    }
+    return "";
+  }
+
+  /**
+   * Everything the input box of the played seat shows for a channel (F13-F16):
+   *   the send button  发送 (may write) / 禁言中 (may not; the reason on hover) / 已暂停 / 未开始 / 已结束
+   *   the counter      "23/300" (the server's `max_chars`; over the limit the tail is cut when sent)
+   *   结束发言          only while the seat holds that channel's floor
+   *   技能              greyed without a usable ability
+   * Typing is always possible: only the buttons depend on the state.
+   */
+  function composerModel(session, channelId, text, ctx) {
+    const seat = takeoverSeat(session);
+    if (!seat || !channelId) return { visible: false };
+    const t = session.takeover;
+    const state = t.channels[channelId] || null;
+    const status = session.status || "idle";
+    const count = countChars(text);
+    const max = state && state.max_chars ? state.max_chars : null;
+    let mode;
+    let label;
+    let reason;
+    if (status === "idle") {
+      mode = "idle";
+      label = "未开始";
+      reason = "对局还没有开始：开始后才能发言";
+    } else if (status === "finished") {
+      mode = "finished";
+      label = "已结束";
+      reason = "对局已结束";
+    } else if (status === "paused") {
+      mode = "paused";
+      label = "已暂停";
+      reason = "对局已暂停：继续后才能发送";
+    } else if (!state) {
+      mode = "muted";
+      label = "禁言中";
+      reason = "频道状态同步中……";
+    } else if (!state.can_write) {
+      mode = "muted";
+      label = "禁言中";
+      reason = state.why_not || "现在不能在这个频道发言";
+    } else {
+      mode = "send";
+      label = "发送";
+      reason = count > 0 ? "发送（Enter）；Shift+Enter 换行" : "先写点什么";
+    }
+    const running = status === "running";
+    const showPass = Boolean(state && state.floor && state.floor.mine);
+    const abilities = list(t.abilities);
+    let abilityReason = "技能：释放前会让你确认";
+    if (!running) abilityReason = `${notRunningText(status)}，现在不能使用技能`;
+    else if (!abilities.length) abilityReason = "现在没有可用的技能（技能由主持人在特定环节启用）";
+    return {
+      visible: true,
+      seat,
+      channelId,
+      mode,
+      label,
+      reason,
+      sendEnabled: mode === "send" && count > 0,
+      count,
+      max,
+      over: max ? Math.max(0, count - max) : 0,
+      showPass,
+      canPass: showPass && running && Boolean(state && state.can_pass),
+      passTitle: showPass
+        ? running
+          ? state.can_pass
+            ? "结束发言：把发言权交给下一位"
+            : "现在不能结束发言（发言权已暂停或频道被冻结）"
+          : `${notRunningText(status)}，现在不能结束发言`
+        : "",
+      abilityEnabled: running && abilities.length > 0,
+      abilityReason,
+      hint: composerHint(session, state, ctx && ctx.clockNow),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -785,6 +1085,8 @@
    * continued (D8); there is no separate force-pause any more.
    */
   function controlState(session) {
+    // v0.13: a replayed game is not the live one - none of the live game's controls applies to it
+    if (session && session.replay) return { start: false, pause: false, resume: false };
     const st = (session && session.status) || "idle";
     return { start: st === "idle", pause: st === "running", resume: st === "paused" || st === "finished" };
   }
@@ -976,6 +1278,12 @@
     actorAvatar,
     viewpointOptions,
     normalizeViewpoint,
+    takeoverSeat,
+    seatLabel,
+    takeoverAvailability,
+    viewpointBar,
+    takeoverBar,
+    reshuffleReminder,
     viewpointLabel,
     canSee,
     visibleMessages,
@@ -998,6 +1306,7 @@
     shortFactionName,
     boardSummary,
     floorSummary,
+    personalFloorSummary,
     dmCounterparts,
     channelModel,
     channelTitle,
@@ -1014,7 +1323,14 @@
     requestChannelId,
     requestCountdown,
     requestCard,
+    requestAction,
     feedEntries,
+    countChars,
+    clockText,
+    floorSecondsLeft,
+    composerHint,
+    composerModel,
+    notRunningText,
     requestHints,
     controlState,
     statusDotClass,

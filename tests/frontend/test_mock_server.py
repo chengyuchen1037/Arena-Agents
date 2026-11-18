@@ -1,4 +1,4 @@
-"""Contract tests for tools/mock_ui_server.py (the v0.12.1 UI mock) and, through it, for the SSE v2 client store.
+"""Contract tests for tools/mock_ui_server.py (the v0.13.0 UI mock) and, through it, for the SSE v2 client store.
 
 * every event the mock script publishes must match docs/v0.12-contracts.md §8.2 + §10.6 (``validate_event``);
 * the REAL client store (static/js/store.js, run with node) must reduce the whole event log to exactly
@@ -291,7 +291,7 @@ def test_validator_rejects_broken_events() -> None:
         {"id": 2, "type": "agent.status", "data": {"id": "N1", "state": "sleeping", "until": 42.5}},
         {"id": 3, "type": "agent.status", "data": {"id": "N1", "state": "acting", "until": None}},
         {"id": 4, "type": "review.progress", "data": {"id": "N1", "state": "done", "message": "ok"}},
-        {"id": 5, "type": "workspace.changed", "data": {}},
+        {"id": 5, "type": "archive.progress", "data": {"job_id": "j1", "kind": "export", "phase": "pack", "done": 3, "total": 12, "status": "running"}},
     ]
     for ev in good:
         assert mock.validate_event(ev) == [], ev
@@ -574,19 +574,20 @@ def test_http_state_pages_and_static_files() -> None:
     app, c = _client()
     with c as client:
         state = client.get("/api/state").json()
-        assert state["app_version"].startswith("v0.12.1")
+        assert state["app_version"].startswith("v0.13.0")
         assert mock.validate_session(state["session"]) == []
         assert state["session"]["status"] == "idle"
         assert [p["id"] for p in state["session"]["participants"]] == IDS
         assert state["session"]["budget"]["max_tokens"] == mock.DEMO_BUDGET_TOKENS
         assert state["session"]["memory_enabled"] is True
-        assert state["workspace"]["enabled"] is True
-        assert client.get("/api/health").json()["version"].startswith("v0.12.1")
+        assert "workspace" not in state, "v0.13: there is no workspace any more"
+        assert state["legacy_data"] == {"found": False, "dismissed": False}
+        assert client.get("/api/health").json()["version"].startswith("v0.13.0")
 
         index = client.get("/")
         assert index.status_code == 200 and 'data-platform' in index.text
         assert index.headers["cache-control"].startswith("no-store")
-        for script in ("app", "core", "store", "view", "avatar", "platform", "layout", "providers", "roster", "budget", "workspace"):
+        for script in ("app", "core", "store", "view", "avatar", "platform", "layout", "providers", "roster", "budget", "archive"):
             assert client.get(f"/static/js/{script}.js").status_code == 200, script
         assert client.get("/static/css/style.css").status_code == 200
         parts = client.get("/static/avatar/parts.json")
@@ -602,8 +603,10 @@ def test_http_state_pages_and_static_files() -> None:
         assert client.get("/api/providers").json()["providers"][0]["models"]
         bindings = client.get("/api/settings/bindings").json()
         assert "moderator" in bindings["bindings"] and bindings["providers"]
-        assert client.get("/api/workspaces").json()["current"]["name"]
-        assert client.get("/api/sessions").json()["sessions"][0]["current"] is True
+        assert client.get("/api/workspaces").status_code in (404, 405)  # v0.13: no workspaces
+        assert client.get("/static/js/workspace.js").status_code == 404
+        assert client.get("/api/games").json()["games"][0]["current"] is True
+        assert client.get("/api/sessions").status_code in (404, 405)  # v0.13: replaced by /api/games
         assert client.get("/api/settings/templates").json()["slots"] == 3
         # the execution depth is gone (backend removed it)
         assert client.post("/api/session/execution-depth", json={"execution_depth": "high"}).status_code in (404, 405)
@@ -659,8 +662,7 @@ def test_http_controls_game_flow_and_the_budget_pause() -> None:
         assert new["budget"]["max_tokens"] == 50_000_000, "the limits survive a new game, the used amounts do not"
         assert new["budget"]["used_tokens"] == 0 and new["budget"]["state"] == "ok"
         assert new["review"] == {"available": False, "done": [], "running": False}
-        saved = client.post("/api/session/save").json()
-        assert saved["filename"].endswith(".json") and saved["session"]["session_id"] == new["session_id"]
+        assert client.post("/api/session/save").status_code in (404, 405)  # v0.13: the game saves itself
         # a bad mock-only event is refused by the validator
         assert client.post("/api/mock/emit", json={"type": "agent.status", "data": {"id": "N1", "state": "x", "until": None}}).status_code == 422
         assert client.post("/api/mock/emit", json={"type": "phase.changed", "data": {"text": "ok"}}).json()["ok"] is True
@@ -767,57 +769,19 @@ def test_http_roster_persona_memory_and_refine() -> None:
         assert client.post("/api/roster/N99/refine", json={"kind": "persona", "text": "x"}).status_code == 404
 
 
-def _pack(files: dict[str, str]) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as z:
-        for name, text in files.items():
-            z.writestr(name, text)
-    return buf.getvalue()
-
-
-def test_http_memory_pack_export_import_preview_and_clear() -> None:
+def test_http_memory_clear_and_the_load_memory_switch() -> None:
     app, c = _client()
-    zip_headers = {"Content-Type": "application/zip"}
     with c as client:
         client.put("/api/roster/N3", json={"persona": "P3", "memory": "M3"})
         client.put("/api/roster/N5", json={"memory": "M5"})
-        exported = client.get("/api/roster/memory:export")
-        assert exported.status_code == 200 and exported.headers["content-type"] == "application/zip"
-        assert 'filename="arena-memory.zip"' in exported.headers["content-disposition"]
-        with zipfile.ZipFile(io.BytesIO(exported.content)) as z:
-            names = set(z.namelist())
-            assert {f"{pid}.persona.md" for pid in IDS} | {f"{pid}.memory.md" for pid in IDS} == names
-            assert z.read("N3.persona.md").decode("utf-8") == "P3"
-            assert z.read("N5.memory.md").decode("utf-8") == "M5"
-
-        # a pack that changes N3's persona and N5's memory (and repeats N4's empty text)
-        pack = _pack({"N3.persona.md": "NEW3", "N5.memory.md": "NEW5", "N4.persona.md": ""})
-        preview = client.post("/api/roster/memory:import?dry_run=true", content=pack, headers=zip_headers).json()
-        assert preview["dry_run"] is True
-        assert preview["changes"] == [{"id": "N3", "persona": True, "memory": False}, {"id": "N5", "persona": False, "memory": True}]
-        seats = {s["id"]: s for s in client.get("/api/roster").json()["seats"]}
-        assert (seats["N3"]["persona"], seats["N5"]["memory"]) == ("P3", "M5"), "a dry run changes nothing"
-        applied = client.post("/api/roster/memory:import?dry_run=false", content=pack, headers=zip_headers).json()
-        assert applied["dry_run"] is False and applied["changes"] == preview["changes"]
-        seats = {s["id"]: s for s in client.get("/api/roster").json()["seats"]}
-        assert (seats["N3"]["persona"], seats["N3"]["memory"], seats["N5"]["memory"]) == ("NEW3", "M3", "NEW5")
-        # the default of the query string is the safe one: a preview
-        again = client.post("/api/roster/memory:import", content=_pack({"N1.memory.md": "x"}), headers=zip_headers).json()
-        assert again["dry_run"] is True
-        assert next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N1")["memory"] == ""
-
-        # broken packs: not a zip / a file that is not part of the roster / too big
-        assert client.post("/api/roster/memory:import?dry_run=true", content=b"not a zip", headers=zip_headers).status_code == 400
-        assert client.post("/api/roster/memory:import?dry_run=true", content=_pack({"N99.memory.md": "x"}), headers=zip_headers).status_code == 400
-        assert client.post("/api/roster/memory:import?dry_run=true", content=_pack({"../evil.md": "x"}), headers=zip_headers).status_code == 400
-        assert client.post("/api/roster/memory:import?dry_run=true", content=b"0" * (4 * 1024 * 1024 + 1), headers=zip_headers).status_code == 413
-        # an empty pack is valid and changes nothing
-        assert client.post("/api/roster/memory:import?dry_run=true", content=_pack({}), headers=zip_headers).json()["changes"] == []
+        # (v0.13: the memory pack export / import is gone - the archive covers it)
+        assert client.get("/api/roster/memory:export").status_code in (404, 405)
+        assert client.post("/api/roster/memory:import?dry_run=true", content=b"x").status_code in (404, 405)
 
         # clear: memory only, or memory and persona
         assert client.post("/api/roster/memory:clear", json={"include_persona": False}).json() == {"ok": True}
         seats = {s["id"]: s for s in client.get("/api/roster").json()["seats"]}
-        assert (seats["N3"]["persona"], seats["N3"]["memory"], seats["N5"]["memory"]) == ("NEW3", "", "")
+        assert (seats["N3"]["persona"], seats["N3"]["memory"], seats["N5"]["memory"]) == ("P3", "", "")
         assert client.post("/api/roster/memory:clear", json={"include_persona": True}).status_code == 200
         assert next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N3")["persona"] == ""
         assert client.post("/api/roster/memory:clear").status_code == 200  # no body: memory only
@@ -951,6 +915,94 @@ def test_http_mock_helpers_frame_speed_disconnect() -> None:
         assert client.post("/api/mock/disconnect").json() == {"ok": True, "dropped": 0}
         info = client.get("/api/mock/info").json()
         assert {"speed", "latest_event_id", "subscribers", "status", "ring", "clock", "budget"} <= set(info)
+
+
+# --------------------------------------------------------------------------------- v0.13: the history of games
+def test_http_history_of_games_list_delete_load() -> None:
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    # normal speed: after "start" the script really is still running when the next request arrives
+    with TestClient(mock.create_app(speed=1.0)) as client:
+        body = client.get("/api/games").json()
+        live = body["current"]
+        games = body["games"]
+        assert games[0]["session_id"] == live and games[0]["current"] is True
+        assert [g["session_id"] for g in games[1:]] == ["mock-old-1", "mock-old-2", "mock-old-3"]
+        assert all(g["current"] is False for g in games[1:])
+        keys = {"title", "scenario_title", "status", "winner", "created_at", "updated_at", "duration_gt", "players", "tokens", "cost_usd", "human_involved"}
+        assert all(keys <= set(g) for g in games)
+        assert {g["session_id"]: g["human_involved"] for g in games[1:]} == {"mock-old-1": False, "mock-old-2": True, "mock-old-3": False}
+
+        # the live game cannot be deleted; an unknown / malformed id is a clear error
+        assert client.delete(f"/api/games/{live}").status_code == 409
+        assert client.delete("/api/games/nope").status_code == 404
+        assert client.delete("/api/games/bad.id").status_code == 400
+        assert client.delete("/api/games/mock-old-3").json() == {"ok": True, "session_id": "mock-old-3"}
+        assert [g["session_id"] for g in client.get("/api/games").json()["games"]][1:] == ["mock-old-1", "mock-old-2"]
+
+        # continuing a game: a running game is not replaced, the live one cannot be loaded again, unknown ones 404
+        assert client.post(f"/api/games/{live}/load").status_code == 409
+        assert client.post("/api/games/nope/load").status_code == 404
+        started = client.post("/api/control/start").json()
+        assert started["session"]["status"] == "running"
+        refused = client.post("/api/games/mock-old-2/load")
+        assert refused.status_code == 409 and "暂停" in refused.json()["detail"]
+        client.post("/api/control/pause")
+        loaded = client.post("/api/games/mock-old-2/load").json()
+        assert loaded["ok"] is True and loaded["session"]["session_id"] == "mock-old-2"
+        assert client.get("/api/games").json()["current"] == "mock-old-2"
+
+
+def test_http_replay_of_a_saved_game_is_the_script_cut_down_to_what_a_ledger_holds() -> None:
+    pytest.importorskip("fastapi")
+    pytest.importorskip("httpx")
+    from fastapi.testclient import TestClient
+
+    app, c = _client()
+    with c as client:
+        saved = client.get("/api/games/mock-old-1/replay")
+        assert saved.status_code == 200
+        data = saved.json()
+        assert data["version"] == 1 and set(data) == {"version", "game", "initial", "events", "duration_gt"}
+        assert data["game"]["session_id"] == "mock-old-1" and data["game"]["winner"] and data["game"]["human_involved"] is False
+        assert data["initial"]["session_id"] == "mock-old-1" and data["initial"]["status"] == "idle"
+        events = data["events"]
+        assert len(events) > 100 and all(set(ev) == {"seq", "gt", "type", "data"} for ev in events)
+        assert {ev["type"] for ev in events} <= mock.REPLAY_EVENT_TYPES, "no agent states, counters or review progress in a replay"
+        assert not any(ev["type"].startswith(("agent.", "budget.", "review.")) for ev in events)
+        gts = [ev["gt"] for ev in events]
+        assert gts == sorted(gts) and gts[-1] == data["duration_gt"] > 30, "game-clock seconds, never going back"
+        assert [ev["seq"] for ev in events] == sorted({ev["seq"] for ev in events}), "one step per event, in order"
+        assert client.get("/api/games/mock-old-2/replay").json()["game"]["human_involved"] is True
+        assert client.get("/api/games/nope/replay").status_code == 404
+        assert client.get("/api/games/bad.id/replay").status_code == 400
+        # the same answer twice (it is built once)
+        assert client.get("/api/games/mock-old-1/replay").json()["events"] == events
+
+    # the live game: not while it runs (normal speed: it is still running when the next request arrives)
+    with TestClient(mock.create_app(speed=1.0)) as slow:
+        live = slow.get("/api/games").json()["current"]
+        assert slow.get(f"/api/games/{live}/replay").status_code == 200  # idle: nothing to spoil
+        slow.post("/api/control/start")
+        assert slow.get(f"/api/games/{live}/replay").status_code == 409
+
+
+def test_the_replay_of_a_saved_game_rebuilds_the_final_session_with_the_real_client_store(tmp_path: Path) -> None:
+    if NODE is None:
+        pytest.skip("node executable not found")
+    run = mock.history_replay(seed=7)
+    events = [{"id": i, "gt": ev["gt"], "type": ev["type"], "data": ev["data"]} for i, ev in enumerate(run["events"], start=1)]
+    log = tmp_path / "history-replay.json"
+    # (the mock's script is shorter than a real game: 3 requests, 32 messages, 14 channels)
+    minimums = {"messages": 20, "requests": 3, "channels": 14}
+    log.write_text(json.dumps({"initial": run["initial"], "events": events, "final": run["final"], "minimums": minimums}, ensure_ascii=False), encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(ROOT / "tests" / "frontend" / "replay_projection_check.js"), str(log)],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
 
 
 def test_static_files_are_served_from_the_repo_static_directory() -> None:

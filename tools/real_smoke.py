@@ -1,17 +1,19 @@
-"""Real-model smoke test for the v0.12.1 engine (costs API credits — it has a hard call budget).
+"""Real-model smoke test for the engine (costs API credits — it has a hard call budget).
 
-It plays a *small* game with the models that are bound in a workspace's saved default bindings, and
+It plays a *small* game with the models that are bound in the saved default bindings of a data directory, and
 prints a compact report: tool usage, rejection codes, the four kinds of tokens, the prompt-cache hit rate,
 how many activations each agent had and how many messages were merged into a running activation.
 Nothing is shown from the key store; the provider registry is only used by the engine to make the calls.
 
-Isolation: the encrypted provider registry and the DPAPI key wrapper are COPIED from ``--from`` into
-a private scratch directory, so the live workspace (which another running instance may hold locked)
-is never opened or modified; the copy is deleted at the end (``--keep`` keeps it).
+Isolation: the provider registry (``providers.json``), the encrypted keys (``secrets.v1.enc``) and the DPAPI key
+wrapper (``master.v1.dpapi``) are COPIED from ``--from`` into a private scratch directory, so the live data
+directory (which another running instance may hold locked) is never opened or modified; the copy is deleted at
+the end (``--keep`` keeps it).  Where there is no ``master.v1.dpapi`` (Linux), the master key comes from the
+environment (``ARENA_MASTER_KEY`` / ``ARENA_MASTER_KEY_FILE``), as it does for the application.
 
 Examples::
 
-    python tools/real_smoke.py --from "C:/Users/me/Arena-Agents/Default/.arena" --players 4 --max-calls 60
+    python tools/real_smoke.py --from "C:/Users/me/Arena-Agent/data" --players 4 --max-calls 60
     python tools/real_smoke.py --from ... --scenario scenarios/werewolf_12p.md --players 12 --max-calls 80
 """
 
@@ -51,7 +53,7 @@ SEATS = [
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--from", dest="source", required=True, help="a workspace's .arena directory (or a data dir) holding providers.v1.enc")
+    parser.add_argument("--from", dest="source", required=True, help="a data directory (the data/ of an installation) holding providers.json and secrets.v1.enc")
     parser.add_argument("--scenario", default="scenarios/minimal_test.md")
     parser.add_argument("--players", type=int, default=4)
     parser.add_argument("--max-calls", type=int, default=60, help="hard budget of LLM calls; the game is paused when reached")
@@ -95,11 +97,14 @@ def parse_args() -> argparse.Namespace:
 
 def prepare_scratch(source: Path, players: list[str], window: int = 0) -> Path:
     scratch = Path(tempfile.mkdtemp(prefix="arena-real-smoke-", dir=str(ROOT / ".demo-data")))
-    for name in ("providers.v1.enc", "master.v1.dpapi"):
+    if not (source / "providers.json").is_file():
+        raise SystemExit(f"missing providers.json in {source} (is this the data/ directory of a v0.13 installation?)")
+    if not (source / "secrets.v1.enc").is_file():
+        raise SystemExit(f"missing secrets.v1.enc in {source}: the providers have no API keys stored, so no model can be called")
+    for name in ("providers.json", "secrets.v1.enc", "master.v1.dpapi"):
         src = source / name
-        if not src.is_file():
-            raise SystemExit(f"missing {name} in {source}")
-        shutil.copy2(src, scratch / name)
+        if src.is_file():  # (master.v1.dpapi only exists where Windows protects the master key)
+            shutil.copy2(src, scratch / name)
     settings = json.loads((source / "settings.json").read_text(encoding="utf-8")) if (source / "settings.json").is_file() else {}
     bindings = settings.get("default_bindings") or {}
     wanted = {actor: bindings[actor] for actor in ["moderator", *players] if actor in bindings}
@@ -131,11 +136,10 @@ async def main() -> int:
     ids = [f"N{i}" for i in range(1, args.players + 1)]
     (ROOT / ".demo-data").mkdir(exist_ok=True)
     scratch = prepare_scratch(source, ids, args.window)
-    os.environ["ARENA_DISABLE_WORKSPACE"] = "1"
-    os.environ["ARENA_DISABLE_LEGACY_MIGRATION"] = "1"
     os.environ["ARENA_DATA_DIR"] = str(scratch)
-    os.environ.pop("ARENA_MASTER_KEY", None)
-    os.environ.pop("ARENA_MASTER_KEY_FILE", None)
+    if (scratch / "master.v1.dpapi").is_file():  # Windows: the wrapper next to the data is the master key
+        os.environ.pop("ARENA_MASTER_KEY", None)
+        os.environ.pop("ARENA_MASTER_KEY_FILE", None)
     os.environ["PYTHONUTF8"] = "1"
 
     import app.game.orchestrator as orchestrator_module

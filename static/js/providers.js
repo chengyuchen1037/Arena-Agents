@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Arena-Agents v0.10 — Provider / model / binding / session-list UI
+   Arena-Agents v0.10 — Provider / model / binding UI (v0.13: the list of saved games moved to history.js)
    Loaded after core.js and before app.js. Exposes window.ArenaProviderUI.create(ctx).
    ctx: { api, Core, showToast, getSession, onChange }
 
@@ -81,9 +81,6 @@
       btnSelectNoneActors: $("btn-select-none-actors"),
       templateApplyHint: $("template-apply-hint"),
 
-      sessionsModal: $("sessions-modal"),
-      sessionList: $("session-list"),
-
       statusDot: $("api-status-dot"),
       statusLabel: $("api-status-label"),
 
@@ -102,7 +99,6 @@
       pricing: Core.normalizePricingSource(null), // price source: url, entries, fetched_at, error
       pricingBusy: false,
       rows: [],
-      sessions: [],
       dismissedNotice: "",
       lastSig: "",
       // v0.11: endpoint preview + auto_append_path
@@ -1396,98 +1392,7 @@
       if (open) open.addEventListener("click", () => openBindingsFresh());
     }
 
-    // -----------------------------------------------------------------------
-    // Sessions modal
-    // -----------------------------------------------------------------------
-
-    function renderSessions() {
-      if (!el.sessionList) return;
-      const s = getSession();
-      const cur = s && s.session_id;
-      if (st.sessions.length === 0) {
-        el.sessionList.innerHTML = `<div class="empty-placeholder">没有已保存的外部存档</div>`;
-        return;
-      }
-      el.sessionList.innerHTML = st.sessions
-        .map((x) => {
-          const meta = [x.title, x.status, x.updated_at || x.saved_at, x.record_count != null ? `${Core.numText(x.record_count)} 条记录` : ""]
-            .filter((v) => v !== undefined && v !== null && String(v) !== "")
-            .map((v) => esc(v))
-            .join(" &middot; ");
-          return `
-          <div class="session-item" data-session-id="${esc(x.session_id)}">
-            <div class="session-item-main">
-              <div class="session-item-id">${esc(x.session_id)}${
-                x.current || x.session_id === cur ? ' <span class="tag-badge muted">当前</span>' : ""
-              }</div>
-              <div class="session-item-meta">${meta}</div>
-            </div>
-            <button type="button" class="btn btn-xs" data-action="load-session" ${
-              x.current || x.session_id === cur || locked() ? "disabled" : ""
-            } title="${locked() ? "对局运行中不能切换存档，请先暂停" : ""}">加载</button>
-            <button type="button" class="btn btn-xs btn-danger-outline" data-action="delete-session" ${
-              x.current || x.session_id === cur ? "disabled" : ""
-            }>删除</button>
-          </div>`;
-        })
-        .join("");
-    }
-
-    async function loadSessions() {
-      try {
-        const res = await api.get("api/sessions");
-        st.sessions = Core.normalizeSessions(res);
-      } catch (e) {
-        st.sessions = [];
-        showToast(`读取存档列表失败：${e.message}`);
-      }
-      renderSessions();
-    }
-
-    async function loadSession(id) {
-      if (!root.confirm(`加载存档「${id}」会替换当前对局（当前对局会先自动保存），确定吗？`)) return;
-      try {
-        const res = await api.post(`api/sessions/${enc(id)}/load`);
-        if (res && res.session && ctx.onSessionLoaded) ctx.onSessionLoaded(res.session);
-        hide(el.sessionsModal);
-        showToast("存档已加载（对局保持暂停，请检查模型绑定后点击「继续」）");
-      } catch (e) {
-        showToast(e.message);
-      }
-    }
-
-    async function deleteSession(id) {
-      if (!root.confirm(`确定永久删除存档「${id}」吗？此操作不可恢复。`)) return;
-      try {
-        await api.del(`api/sessions/${enc(id)}`);
-        showToast("存档已删除");
-      } catch (e) {
-        showToast(e.message);
-      }
-      await loadSessions();
-    }
-
-    function wireSessionsModal() {
-      const open = $("btn-open-sessions-modal");
-      if (open) {
-        open.addEventListener("click", async () => {
-          show(el.sessionsModal);
-          await loadSessions();
-        });
-      }
-      const close = $("btn-close-sessions-modal");
-      if (close) close.addEventListener("click", () => hide(el.sessionsModal));
-      const refresh = $("btn-refresh-sessions");
-      if (refresh) refresh.addEventListener("click", loadSessions);
-      if (el.sessionList) {
-        el.sessionList.addEventListener("click", (evt) => {
-          const action = closestAttr(evt.target, "[data-action]", "data-action");
-          const id = closestAttr(evt.target, ".session-item[data-session-id]", "data-session-id");
-          if (action === "delete-session" && id) deleteSession(id);
-          else if (action === "load-session" && id) loadSession(id);
-        });
-      }
-    }
+    // (v0.13: the list of saved games is history.js - "历史对局")
 
     // -----------------------------------------------------------------------
     // Session-driven UI: restore notice, lock state
@@ -1550,7 +1455,6 @@
 
     wireProviderModal();
     wireBindingsModal();
-    wireSessionsModal();
     wireNotice();
 
     return {

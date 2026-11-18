@@ -16,8 +16,9 @@
        budgetEvent,    // "warning" | "reached" (budget.warning / budget.reached)
        rosterChanged,  // true when names / avatars changed (roster.updated)
        reviewEvent,    // {id, state, message} (review.progress)
-       reload,         // true for workspace.changed
+       archiveEvent,   // the normalized archive.progress payload (v0.13: export / import progress), else null
        replaced,       // true when the whole session was swapped (snapshot)
+       takeoverChanged,// true when the played seat changed (takeover.updated): v0.13 locks the viewpoint to it
      }
      ctx: {clockNow}  the client's estimate of the game clock; request deadlines are kept as
                       absolute game-clock values so countdowns survive re-renders.
@@ -41,7 +42,8 @@
   const MAX_REQUESTS = 200;
   const MAX_TICKETS = 500;
   // v0.12.1 (E2): only three states. Older servers' "idle" / "stopped" both mean "not running" => sleeping.
-  const AGENT_STATES = ["thinking", "acting", "sleeping"];
+  // v0.13 (F6): "human" = a person plays the seat instead of its agent.
+  const AGENT_STATES = ["thinking", "acting", "sleeping", "human"];
   const DIRTY_KEYS = ["topbar", "board", "channels", "feed", "dashboard", "popover"];
   const METRIC_KEYS = [
     "activations",
@@ -331,6 +333,113 @@
     };
   }
 
+  /** v0.13: one `archive.progress` payload (docs/v0.12-contracts.md §11.4) with every field present and typed. */
+  function normalizeArchiveEvent(raw) {
+    const d = isObject(raw) ? raw : {};
+    return {
+      job_id: str(d.job_id),
+      kind: d.kind === "import" ? "import" : "export",
+      phase: str(d.phase),
+      done: Math.max(0, num(d.done, 0)),
+      total: Math.max(0, num(d.total, 0)),
+      status: ["running", "done", "error"].includes(d.status) ? d.status : "running",
+      message: str(d.message),
+      code: str(d.code),
+      result: isObject(d.result) ? d.result : null,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.13: the seat a person plays (docs/v0.12-contracts.md §11.7)
+  // -------------------------------------------------------------------------
+
+  const optStr = (v) => (v === undefined || v === null || v === "" ? null : String(v));
+
+  function normalizeTakeoverChannel(raw) {
+    const c = isObject(raw) ? raw : {};
+    let floor = null;
+    if (isObject(c.floor)) {
+      const f = c.floor;
+      floor = {
+        kind: str(f.kind, "none"),
+        mine: Boolean(f.mine),
+        paused: Boolean(f.paused),
+        messages_left: optNum(f.messages_left),
+        chars_left: optNum(f.chars_left),
+        seconds_left: optNum(f.seconds_left),
+        deadline_clock: optNum(f.deadline_clock),
+      };
+    }
+    return {
+      can_write: Boolean(c.can_write),
+      why_not: optStr(c.why_not),
+      code: optStr(c.code),
+      max_chars: optNum(c.max_chars),
+      floor,
+      can_pass: Boolean(c.can_pass),
+    };
+  }
+
+  function normalizeTakeoverRequest(raw) {
+    const r = isObject(raw) ? raw : {};
+    const mine = isObject(r.my_answer)
+      ? { value: str(r.my_answer.value), label: str(r.my_answer.label, str(r.my_answer.value)), reason: str(r.my_answer.reason) }
+      : null;
+    return {
+      id: str(r.id),
+      kind: str(r.kind, "choice"),
+      max_chars: optNum(r.max_chars),
+      answered: Boolean(r.answered) || mine !== null,
+      my_answer: mine,
+      seconds_left: optNum(r.seconds_left),
+      deadline_clock: optNum(r.deadline_clock),
+      channel_id: optStr(r.channel_id),
+    };
+  }
+
+  function normalizeTakeoverParam(raw) {
+    const p = isObject(raw) ? raw : {};
+    const out = { name: str(p.name), type: str(p.type, "text"), optional: Boolean(p.optional) };
+    if (p.max_chars !== undefined) out.max_chars = optNum(p.max_chars);
+    if (Array.isArray(p.values)) out.values = strList(p.values);
+    if (p.min !== undefined) out.min = optNum(p.min);
+    if (p.max !== undefined) out.max = optNum(p.max);
+    if (Array.isArray(p.candidates)) out.candidates = strList(p.candidates);
+    return out;
+  }
+
+  /**
+   * `PublicSession.takeover` / the `takeover.updated` payload. Without a played seat only `seat` (null) and
+   * `reshuffle_available` count: everything else is empty, whatever the payload says.
+   */
+  function normalizeTakeover(raw) {
+    const t = isObject(raw) ? raw : {};
+    const seat = optStr(t.seat);
+    const out = {
+      seat,
+      reshuffle_available: Boolean(t.reshuffle_available),
+      seq: 0,
+      channels: {},
+      requests: [],
+      abilities: [],
+      attention: [],
+    };
+    if (!seat) return out;
+    out.seq = num(t.seq, 0);
+    if (isObject(t.channels)) {
+      for (const id of Object.keys(t.channels)) out.channels[id] = normalizeTakeoverChannel(t.channels[id]);
+    }
+    out.requests = (Array.isArray(t.requests) ? t.requests : []).filter(isObject).map(normalizeTakeoverRequest);
+    out.abilities = (Array.isArray(t.abilities) ? t.abilities : []).filter(isObject).map((a) => ({
+      id: str(a.id),
+      description: str(a.description),
+      quota_left: Math.max(0, num(a.quota_left, 0)),
+      params: (Array.isArray(a.params) ? a.params : []).filter(isObject).map(normalizeTakeoverParam),
+    }));
+    out.attention = strList(t.attention);
+    return out;
+  }
+
   /** Coerce the scalar / small-object top-level fields (used after a merge too). */
   function normalizeScalars(s) {
     s.session_id = str(s.session_id);
@@ -376,6 +485,7 @@
     };
     s.budget = normalizeBudget(s.budget);
     s.review = normalizeReview(s.review, s.review);
+    s.takeover = normalizeTakeover(s.takeover);
     return s;
   }
 
@@ -615,6 +725,13 @@
       const s = res.session;
       const node = id === MODERATOR_ID ? s.moderator : findById(s.participants, id);
       if (!node) return;
+      // v0.13 (F6): a seat a person plays has no agent - it stays "human" whatever an agent-state event says
+      if (id !== MODERATOR_ID && s.takeover && s.takeover.seat === id) {
+        node.state = "human";
+        node.sleep_until = null;
+        res.dirty.board = res.dirty.popover = true;
+        return;
+      }
       node.state = state;
       // only a sleeping agent can have a wake-up time
       node.sleep_until = state === "sleeping" ? until : null;
@@ -711,6 +828,27 @@
       res.dirty.board = res.dirty.popover = res.dirty.topbar = true;
     },
 
+    /**
+     * v0.13: the played seat and its state (what it may do now). The seat's card says "human" while a person
+     * plays it (the server's participants say so in a snapshot; this keeps the event path the same).
+     */
+    "takeover.updated"(res, d) {
+      const s = res.session;
+      const before = s.takeover ? s.takeover.seat : null;
+      s.takeover = normalizeTakeover(d.takeover);
+      const seat = s.takeover.seat;
+      for (const p of s.participants) {
+        if (seat && p.id === seat) {
+          p.state = "human";
+          p.sleep_until = null;
+        } else if (p.state === "human") {
+          p.state = "sleeping";
+        }
+      }
+      res.takeoverChanged = before !== seat;
+      res.dirty.topbar = res.dirty.board = res.dirty.channels = res.dirty.feed = res.dirty.popover = true;
+    },
+
     "session.updated"(res, d) {
       const s = res.session;
       for (const key of Object.keys(d)) {
@@ -725,8 +863,9 @@
       res.dirty.topbar = res.dirty.board = res.dirty.popover = res.dirty.feed = true;
     },
 
-    "workspace.changed"(res) {
-      res.reload = true;
+    /** v0.13: progress of an archive export / import (docs/archive.md); it is not part of the game's state. */
+    "archive.progress"(res, d) {
+      res.archiveEvent = normalizeArchiveEvent(d);
     },
 
     error(res, d) {
@@ -749,8 +888,9 @@
       budgetEvent: null,
       rosterChanged: false,
       reviewEvent: null,
-      reload: false,
+      archiveEvent: null,
       replaced: false,
+      takeoverChanged: false,
     };
     if (!isObject(ev)) return res;
     const handler = HANDLERS[str(ev.type)];
@@ -811,6 +951,8 @@
     normalizeParticipant,
     normalizeBudget,
     normalizeReview,
+    normalizeArchiveEvent,
+    normalizeTakeover,
     seatOf,
     insertMessage,
     isTruncated,

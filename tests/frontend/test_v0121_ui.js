@@ -1,7 +1,7 @@
 "use strict";
 // v0.12.1 features of the UI against the fake DOM (see harness.js):
 //   roster      names / avatars / persona / memory editors, "用主持人模型完善" (draft first, confirm to save),
-//               regenerate (one / all), the 名册 menu (export, import with a preview, clear, load-memory switch),
+//               regenerate (one / all), the 名册 menu (clear, load-memory switch; v0.13: export / import moved to the settings),
 //               review (复盘全部 / 复盘此玩家 / progress / 已复盘)
 //   budget      the "上限" dialog (GET/PUT /api/budget)
 //   prices      price source bar, four model prices, suggestions that fill the form
@@ -316,78 +316,27 @@ test("an older backend without the roster API: the editors are disabled with an 
 });
 
 // =====================================================================================================
-// roster menu: export / import (preview first) / clear / "load memory"
+// roster menu: clear / "load memory" (v0.13: the memory pack export / import is gone, the archive covers it)
 // =====================================================================================================
-test("名册 menu: opens and closes; export downloads the zip with the server's file name", async () => {
+test("名册 menu: opens and closes; it only has clear-all-memory and the load-memory switch (the pack export / import is gone)", async () => {
   const { env, backend } = await live({ status: "idle" });
   assert.equal(env.el("roster-menu").hidden, true);
   env.el("btn-roster-menu").dispatch("click");
   assert.equal(env.el("roster-menu").hidden, false);
   assert.equal(env.el("btn-roster-menu").getAttribute("aria-expanded"), "true");
+  assert.ok(!H.HTML_SRC.includes("btn-roster-export") && !H.HTML_SRC.includes("btn-roster-import") && !H.HTML_SRC.includes("file-import-memory"));
+  assert.ok(!H.SRC.roster.includes("memory:export") && !H.SRC.roster.includes("memory:import"));
+  // an old menu entry does nothing (and calls nothing)
   menuClick(env, "export");
-  await flush(env, 30);
-  assert.equal(posts(backend, "GET", "/api/roster/memory:export").length, 1);
-  assert.equal(env.downloads.length, 1);
-  assert.equal(env.downloads[0].download, "arena-memory-test.zip");
-  assert.equal(env.el("roster-menu").hidden, true, "choosing an item closes the menu");
-  assert.match(lastToast(env), /已导出全部记忆：arena-memory-test\.zip/);
+  await flush(env, 10);
+  assert.equal(backend.calls.filter((c) => /memory:(export|import)/.test(c.url)).length, 0);
+  assert.equal(env.downloads.length, 0);
   // a click elsewhere / Esc closes it
-  env.el("btn-roster-menu").dispatch("click");
   env.document.dispatchEvent("click", { target: target({}) });
   assert.equal(env.el("roster-menu").hidden, true);
   env.el("btn-roster-menu").dispatch("click");
   env.document.dispatchEvent("keydown", { key: "Escape" });
   assert.equal(env.el("roster-menu").hidden, true);
-});
-
-test("import: a dry run shows WHICH players' texts will be overwritten; only after confirming is it applied", async () => {
-  const { env, backend } = await live({ status: "idle" });
-  const bytes = new Uint8Array([80, 75, 3, 4, 1, 2, 3]);
-  const file = { name: "pack.zip", arrayBuffer: async () => bytes.buffer };
-  env.el("file-import-memory").dispatch("change", { target: { files: [file], value: "x" } });
-  await flush(env, 40);
-  assert.equal(backend.importCalls.length, 1, "only the preview so far");
-  assert.deepEqual([backend.importCalls[0].dry_run, backend.importCalls[0].contentType], [true, "application/zip"]);
-  assert.equal(backend.importCalls[0].body, bytes.buffer, "the raw zip bytes are sent, not JSON");
-  assert.equal(env.el("dialog-modal").style.display, "flex");
-  const body = textOf(html(env, "dialog-body"));
-  assert.match(body, /覆盖/);
-  assert.match(body, /Carol\s*：\s*性格设定、记忆 将被覆盖/);
-  assert.match(body, /Eve\s*：\s*记忆 将被覆盖/);
-  assert.ok(!/\bN3\b/.test(body), "nicknames, not ids");
-  assert.match(env.el("btn-dialog-ok").textContent, /确认导入 2 名玩家/);
-  assert.equal(env.el("file-import-memory").value, "", "the file input is reset so the same file can be picked again");
-  // confirm
-  env.el("btn-dialog-ok").dispatch("click");
-  await flush(env, 40);
-  assert.equal(backend.importCalls.length, 2);
-  assert.equal(backend.importCalls[1].dry_run, false);
-  assert.equal(env.el("dialog-modal").style.display, "none");
-  assert.match(lastToast(env), /已导入 2 名玩家的记忆/);
-});
-
-test("import: cancelling the preview changes nothing; a broken pack is reported; an empty pack says so", async () => {
-  const { env, backend } = await live({ status: "idle" });
-  const file = { name: "pack.zip", arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer };
-  env.el("file-import-memory").dispatch("change", { target: { files: [file], value: "" } });
-  await flush(env, 40);
-  env.el("btn-dialog-cancel").dispatch("click");
-  await flush(env, 20);
-  assert.equal(backend.importCalls.length, 1, "no real import");
-  assert.equal(env.el("dialog-modal").style.display, "none");
-  // a broken pack (the server says 400 on the dry run)
-  backend.importError = "不是有效的 zip 记忆包";
-  env.el("file-import-memory").dispatch("change", { target: { files: [file], value: "" } });
-  await flush(env, 40);
-  assert.match(lastToast(env), /记忆包无法导入：.*不是有效的 zip 记忆包/);
-  assert.equal(env.el("dialog-modal").style.display, "none");
-  // nothing to import
-  backend.importError = "";
-  backend.importChanges = [];
-  env.el("file-import-memory").dispatch("change", { target: { files: [file], value: "" } });
-  await flush(env, 40);
-  assert.match(lastToast(env), /记忆包里没有可导入的玩家内容/);
-  assert.equal(backend.importCalls.filter((c) => !c.dry_run).length, 0);
 });
 
 test("clear all memory: a second confirmation (danger), optionally persona too; nothing happens on cancel", async () => {
@@ -431,7 +380,7 @@ test("clear all memory: a second confirmation (danger), optionally persona too; 
   assert.match(html(env, "detail-editors"), /detail-editor-meta">空<\/span>/);
 });
 
-test("'本局加载记忆' switch: PUT /api/roster/memory-enabled; it follows the session; idle-only (and import / clear too)", async () => {
+test("'本局加载记忆' switch: PUT /api/roster/memory-enabled; it follows the session; idle-only (and clear too)", async () => {
   const { env, backend } = await live({ status: "idle", memory_enabled: true });
   assert.equal(env.el("chk-memory-enabled").checked, true);
   env.el("chk-memory-enabled").checked = false;
@@ -451,12 +400,10 @@ test("'本局加载记忆' switch: PUT /api/roster/memory-enabled; it follows th
   await flush(env, 30);
   assert.equal(env.el("chk-memory-enabled").checked, true);
   assert.match(lastToast(env), /对局已开始/);
-  // while a game runs the switch, import and clear are locked; export stays available
+  // while a game runs the switch and clear are locked
   env.sse("game.status", { status: "running", reason: "started", winner: null });
   assert.equal(env.el("chk-memory-enabled").disabled, true);
-  assert.equal(env.el("btn-roster-import").disabled, true);
   assert.equal(env.el("btn-roster-clear").disabled, true);
-  assert.equal(env.el("btn-roster-export").disabled, false);
 });
 
 test("a new game reloads the roster (names / avatars / memory may have changed in between)", async () => {
@@ -969,9 +916,10 @@ test("phone: secondary top-bar buttons move into the ⋯ menu (the real elements
     boardRight: new FakeEl("div"),
   };
   const place = (home, ...ids) => ids.forEach((id) => home.appendChild(env.el(id)));
-  place(homes.left, "btn-open-workspace-modal", "btn-theme", "viewpoint-picker");
-  place(homes.right, "usage-telemetry-pill", "btn-open-budget-modal", "btn-new", "btn-save", "btn-start", "btn-pause", "btn-resume", "btn-more");
-  place(homes.boardRight, "btn-import-session", "btn-open-sessions-modal", "btn-open-bindings-modal", "btn-open-provider-modal");
+  // (v0.13: the whole viewpoint bar [视角▾][切换][接管] moves, the takeover bar stays in the first row)
+  place(homes.left, "btn-open-settings-modal", "btn-theme", "viewpoint-bar", "takeover-bar");
+  place(homes.right, "usage-telemetry-pill", "btn-open-budget-modal", "btn-new", "btn-start", "btn-pause", "btn-resume", "btn-more");
+  place(homes.boardRight, "btn-open-history-modal", "btn-open-bindings-modal", "btn-open-provider-modal");
   homes.status.appendChild(env.el("mod-chip"));
   env.run();
   await settle();
@@ -984,9 +932,10 @@ test("phone: secondary top-bar buttons move into the ⋯ menu (the real elements
   env.sandbox.innerWidth = 390;
   env.sandbox.innerHeight = 844;
   env.sandbox.dispatchEvent("resize");
-  const inMenu = ["btn-open-workspace-modal", "btn-theme", "viewpoint-picker", "btn-open-budget-modal", "btn-new", "btn-save", "btn-import-session", "btn-open-sessions-modal", "btn-open-bindings-modal", "btn-open-provider-modal"];
+  const inMenu = ["btn-open-settings-modal", "btn-theme", "viewpoint-bar", "btn-open-budget-modal", "btn-new", "btn-open-history-modal", "btn-open-bindings-modal", "btn-open-provider-modal"];
   for (const id of inMenu) assert.equal(env.el(id).parentNode, menu, `${id} is in the menu`);
   assert.equal(menu.children.length, inMenu.length);
+  assert.equal(env.el("takeover-bar").parentNode, homes.left, "the takeover bar stays in the first row of the phone (F3)");
   for (const id of ["btn-start", "btn-pause", "btn-resume", "btn-more"]) assert.equal(env.el(id).parentNode, homes.right, `${id} stays on the bar`);
   assert.equal(env.el("usage-telemetry-pill").parentNode, homes.status, "the usage pill moves to the status row");
   assert.ok(homes.status.children.indexOf(env.el("usage-telemetry-pill")) < homes.status.children.indexOf(env.el("mod-chip")), "... before the moderator chip");
@@ -1014,9 +963,9 @@ test("phone: secondary top-bar buttons move into the ⋯ menu (the real elements
   env.sandbox.innerHeight = 900;
   env.sandbox.dispatchEvent("resize");
   assert.equal(menu.children.length, 0);
-  for (const id of ["btn-open-workspace-modal", "btn-theme", "viewpoint-picker"]) assert.equal(env.el(id).parentNode, homes.left, id);
-  for (const id of ["usage-telemetry-pill", "btn-open-budget-modal", "btn-new", "btn-save"]) assert.equal(env.el(id).parentNode, homes.right, id);
-  for (const id of ["btn-import-session", "btn-open-sessions-modal", "btn-open-bindings-modal", "btn-open-provider-modal"]) assert.equal(env.el(id).parentNode, homes.boardRight, id);
+  for (const id of ["btn-open-settings-modal", "btn-theme", "viewpoint-bar", "takeover-bar"]) assert.equal(env.el(id).parentNode, homes.left, id);
+  for (const id of ["usage-telemetry-pill", "btn-open-budget-modal", "btn-new"]) assert.equal(env.el(id).parentNode, homes.right, id);
+  for (const id of ["btn-open-history-modal", "btn-open-bindings-modal", "btn-open-provider-modal"]) assert.equal(env.el(id).parentNode, homes.boardRight, id);
   assert.equal(env.el("more-menu").hidden, true);
 });
 

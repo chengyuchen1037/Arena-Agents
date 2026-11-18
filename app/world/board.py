@@ -12,6 +12,12 @@ same order of checks as the ``speak`` commit gate (contracts §2.3):
    (system DMs have no limit and need no token)
 
 ``why_not`` is the string ``"<CODE>：<one-sentence reason>"`` (``None`` when the agent can write).
+
+``max_chars`` (v0.13) is the length cap of ONE free-text message the agent could write there right now
+(longer text is truncated by the gate, D19): the token's per-message cap clipped to what is left of its
+total (turn / queue), ``max_chars_per_message`` of the discussion (free), the ``dm`` default (system DM).
+``None`` when the agent cannot write or the moderator writes (no cap).  ``seat_status`` (``seat.py``) and
+``speech_gate`` (``chat.py``) say the same; ``tests/v12/world`` locks the three together.
 """
 
 from __future__ import annotations
@@ -116,6 +122,28 @@ def _write_status(world: Any, channel: ChannelState, agent_id: str, is_moderator
     return False, f"{Code.NO_FLOOR}：现在不能在该频道发言。"
 
 
+def _max_chars(
+    world: Any, channel: ChannelState, agent_id: str, is_moderator: bool, can_write: bool
+) -> int | None:
+    """The cap of one message of ``agent_id`` in ``channel`` (same numbers as ``speech_gate(...).max_chars``)."""
+    if is_moderator or not can_write:
+        return None
+    mode = channel.mode
+    if mode in ("turn", "queue"):
+        group = channel.group
+        tokens = [] if group is None else group.tokens
+        mine = next((t for t in tokens if t.holder == agent_id and t.status == "active"), None)
+        if mine is None:
+            return None
+        return max(0, min(mine.max_chars_per_message, mine.max_chars_total - mine.chars_used))
+    if mode == "free":
+        if channel.free is not None:
+            return channel.free.max_chars_per_message
+        defaults = world.spec.defaults
+        return defaults.dm.max_chars_per_message if channel.system else defaults.free.max_chars_per_message
+    return None
+
+
 def _floor_block(world: Any, channel: ChannelState, agent_id: str, is_moderator: bool) -> dict[str, Any]:
     now = float(world.clock.now())
     mode = channel.mode
@@ -185,6 +213,7 @@ def _channel_block(world: Any, channel: ChannelState, agent_id: str, is_moderato
         "system": bool(channel.system),
         "can_write": can_write,
         "why_not": why_not,
+        "max_chars": _max_chars(world, channel, agent_id, is_moderator, can_write),
         "floor": _floor_block(world, channel, agent_id, is_moderator),
     }
 

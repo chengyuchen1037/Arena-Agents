@@ -1,7 +1,7 @@
 # Architecture
 
-> **版本：v0.12.1。** 本页是总览；图由 [`tools/make_diagrams.py`](../tools/make_diagrams.py) 生成（SVG，中英文各一份，改了文字就重新生成，见文末）。
-> 要查字段、拒绝码、事件目录和各项默认值，看 [实现契约](v0.12-contracts.md)；决策记录在 [v0.12.1 方案](v0.12.1-plan.md)（E1–E26）和 [v0.12 方案](v0.12-async-agents-plan.md)（D1–D25，其中一部分已被 v0.12.1 取代）。English: [architecture.en.md](architecture.en.md)。
+> **版本：v0.13.0（Actor + Worker 的架构沿用 v0.12.1）。** 本页是总览；图由 [`tools/make_diagrams.py`](../tools/make_diagrams.py) 生成（SVG，中英文各一份，改了文字就重新生成，见文末）。
+> 要查字段、拒绝码、事件目录和各项默认值，看 [实现契约](v0.12-contracts.md)（v0.13 增补在 §11）；决策记录在 [v0.13 方案](v0.13-plan.md)（F1–F38）、[v0.12.1 方案](v0.12.1-plan.md)（E1–E26）和 [v0.12 方案](v0.12-async-agents-plan.md)（D1–D25，其中一部分已被 v0.12.1 取代）。English: [architecture.en.md](architecture.en.md)。
 
 Arena-Agents 把一局游戏里的**每一个角色（所有玩家和主持人）**都做成异步 agent：**前台 Actor + 后台 Worker**。引擎只提供与游戏无关的“物理层”（频道、发言权、请求、账本），规则写在剧本里，由 LLM 主持人驱动整局流程。
 
@@ -11,16 +11,16 @@ token 靠**编排**来管理（持久对话 + 前缀缓存、在途合并、按�
 
 ## 1. 总览
 
-<img src="images/arch-overview.zh.svg" alt="Arena-Agents 整体架构：浏览器、FastAPI、GameOrchestrator、Runtime（Actor + Worker）、Brain、World，以及 LLM 适配器、工作区与剧本" width="100%">
+<img src="images/arch-overview.zh.svg" alt="Arena-Agents 整体架构：浏览器、FastAPI、GameOrchestrator、Runtime（Actor + Worker）、Brain、World，以及 LLM 适配器、数据目录与剧本" width="100%">
 
 自上而下：
 
-- **浏览器**用 REST 控制对局，用 **SSE v2**（带 `id` 的增量事件，断线后可续传）观战；界面永远看不到思维链和工具调用。
-- **GameOrchestrator**（`app/game/`）管理一局的生命周期：创建世界和 agent（12 名玩家 + 主持人 = 13 个）、开始 / 暂停 / 继续、模型绑定、预算、名册与复盘、加密存档、工作区切换。
+- **浏览器**用 REST 控制对局，用 **SSE v2**（带 `id` 的增量事件，断线后可续传）观战；界面永远看不到思维链和工具调用。v0.13 起观战者也可以**接管一个座位**亲自参与（见 [§3.4](#34-应用层appgameappapi)），并浏览、重放历史对局。
+- **GameOrchestrator**（`app/game/`）管理一局的生命周期：创建世界和 agent（12 名玩家 + 主持人 = 13 个；有人接管一个座位时那个座位没有 agent）、开始 / 暂停 / 继续、模型绑定、预算、名册与复盘、存档与自动保存、接管座位、重放投影。
 - **Runtime**（`app/runtime/`，asyncio）：每个 agent 是一个 **Actor + Worker**；**Supervisor** 把世界的投递“泵”给各个 agent、轮询计时器、看门狗、发布指标。
 - **Brain**（`app/agents/`）把世界翻译成模型读得懂的东西（系统提示词、工具 schema、状态板 + 可见历史），再把工具调用翻译回 Intent。它同步、很快、不做网络 I/O。
 - **World**（`app/world/`）是同步的单线程状态机：**提交闸门**是改变世界的唯一入口，**账本**只追加；世界给能看到某条记录的 agent 投递 **Envelope**（唤醒），给观战者发 **UiEvent**。
-- 右侧：**LLM 适配器**（三种协议）、**工作区**（加密的 Provider 与存档；名册和价格表是明文文件）、**剧本**（规则 + 主持人手册）。
+- 右侧：**LLM 适配器**（三种协议）、**数据目录** `data/`（只有 API Key 加密；对局、日志、名册、设置都是明文文件）、**剧本**（规则 + 主持人手册）。
 
 实线是调用与数据：agent 的工具调用 → **Intent** → 提交闸门 → **Receipt**（作为工具结果回到模型）。虚线是通知：世界 → agent 的 Envelope（唤醒）、世界 → 浏览器的 UiEvent（观战）。
 
@@ -109,7 +109,7 @@ token 靠**编排**来管理（持久对话 + 前缀缓存、在途合并、按�
 - **看门狗**（真实时间）：对局在运行、所有 agent 都静止、主持人没有自己设的闹钟、世界也没有待到期的计时器，并且账本 20 秒（`watchdog`）没有任何变化 → 只唤醒**主持人**。连续 3 次（`max_watchdog_wakes`）唤醒仍无进展，再静止一个周期，就在界面上显示一条警告横幅（之后仍每隔 20 秒唤醒主持人一次），由用户决定是否暂停——**看门狗从不自动暂停对局**；账本一有进展，横幅就撤下。
 - `llm_gate.py` — LLM 闸门：默认不限并发（`llm_concurrency: 0`），只在供应商限流时才需要调小；`GatedEngineLlm` 给每次调用加超时。
 - `usage.py` — `UsageBook`：按 agent、按模型统计四类 token、费用、缓存命中率、激活 / 工具 / 拒绝次数。
-- `trace_log.py` — 明文 JSONL 的 trace 日志（工作区 `logs/` 下，写入前脱敏）：思维链、工具调用和回执只写在这里，前端不展示。
+- `trace_log.py` — 明文 JSONL 的 trace 日志（数据目录的 `logs/<对局 id>/` 下，写入前脱敏）：思维链、工具调用和回执只写在这里，前端不展示。
 - `bus.py` — 事件总线：环形缓冲 5000 条，每个订阅者一个有界队列；队列满了先丢可被同类取代的普通事件（`agent.status`、`agent.metrics`……），实在不行才标记“丢了重要事件”，SSE 据此重发一份完整快照。
 
 ### 3.3 Agents（`app/agents/`）
@@ -120,13 +120,31 @@ token 靠**编排**来管理（持久对话 + 前缀缓存、在途合并、按�
 
 ### 3.4 应用层（`app/game/`、`app/api/`）
 
-- `GameOrchestrator` 管理生命周期（开始 / 暂停 / 继续 / 终局后继续）、模型绑定、加密存档、观战事件总线与 HTTP API；名册 / 预算 / 复盘 / “完善”在 `roster_runtime.py`（mixin），按局预算在 `budget.py`，演示机器人在 `demo.py`。
-- 存档格式 v4：账本 + 世界状态 + 四类 token 的用量 + 本局的预算与名册快照；**不兼容 v0.12.0 及更早的存档**（它们保留在存档列表中，不会被改动）。
-- API：`/api/state`（PublicSession v3）、`/api/events`（SSE v2：带 `id` 的增量事件，支持 `Last-Event-ID` 续传）、`/api/control/*`、`/api/roster*`、`/api/budget`、`/api/game/review`、`/api/pricing/*`、`/api/providers*`、`/api/settings/*`、`/api/sessions*`、`/api/workspaces*`（见 [实现契约](v0.12-contracts.md) §6、§8、§10）。
+- `GameOrchestrator` 管理生命周期（开始 / 暂停 / 继续 / 终局后继续）、模型绑定、存档与自动保存、观战事件总线与 HTTP API；名册 / 预算 / 复盘 / “完善”在 `roster_runtime.py`（mixin），按局预算在 `budget.py`，接管座位在 `takeover_runtime.py`（mixin），演示机器人在 `demo.py`。
+- 存档格式 v5：账本 + 世界状态 + 四类 token 的用量 + 本局的预算与名册快照 + `takeover` / `human_spans` / 创建·开始·结束时间；明文 JSON。**不能直接打开 v0.12.1 及更早的存档**（它们留在原处、不会被改动；v0.12.1 的对局用 `tools/migrate_v0121_to_archive.py` 转换后导入）。
+- API：`/api/state`（PublicSession v3，另有 `takeover`）、`/api/events`（SSE v2：带 `id` 的增量事件，支持 `Last-Event-ID` 续传）、`/api/control/*`、`/api/takeover*`、`/api/seat/*`、`/api/games*`（历史、删除、继续、重放）、`/api/archive/*`（导出 / 导入）、`/api/roster*`、`/api/budget`、`/api/game/review`、`/api/pricing/*`、`/api/providers*`、`/api/settings/*`（见 [实现契约](v0.12-contracts.md) §6、§8、§10、§11）。
+
+#### 接管座位（v0.13）
+
+玩家可以在对局**未开始或已暂停**时接管**一个**玩家座位（`app/game/takeover_runtime.py`；主持人不能接管）。被接管的座位**没有 agent**：`_build_runtime` 不为它创建 Actor + Worker，世界投给它的 Envelope 被 Supervisor 安静地丢掉，所以不调用模型、不产生 token。人类的动作走**同一个提交闸门**：
+
+- `POST /api/seat/{speak,pass,respond,ability}` 把请求变成 `Intent(actor_id=被接管的座位, …)` 交给 `world.submit`，所以轮次、字数、条数、截止时间、`STALE` 都是引擎自己的规则；动作者永远由服务端决定，客户端不能替别的座位操作。
+- 界面要知道“我现在能做什么”：`app/world/seat.py` 的 `seat_status(world, seat)` 按座位算出每个频道的 `can_write` / `why_not` / `max_chars` / 发言权、待答请求、可用技能，测试把它与 `speech_gate` 逐频道锁定；每次世界变化后（同一个事件循环轮次内合并一次、内容没变不发）作为 `takeover.updated` 推送，也是 `PublicSession.takeover` 的一部分。前端不自己推算。
+- **谁也不被告知**：主持人、其他 agent、被接管座位的 agent 都不知道有人类参与。退出接管时重置这个座位的会话（`ConversationBook` + `ArenaBrain`），它下次被唤醒拿到完整的首条消息，人类说过的话作为它自己的历史出现。
+- 开始 / 继续、**重新发牌**、接管 / 退出接管由同一把**控制锁**串行，所以重新发牌不可能发生在开始之后，连点也不会交错；服务端在对局不是 `idle`、或账本里已有开始记录时一律拒绝（409）。
+- 接管状态随对局保存，重启后恢复为已暂停且仍在接管；绑定检查不豁免被接管的座位（退出接管和赛后复盘要用它）。
+
+视角限制：服务端仍向浏览器推送完整的观战数据，接管时的视角只在**前端**锁定（已知限制，见 [v0.13 方案](v0.13-plan.md) F3）。
+
+#### 存档、历史与重放（v0.13）
+
+- `app/storage/games.py` 的 `GameStore`：每局一个 `games/<id>/game.json`（明文 JSON，原子写，保留上一份好副本）；`games/index.json` 是历史列表的缓存，与文件夹对不上时自动重建。API Key 单独放在 `secrets.v1.enc`（`SecretStore`，唯一加密的文件）。
+- `app/archive/`：`.arenaagents`（zip 容器：清单 + 每个文件的 SHA-256；除 API Key 外不加密，Key 用用户的密码经 scrypt 派生出的密钥以 AES-256-GCM 加密）。导出 / 导入是后台任务（进度经 SSE `archive.progress`）；导入在“暂停自动保存”的窗口里整体替换数据目录，先备份、失败回滚。格式与流程见 [archive.md](archive.md)。
+- `app/game/replay.py`：把一局的**账本**投影成与直播相同的 UiEvent 序列（加一个起始会话），前端用独立的 Store 回放，直播的对局在后台照常更新；只含观战内容（账本里没有思考和工具调用）。`tests/v12/world/test_replay.py` 对真实世界的每一步逐一核对。
 
 #### 名册
 
-座位固定为 `N1`–`N12`，默认名字 Alice…Leo，可改名并**持久保存**；每个座位（和主持人）有一个由程序化素材库随机组合的**像素头像**，可重新生成全部 / 单个。性格设定与记忆是工作区里的纯文本文件（`roster/N1.persona.md`、`N1.memory.md`），默认为空，可导入 / 导出 / 清空，也可以让主持人的模型把几句要点“完善”成草稿（草稿由用户确认才保存）。记忆分三段：`## 战绩`（引擎维护）、`## 对局记忆`（赛后复盘）、`## 经验与印象`（用户手写）。**默认不自动复盘**——对局结束后手动点“复盘”，每位玩家用自己的模型写一份第一人称笔记；每局可以选择是否加载记忆。一局创建时拿走名册的一份拷贝（名字、头像、主持人头像），开始时重新读取性格与记忆文件。
+座位固定为 `N1`–`N12`，默认名字 Alice…Leo，可改名并**持久保存**；每个座位（和主持人）有一个由程序化素材库随机组合的**像素头像**，可重新生成全部 / 单个。性格设定与记忆是数据目录里的纯文本文件（`data/roster/N1.persona.md`、`N1.memory.md`），默认为空，可在界面里编辑 / 清空，也可以让主持人的模型把几句要点“完善”成草稿（草稿由用户确认才保存）。记忆分三段：`## 战绩`（引擎维护）、`## 对局记忆`（赛后复盘）、`## 经验与印象`（用户手写）。**默认不自动复盘**——对局结束后手动点“复盘”，每位玩家用自己的模型写一份第一人称笔记；每局可以选择是否加载记忆。一局创建时拿走名册的一份拷贝（名字、头像、主持人头像），开始时重新读取性格与记忆文件。
 
 #### 预算
 
@@ -144,7 +162,7 @@ token 靠**编排**来管理（持久对话 + 前缀缓存、在途合并、按�
 
 以后改价格不会改写历史。三个适配器都解析缓存计数（OpenAI `prompt_tokens_details.cached_tokens`、DeepSeek `prompt_cache_hit_tokens`、Anthropic `cache_read/creation_input_tokens`），Anthropic 请求在 system / 最后一个工具 / 最后一条消息上放缓存断点（≤ 4 个）；上游拒绝时自动去掉重试。模型价格可以从**价格源**（默认 LiteLLM 的 `model_prices_and_context_window.json`）自动匹配填入，详见 [providers.md](providers.md)。
 
-工作区（Provider 注册表、设置、模板、绑定、存档、日志、名册、价格表）见 [workspaces.md](workspaces.md)：Provider 与存档用 AES-256-GCM 加密，主密钥由 Windows DPAPI 保护，或来自 Docker Secret / 环境变量；名册和价格表是明文文件（不含密钥）。
+数据目录 `<程序目录>/data/`（Provider 注册表、设置、模板、绑定、对局、日志、名册、价格表）见 [storage.md](storage.md)：**只有 API Key 加密**（`secrets.v1.enc`，AES-256-GCM，主密钥由 Windows DPAPI 保护，或来自 Docker Secret / 环境变量，缺失时拒绝保存 Key），其余都是明文文件（不含密钥）。
 
 ## 4. 设计不变量
 
@@ -155,9 +173,10 @@ token 靠**编排**来管理（持久对话 + 前缀缓存、在途合并、按�
 - 同一个 agent 任何时刻最多一个在途的模型调用；一轮的工具在没有 `await` 的一段里执行；过期的运行不再行动（`tests/v12/runtime/test_agent_fuzz.py` 随机检查这些不变量）。
 - 主持人是独立 agent：不能操控其他 agent 的内部进程，不能改写已发生的事。
 - 所有期限用游戏时钟，暂停时不走；发言既有时间也有字数限制，超长内容被截断。看门狗、重试退避和取消宽限期用真实时间。
-- Provider 密钥不进入提示词、日志、API 响应或存档。
-- 运行中的对局不能换模型或换工作区；失败的切换 / 保存不得破坏原有状态。
-- 运行数据不进入仓库。
+- Provider 密钥不进入提示词、日志、API 响应或对局存档（导出 `.arenaagents` 时 Key 只在用户选择并设了密码后，以密文形式写入）。
+- 运行中的对局不能换模型、接管座位或导入存档；失败的导入 / 保存不得破坏原有状态（导入先备份、失败回滚）。
+- 人类的动作与 agent 的动作走同一个提交闸门，动作者由服务端决定；谁也不被告知有人类参与。
+- 运行数据不进入仓库（`data/`、`.demo-data/`、`*.arenaagents` 已被 `.gitignore` 排除）。
 
 ## 5. 重新生成图
 

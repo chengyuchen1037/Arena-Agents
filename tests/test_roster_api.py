@@ -1,15 +1,14 @@
-"""v0.12.1 roster / memory / budget / review HTTP API (contracts 10.4 and 10.8), against a real orchestrator."""
+"""v0.12.1 roster / memory / budget / review HTTP API (contracts 10.4 and 10.8), against a real orchestrator.
+
+(v0.13 removed the memory pack: ``memory:export`` / ``memory:import``.)"""
 
 from __future__ import annotations
-
-import io
-import zipfile
-from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.api import roster as roster_api
+from app.api import routes as routes_api
 from app.main import app
 from test_roster_runtime import IDS, TextLlm, end_at_once, finished_game, make_orch, play_with, wait_for
 
@@ -20,6 +19,9 @@ TOKEN = "s3cret-token-value"
 def orch(monkeypatch):
     orchestrator = make_orch(monkeypatch)
     monkeypatch.setattr(roster_api, "orchestrator", orchestrator)
+    # /api/state must be served by the same game: the process-wide singleton may already exist (built by an earlier test
+    # under the real 12-player config) and is not this test's game
+    monkeypatch.setattr(routes_api, "orchestrator", orchestrator)
     return orchestrator
 
 
@@ -27,14 +29,6 @@ def orch(monkeypatch):
 def client(orch):
     with TestClient(app) as c:
         yield c
-
-
-def pack(files: dict[str, str]) -> bytes:
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        for name, text in files.items():
-            archive.writestr(name, text)
-    return buffer.getvalue()
 
 
 def detail(response) -> str:
@@ -154,32 +148,22 @@ def test_the_moderators_avatar_is_idle_only_like_the_players(client, orch):
 
 
 # ------------------------------------------------------------------------------------ memory
-def test_the_memory_pack_exports_imports_previews_and_clears(client):
+def test_the_memory_can_be_cleared_with_or_without_the_persona(client):
     client.put("/api/roster/N1", json={"persona": "性格一", "memory": "## 经验与印象\n记忆一"})
-    exported = client.get("/api/roster/memory:export")
-    assert exported.status_code == 200 and exported.headers["content-type"] == "application/zip"
-    assert 'filename="arena-memory.zip"' in exported.headers["content-disposition"] and exported.headers["cache-control"] == "no-store"
-    assert sorted(zipfile.ZipFile(io.BytesIO(exported.content)).namelist()) == ["N1.memory.md", "N1.persona.md"]
-
+    only_memory = client.post("/api/roster/memory:clear", json={})
+    assert only_memory.status_code == 200 and only_memory.json()["seats"][0]["memory"] == "" and only_memory.json()["seats"][0]["persona"] == "性格一"
+    client.put("/api/roster/N1", json={"memory": "又有了"})
     cleared = client.post("/api/roster/memory:clear", json={"include_persona": True})
     assert cleared.status_code == 200 and cleared.json()["seats"][0]["memory"] == "" and cleared.json()["seats"][0]["persona"] == ""
 
-    dry = client.post("/api/roster/memory:import?dry_run=true", content=exported.content, headers={"content-type": "application/zip"})
-    assert dry.status_code == 200 and dry.json() == {"dry_run": True, "changes": [{"id": "N1", "name": "Alice", "persona": True, "memory": True}]}
-    assert client.get("/api/roster").json()["seats"][0]["memory"] == ""  # a preview changes nothing
-    done = client.post("/api/roster/memory:import", content=exported.content, headers={"content-type": "application/zip"})
-    assert done.status_code == 200 and done.json()["dry_run"] is False and done.json()["changes"][0]["id"] == "N1"
-    assert "记忆一" in client.get("/api/roster").json()["seats"][0]["memory"]
 
-
-def test_bad_memory_packs_are_refused_and_change_nothing(client):
-    client.put("/api/roster/N1", json={"memory": "原样"})
-    for data in (b"garbage", b"", pack({"evil.txt": "x"}), pack({"../N1.memory.md": "x"})):
-        response = client.post("/api/roster/memory:import", content=data, headers={"content-type": "application/zip"})
-        assert response.status_code == 400 and detail(response)
-    huge = client.post("/api/roster/memory:import", content=b"x" * (2 * 1024 * 1024 + 10), headers={"content-type": "application/zip"})
-    assert huge.status_code == 413
-    assert client.get("/api/roster").json()["seats"][0]["memory"] == "原样"
+def test_the_memory_pack_is_gone_the_archive_is_the_only_way_out(client):
+    """F26: no zip export / import of the memory any more (the whole data travels in an .arenaagents archive)."""
+    client.put("/api/roster/N1", json={"memory": "不会被导出"})
+    assert client.get("/api/roster/memory:export").status_code in (404, 405)
+    for query in ("", "?dry_run=true"):
+        assert client.post(f"/api/roster/memory:import{query}", content=b"PK\x03\x04", headers={"content-type": "application/zip"}).status_code in (404, 405)
+    assert client.get("/api/roster").json()["seats"][0]["memory"] == "不会被导出"  # and nothing was touched
 
 
 def test_the_memory_switch_is_saved(client):
@@ -272,7 +256,6 @@ def test_everything_that_changes_something_needs_the_token(client, monkeypatch):
         assert client.request(method.upper(), path, json=body).status_code == 401, path
     assert client.get("/api/roster").status_code == 401 and client.get("/api/budget").status_code == 401
     assert client.get("/api/roster", headers={"X-Arena-Token": TOKEN}).status_code == 200
-    assert client.post("/api/roster/memory:import", content=b"x").status_code == 401
 
 
 def test_a_remote_client_may_read_but_not_write_without_a_token(orch):
@@ -280,4 +263,3 @@ def test_a_remote_client_may_read_but_not_write_without_a_token(orch):
         assert remote.get("/api/roster").status_code == 200
         assert remote.put("/api/roster/N1", json={"persona": "x"}).status_code == 403
         assert remote.put("/api/budget", json={"max_tokens": 5}).status_code == 403
-        assert remote.post("/api/roster/memory:import", content=b"x").status_code == 403

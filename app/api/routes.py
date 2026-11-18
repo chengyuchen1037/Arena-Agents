@@ -3,30 +3,20 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
-from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.api import providers as provider_api
-from app.api import workspaces as workspace_api
-from app.api.security import (
-    is_local_request,
-    max_import_bytes,
-    require_trusted_client,
-    verify_api_access,
-)
-from app.api.session_io import read_limited_body, validate_import_payload
+from app.api.security import require_trusted_client, verify_api_access
 from app.config import APP_VERSION
-from app.game.orchestrator import SessionLoadError, orchestrator
-from app.game.session import SESSION_ID_PATTERN, GameSession
+from app.game.orchestrator import TakeoverError, orchestrator
+from app.game.session import GameSession
 from app.providers.models import ModelBinding, ProviderError
 from app.providers.store import get_provider_store
 from app.storage.errors import StorageError
-from app.storage.sessions import get_session_store
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +44,17 @@ def _safe_binding_issues() -> list[dict[str, str]]:
         return []
 
 
+def _legacy_data(request: Request | None) -> dict[str, Any]:
+    """v0.13 (F24): is there v0.12.1 data to convert?  Never raises: ``/state`` must stay available."""
+    from app.archive.legacy import legacy_data_state
+
+    try:
+        return legacy_data_state(request)
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not check for v0.12.1 data", exc_info=True)
+        return {"found": False, "dismissed": False}
+
+
 @router.get("/state")
 async def get_state(request: Request = None) -> dict[str, Any]:  # type: ignore[assignment]
     llm = orchestrator.llm
@@ -70,19 +71,10 @@ async def get_state(request: Request = None) -> dict[str, Any]:  # type: ignore[
             or getattr(orchestrator.session, "restored_from_save", False)
         ),
         "binding_issues": _safe_binding_issues(),
-        # v0.11: which workspace is active. Remote readers only get name/id (no path).
-        "workspace": _workspace_summary(request),
+        # v0.13 (F24): the notice "old data found, run the conversion script" (path only for a client on this machine)
+        "legacy_data": _legacy_data(request),
         "session": _public_session(orchestrator.session),
     }
-
-
-def _workspace_summary(request: Request | None) -> dict[str, Any]:
-    try:
-        include_path = True if request is None else is_local_request(request)
-        return workspace_api.workspace_state(include_path=include_path, engine=orchestrator)
-    except Exception:  # noqa: BLE001 - /state must stay available even if the workspace breaks
-        logger.warning("Could not read the active workspace", exc_info=True)
-        return {"enabled": False}
 
 
 @router.get("/config/llm")
@@ -213,6 +205,8 @@ async def control_shuffle_identities() -> dict[str, Any]:
     try:
         session = await orchestrator.shuffle_identities()
         return {"ok": True, "session": _public_session(session)}
+    except TakeoverError as exc:  # v0.13 (F5): the game has started - never re-dealt again
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -222,6 +216,8 @@ def _require_complete_bindings() -> None:
 
     if getattr(orchestrator, "get_model_binding", None) is None:
         return  # engine without binding support (legacy/unit tests)
+    if getattr(orchestrator, "demo_mode", False):
+        return  # scripted bots call no model
     issues = _safe_binding_issues()
     if issues:
         shown = "；".join(f"{i['actor_id']}：{i['message']}" for i in issues[:6])
@@ -252,107 +248,4 @@ async def control_pause() -> dict[str, Any]:
 @router.post("/control/force-pause")
 async def control_force_pause() -> dict[str, Any]:
     session = await orchestrator.force_pause()
-    return {"ok": True, "session": _public_session(session)}
-
-
-@router.post("/session/save")
-async def save_session() -> JSONResponse:
-    session_id = str(orchestrator.session.session_id)
-    if not SESSION_ID_PATTERN.fullmatch(session_id):
-        # Should be impossible (validated by GameSession); defence in depth.
-        raise HTTPException(status_code=400, detail="Invalid session_id; refusing to save.")
-    # The durable copy goes to the encrypted external SessionStore (written by
-    # the orchestrator). Nothing is written next to the source code any more.
-    try:
-        await orchestrator.persist_session("manual")
-    except StorageError as exc:
-        logger.error("Manual save failed: %s", type(exc).__name__)
-        raise HTTPException(status_code=503, detail=f"保存失败：{exc}") from exc
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"arena_session_{ts}_{session_id}.json"
-    # `session` is the user's own full save for an explicit browser download;
-    # server paths are never returned.
-    return JSONResponse(
-        content={
-            "ok": True,
-            "filename": filename,
-            "session": orchestrator.session_payload(),
-        }
-    )
-
-
-def _unique_import_id(payload: dict[str, Any]) -> str | None:
-    """Return the original id when it collided with a stored session (payload gets a fresh id)."""
-
-    original = str(payload.get("session_id", ""))
-    try:
-        collides = bool(original) and get_session_store().exists(original)
-    except StorageError:
-        return None
-    except ValueError as exc:  # e.g. Windows reserved names (CON, NUL, ...)
-        raise HTTPException(status_code=400, detail="无效的 session_id（保留名称或非法字符）。") from exc
-    if not collides:
-        return None
-    payload["session_id"] = uuid.uuid4().hex[:12]
-    return original
-
-
-@router.post("/session/import", dependencies=[Depends(require_trusted_client)])
-async def import_session(request: Request) -> dict[str, Any]:
-    raw = await read_limited_body(request, max_import_bytes())
-    try:
-        data = json.loads(raw)
-    except (ValueError, RecursionError) as exc:
-        raise HTTPException(status_code=400, detail="Import payload is not valid JSON.") from exc
-    session_payload = validate_import_payload(data)
-    # Never overwrite an existing stored game: colliding ids get a fresh id.
-    renamed_from = _unique_import_id(session_payload)
-    try:
-        session = await orchestrator.load_session_data(session_payload)
-    except ValueError as exc:  # engine-side validation (ValidationError/ScenarioError)
-        raise HTTPException(status_code=400, detail=f"Invalid session data: {exc}") from exc
-    result: dict[str, Any] = {"ok": True, "session": _public_session(session)}
-    if renamed_from:
-        result["renamed_from"] = renamed_from
-    return result
-
-
-@router.post("/sessions/{session_id}/load", dependencies=[Depends(require_trusted_client)])
-async def load_stored_session(session_id: str) -> dict[str, Any]:
-    provider_api.check_session_id(session_id)
-    if session_id == str(getattr(orchestrator.session, "session_id", "")):
-        # Persisting the live game first would overwrite the very copy being loaded.
-        raise HTTPException(status_code=409, detail="该存档就是当前对局，无需加载。")
-    store = get_session_store()
-    try:
-        if not store.exists(session_id):
-            raise HTTPException(status_code=404, detail="存档不存在。")
-        payload = store.load(session_id)
-    except StorageError as exc:
-        raise HTTPException(status_code=503, detail=f"读取存档失败：{exc}") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail="无效的 session_id（保留名称或非法字符）。") from exc
-    session_payload = validate_import_payload(payload)
-
-    # The UI promises "the current game is saved first": do it explicitly, and abort
-    # (leaving the live game untouched) if that save fails.
-    try:
-        saved = await orchestrator.persist_session("pre-load")
-    except Exception as exc:  # noqa: BLE001 - any failure must abort the load
-        logger.error("Pre-load save failed: %s", type(exc).__name__)
-        # Only storage errors carry user-safe text; anything else may contain paths.
-        reason = f"（{exc}）" if isinstance(exc, StorageError) else ""
-        raise HTTPException(
-            status_code=503,
-            detail=f"加载已取消：无法先保存当前对局{reason}。当前对局未被改动。",
-        ) from exc
-    if saved is False:
-        raise HTTPException(
-            status_code=503,
-            detail="加载已取消：无法先保存当前对局。当前对局未被改动。",
-        )
-    try:
-        session = await orchestrator.load_session_data(session_payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid session data: {exc}") from exc
     return {"ok": True, "session": _public_session(session)}

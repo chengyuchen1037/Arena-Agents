@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Mock UI server for the v0.12.1 front end (docs/v0.12-contracts.md §8 + §10.3 / §10.4 / §10.6:
+"""Mock UI server for the v0.13.0 front end (docs/v0.12-contracts.md §8 + §10.3 / §10.4 / §10.6:
 SSE v2 events, PublicSession v3, roster / budget / price-source APIs).
 
 It serves ``static/`` and replays one scripted 12-player game (about 60 s) over the SAME wire format
@@ -33,6 +33,12 @@ ring buffer when possible, otherwise a ``snapshot`` is sent first; a ``: heartbe
 Besides the contract endpoints there are a few mock-only helpers under ``/api/mock/*`` (hold the game,
 jump to the end, drop all SSE connections, show a stall notice, ...); see ``create_app``.
 
+v0.13 archive (contract section 11.9): ``/api/archive/*`` export and import jobs with ``archive.progress`` events, and
+``/api/state.legacy_data`` (start with ``--legacy`` to see the "old v0.12.1 data found" notice).  To try the import in
+the browser pick a file whose NAME says what should happen: ``demo`` / ``keys`` (password ``Correct-Horse-9``) /
+``mismatch`` (keys that do not match the Provider addresses) / ``fail`` / ``newer`` / ``corrupt`` / ``huge`` (see
+``MockArchive``).
+
 ``validate_event`` / ``validate_session`` check payloads against the §8 / §10.6 shapes: tests (and the
 lead, when wiring the real backend) can reuse them.
 """
@@ -46,6 +52,7 @@ import json
 import random
 import re
 import sys
+import unicodedata
 import uuid
 import zipfile
 from collections import deque
@@ -54,16 +61,11 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-#: The workspace paths the mock reports are FICTIONAL on purpose (never ``ROOT``-based): the dialog shows
-#: them, so a screenshot taken from the mock must not carry the path of the checkout or the user name.
-MOCK_WORKSPACE_PATH = "D:\\Arena-Workspaces\\Demo"
-MOCK_OTHER_WORKSPACE_PATH = "D:\\Arena-Workspaces\\Weekend-League"
-MOCK_DEFAULT_WORKSPACE_PATH = "D:\\Arena-Workspaces\\Default"
 STATIC_DIR = ROOT / "static"
 PARTS_REAL = STATIC_DIR / "avatar" / "parts.json"
 PARTS_FIXTURE = ROOT / "tests" / "frontend" / "fixtures" / "parts.min.json"
 DEFAULT_PORT = 8731
-APP_VERSION = "v0.12.1-mock"
+APP_VERSION = "v0.13.0-mock"
 PACE = 1.0  # plot seconds -> game seconds at speed=1 (the whole script is about 60 s)
 MODERATOR = "moderator"
 ENGINE = "engine"
@@ -381,42 +383,6 @@ class MockRoster:
             self.seats[pid]["avatar"] = best
         return [pid]
 
-    def export_zip(self) -> bytes:
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-            for pid in PLAYER_IDS:
-                s = self.seats[pid]
-                z.writestr(f"{pid}.persona.md", s["persona"])
-                z.writestr(f"{pid}.memory.md", s["memory"])
-        return buf.getvalue()
-
-    def import_zip(self, data: bytes, *, apply: bool) -> list[dict[str, Any]]:
-        """Parse a memory pack; returns the changes [{id, persona, memory}]. Raises ValueError for bad packs."""
-        try:
-            z = zipfile.ZipFile(io.BytesIO(data))
-        except zipfile.BadZipFile as exc:
-            raise ValueError("不是有效的 zip 记忆包") from exc
-        changes: dict[str, dict[str, Any]] = {}
-        incoming: dict[str, dict[str, str]] = {}
-        for info in z.infolist():
-            if info.is_dir():
-                continue
-            m = re.fullmatch(r"(N\d{1,2})\.(persona|memory)\.md", info.filename)
-            if not m or m.group(1) not in self.seats:
-                raise ValueError(f"记忆包里有不在名册内的文件：{info.filename}")
-            if info.file_size > 256 * 1024:
-                raise ValueError(f"文件太大：{info.filename}")
-            text = z.read(info).decode("utf-8", errors="replace")
-            incoming.setdefault(m.group(1), {})[m.group(2)] = text
-        for pid, parts in incoming.items():
-            diff = {k: parts[k] != self.seats[pid][k] for k in parts}
-            if any(diff.values()):
-                changes[pid] = {"id": pid, "persona": bool(diff.get("persona")), "memory": bool(diff.get("memory"))}
-            if apply:
-                for k, v in parts.items():
-                    self.seats[pid][k] = v
-        return [changes[p] for p in PLAYER_IDS if p in changes]
-
     def clear(self, include_persona: bool) -> None:
         for s in self.seats.values():
             s["memory"] = ""
@@ -425,11 +391,321 @@ class MockRoster:
 
 
 # --------------------------------------------------------------------------------------------------
+# v0.13 archive: export / import jobs with progress events (docs/archive.md; contract sections 11.5 / 11.9)
+# --------------------------------------------------------------------------------------------------
+
+#: What the mock "has" on its fictional disk (never the checkout's path or the user name: the dialogs show them)
+MOCK_DATA_DIR = "D:\\Arena-Agents\\data"
+MOCK_LEGACY_WORKSPACE = "C:\\Users\\you\\Arena-Agents\\Default"
+MOCK_PASSWORD = "Correct-Horse-9"  # opens every mock archive that holds API keys (a file name with "keys")
+MOCK_MAX_ARCHIVE_BYTES = 2 * 1024**3
+MOCK_APP_VERSION = "v0.13.0"
+MAX_PASSWORD_ATTEMPTS = 10
+EXPORT_NAME_RE = re.compile(r"^arena-[0-9]{8}-[0-9]{6}\.arenaagents$")
+WRONG_PASSWORD = "密码错误或 API Key 部分已损坏"
+GAME_RUNNING_TEXT = "对局正在运行：请先暂停对局，再导入存档。"
+BUSY_TEXT = "已有一个导出或导入任务正在进行，请等它结束。"
+MISMATCH_TEXT = (
+    "存档里 Provider「DeepSeek」的协议或地址与加密 API Key 时不一致：存档在导出之后被改动过。为了安全，不导入 API Key；"
+    "可以选择「跳过 API Key」导入其余内容，再在 Provider 里重新填写 Key。"
+)
+ARCHIVE_SCENARIOS = "demo（正常）/ keys（含 API Key，密码 " + MOCK_PASSWORD + "）/ mismatch（Key 与地址不一致）/ fail（导入中途失败）/ newer（版本太新）/ corrupt（校验失败）/ huge（太大）"
+
+
+def mock_password_problem(password: Any) -> str | None:
+    """The password rule of app/archive/kdf.py (tests/archive/password_cases.json is the table both are tested against)."""
+    if not isinstance(password, str):
+        return "请输入密码。"
+    text = unicodedata.normalize("NFC", password)
+    if any(ord(ch) < 0x20 or 0x7F <= ord(ch) <= 0x9F for ch in text):
+        return "密码不能包含控制字符。"
+    if len(text) > 256:
+        return "密码最长 256 位。"
+    if len(text) < 12:
+        return f"密码至少需要 12 位（现在 {len(text)} 位）。"
+    classes = {"upper" if "A" <= ch <= "Z" else "lower" if "a" <= ch <= "z" else "digit" if "0" <= ch <= "9" else "symbol" for ch in text}
+    if len(classes) < 3:
+        return f"密码需要包含大写字母、小写字母、数字、符号中的至少 3 类（现在 {len(classes)} 类）。"
+    return None
+
+
+def archive_error(status: int, code: str, message: str) -> tuple[int, dict[str, Any]]:
+    return status, {"detail": message, "code": code}
+
+
+class MockArchive:
+    """The archive endpoints of the mock: jobs that really take a moment (so the progress bar moves), a pending
+    import and the "old data found" notice.  Nothing touches the disk.
+
+    Hand-testing the import in the browser: the NAME of the file picked decides what the mock makes of it ("demo"
+    = a normal archive, "keys" = holds API keys, password ``MOCK_PASSWORD``, "mismatch" = keys whose Provider address was
+    changed after they were sealed, "fail" = the import breaks half way, "newer" = a newer format, "corrupt" =
+    checksum mismatch, "huge" = over the size limit); any other file is
+    read as a real archive (its ``manifest.json``) and refused when it is none."""
+
+    def __init__(self, bus: "EventBus", game: Any, *, speed: float = 1.0) -> None:
+        self.bus = bus
+        self.game = game  # () -> MockGame
+        self.speed = max(0.01, float(speed))
+        self.tick = 0.12  # seconds (at speed 1) between two progress events
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.busy: str | None = None
+        self.pending: dict[str, Any] | None = None
+        self.exports: dict[str, bytes] = {}
+        self.legacy: dict[str, bool] = {"found": False, "dismissed": False}
+        self.max_bytes = MOCK_MAX_ARCHIVE_BYTES
+        self.tasks: set[asyncio.Task[None]] = set()
+
+    # ------------------------------------------------------------------------------------ the notice
+    def legacy_state(self) -> dict[str, Any]:
+        state: dict[str, Any] = {"found": bool(self.legacy["found"]), "dismissed": bool(self.legacy["dismissed"])}
+        if state["found"]:
+            state["path"] = MOCK_LEGACY_WORKSPACE
+        return state
+
+    # ------------------------------------------------------------------------------------- queries
+    def game_running(self) -> bool:
+        return self.game().session["status"] == "running"
+
+    def public_pending(self) -> dict[str, Any] | None:
+        p = self.pending
+        if p is None:
+            return None
+        return {"import_id": p["import_id"], "name": p["name"], "size_bytes": p["size_bytes"], "summary": copy.deepcopy(p["summary"]), "expires_in": 7200}
+
+    def snapshot(self, job: dict[str, Any], *, local: bool = True) -> dict[str, Any]:
+        data = self.event_data(job)
+        if job["status"] == "done" and job.get("result") is not None:
+            data["result"] = dict(job["result"]) if local else {k: v for k, v in job["result"].items() if k != "path"}
+        return data
+
+    def status(self) -> dict[str, Any]:
+        active = next((j for j in reversed(list(self.jobs.values())) if j["status"] == "running"), None)
+        return {"busy": self.busy is not None, "job": self.snapshot(active) if active else None, "import": self.public_pending(), "game_active": self.game_running()}
+
+    def get_job(self, job_id: str) -> tuple[int, dict[str, Any]]:
+        job = self.jobs.get(job_id)
+        if job is None:
+            return archive_error(404, "not_found", "找不到这个任务（可能已经过期，或服务重启过）。")
+        return 200, self.snapshot(job)
+
+    # ----------------------------------------------------------------------------------- publishing
+    def event_data(self, job: dict[str, Any]) -> dict[str, Any]:
+        data: dict[str, Any] = {k: job[k] for k in ("job_id", "kind", "phase", "done", "total", "status")}
+        if job.get("message"):
+            data["message"] = job["message"]
+        if job.get("code"):
+            data["code"] = job["code"]
+        if job["status"] == "done" and job.get("result") is not None:
+            data["result"] = {k: v for k, v in job["result"].items() if k != "path"}  # no server path on the stream
+        return data
+
+    def publish(self, job: dict[str, Any]) -> None:
+        self.bus.publish("archive.progress", self.event_data(job))
+
+    def new_job(self, kind: str) -> dict[str, Any]:
+        job = {"job_id": uuid.uuid4().hex[:16], "kind": kind, "phase": "flush" if kind == "export" else "verify", "done": 0, "total": 1, "status": "running", "message": "", "code": "", "result": None}
+        self.jobs[job["job_id"]] = job
+        self.busy = job["job_id"]
+        return job
+
+    def spawn(self, coro: Any) -> None:
+        task = asyncio.get_running_loop().create_task(coro)
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def walk(self, job: dict[str, Any], plan: list[tuple[str, int, int]], *, stop_after: str | None = None) -> bool:
+        """Publish the phases of ``plan`` = [(phase, steps, total)] one step at a time; ``False`` when stopped early."""
+        for phase, steps, total in plan:
+            for i in range(steps + 1):
+                job["phase"], job["done"], job["total"] = phase, round(total * i / steps), total
+                self.publish(job)
+                if i < steps:
+                    await asyncio.sleep(self.tick / self.speed)
+            if phase == stop_after:
+                return False
+        return True
+
+    def finish(self, job: dict[str, Any], *, result: dict[str, Any] | None = None, error: tuple[str, str] | None = None) -> None:
+        if error is not None:
+            job["status"], job["code"], job["message"] = "error", error[0], error[1]
+        else:
+            job["status"], job["result"] = "done", result
+        self.busy = None
+        self.publish(job)
+
+    # ---------------------------------------------------------------------------------------- export
+    def start_export(self, include_keys: bool, password: Any, include_logs: bool) -> tuple[int, dict[str, Any]]:
+        if include_keys:
+            problem = mock_password_problem(password)
+            if problem:
+                return archive_error(422, "weak_password", problem)
+        if self.busy is not None:
+            return archive_error(409, "busy", BUSY_TEXT)
+        job = self.new_job("export")
+        self.publish(job)
+        self.spawn(self.run_export(job, include_keys, include_logs))
+        return 202, {"job_id": job["job_id"], "kind": "export"}
+
+    async def run_export(self, job: dict[str, Any], include_keys: bool, include_logs: bool) -> None:
+        pack_bytes = 48_000_000 if include_logs else 1_400_000
+        plan = [("flush", 1, 1), ("collect", 1, 1)] + ([("encrypt", 1, 1)] if include_keys else []) + [("pack", 12, pack_bytes), ("finalize", 1, 1)]
+        try:
+            await self.walk(job, plan)
+            now = datetime.now().astimezone().replace(microsecond=0)
+            name = f"arena-{now:%Y%m%d-%H%M%S}.arenaagents"
+            while name in self.exports:  # two exports in the same second
+                now = now.replace(second=(now.second + 1) % 60)
+                name = f"arena-{now:%Y%m%d-%H%M%S}.arenaagents"
+            contents = {"games": 3, "providers": 2, "roster_seats": 12, "has_secrets": include_keys, "has_logs": include_logs}
+            result = {
+                "name": name,
+                "path": f"{MOCK_DATA_DIR}\\exports\\{name}",
+                "display_path": f"data/exports/{name}",
+                "size_bytes": 9_800_000 if include_logs else 310_000,
+                "archive_id": uuid.uuid4().hex,
+                "created_at": now.isoformat(timespec="seconds"),
+                "app_version": MOCK_APP_VERSION,
+                "contents": contents,
+                "file_count": 31 if include_logs else 17,
+                "uncompressed_bytes": pack_bytes,
+                "warnings": [],
+            }
+            self.exports[name] = self.tiny_archive(result)
+            self.finish(job, result=result)
+        except Exception:  # noqa: BLE001 - a mock job never leaves the slot taken
+            self.finish(job, error=("internal", "导出失败：发生了内部错误（模拟）。"))
+
+    @staticmethod
+    def tiny_archive(result: dict[str, Any]) -> bytes:
+        """A small valid zip with a manifest (the mock's idea of the downloaded file)."""
+        manifest = {
+            "format": "arenaagents", "format_version": 1, "app_version": result["app_version"], "archive_id": result["archive_id"],
+            "created_at": result["created_at"], "contents": result["contents"], "files": [], "files_sha256": "0" * 64,
+        }
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=1))
+        return buf.getvalue()
+
+    def export_file(self, name: str) -> bytes | None:
+        return self.exports.get(name) if EXPORT_NAME_RE.fullmatch(name or "") else None
+
+    # ----------------------------------------------------------------------------------------- import
+    def demo_summary(self, size: int, *, has_secrets: bool, created_at: str | None = None) -> dict[str, Any]:
+        games = [
+            {"session_id": "g3demo000003", "title": "Arena-Agents", "scenario_title": "狼人杀 12 人局", "status": "finished", "winner": "好人阵营", "created_at": "2026-11-17T09:00:00+00:00", "human_involved": False, "players": 12},
+            {"session_id": "g2demo000002", "title": "Arena-Agents", "scenario_title": "狼人杀 12 人局", "status": "paused", "winner": None, "created_at": "2026-11-16T09:00:00+00:00", "human_involved": True, "players": 12},
+            {"session_id": "g1demo000001", "title": "Arena-Agents", "scenario_title": "狼人杀 12 人局", "status": "finished", "winner": "狼人阵营", "created_at": "2026-11-15T09:00:00+00:00", "human_involved": False, "players": 12},
+        ]
+        return {
+            "archive_id": uuid.uuid4().hex, "format_version": 1, "app_version": MOCK_APP_VERSION,
+            "created_at": created_at or "2026-11-18T00:42:07-08:00", "size_bytes": size, "uncompressed_bytes": size * 6, "file_count": 31,
+            "games": 3, "providers": 2, "roster_seats": 12, "has_secrets": has_secrets, "has_logs": True,
+            "provider_names": ["DeepSeek", "Claude"], "game_list": games, "games_listed": 3, "warnings": [],
+        }
+
+    def read_manifest(self, data: bytes) -> dict[str, Any] | None:
+        """The summary of a REAL archive (what its manifest says); ``None`` when ``data`` is none."""
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as z:
+                manifest = json.loads(z.read("manifest.json").decode("utf-8"))
+        except (zipfile.BadZipFile, KeyError, ValueError, UnicodeDecodeError):
+            return None
+        if not isinstance(manifest, dict) or manifest.get("format") != "arenaagents" or not isinstance(manifest.get("contents"), dict):
+            return None
+        c = manifest["contents"]
+        summary = self.demo_summary(len(data), has_secrets=bool(c.get("has_secrets")), created_at=str(manifest.get("created_at") or "2026-11-18T00:00:00+00:00"))
+        summary.update(
+            archive_id=str(manifest.get("archive_id") or summary["archive_id"]), app_version=str(manifest.get("app_version") or "?"),
+            games=int(c.get("games") or 0), providers=int(c.get("providers") or 0), roster_seats=int(c.get("roster_seats") or 0),
+            has_logs=bool(c.get("has_logs")), file_count=len(manifest.get("files") or []),
+        )
+        summary["game_list"] = summary["game_list"][: summary["games"]]
+        summary["games_listed"] = len(summary["game_list"])
+        return summary
+
+    def receive(self, data: bytes, name: str) -> tuple[int, dict[str, Any]]:
+        if self.game_running():
+            return archive_error(409, "game_running", GAME_RUNNING_TEXT)
+        if self.busy is not None:
+            return archive_error(409, "busy", BUSY_TEXT)
+        if len(data) > self.max_bytes or "huge" in name.lower():
+            return archive_error(413, "too_large", "存档文件超过了大小上限（2.0 GB）。可以用环境变量 ARENA_MAX_ARCHIVE_BYTES 调大。")
+        if not data:
+            return archive_error(422, "invalid_archive", "上传的文件是空的。")
+        lowered = name.lower()
+        if "newer" in lowered:
+            return archive_error(422, "unsupported_version", "这份存档使用更新的格式（v2），当前程序只支持到 v1。请先把 Arena-Agents 升级到较新的版本再导入。")
+        if "corrupt" in lowered:
+            return archive_error(422, "invalid_archive", "games/g2demo000002/game.json 的 SHA-256 校验值与清单不符：存档已损坏或被改动。")
+        if any(word in lowered for word in ("demo", "keys", "fail", "mismatch")):
+            summary: dict[str, Any] | None = self.demo_summary(len(data), has_secrets="keys" in lowered or "mismatch" in lowered)
+        else:
+            summary = self.read_manifest(data)
+        if summary is None:
+            return archive_error(422, "invalid_archive", "这不是有效的存档文件（不是 zip，或者文件已损坏）。")
+        self.pending = {"import_id": uuid.uuid4().hex[:16], "name": name, "size_bytes": len(data), "summary": summary, "attempts": 0, "fail": "fail" in lowered, "mismatch": "mismatch" in lowered}
+        return 200, self.public_pending() or {}
+
+    def discard(self, import_id: str) -> bool:
+        if self.pending is not None and self.pending["import_id"] == import_id:
+            self.pending = None
+            return True
+        return False
+
+    def start_apply(self, import_id: str, password: Any, skip_keys: bool) -> tuple[int, dict[str, Any]]:
+        pending = self.pending
+        if pending is None or pending["import_id"] != import_id:
+            return archive_error(404, "not_found", "这次导入已经过期或被取消，请重新选择存档文件。")
+        if self.game_running():
+            return archive_error(409, "game_running", GAME_RUNNING_TEXT)
+        if self.busy is not None:
+            return archive_error(409, "busy", BUSY_TEXT)
+        keys = bool(pending["summary"]["has_secrets"]) and not skip_keys
+        if keys:
+            if not password:
+                return archive_error(422, "wrong_password", "这份存档含有 API Key：请输入密码，或者选择跳过 API Key。")
+            if pending["attempts"] >= MAX_PASSWORD_ATTEMPTS:
+                self.pending = None
+                return archive_error(429, "too_many_attempts", "密码错误次数过多，请重新选择存档文件再试。")
+            if password != MOCK_PASSWORD:
+                pending["attempts"] += 1
+                return archive_error(422, "wrong_password", WRONG_PASSWORD)
+            if pending["mismatch"]:  # the right password, but providers.json was changed after the keys were sealed
+                return archive_error(422, "keys_mismatch", MISMATCH_TEXT)
+        job = self.new_job("import")
+        self.publish(job)
+        self.spawn(self.run_import(job, pending, keys))
+        return 202, {"job_id": job["job_id"], "kind": "import"}
+
+    async def run_import(self, job: dict[str, Any], pending: dict[str, Any], keys: bool) -> None:
+        summary = pending["summary"]
+        plan = [("verify", 8, pending["size_bytes"]), ("validate", 1, 1), ("backup", 1, 1), ("replace", 4, 4)] + ([("keys", 1, 1)] if keys else []) + [("reload", 1, 1), ("finalize", 1, 1)]
+        try:
+            if not await self.walk(job, plan, stop_after="replace" if pending["fail"] else None):
+                self.finish(job, error=("io_error", "无法移动数据目录里的「games」（可能被其他程序占用）。已恢复原来的数据。"))
+                return
+            await self.game().reset()  # the real server reloads the data and sends every client a fresh snapshot
+            now = datetime.now()
+            names = summary["provider_names"]
+            result = {
+                "backup": f"{now:%Y%m%d-%H%M%S}", "games": summary["games"], "providers": summary["providers"],
+                "keys_imported": len(names) if keys else 0, "keys_kept": 0 if keys else 1,
+                "providers_without_key": [] if keys else names[1:], "warnings": [],
+            }
+            self.pending = None
+            self.finish(job, result=result)
+        except Exception:  # noqa: BLE001
+            self.finish(job, error=("internal", "导入失败：发生了内部错误（模拟）。"))
+
+
+# --------------------------------------------------------------------------------------------------
 # contract shapes (§8.1 / §10.6) and a validator for the §8.2 events
 # --------------------------------------------------------------------------------------------------
 
 MSG_KINDS = {"speech", "announce", "template", "challenge", "reply", "ability", "system"}
-AGENT_STATES = {"thinking", "acting", "sleeping"}
+AGENT_STATES = {"thinking", "acting", "sleeping", "human"}  # v0.13: "human" = a person plays the seat (F6)
 GAME_STATUSES = {"idle", "running", "paused", "finished"}
 PAUSE_REASONS = {"user", "hold", "error", "stall", "budget", ""}
 FLOOR_KINDS = {"turn", "queue", "free", "none"}
@@ -672,11 +948,64 @@ def validate_avatar(a: Any, where: str = "avatar") -> list[str]:
     return []
 
 
+def validate_takeover(t: Any, where: str = "takeover") -> list[str]:
+    """``PublicSession.takeover`` / the ``takeover.updated`` payload (contract §11.7)."""
+    errs: list[str] = []
+    if not isinstance(t, dict):
+        return [f"{where}: not an object"]
+    if not _opt_str(t.get("seat")):
+        errs.append(f"{where}.seat")
+    if not isinstance(t.get("reshuffle_available"), bool):
+        errs.append(f"{where}.reshuffle_available")
+    if t.get("seat") is None:
+        return errs
+    if not _is_int(t.get("seq")):
+        errs.append(f"{where}.seq")
+    channels = t.get("channels")
+    if not isinstance(channels, dict):
+        errs.append(f"{where}.channels")
+    else:
+        for cid, c in channels.items():
+            if not (isinstance(c, dict) and isinstance(c.get("can_write"), bool) and _opt_str(c.get("why_not")) and _opt_str(c.get("code"))
+                    and (c.get("max_chars") is None or _is_int(c["max_chars"])) and isinstance(c.get("can_pass"), bool)):
+                errs.append(f"{where}.channels.{cid}")
+                continue
+            floor = c.get("floor")
+            if floor is not None and not (
+                isinstance(floor, dict) and floor.get("kind") in FLOOR_KINDS and isinstance(floor.get("mine"), bool)
+                and isinstance(floor.get("paused"), bool) and all(_opt_num(floor.get(k)) for k in ("messages_left", "chars_left", "seconds_left", "deadline_clock"))
+            ):
+                errs.append(f"{where}.channels.{cid}.floor")
+    reqs = t.get("requests")
+    if not isinstance(reqs, list):
+        errs.append(f"{where}.requests")
+    else:
+        for i, r in enumerate(reqs):
+            if not (isinstance(r, dict) and isinstance(r.get("id"), str) and r.get("kind") in REQUEST_KINDS and isinstance(r.get("answered"), bool)
+                    and _opt_num(r.get("seconds_left")) and _opt_num(r.get("deadline_clock")) and _opt_str(r.get("channel_id"))
+                    and (r.get("my_answer") is None or (isinstance(r["my_answer"], dict) and "value" in r["my_answer"]))):
+                errs.append(f"{where}.requests[{i}]")
+    abilities = t.get("abilities")
+    if not isinstance(abilities, list):
+        errs.append(f"{where}.abilities")
+    else:
+        for i, a in enumerate(abilities):
+            if not (isinstance(a, dict) and isinstance(a.get("id"), str) and _is_int(a.get("quota_left")) and isinstance(a.get("params"), list)
+                    and all(isinstance(p, dict) and isinstance(p.get("name"), str) and p.get("type") in {"player_id", "player_ids", "enum", "int", "text"}
+                            for p in a["params"])):
+                errs.append(f"{where}.abilities[{i}]")
+    if not _str_list(t.get("attention")):
+        errs.append(f"{where}.attention")
+    return errs
+
+
 def validate_session(s: Any) -> list[str]:
     """PublicSession v3 (§10.6)."""
     errs: list[str] = []
     if not isinstance(s, dict):
         return ["session: not an object"]
+    if "takeover" in s:
+        errs += validate_takeover(s["takeover"], "session.takeover")
     for k in ("session_id", "scenario_name", "phase_text", "active_status_text", "summary", "hold_reason", "pause_reason", "stall_notice"):
         if not isinstance(s.get(k), str):
             errs.append(f"session.{k}")
@@ -729,6 +1058,44 @@ def validate_session(s: Any) -> list[str]:
     if not isinstance(s.get("memory_enabled"), bool):
         errs.append("session.memory_enabled")
     errs += validate_review(s.get("review"), "session.review")
+    return errs
+
+
+ARCHIVE_EVENT_KEYS = {"job_id", "kind", "phase", "done", "total", "status", "message", "code", "result"}
+ARCHIVE_PHASES = {
+    "export": {"flush", "collect", "encrypt", "pack", "finalize"},
+    "import": {"verify", "validate", "backup", "replace", "keys", "reload", "finalize"},
+}
+
+
+def validate_archive_event(data: dict[str, Any], w: str = "archive.progress") -> list[str]:
+    """Problems of one ``archive.progress`` payload (contract section 11.4 / 11.9); the result never carries a server path."""
+    errs: list[str] = []
+    if set(data) - ARCHIVE_EVENT_KEYS:
+        errs.append(f"{w}: keys {sorted(set(data) - ARCHIVE_EVENT_KEYS)}")
+    if not (isinstance(data.get("job_id"), str) and data["job_id"]):
+        errs.append(f"{w}.job_id")
+    kind = data.get("kind")
+    if kind not in ARCHIVE_PHASES:
+        errs.append(f"{w}.kind")
+    elif data.get("phase") not in ARCHIVE_PHASES[kind]:
+        errs.append(f"{w}.phase")
+    for key in ("done", "total"):
+        if not _is_int(data.get(key)) or data[key] < 0:
+            errs.append(f"{w}.{key}")
+    status = data.get("status")
+    if status not in ("running", "done", "error"):
+        errs.append(f"{w}.status")
+    if status == "error" and not (isinstance(data.get("message"), str) and data["message"] and isinstance(data.get("code"), str) and data["code"]):
+        errs.append(f"{w}: an error needs message and code")
+    if status == "done":
+        result = data.get("result")
+        if not isinstance(result, dict):
+            errs.append(f"{w}.result")
+        elif "path" in result:
+            errs.append(f"{w}.result.path: the stream never carries a server path")
+    elif "result" in data:
+        errs.append(f"{w}.result: only a finished job has one")
     return errs
 
 
@@ -824,9 +1191,10 @@ def validate_event(ev: Any) -> list[str]:
             errs += validate_budget(data["budget"], f"{w}.budget")
         if "review" in data:
             errs += validate_review(data["review"], f"{w}.review")
-    elif etype == "workspace.changed":
-        if data != {}:
-            errs.append(w)
+    elif etype == "takeover.updated":
+        errs += validate_takeover(data.get("takeover"), f"{w}.takeover")
+    elif etype == "archive.progress":
+        errs += validate_archive_event(data, w)
     elif etype == "error":
         if not isinstance(data.get("message"), str):
             errs.append(w)
@@ -989,7 +1357,7 @@ def build_session(session_id: str, bindings: dict[str, Any], roster: MockRoster,
     return {
         "session_id": session_id,
         "schema_version": 5,
-        "version": "v0.12.1",
+        "version": "v0.13.0",
         "title": "Arena-Agents",
         "scenario_name": "werewolf_12p",
         "scenario_title": "狼人杀 12 人局（模拟数据）",
@@ -1030,7 +1398,40 @@ def build_session(session_id: str, bindings: dict[str, Any], roster: MockRoster,
         "review": {"available": False, "done": [], "running": False},
         "stall_notice": "",
         "demo": demo,
+        # v0.13 (F2, F10): nobody plays a seat yet; "reshuffle_available": the game has not started (F5)
+        "takeover": {"seat": None, "reshuffle_available": True},
     }
+
+
+# the abilities of the mock's scenario (white wolf king) as the seat state lists them (contract §11.7)
+EXPLODE = "white_wolf_explode"
+EXPLODE_TEXT = "白狼王自爆：只在主持人启用期间（白天非投票的正式发言环节）可用。公开宣布自爆并带走一名存活的其他玩家，公共频道会被冻结。"
+FREE_MAX_CHARS = 300  # the mock scenario's per-message limits (defaults.free / defaults.dm)
+DM_MAX_CHARS = 600
+TOKEN_MAX_MESSAGES = 2
+TOKEN_MAX_CHARS = 600
+FREE_MAX_MESSAGES = 6
+TEXT_ANSWER_MAX_CHARS = 300
+
+
+def receipt(ok: bool, message: str = "", *, code: str | None = None, seq: int | None = None, truncated: dict[str, int] | None = None,
+            **data: Any) -> dict[str, Any]:
+    """The slim receipt of the seat endpoints (contract §11.7)."""
+    out: dict[str, Any] = {"accepted": ok, "seq": seq, "code": None if ok else code, "message": message}
+    if truncated:
+        out["truncated"] = truncated
+    if data:
+        out["data"] = data
+    return out
+
+
+class TakeoverError(Exception):
+    """A takeover / seat request the server refuses: ``status`` is the HTTP status the endpoint answers with."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
 
 
 class MockGame:
@@ -1060,17 +1461,35 @@ class MockGame:
         self.intent: dict[str, tuple[str, float | None]] = {}  # what each agent is doing (restored on resume)
         self.deadlines: dict[str, float] = {}  # request id -> game-clock second it closes at
         self.reviewed: dict[str, bool] = {}
+        self._reset_human()
+
+    def _reset_human(self) -> None:
+        """v0.13: a person may play one seat (F2).  The script waits for them where their seat would act."""
+        self.takeover_seat: str | None = None
+        self.started = False  # a game.status "running" was recorded: no more re-dealing (F5)
+        self.invalidating_seq = 0  # the seq of the last phase change: older drafts are STALE (F11)
+        self.token: dict[str, Any] | None = None  # the played seat's active token in a queue
+        self.ability_open = False  # the moderator enabled the ability for the played seat
+        self.ability_result: dict[str, Any] | None = None  # {"target", "declaration"} once it was used
+        self.free_spoken = False  # the played seat spoke in the free discussion
+        self._takeover_flush_scheduled = False
 
     # ----------------------------------------------------------------------------- plumbing
+    #: events that cannot change what the played seat may do (no ``takeover.updated`` after them)
+    _SEAT_QUIET = frozenset({"agent.status", "agent.metrics", "budget.updated", "budget.warning", "budget.reached", "takeover.updated"})
+
     def emit(self, etype: str, **data: Any) -> None:
         ev = self.bus.publish(etype, data)
         self.session["event_id"] = ev["id"]
+        if self.takeover_seat is not None and etype not in self._SEAT_QUIET:
+            self.schedule_takeover_flush()
 
     def snapshot_payload(self) -> dict[str, Any]:
         self.session["event_id"] = self.bus.latest_id
         for r in self.session["requests"]:
             if r["status"] == "open" and r["id"] in self.deadlines:
                 r["seconds_left"] = round(max(0.0, self.deadlines[r["id"]] - self.session["clock"]), 2)
+        self.session["takeover"] = self.compute_takeover()
         return copy.deepcopy(self.session)
 
     @property
@@ -1163,6 +1582,7 @@ class MockGame:
             s["winner"] = None
             s["summary"] = ""
             s["review"]["available"] = False
+            self.started = True  # (F5) from now on nobody can re-deal
         self.emit("game.status", status=status, reason=reason, winner=s["winner"], summary=s["summary"])
         text = {
             "running": "对局进行中",
@@ -1179,6 +1599,8 @@ class MockGame:
     def set_agent(self, aid: str, state: str, until: float | None = None) -> None:
         """thinking / acting / sleeping (``until``: game-clock second a timed sleep ends)."""
         until = until if state == "sleeping" else None
+        if aid == self.takeover_seat:
+            return  # a person plays this seat: it has no agent that thinks, acts or sleeps (F6)
         node = self.session["moderator"] if aid == MODERATOR else self.player(aid)
         self.intent[aid] = (state, until)
         if self.session["status"] == "paused":
@@ -1198,7 +1620,7 @@ class MockGame:
 
     def stir(self, exclude: set[str], k: int = 3) -> None:
         """A new message wakes agents (E1): a few of the sleeping ones think for a moment and go back to sleep."""
-        pool = [a for a in [MODERATOR, *self.alive()] if a not in exclude]
+        pool = [a for a in [MODERATOR, *self.alive()] if a not in exclude and a != self.takeover_seat]
         pool = [a for a in pool if (self.session["moderator"] if a == MODERATOR else self.player(a))["state"] == "sleeping"]
         for aid in self.rng.sample(pool, min(k, len(pool))):
             self.spawn_bg(self._mini_activation(aid))
@@ -1349,6 +1771,9 @@ class MockGame:
 
     def set_phase(self, text: str) -> None:
         self.session["phase_text"] = text
+        if self.takeover_seat is not None:  # a ledger entry that makes the drafts written before it STALE (F11)
+            self.session["seq"] += 1
+            self.invalidating_seq = self.session["seq"]
         self.emit("phase.changed", text=text)
 
     def update_dashboard(self) -> None:
@@ -1396,7 +1821,9 @@ class MockGame:
         self.emit("channel.updated", channel=copy.deepcopy(ch))
         self.set_floor(cid, {"kind": "queue", "active": order[0], "paused": False, "seconds_left": 90.0, "queue": queue, "free": None})
         for i, holder in enumerate(order):
-            if holder in speeches:
+            if holder == self.takeover_seat:
+                await self.human_turn(cid, queue, i)  # a person plays this seat: wait for their words (F7)
+            elif holder in speeches:
                 spec = speeches[holder]
                 truncated = spec[2] if len(spec) > 2 else None
                 await self.speak(cid, holder, spec[0], think=spec[1], truncated=truncated)
@@ -1567,7 +1994,15 @@ class MockGame:
             self.sleep(pid)
 
         thinks = [0.4 + self.rng.random() * 2.2 for _ in to]
-        await asyncio.gather(*(one(pid, t) for pid, t in zip(to, thinks)))
+        human = self.takeover_seat if self.takeover_seat in to else None  # a person votes for this seat (F17)
+        await asyncio.gather(*(one(pid, t) for pid, t in zip(to, thinks) if pid != human))
+        if human is not None:
+            await self.wait_human(lambda: self._request(rid)["status"] != "open" or self.takeover_seat != human, 90.0)
+            if self._request(rid)["status"] == "open":
+                if self.takeover_seat != human:  # given back to its agent meanwhile: the script votes for it
+                    await one(human, 0.8)
+                else:  # nobody answered in time: the request closes at its deadline (F7)
+                    self.close_request(rid, "deadline")
         return rid
 
     # --- challenge tickets
@@ -1657,12 +2092,22 @@ class MockGame:
                 self.request_answer(rid, pid, change[0])
                 self.sleep(pid)
 
-        await asyncio.gather(
-            wolf("N3", "N5", 1.0),
-            wolf("N6", "N4", 1.6, change=("N5", 2.6)),
-            wolf("N10", "N5", 2.0),
-            wolf("N12", "N8", 2.4, change=("N5", 3.4)),
-        )
+        human_wolf = self.takeover_seat if self.takeover_seat in WOLVES else None  # a person plays one of the wolves
+        plan = [
+            ("N3", "N5", 1.0, None),
+            ("N6", "N4", 1.6, ("N5", 2.6)),
+            ("N10", "N5", 2.0, None),
+            ("N12", "N8", 2.4, ("N5", 3.4)),
+        ]
+        await asyncio.gather(*(wolf(pid, target, think, change) for pid, target, think, change in plan if pid != human_wolf))
+        if human_wolf is not None:
+            # the others agree on one target; the request closes when the person answers the same (or at its deadline)
+            await self.wait_human(lambda: self._request(rid)["status"] != "open" or self.takeover_seat != human_wolf, 120.0)
+            if self._request(rid)["status"] == "open":
+                if self.takeover_seat != human_wolf:
+                    await wolf(human_wolf, "N5", 0.8)
+                else:
+                    self.close_request(rid, "deadline")
         await self.moderator_step(0.8, "主持人：宣布刀口，回复预言家与女巫")
         self.announce("wolves", "kill_target", f"今晚刀口：{ref('N5')}。")
         self.commit("dm-N4", MODERATOR, f"【查验结果】{ref('N3')} 是狼人阵营。", "speech", visible=[MODERATOR, "N4"])
@@ -1716,40 +2161,56 @@ class MockGame:
         self.update_dashboard()
         lid = self.open_request("请留下遗言（不超过 100 字）", [], ["N10"], sealed=False, kind="text", seconds=60.0)
         self.moderator_idle()
-        self.set_agent("N10", "thinking")
-        await self.wait(1.4)
-        self.set_agent("N10", "acting")
-        self.meter("N10", tools=1, think=1)
-        self.request_answer(lid, "N10", "我真的是好人，大家别被预言家牵着走。")
-        self.sleep("N10")
+        last_words = "我真的是好人，大家别被预言家牵着走。"
+        if self.takeover_seat == "N10":  # a person plays the voted-out seat: they write their own last words
+            await self.wait_human(lambda: self._request(lid)["status"] != "open" or self.takeover_seat != "N10", 60.0)
+            written = next((a["value"] for a in self._request(lid)["answers"] if a["player_id"] == "N10"), None)
+            if written is not None:
+                last_words = written
+            elif self._request(lid)["status"] == "open":
+                if self.takeover_seat == "N10":
+                    self.close_request(lid, "deadline")
+        if last_words == "我真的是好人，大家别被预言家牵着走。" and self._request(lid)["status"] == "open":
+            self.set_agent("N10", "thinking")
+            await self.wait(1.4)
+            self.set_agent("N10", "acting")
+            self.meter("N10", tools=1, think=1)
+            self.request_answer(lid, "N10", last_words)
+            self.sleep("N10")
         await self.moderator_step(0.8, "主持人：转述遗言")
-        self.announce("public", "last_words_relay", f"【遗言】{self.name('N10')}（N10）：我真的是好人，大家别被预言家牵着走。")
+        self.announce("public", "last_words_relay", f"【遗言】{self.name('N10')}（N10）：{last_words}")
         self.moderator_idle()
         await self.wait(0.6)
 
         # 6. challenge tickets (D22): one rejected, one upheld
         self.set_phase("第 2 天 · 质询与复核")
-        await asyncio.gather(
-            self.challenge(
-                "N3",
-                "主持人，刚才的计票是不是漏了一票？我记得我只被投了 5 票。",
-                "rejected",
-                "经逐一核对，计票无误：N10 得 6 票。质询驳回。",
-                think=1.2,
-                resolve_after=2.4,
-            ),
-            self._delayed(
-                1.6,
+        challenges = []
+        if self.takeover_seat != "N3":  # (a played seat challenges only when its person does: in the private chat)
+            challenges.append(
                 self.challenge(
-                    "N8",
-                    "主持人，N7 的发言被截断了，最后一句没有说完，请允许他补充。",
-                    "upheld",
-                    "质询成立：已记录 N7 的发言被截断，大家请注意这一点。",
-                    think=1.0,
-                    resolve_after=2.6,
-                ),
-            ),
-        )
+                    "N3",
+                    "主持人，刚才的计票是不是漏了一票？我记得我只被投了 5 票。",
+                    "rejected",
+                    "经逐一核对，计票无误：N10 得 6 票。质询驳回。",
+                    think=1.2,
+                    resolve_after=2.4,
+                )
+            )
+        if self.takeover_seat != "N8":
+            challenges.append(
+                self._delayed(
+                    1.6,
+                    self.challenge(
+                        "N8",
+                        "主持人，N7 的发言被截断了，最后一句没有说完，请允许他补充。",
+                        "upheld",
+                        "质询成立：已记录 N7 的发言被截断，大家请注意这一点。",
+                        think=1.0,
+                        resolve_after=2.6,
+                    ),
+                )
+            )
+        await asyncio.gather(*challenges)
         await self.wait(0.5)
 
         # 7. a free discussion; the white wolf king explodes: public declaration + frozen channel (D25)
@@ -1767,20 +2228,46 @@ class MockGame:
             ("N7", "各位注意，我是猎人，今天谁敢动我我就开枪。", 3.5),
             ("N9", "我还是跟随预言家，今天投 N3。", 4.0),
         ]
+        chatter = [c for c in chatter if c[0] != self.takeover_seat]  # (a played seat speaks for itself)
         tasks = [asyncio.ensure_future(self._chatter("public", pid, text, t)) for pid, text, t in chatter]
+        pub = self.channel("public")
+        target = "N7"  # whom the explosion takes along
+        scripted = True  # N12's agent explodes (the script's way); a person plays it differently
+        exploded = True
         try:
-            self.set_agent("N12", "thinking")
-            await self.wait(2.7)  # N12 decides to explode while the others are still typing
-            self.set_agent("N12", "acting")
-            self.meter("N12", tools=2)
-            self.emit("ability.used", ability_id="white_wolf_explode", actor_id="N12")
-            self.commit("public", "N12", f"我是白狼王，自爆！带走猎人 {ref('N7')}。", "ability")  # the ability is the permission: no floor needed
-            pub = self.channel("public")
-            pub["frozen"] = True
-            self.emit("channel.updated", channel=copy.deepcopy(pub))
-            for t in tasks:  # the revoked floor cancels the others' in-flight thinking
-                if not t.done():
-                    t.cancel()
+            if self.takeover_seat == "N12":
+                # the moderator enabled the explosion for the person who plays the white wolf king: it is their call
+                scripted = False
+                self.ability_open = True
+                self.commit("dm-N12", MODERATOR, "白天发言开始，你的“自爆”技能现已启用（是否使用由你决定，不用就无需回复）。", "speech", visible=[MODERATOR, "N12"])
+                self.schedule_takeover_flush()
+                # Several speakers wait concurrently and each advances the mock's shared game clock: 30 game
+                # seconds would be only a couple of wall-clock seconds in a real browser.  Give the person
+                # enough time to fill the form and read the second confirmation (the real engine is unchanged).
+                await self.wait_human(lambda: self.ability_result is not None or self.takeover_seat != "N12", 300.0)
+                self.ability_open = False
+                if self.ability_result is not None:
+                    target = self.ability_result["target"]
+                elif self.takeover_seat == "N12":
+                    exploded = False  # they did not use it
+                else:
+                    scripted = True  # given back to its agent meanwhile: it explodes as scripted
+            elif self.takeover_seat is not None:
+                # a person plays another seat: leave them time to say something before the explosion freezes the channel
+                await self.wait_human(lambda: self.free_spoken or self.takeover_seat is None, 25.0)
+            if scripted:
+                self.set_agent("N12", "thinking")
+                await self.wait(2.7)  # N12 decides to explode while the others are still typing
+                self.set_agent("N12", "acting")
+                self.meter("N12", tools=2)
+                self.emit("ability.used", ability_id="white_wolf_explode", actor_id="N12")
+                self.commit("public", "N12", f"我是白狼王，自爆！带走猎人 {ref('N7')}。", "ability")  # the ability is the permission: no floor needed
+                pub["frozen"] = True
+                self.emit("channel.updated", channel=copy.deepcopy(pub))
+            if exploded:
+                for t in tasks:  # the revoked floor cancels the others' in-flight thinking
+                    if not t.done():
+                        t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             for t in tasks:
@@ -1788,13 +2275,14 @@ class MockGame:
                     t.cancel()
         self.sleep("N12")
         await self.wait(0.8)
-        await self.moderator_step(1.6, "主持人：裁决白狼王自爆")
-        self.player_out("N12")
-        self.player_out("N7")
-        self.update_dashboard()
-        self.announce("public", "death_notice", f"【出局公告】{ref('N12')} 自爆出局，并带走 {ref('N7')}。")
-        pub["frozen"] = False
-        self.emit("channel.updated", channel=copy.deepcopy(pub))
+        if exploded:
+            await self.moderator_step(1.6, "主持人：裁决白狼王自爆")
+            self.player_out("N12")
+            self.player_out(target)
+            self.update_dashboard()
+            self.announce("public", "death_notice", f"【出局公告】{ref('N12')} 自爆出局，并带走 {ref(target)}。")
+            pub["frozen"] = False
+            self.emit("channel.updated", channel=copy.deepcopy(pub))
         self.moderator_idle()
         await self.wait(1.0)
 
@@ -1802,8 +2290,9 @@ class MockGame:
         await self.moderator_step(1.0, "主持人：第 3 天 · 放逐并判定胜负")
         self.close_floor("public")
         self.set_phase("第 3 天 · 终局")
-        self.player_out("N3")
-        self.player_out("N6")
+        for pid in ("N3", "N6"):
+            if not self.player(pid)["out"]:  # (a person's explosion may have taken one of them already)
+                self.player_out(pid)
         self.update_dashboard()
         self.announce("public", "death_notice", f"【出局公告】{ref('N3')}、{ref('N6')} 出局。")
         await self.wait(0.6)
@@ -1835,7 +2324,7 @@ class MockGame:
             ("N4", "能活到最后很开心，感谢守卫 N8 的那一刀。", 1.8),
             ("N8", "守卫的职责就是守住好人，今天算是圆满了。", 2.6),
         ]
-        await asyncio.gather(*(self.speak("public", pid, text, think=t) for pid, text, t in lines))
+        await asyncio.gather(*(self.speak("public", pid, text, think=t) for pid, text, t in lines if pid != self.takeover_seat))
         await self.moderator_step(0.8, "主持人：再次宣布终局")
         self.close_floor("public")
         await self.drain_bg()
@@ -1926,6 +2415,8 @@ class MockGame:
         self.gate.clear()
         self.set_status("paused", reason=("hold:" + hold_reason) if reason == "hold" else reason, pause_reason=reason, hold_reason=hold_reason)
         for aid in [MODERATOR, *PLAYER_IDS]:  # a paused game: everybody sleeps (E2)
+            if aid == self.takeover_seat:
+                continue  # (the played seat stays "human")
             node = self.session["moderator"] if aid == MODERATOR else self.player(aid)
             if node["state"] != "sleeping" or node.get("sleep_until") is not None:
                 node["state"] = "sleeping"
@@ -1969,6 +2460,7 @@ class MockGame:
         self.intent = {}
         self.deadlines = {}
         self.reviewed = {}
+        self._reset_human()
         self.session = build_session(uuid.uuid4().hex[:12], self.bindings, self.roster, self.budget_limits, demo=self.demo)
         self.session["event_id"] = self.bus.latest_id + 1  # the id the snapshot event is about to get
         self.bus.publish("snapshot", {"session": copy.deepcopy(self.session)})
@@ -1993,6 +2485,334 @@ class MockGame:
             self.session["moderator"]["avatar"] = copy.deepcopy(self.roster.moderator["avatar"])
             data["moderator"] = {"id": MODERATOR, "avatar": copy.deepcopy(self.roster.moderator["avatar"])}
         self.emit("roster.updated", **data)
+
+    # ----------------------------------------------------------------------------- v0.13: a person plays a seat
+    # The real backend computes this with app/world/seat.py (``seat_status``); the mock re-implements the same
+    # rules for its scripted world (contract §11.7), so the front end can be developed against it.
+    def schedule_takeover_flush(self) -> None:
+        """Publish ``takeover.updated`` once, after the current batch of events (like the orchestrator does)."""
+        if self._takeover_flush_scheduled:
+            return
+        self._takeover_flush_scheduled = True
+        try:
+            asyncio.get_running_loop().call_soon(self.flush_takeover)
+        except RuntimeError:  # no loop (a unit test): publish right away
+            self.flush_takeover()
+
+    def flush_takeover(self, *, force: bool = False) -> None:
+        self._takeover_flush_scheduled = False
+        if self.takeover_seat is None and not force:
+            return
+        payload = self.compute_takeover()
+        if not force and payload == self.session.get("takeover"):
+            return
+        self.session["takeover"] = payload
+        ev = self.bus.publish("takeover.updated", {"takeover": copy.deepcopy(payload)})
+        self.session["event_id"] = ev["id"]
+
+    def request_channel(self, request: dict[str, Any], seat: str) -> str | None:
+        """The channel whose feed shows the request card (the smallest channel of the seat that holds every recipient)."""
+        mine = [c for c in self.session["channels"] if seat in c["members"]]
+        fits = [c for c in mine if request["to"] and all(t in c["members"] for t in request["to"])]
+        fits.sort(key=lambda c: len(c["members"]))
+        if fits:
+            return fits[0]["id"]
+        groups = [c for c in mine if not c["system"] and c["type"] != "dm"]
+        return groups[0]["id"] if groups else None
+
+    def seat_channel_state(self, ch: dict[str, Any], seat: str) -> dict[str, Any]:
+        mode = ch["mode"]
+        floor = ch["floor"] or floor_none()
+        out: dict[str, Any] = {"can_write": False, "why_not": None, "code": None, "max_chars": None, "floor": None, "can_pass": False}
+        mine = next((q for q in floor["queue"] if q["holder"] == seat and q["state"] == "active"), None) if mode in ("queue", "turn") else None
+        if mode in ("queue", "turn"):
+            tok = self.token if self.token and self.token["cid"] == ch["id"] else None
+            used_chars = tok["chars_used"] if tok else 0
+            out["floor"] = {
+                "kind": mode, "mine": mine is not None, "paused": bool(floor["paused"]),
+                "messages_left": None, "chars_left": None, "seconds_left": None, "deadline_clock": None,
+            }
+            if mine is not None:
+                deadline = tok["deadline"] if tok else round(self.clock + 90.0, 3)
+                out["floor"].update(
+                    messages_left=max(0, mine["max_messages"] - mine["messages_used"]),
+                    chars_left=max(0, TOKEN_MAX_CHARS - used_chars),
+                    seconds_left=round(max(0.0, deadline - self.clock), 1),
+                    deadline_clock=deadline,
+                )
+        elif mode == "free" and not ch["system"]:
+            counts = (floor.get("free") or {}).get("message_counts", {})
+            out["floor"] = {
+                "kind": "free", "mine": False, "paused": False,
+                "messages_left": max(0, FREE_MAX_MESSAGES - counts.get(seat, 0)),
+                "chars_left": None, "seconds_left": None, "deadline_clock": None,
+            }
+        if mode in ("closed", "listen"):
+            out["code"] = "CHANNEL_CLOSED"
+            out["why_not"] = "你与主持人的私聊已被关闭，暂时无法在其中发言。" if ch["system"] else (
+                f"频道「{ch['name']}」是只听频道，成员不能在其中发言。" if mode == "listen" else f"频道「{ch['name']}」当前已关闭，只有主持人可以发言。"
+            )
+        elif ch["frozen"]:
+            out.update(code="NO_FLOOR", why_not="频道已被冻结，等待主持人裁决。")
+        elif mode in ("queue", "turn"):
+            if mine is not None and floor["paused"]:
+                out.update(code="NO_FLOOR", why_not="发言权已暂停，请等待主持人恢复。")
+            elif mine is not None:
+                left = out["floor"]["chars_left"]
+                out.update(can_write=True, max_chars=min(FREE_MAX_CHARS, left), can_pass=True)
+            else:
+                entry = next((q for q in floor["queue"] if q["holder"] == seat), None)
+                active = [q["holder"] for q in floor["queue"] if q["state"] == "active"]
+                if entry is not None and entry["state"] == "pending":
+                    text = "还没轮到你发言"
+                elif entry is not None:
+                    text = "你在本轮的发言权已经结束"
+                else:
+                    text = "你没有本轮发言权"
+                if active:
+                    text += "，当前可以发言的是：" + "、".join(self.name(h) for h in active)
+                out.update(code="NO_FLOOR", why_not=text + "。")
+        elif mode == "free":
+            counts = (floor.get("free") or {}).get("message_counts", {})
+            if not ch["system"] and counts.get(seat, 0) >= FREE_MAX_MESSAGES:
+                out.update(code="QUOTA_EXCEEDED", why_not=f"你在本次自由讨论中的发言条数已用完（上限 {FREE_MAX_MESSAGES} 条）。")
+            else:
+                out.update(can_write=True, max_chars=DM_MAX_CHARS if ch["system"] else FREE_MAX_CHARS)
+        else:
+            out.update(code="CHANNEL_CLOSED", why_not=f"频道「{ch['name']}」当前不可发言。")
+        return out
+
+    def compute_takeover(self) -> dict[str, Any]:
+        s = self.session
+        seat = self.takeover_seat
+        out: dict[str, Any] = {"seat": seat, "reshuffle_available": s["status"] == "idle" and not self.started}
+        if seat is None:
+            return out
+        now = self.clock
+        channels = {c["id"]: self.seat_channel_state(c, seat) for c in s["channels"] if seat in c["members"]}
+        requests = []
+        for r in s["requests"]:
+            if r["status"] != "open" or seat not in r["to"]:
+                continue
+            mine = next((a for a in r["answers"] if a["player_id"] == seat), None)
+            deadline = self.deadlines.get(r["id"])
+            requests.append(
+                {
+                    "id": r["id"],
+                    "kind": r["kind"],
+                    "max_chars": TEXT_ANSWER_MAX_CHARS if r["kind"] == "text" else None,
+                    "answered": mine is not None,
+                    "my_answer": None if mine is None else {"value": mine["value"], "label": mine["label"], "reason": mine["reason"]},
+                    "seconds_left": None if deadline is None else round(max(0.0, deadline - now), 1),
+                    "deadline_clock": deadline,
+                    "channel_id": self.request_channel(r, seat),
+                }
+            )
+        abilities = []
+        if self.ability_open and seat == "N12" and self.ability_result is None:
+            abilities.append(
+                {
+                    "id": EXPLODE,
+                    "description": EXPLODE_TEXT,
+                    "quota_left": 1,
+                    "params": [
+                        {"name": "target", "type": "player_id", "optional": False, "candidates": self.alive()},
+                        {"name": "declaration", "type": "text", "optional": False, "max_chars": 120},
+                    ],
+                }
+            )
+        attention = [
+            cid
+            for cid, st in channels.items()
+            if (st["can_write"] and (st["floor"] or {}).get("mine")) or any(not r["answered"] and r["channel_id"] == cid for r in requests)
+        ]
+        out.update(seq=s["seq"], channels=channels, requests=requests, abilities=abilities, attention=attention)
+        return out
+
+    async def wait_human(self, done: Any, seconds: float) -> bool:
+        """Game-time wait until ``done()`` (the person acted) or ``seconds`` passed (a paused game waits as well)."""
+        end = self.clock + seconds
+        while not done():
+            if self.clock >= end:
+                return False
+            await self.wait(0.1)
+        return True
+
+    async def human_turn(self, cid: str, queue: list[dict[str, Any]], index: int, *, seconds: float = 90.0) -> None:
+        """The played seat holds the token of a queue: wait for its speech / pass / the deadline (F7)."""
+        queue[index]["max_messages"] = TOKEN_MAX_MESSAGES
+        self.token = {"cid": cid, "index": index, "queue": queue, "deadline": round(self.clock + seconds, 3), "used": 0,
+                      "chars_used": 0, "done": False}
+        tok = self.token
+        self.schedule_takeover_flush()
+        await self.wait_human(lambda: tok["done"] or self.takeover_seat is None, seconds)
+        self.token = None
+
+    # --- the actions of the person (the endpoints call these; every refusal is a receipt, like the engine's)
+    def _played_seat(self) -> str:
+        if self.takeover_seat is None:
+            raise TakeoverError(409, "请先接管一个座位。")
+        status = self.session["status"]
+        if status != "running":
+            why = {"idle": "对局还没有开始", "paused": "对局已暂停", "finished": "对局已结束"}.get(status, "对局没有在运行")
+            raise TakeoverError(409, f"{why}，不能操作；请先点「开始」或「继续」。")
+        return self.takeover_seat
+
+    def seat_speak(self, channel_id: str, content: str, based_on_seq: int | None) -> dict[str, Any]:
+        seat = self._played_seat()
+        ch = next((c for c in self.session["channels"] if c["id"] == channel_id), None)
+        if ch is None or seat not in ch["members"]:
+            return receipt(False, f"频道 {channel_id!r} 不存在或你不是成员。", code="UNKNOWN_CHANNEL")
+        text = str(content).strip()
+        if not text:
+            return receipt(False, "发言内容不能为空。", code="INVALID_PARAMS")
+        if based_on_seq is not None and based_on_seq < self.invalidating_seq:
+            return receipt(False, "你思考期间世界发生了重要变化，请先阅读最新内容后再决定是否发言。", code="STALE", latest_seq=self.session["seq"])
+        state = self.seat_channel_state(ch, seat)
+        if not state["can_write"]:
+            return receipt(False, state["why_not"] or "现在不能发言。", code=state["code"] or "NO_FLOOR")
+        cap = int(state["max_chars"])
+        kept, truncated = text[:cap], None
+        if len(text) > cap:
+            truncated = {"dropped_chars": len(text) - cap, "kept_chars": cap}
+        msg = self.commit(channel_id, seat, kept, "speech", truncated=truncated)
+        if ch["mode"] in ("queue", "turn") and self.token and self.token["cid"] == channel_id:
+            tok = self.token
+            tok["used"] += 1
+            tok["chars_used"] += len(kept)
+            for q in (ch["floor"]["queue"], tok["queue"]):
+                q[tok["index"]]["messages_used"] = tok["used"]
+            if tok["used"] >= TOKEN_MAX_MESSAGES or tok["chars_used"] >= TOKEN_MAX_CHARS:
+                tok["done"] = True
+            self.emit("floor.changed", channel_id=channel_id, floor=copy.deepcopy(ch["floor"]))
+        elif ch["mode"] == "free" and ch["floor"]["free"] is not None:
+            free = ch["floor"]["free"]
+            free["chars_used"] += len(kept)
+            free["message_counts"][seat] = free["message_counts"].get(seat, 0) + 1
+            self.emit("floor.changed", channel_id=channel_id, floor=copy.deepcopy(ch["floor"]))
+        if channel_id == "public" and ch["mode"] == "free":
+            self.free_spoken = True
+        if channel_id in ("public", "wolves"):
+            self.stir({seat}, 3)  # everybody who can read it wakes up (E1)
+        note = "已发送。" + (f"超出字数上限：末尾 {truncated['dropped_chars']} 个字被截掉（保留了 {truncated['kept_chars']} 个字）。" if truncated else "")
+        return receipt(True, note, seq=msg["seq"], truncated=truncated)
+
+    def seat_pass(self, channel_id: str) -> dict[str, Any]:
+        seat = self._played_seat()
+        ch = next((c for c in self.session["channels"] if c["id"] == channel_id), None)
+        if ch is None or seat not in ch["members"]:
+            return receipt(False, f"频道 {channel_id!r} 不存在或你不是成员。", code="UNKNOWN_CHANNEL")
+        state = self.seat_channel_state(ch, seat)
+        if not state["can_pass"] or not self.token or self.token["cid"] != channel_id:
+            return receipt(False, "你当前没有可以放弃的发言权。", code="NO_FLOOR")
+        self.token["done"] = True
+        return receipt(True, "已放弃发言权。", seq=self.session["seq"])
+
+    def seat_respond(self, request_id: str, value: str, reason: str = "") -> dict[str, Any]:
+        seat = self._played_seat()
+        req = next((r for r in self.session["requests"] if r["id"] == request_id), None)
+        if req is None:
+            return receipt(False, f"请求 {request_id} 不存在。", code="UNKNOWN_REQUEST")
+        if req["status"] != "open":
+            return receipt(False, f"请求 {request_id} 已经关闭，不能再作答。", code="REQUEST_CLOSED")
+        if seat not in req["to"]:
+            return receipt(False, f"请求 {request_id} 不是发给你的。", code="FORBIDDEN")
+        text = str(value).strip()
+        truncated = None
+        if req["kind"] == "choice":
+            valid = [o["id"] for o in req["options"]]
+            if text not in valid:
+                return receipt(False, f"「{value}」不是有效的选项。合法的选项 id：{'、'.join(valid)}。", code="INVALID_TARGET")
+        else:
+            if not text:
+                return receipt(False, "回答内容不能为空。", code="INVALID_PARAMS")
+            if len(text) > TEXT_ANSWER_MAX_CHARS:
+                truncated = {"dropped_chars": len(text) - TEXT_ANSWER_MAX_CHARS, "kept_chars": TEXT_ANSWER_MAX_CHARS}
+                text = text[:TEXT_ANSWER_MAX_CHARS]
+        replaced = seat in req["answered_by"]  # (a person's answers cost no tokens: nothing is metered)
+        self.request_answer(request_id, seat, text, reason=str(reason or ""))
+        closed = req["status"] != "open"
+        return receipt(True, f"已记录你对 {request_id} 的回答。" + ("" if closed else "在请求关闭前你可以再次作答来修改。"),
+                       seq=self.session["seq"], truncated=truncated, request_id=request_id, value=text, replaced=replaced, closed=closed)
+
+    def seat_ability(self, ability_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        seat = self._played_seat()
+        if ability_id != EXPLODE:
+            return receipt(False, f"没有名为 {ability_id} 的能力。已知能力：{EXPLODE}", code="UNKNOWN_ABILITY")
+        if seat != "N12":
+            return receipt(False, f"你不是能力 {ability_id} 的持有者。", code="FORBIDDEN")
+        if not self.ability_open or self.ability_result is not None:
+            return receipt(False, f"能力 {ability_id} 当前不可用（未启用）。", code="ABILITY_DISABLED")
+        target = (params or {}).get("target")
+        declaration = str((params or {}).get("declaration") or "").strip()
+        if not isinstance(target, str) or target not in PLAYER_IDS:
+            return receipt(False, f"参数 target：{target!r} 不是有效的玩家 id", code="INVALID_TARGET")
+        if target == seat or self.player(target)["out"]:
+            return receipt(False, "目标必须是存活的其他玩家。", code="INVALID_TARGET")
+        if not declaration:
+            return receipt(False, "缺少参数：declaration", code="INVALID_PARAMS")
+        declaration = declaration[:120]
+        self.ability_result = {"target": target, "declaration": declaration}
+        self.ability_open = False
+        self.emit("ability.used", ability_id=EXPLODE, actor_id=seat)
+        msg = self.commit("public", seat, f"【自爆】{self.ref(seat)} 亮明白狼王身份并自爆，带走 {self.ref(target)}。{declaration}", "ability")
+        pub = self.channel("public")
+        pub["frozen"] = True
+        self.emit("channel.updated", channel=copy.deepcopy(pub))
+        return receipt(True, f"已发动能力 {ability_id}（剩余 0 次）。后续裁决由主持人完成。", seq=msg["seq"], ability_id=ability_id, uses_left=0)
+
+    # --- takeover / release / re-deal
+    def take_over(self, seat: Any) -> None:
+        if not isinstance(seat, str) or not seat:
+            raise TakeoverError(422, "请选择要接管的座位。")
+        if seat == MODERATOR:
+            raise TakeoverError(422, "只能接管玩家座位，不能接管主持人。")
+        if seat not in PLAYER_IDS:
+            raise TakeoverError(404, "座位不存在。")
+        if self.takeover_seat == seat:
+            return
+        if self.takeover_seat is not None:
+            raise TakeoverError(409, "请先退出当前接管。")
+        status = self.session["status"]
+        if status == "running":
+            raise TakeoverError(409, "对局进行中不能接管：请先暂停。")
+        if status == "finished":
+            raise TakeoverError(409, "对局已结束，不能接管。")
+        self.takeover_seat = seat
+        node = self.player(seat)
+        node["state"] = "human"
+        node["sleep_until"] = None
+        self.flush_takeover(force=True)
+
+    def release_seat(self) -> None:
+        if self.takeover_seat is None:
+            return
+        if self.session["status"] == "running":
+            raise TakeoverError(409, "对局进行中不能退出接管：请先暂停。")
+        seat = self.takeover_seat
+        self.takeover_seat = None
+        node = self.player(seat)
+        node["state"] = "sleeping"
+        node["sleep_until"] = None
+        self.ability_open = False
+        if self.token is not None:
+            self.token["done"] = True
+        payload = self.compute_takeover()
+        self.session["takeover"] = payload
+        ev = self.bus.publish("takeover.updated", {"takeover": copy.deepcopy(payload)})
+        self.session["event_id"] = ev["id"]
+
+    def reshuffle(self) -> None:
+        """Re-deal the identities (idle only, F5).  The mock only mixes the identity tags shown on the cards."""
+        if self.session["status"] != "idle" or self.started:
+            raise TakeoverError(409, "对局已经开始，不能再重新发牌。")
+        roles = [p["tags"][0] for p in self.session["participants"]]
+        self.rng.shuffle(roles)
+        for p, role in zip(self.session["participants"], roles):
+            p["tags"] = [role, *p["tags"][1:]]
+        self.session["takeover"] = self.compute_takeover()
+        self.session["event_id"] = self.bus.latest_id + 1  # the id the snapshot event is about to get
+        self.bus.publish("snapshot", {"session": copy.deepcopy(self.session)})
 
 
 # --------------------------------------------------------------------------------------------------
@@ -2028,11 +2848,78 @@ def replay_fast(*, epilogue: bool = True, seed: int = 7, budget_demo: bool = Tru
 
 
 # --------------------------------------------------------------------------------------------------
+# v0.13 (F34-F36): the history of games.  A replay of a saved game holds what a LEDGER holds - the spectator
+# events (messages, channels, floors, requests, tags, phases, ...) with the game-clock second they happened at -
+# and nothing else: no agent states, no token counters, no review progress (contract section 11.8).
+# --------------------------------------------------------------------------------------------------
+
+#: the event types a saved game's replay consists of (what app/game/replay.py projects from a ledger)
+REPLAY_EVENT_TYPES = frozenset(
+    {
+        "message.committed", "channel.created", "channel.updated", "floor.changed",
+        "request.opened", "request.progress", "request.answer", "request.closed", "request.updated",
+        "player.updated", "phase.changed", "dashboard.updated", "ability.used",
+        "challenge.opened", "challenge.resolved", "game.status",
+    }
+)
+
+
+async def _history_replay(seed: int) -> dict[str, Any]:
+    """The scripted game, played offline (virtual time), as a replay: ``initial`` / ``events`` (each with its game
+    clock ``gt``; the id of the event doubles as its ``seq``, so every event is a step of its own) / ``final``."""
+    bus = EventBus(ring=100000)
+    game = MockGame(bus, speed=1.0, seed=seed, budget=default_budget(None, False))
+    clocks: dict[int, float] = {}
+    publish = bus.publish
+
+    def stamped(etype: str, data: dict[str, Any]) -> dict[str, Any]:
+        ev = publish(etype, data)
+        clocks[ev["id"]] = round(float(game.session["clock"]), 3)
+        return ev
+
+    bus.publish = stamped  # type: ignore[method-assign]
+    initial = game.snapshot_payload()
+    game.gate.set()
+    game.set_status("running", reason="started")
+    await game.play()
+    final = game.snapshot_payload()
+    events = [
+        {"seq": ev["id"], "gt": clocks.get(ev["id"], 0.0), "type": ev["type"], "data": ev["data"]}
+        for ev in bus.ring
+        if ev["type"] in REPLAY_EVENT_TYPES
+    ]
+    return {"initial": initial, "events": events, "final": final, "duration_gt": events[-1]["gt"] if events else 0.0}
+
+
+def history_replay(seed: int = 7) -> dict[str, Any]:
+    """:func:`_history_replay` on a loop of its own (it may be called from a worker thread of the server)."""
+    return asyncio.run(_history_replay(seed), loop_factory=VirtualLoop)
+
+
+def mock_saved_games() -> list[dict[str, Any]]:
+    """Three older games for the history list (the summaries of ``GameStore``, contract section 11.3)."""
+    from datetime import timedelta
+
+    def when(days: float) -> str:
+        return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    base = {"title": "Arena-Agents", "scenario_name": "werewolf_12p", "scenario_title": "狼人杀 12 人局（模拟数据）", "players": 12, "schema_version": 5}
+    return [
+        {**base, "session_id": "mock-old-1", "status": "finished", "winner": "好人阵营", "created_at": when(1.0), "started_at": when(1.0),
+         "finished_at": when(0.98), "updated_at": when(0.98), "duration_gt": 1523.0, "tokens": 1250000, "cost_usd": 0.52, "human_involved": False, "size_bytes": 91000},
+        {**base, "session_id": "mock-old-2", "status": "paused", "winner": None, "created_at": when(2.0), "started_at": when(2.0),
+         "finished_at": None, "updated_at": when(1.9), "duration_gt": 600.0, "tokens": 320000, "cost_usd": 0.11, "human_involved": True, "size_bytes": 40000},
+        {**base, "session_id": "mock-old-3", "status": "finished", "winner": "狼人阵营", "created_at": when(5.0), "started_at": when(5.0),
+         "finished_at": when(4.95), "updated_at": when(4.95), "duration_gt": 2210.0, "tokens": 2410000, "cost_usd": 0.97, "human_involved": False, "size_bytes": 120000},
+    ]
+
+
+# --------------------------------------------------------------------------------------------------
 # the FastAPI app
 # --------------------------------------------------------------------------------------------------
 
 
-def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None = DEMO_BUDGET_TOKENS, demo: bool = False) -> Any:
+def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None = DEMO_BUDGET_TOKENS, demo: bool = False, legacy: bool = False) -> Any:
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
     from fastapi.staticfiles import StaticFiles
@@ -2047,7 +2934,7 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             {"slot": 1, "name": "旗舰", "provider_id": "mock-claude", "model_id": "claude-sonnet", "reasoning_depth": "high", "valid": True},
         ],
         "sessions": [],
-        "workspace": {"id": "w-mock", "name": "mock-workspace", "path": MOCK_WORKSPACE_PATH, "status": "ok"},
+        "games": mock_saved_games(),  # v0.13: the older games of the history list
         "pricing": {"url": DEFAULT_PRICING_URL, "default_url": DEFAULT_PRICING_URL, "fetched_at": now_iso(), "entries": 2345, "error": None},
     }
     initial_budget = default_budget(budget_tokens if budget_tokens else None, True)
@@ -2060,6 +2947,10 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         if "game" not in holder:  # created lazily: the asyncio primitives need a running loop
             holder["game"] = MockGame(bus, speed=speed, seed=seed, roster=roster, budget=initial_budget, demo=demo)
         return holder["game"]
+
+    archive = MockArchive(bus, game, speed=speed)  # v0.13: export / import jobs and the "old data found" notice
+    archive.legacy["found"] = bool(legacy)
+    app.state.mock_archive = archive
 
     @app.middleware("http")
     async def no_cache(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -2101,7 +2992,7 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             "reasoning_effort": "high",
             "restored": False,
             "binding_issues": [],
-            "workspace": {"enabled": True, "current": store["workspace"]},
+            "legacy_data": archive.legacy_state(),
             "session": session_payload(),
         }
 
@@ -2171,33 +3062,148 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         game().pause()  # contract §6: pause and force-pause are equivalent now
         return {"ok": True, "session": session_payload()}
 
-    @app.post("/api/session/save")
-    async def save_session() -> dict[str, Any]:
-        s = session_payload()
-        return {"ok": True, "filename": f"arena_session_mock_{s['session_id']}.json", "session": s}
+    # ---- v0.13: a person plays a seat (contract §11.7)
+    def refuse(exc: TakeoverError) -> HTTPException:
+        return HTTPException(status_code=exc.status, detail=exc.detail)
 
-    @app.post("/api/session/import")
-    async def import_session(request: Request) -> dict[str, Any]:
-        await request.body()
+    @app.post("/api/control/shuffle-identities")
+    async def control_shuffle_identities() -> dict[str, Any]:
+        try:
+            game().reshuffle()
+        except TakeoverError as exc:
+            raise refuse(exc) from exc
         return {"ok": True, "session": session_payload()}
 
-    @app.get("/api/sessions")
-    async def list_sessions() -> dict[str, Any]:
+    @app.post("/api/takeover")
+    async def takeover(body: dict[str, Any]) -> dict[str, Any]:
+        try:
+            game().take_over(body.get("seat"))
+        except TakeoverError as exc:
+            raise refuse(exc) from exc
+        return {"ok": True, "session": session_payload()}
+
+    @app.post("/api/takeover/release")
+    async def takeover_release() -> dict[str, Any]:
+        try:
+            game().release_seat()
+        except TakeoverError as exc:
+            raise refuse(exc) from exc
+        return {"ok": True, "session": session_payload()}
+
+    def seat_action(call: Any) -> dict[str, Any]:
+        try:
+            return call()
+        except TakeoverError as exc:
+            raise refuse(exc) from exc
+
+    def based_on(body: dict[str, Any]) -> int | None:
+        value = body.get("based_on_seq")
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise HTTPException(status_code=422, detail="based_on_seq 必须是整数")
+        return value
+
+    @app.post("/api/seat/speak")
+    async def seat_speak(body: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(body.get("channel_id"), str) or not isinstance(body.get("content"), str):
+            raise HTTPException(status_code=422, detail="需要 channel_id 与 content")
+        return seat_action(lambda: game().seat_speak(body["channel_id"], body["content"], based_on(body)))
+
+    @app.post("/api/seat/pass")
+    async def seat_pass(body: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(body.get("channel_id"), str):
+            raise HTTPException(status_code=422, detail="需要 channel_id")
+        return seat_action(lambda: game().seat_pass(body["channel_id"]))
+
+    @app.post("/api/seat/respond")
+    async def seat_respond(body: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(body.get("request_id"), str) or not isinstance(body.get("value"), str):
+            raise HTTPException(status_code=422, detail="需要 request_id 与 value")
+        return seat_action(lambda: game().seat_respond(body["request_id"], body["value"], str(body.get("reason") or "")))
+
+    @app.post("/api/seat/ability")
+    async def seat_ability(body: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(body.get("ability_id"), str) or not isinstance(body.get("params", {}), dict):
+            raise HTTPException(status_code=422, detail="需要 ability_id 与 params")
+        return seat_action(lambda: game().seat_ability(body["ability_id"], body.get("params") or {}))
+
+    # ---- v0.13 (F34-F36): the history of games - list, delete, continue, replay (contract sections 11.3, 11.5, 11.8)
+    def live_game_summary() -> dict[str, Any]:
         s = game().session
-        current = {"session_id": s["session_id"], "title": s["title"], "status": s["status"], "current": True, "record_count": len(s["messages"])}
-        return {"sessions": [current, *store["sessions"]]}
+        return {
+            "session_id": s["session_id"], "title": s["title"], "scenario_name": s["scenario_name"], "scenario_title": s["scenario_title"],
+            "status": s["status"], "winner": s["winner"], "created_at": now_iso(), "started_at": None, "finished_at": None,
+            "updated_at": now_iso(), "duration_gt": round(float(s["clock"]), 1), "players": len(s["participants"]),
+            "tokens": int((s.get("usage_stats") or {}).get("total_tokens") or 0), "cost_usd": float((s.get("usage_stats") or {}).get("total_cost_usd") or 0.0),
+            "human_involved": game().takeover_seat is not None, "schema_version": 5, "size_bytes": 0,
+        }
 
-    @app.delete("/api/sessions/{session_id}")
-    async def delete_session(session_id: str) -> dict[str, Any]:
-        store["sessions"] = [x for x in store["sessions"] if x["session_id"] != session_id]
-        return {"ok": True}
+    def games_checked(game_id: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", game_id):
+            raise HTTPException(status_code=400, detail="无效的对局 id。")
+        return game_id
 
-    @app.post("/api/sessions/{session_id}/load")
-    async def load_session(session_id: str) -> dict[str, Any]:
+    @app.get("/api/games")
+    async def list_games() -> dict[str, Any]:
+        live = live_game_summary()
+        saved = [g for g in store["games"] if g["session_id"] != live["session_id"]]
+        games = [{**live, "current": True}, *({**g, "current": False} for g in saved)]
+        return {"games": games, "current": live["session_id"]}
+
+    @app.delete("/api/games/{session_id}")
+    async def delete_game(session_id: str) -> dict[str, Any]:
+        games_checked(session_id)
         if session_id == game().session["session_id"]:
-            raise HTTPException(status_code=409, detail="该存档就是当前对局，无需加载。")
-        await game().reset()
+            raise HTTPException(status_code=409, detail="当前对局不能删除：请先新建或载入另一局。")
+        if not any(g["session_id"] == session_id for g in store["games"]):
+            raise HTTPException(status_code=404, detail="对局不存在。")
+        store["games"] = [g for g in store["games"] if g["session_id"] != session_id]
+        return {"ok": True, "session_id": session_id}  # (the roster - names, avatars, memory - is not part of a game)
+
+    @app.post("/api/games/{session_id}/load")
+    async def load_game(session_id: str) -> dict[str, Any]:
+        games_checked(session_id)
+        g = game()
+        if session_id == g.session["session_id"]:
+            raise HTTPException(status_code=409, detail="这就是当前对局，无需载入。")
+        if not any(x["session_id"] == session_id for x in store["games"]):
+            raise HTTPException(status_code=404, detail="对局不存在。")
+        if g.session["status"] == "running":
+            raise HTTPException(status_code=409, detail="对局进行中，不能载入其他对局：请先暂停。")
+        # (the mock cannot rebuild a stored game: it deals a fresh one that carries the requested id)
+        await g.reset()
+        g.session["session_id"] = session_id
+        g.bus.publish("snapshot", {"session": g.snapshot_payload()})
         return {"ok": True, "session": session_payload()}
+
+    @app.get("/api/games/{session_id}/replay")
+    async def replay_of_game(session_id: str) -> dict[str, Any]:
+        games_checked(session_id)
+        g = game()
+        known = next((x for x in store["games"] if x["session_id"] == session_id), None)
+        if session_id == g.session["session_id"]:
+            known = live_game_summary()
+            if g.session["status"] == "running" or g.takeover_seat is not None:
+                raise HTTPException(status_code=409, detail="对局进行中或正在接管一个座位，不能重放当前对局：请先暂停并退出接管。")
+        if known is None:
+            raise HTTPException(status_code=404, detail="对局不存在。")
+        if "history_replay" not in holder:  # the script, played once offline in a worker thread (own event loop)
+            holder["history_replay"] = await asyncio.to_thread(history_replay, seed)
+        data = holder["history_replay"]
+        initial = copy.deepcopy(data["initial"])
+        initial["session_id"] = session_id
+        return {
+            "version": 1,
+            "game": {
+                "session_id": session_id, "title": known["title"], "scenario_title": known["scenario_title"], "status": "finished",
+                "winner": data["final"]["winner"], "created_at": known.get("created_at"), "finished_at": known.get("finished_at"),
+                "human_involved": bool(known.get("human_involved")),
+            },
+            "initial": initial,
+            "events": copy.deepcopy(data["events"]),
+            "duration_gt": data["duration_gt"],
+        }
 
     # ---- roster (E13-E16, E21, E24): contract §10.4; {id} is the internal id ("N3")
     def seat_or_404(pid: str, *, moderator_ok: bool = False) -> str:
@@ -2226,25 +3232,6 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         g.session["memory_enabled"] = roster.memory_enabled
         g.publish_session_updated()
         return {"enabled": roster.memory_enabled}
-
-    @app.get("/api/roster/memory:export")
-    async def export_memory() -> Response:
-        return Response(
-            roster.export_zip(),
-            media_type="application/zip",
-            headers={"Content-Disposition": 'attachment; filename="arena-memory.zip"'},
-        )
-
-    @app.post("/api/roster/memory:import")
-    async def import_memory(request: Request, dry_run: bool = True) -> dict[str, Any]:
-        data = await request.body()
-        if len(data) > 4 * 1024 * 1024:
-            raise HTTPException(status_code=413, detail="记忆包太大")
-        try:
-            changes = roster.import_zip(data, apply=not dry_run)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return {"dry_run": dry_run, "changes": changes}
 
     @app.post("/api/roster/memory:clear")
     async def clear_memory(body: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2351,30 +3338,48 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             raise HTTPException(status_code=422, detail="max_cost_usd 必须是正数或空")
         return game().set_budget(max_tokens=mt, max_cost_usd=float(mc) if mc is not None else None, force_stop=bool(body.get("force_stop")))
 
-    # ---- workspaces
-    @app.get("/api/workspaces")
-    async def workspaces() -> dict[str, Any]:
-        cur = store["workspace"]
-        return {
-            "enabled": True,
-            "current": cur,
-            "recent": [cur, {"id": "w-other", "name": "other-workspace", "path": MOCK_OTHER_WORKSPACE_PATH}],
-            "default_path": MOCK_DEFAULT_WORKSPACE_PATH,
-            "native_picker": False,
-        }
+    # ---- v0.13 (F24, F26-F32): archive export / import and the "old data found" notice (contract sections 11.5 / 11.9)
+    def archive_reply(result: tuple[int, dict[str, Any]]) -> Any:
+        return JSONResponse(status_code=result[0], content=result[1])
 
-    @app.post("/api/workspaces/pick-native-folder")
-    async def pick_folder() -> Any:
-        return JSONResponse(status_code=400, content={"detail": "native folder picker is unavailable in the mock"})
+    @app.get("/api/archive/status")
+    async def archive_status() -> dict[str, Any]:
+        return archive.status()
 
-    @app.post("/api/workspaces/select")
-    async def select_workspace(body: dict[str, Any]) -> dict[str, Any]:
-        if game().session["status"] == "running":
-            raise HTTPException(status_code=409, detail="对局运行中，请先暂停。")
-        path = str(body.get("path") or "")
-        store["workspace"] = {"id": uuid.uuid4().hex[:8], "name": Path(path).name or "workspace", "path": path, "status": "ok"}
-        bus.publish("workspace.changed", {})  # every open tab reloads (§8.2)
-        return {"ok": True, "workspace": store["workspace"], "session": session_payload()}
+    @app.post("/api/archive/export")
+    async def archive_export(body: dict[str, Any] | None = None) -> Any:
+        body = body or {}
+        return archive_reply(archive.start_export(bool(body.get("include_keys")), body.get("password"), body.get("include_logs", True) is not False))
+
+    @app.get("/api/archive/jobs/{job_id}")
+    async def archive_job(job_id: str) -> Any:
+        return archive_reply(archive.get_job(job_id))
+
+    @app.get("/api/archive/exports/{name}")
+    async def archive_download(name: str) -> Any:
+        data = archive.export_file(name)
+        if data is None:
+            return archive_reply(archive_error(404, "not_found", "找不到这个导出文件。"))
+        return Response(data, media_type="application/octet-stream", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.post("/api/archive/import")
+    async def archive_upload(request: Request, name: str = "") -> Any:
+        data = await request.body()  # (the real server streams it to a temporary file instead)
+        return archive_reply(archive.receive(data, re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", name)[:120] or "archive.arenaagents"))
+
+    @app.post("/api/archive/import/{import_id}/apply")
+    async def archive_apply(import_id: str, body: dict[str, Any] | None = None) -> Any:
+        body = body or {}
+        return archive_reply(archive.start_apply(import_id, body.get("password"), bool(body.get("skip_keys"))))
+
+    @app.delete("/api/archive/import/{import_id}")
+    async def archive_cancel(import_id: str) -> dict[str, Any]:
+        return {"ok": True, "discarded": archive.discard(import_id)}
+
+    @app.post("/api/notices/legacy-data:dismiss")
+    async def dismiss_legacy_data() -> dict[str, Any]:
+        archive.legacy["dismissed"] = True
+        return {"ok": True}
 
     # ---- providers / bindings / templates (in memory, just enough for the dialogs)
     def find_provider(pid: str) -> dict[str, Any]:
@@ -2573,9 +3578,21 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         """Close every SSE stream: browsers reconnect (with last_event_id) and resume from the ring buffer."""
         return {"ok": True, "dropped": bus.drop_all()}
 
+    @app.post("/api/mock/archive")
+    async def mock_archive_setup(body: dict[str, Any]) -> dict[str, Any]:
+        """Configure the archive mock: {"legacy": bool} shows / hides the "old data found" notice (and un-dismisses it),
+        {"max_bytes": n} is the upload limit, {"tick": seconds} the time between two progress events."""
+        if "legacy" in body:
+            archive.legacy.update(found=bool(body["legacy"]), dismissed=False)
+        if _is_int(body.get("max_bytes")) and body["max_bytes"] > 0:
+            archive.max_bytes = int(body["max_bytes"])
+        if _is_num(body.get("tick")) and body["tick"] >= 0:
+            archive.tick = float(body["tick"])
+        return {"ok": True, "legacy": archive.legacy_state(), "max_bytes": archive.max_bytes, "tick": archive.tick}
+
     @app.post("/api/mock/emit")
     async def mock_emit(body: dict[str, Any]) -> dict[str, Any]:
-        """Publish an arbitrary event (e.g. {"type": "workspace.changed", "data": {}}); validated first."""
+        """Publish an arbitrary event (e.g. {"type": "archive.progress", "data": {...}}); validated first."""
         ev = {"id": bus.latest_id + 1, "type": body.get("type"), "data": body.get("data") or {}}
         problems = validate_event(ev)
         if problems:
@@ -2647,7 +3664,7 @@ def selfcheck() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Arena-Agents v0.12.1 UI mock server")
+    parser = argparse.ArgumentParser(description="Arena-Agents v0.13.0 UI mock server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--speed", type=float, default=1.0, help="replay speed multiplier (default 1.0 ≈ 60 s per game)")
@@ -2655,6 +3672,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--budget-tokens", type=int, default=DEMO_BUDGET_TOKENS,
                         help="demo token limit with 'force stop' (the replay warns at 80 %% and pauses at 100 %%); 0 = no limit")
     parser.add_argument("--demo", action="store_true", help='set session.demo (the page shows the "演示模式" badge)')
+    parser.add_argument("--legacy", action="store_true", help='show the "old v0.12.1 data found" notice (the notice bar of the settings)')
     parser.add_argument("--selfcheck", action="store_true", help="replay the script offline and validate every event")
     args = parser.parse_args(argv)
     if args.selfcheck:
@@ -2663,7 +3681,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Mock UI server: http://{args.host}:{args.port}/  (speed x{args.speed}, seed {args.seed}, "
           f"demo budget {args.budget_tokens or 'off'} tokens)")
-    uvicorn.run(create_app(speed=args.speed, seed=args.seed, budget_tokens=args.budget_tokens, demo=args.demo),
+    uvicorn.run(create_app(speed=args.speed, seed=args.seed, budget_tokens=args.budget_tokens, demo=args.demo, legacy=args.legacy),
                 host=args.host, port=args.port, log_level="warning")
     return 0
 

@@ -15,11 +15,9 @@ changing a name or a memory never affects a game in progress and the system prom
 
 from __future__ import annotations
 
-import io
 import json
 import re
 import threading
-import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -32,8 +30,6 @@ MODERATOR_ID = "moderator"  # the moderator is not a seat: it only has a (random
 MODERATOR_NAME = "主持人"
 MAX_NAME_CHARS = 20
 MAX_TEXT_CHARS = 20_000  # persona / memory
-MAX_ZIP_BYTES = 2 * 1024 * 1024
-MAX_ZIP_MEMBERS = 80
 ROSTER_FILE = "roster.json"
 SECTION_RECORD = "战绩"
 SECTION_MEMORY = "对局记忆"
@@ -41,7 +37,6 @@ SECTION_EXPERIENCE = "经验与印象"
 SECTIONS = (SECTION_RECORD, SECTION_MEMORY, SECTION_EXPERIENCE)
 _NAME_BAD = re.compile(r"[\x00-\x1f\x7f<>\"'`\\]")
 _ID_RE = re.compile(r"^N([1-9]|[1-9][0-9])$")
-_ZIP_NAME_RE = re.compile(r"^N([1-9]|[1-9][0-9])\.(persona|memory)\.md$")
 
 
 class RosterError(ValueError):
@@ -363,83 +358,6 @@ class RosterStore:
             raise RosterError(f"没有这个座位：{agent_id}")
 
     # --------------------------------------------------------------------------- bulk memory
-    def export_zip(self) -> bytes:
-        """Every persona / memory file as a zip (plain text, ``N1.persona.md`` …)."""
-        with self._lock:
-            buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-                for row in self.get()["seats"]:
-                    for kind in ("persona", "memory"):
-                        if row[kind].strip():
-                            archive.writestr(f"{row['id']}.{kind}.md", row[kind] + "\n")
-            return buffer.getvalue()
-
-    def parse_zip(self, data: bytes) -> dict[str, dict[str, str]]:
-        """``{agent_id: {"persona"?: text, "memory"?: text}}`` of a memory pack; raises ``RosterError`` for a
-        pack that is too large, not a zip or holds anything but ``N<k>.persona.md`` / ``N<k>.memory.md``."""
-        if not isinstance(data, (bytes, bytearray)) or not data:
-            raise RosterError("记忆包是空的。")
-        if len(data) > MAX_ZIP_BYTES:
-            raise RosterError("记忆包过大（上限 2 MB）。")
-        try:
-            archive = zipfile.ZipFile(io.BytesIO(bytes(data)))
-        except zipfile.BadZipFile:
-            raise RosterError("这不是有效的 zip 文件。") from None
-        out: dict[str, dict[str, str]] = {}
-        with archive:
-            infos = archive.infolist()
-            if len(infos) > MAX_ZIP_MEMBERS:
-                raise RosterError("记忆包里的文件太多。")
-            total = 0
-            for info in infos:
-                if info.is_dir():
-                    continue
-                match = _ZIP_NAME_RE.match(info.filename)
-                if match is None:
-                    raise RosterError(f"记忆包里有不认识的文件：{info.filename[:60]}（只接受 N1.persona.md / N1.memory.md 这样的文件名）。")
-                if info.file_size > MAX_TEXT_CHARS * 4:
-                    raise RosterError(f"{info.filename} 太大。")
-                total += info.file_size
-                if total > MAX_ZIP_BYTES:
-                    raise RosterError("记忆包解压后过大。")
-                try:
-                    text = archive.read(info).decode("utf-8")
-                except UnicodeDecodeError:
-                    raise RosterError(f"{info.filename} 不是 UTF-8 文本。") from None
-                seat = f"N{match.group(1)}"
-                if seat not in self._seat_ids():
-                    continue  # a pack of a bigger table: the extra seats are ignored
-                kind = match.group(2)
-                out.setdefault(seat, {})[kind] = clean_text(text, "记忆包里的文本")
-        return out
-
-    def preview_import(self, data: bytes) -> list[dict[str, Any]]:
-        """What importing ``data`` would overwrite (``dry_run``)."""
-        pack = self.parse_zip(data)
-        current = {row["id"]: row for row in self.get()["seats"]}
-        changes = []
-        for agent_id in self._seat_ids():
-            if agent_id not in pack:
-                continue
-            row = current[agent_id]
-            persona = "persona" in pack[agent_id] and pack[agent_id]["persona"] != row["persona"]
-            memory = "memory" in pack[agent_id] and pack[agent_id]["memory"] != row["memory"]
-            if persona or memory:
-                changes.append({"id": agent_id, "name": row["name"], "persona": persona, "memory": memory})
-        return changes
-
-    def import_zip(self, data: bytes) -> list[dict[str, Any]]:
-        """Load a memory pack: files present in it replace the seat's text, others are left alone."""
-        with self._lock:
-            changes = self.preview_import(data)
-            pack = self.parse_zip(data)
-            for change in changes:
-                if change["persona"]:
-                    self.set_persona(change["id"], pack[change["id"]]["persona"])
-                if change["memory"]:
-                    self.set_memory(change["id"], pack[change["id"]]["memory"])
-            return changes
-
     def clear(self, *, include_persona: bool = False) -> int:
         """Empty every seat's memory (and persona when asked); returns how many files were removed."""
         with self._lock:

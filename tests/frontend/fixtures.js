@@ -212,6 +212,99 @@ function makeSession(over = {}) {
   return { ...session, ...over };
 }
 
+// ---- v0.13: the seat a person plays (docs/v0.12-contracts.md §11.7) ----------------------------------------
+
+/** The server's state of one channel for the played seat; `over` replaces fields. */
+function seatChannel(over = {}) {
+  return { can_write: true, why_not: null, code: null, max_chars: 300, floor: null, can_pass: false, ...over };
+}
+
+/** The seat's token of a queue / turn floor (it holds the floor unless `mine` is false). */
+const seatFloor = (over = {}) => ({
+  kind: "queue",
+  mine: true,
+  paused: false,
+  messages_left: 2,
+  chars_left: 560,
+  seconds_left: 87.5,
+  deadline_clock: 100,
+  ...over,
+});
+
+/** The seat's share of a free discussion. */
+const seatFree = (over = {}) => ({
+  kind: "free",
+  mine: false,
+  paused: false,
+  messages_left: 4,
+  chars_left: null,
+  seconds_left: null,
+  deadline_clock: null,
+  ...over,
+});
+
+/** One open request of the played seat (its answer part). */
+const seatRequest = (id, over = {}) => ({
+  id,
+  kind: "choice",
+  max_chars: null,
+  answered: false,
+  my_answer: null,
+  seconds_left: 90,
+  deadline_clock: 102.5,
+  channel_id: "public",
+  ...over,
+});
+
+/** The white wolf king's ability as the server lists it for the seat that holds it (params from the scenario). */
+const explodeAbility = (over = {}) => ({
+  id: "white_wolf_explode",
+  description: "白狼王自爆：只在主持人启用期间可用。公开宣布自爆并带走一名存活的其他玩家。",
+  quota_left: 1,
+  params: [
+    { name: "target", type: "player_id", optional: false, candidates: PLAYER_IDS },
+    { name: "declaration", type: "text", optional: false, max_chars: 120 },
+  ],
+  ...over,
+});
+
+/**
+ * `PublicSession.takeover` of a game in which `seat` is played.  Every channel of the seat is in its default
+ * state - the free public chat open (4 messages left), the private chat open (600 characters), the closed group
+ * channels muted - unless `over.channels` replaces fields of one; `over` sets the rest (reshuffle_available,
+ * seq, requests, abilities, attention).
+ */
+function makeTakeover(seat, over = {}) {
+  const { channels: channelOver = {}, ...rest } = over;
+  const channels = {};
+  for (const ch of makeChannels()) {
+    if (!ch.members.includes(seat)) continue;
+    let base;
+    if (ch.mode === "free") {
+      base = seatChannel({ max_chars: ch.system ? 600 : 300, floor: ch.system ? null : seatFree() });
+    } else {
+      base = seatChannel({
+        can_write: false,
+        code: "CHANNEL_CLOSED",
+        why_not: `频道「${ch.name}」当前已关闭，只有主持人可以发言。`,
+        max_chars: null,
+      });
+    }
+    channels[ch.id] = { ...base, ...(channelOver[ch.id] || {}) };
+  }
+  return { seat, reshuffle_available: false, seq: 40, channels, requests: [], abilities: [], attention: [], ...rest };
+}
+
+/** A session in which `seat` is played (its card says "human"); `over` replaces top-level fields. */
+function makePlayedSession(seat, over = {}, takeoverOver = {}) {
+  return makeSession({
+    status: "paused",
+    participants: makeParticipants({ [seat]: { state: "human" } }),
+    takeover: makeTakeover(seat, takeoverOver),
+    ...over,
+  });
+}
+
 /** A `message.committed` event payload (flat MessageView). */
 function messageEvent(id, seq, channelId, from, content, kind = "speech", visible = EVERYONE, extra = {}) {
   return { id, type: "message.committed", data: msg(seq, channelId, from, content, kind, visible, extra) };
@@ -231,6 +324,13 @@ module.exports = {
   makeRequest,
   answer,
   makeSession,
+  seatChannel,
+  seatFloor,
+  seatFree,
+  seatRequest,
+  explodeAbility,
+  makeTakeover,
+  makePlayedSession,
   floorNone,
   channel,
   msg,

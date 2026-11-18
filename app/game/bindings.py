@@ -104,7 +104,11 @@ def compute_binding_issues(
             issues.append(BindingIssue(actor_id=actor_id, message=f"{label} 的 Provider 配置无法读取"))
             continue
         if not str(getattr(provider, "api_key", "") or "").strip():
-            issues.append(BindingIssue(actor_id=actor_id, message=f"{label} 的 Provider 缺少 API Key"))
+            name = str(getattr(provider, "name", "") or getattr(provider, "id", ""))
+            message = f"{label} 的 Provider「{name}」未设置 API Key"
+            if getattr(provider_store, "keys_error", None):
+                message += "（已保存的密钥无法解密：主密钥缺失或不匹配）"
+            issues.append(BindingIssue(actor_id=actor_id, message=message))
     return issues
 
 

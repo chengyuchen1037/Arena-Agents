@@ -163,11 +163,41 @@ def test_channel_block_has_the_documented_fields():
     world = make_world()
     channel = by_id(build_board(world, "u1")["channels"], "public")
     assert set(channel) == {
-        "id", "name", "type", "mode", "members", "readonly", "frozen", "system", "can_write", "why_not", "floor",
+        "id", "name", "type", "mode", "members", "readonly", "frozen", "system", "can_write", "why_not",
+        "max_chars", "floor",
     }
     assert channel["can_write"] is True and channel["why_not"] is None and channel["system"] is False
     dm = by_id(build_board(world, "u1")["channels"], "dm-u1")
     assert dm["system"] is True and dm["type"] == "dm" and dm["can_write"] is True
+
+
+def test_max_chars_is_the_cap_of_one_message_the_agent_could_write_now():
+    world = make_world()
+    defaults = world.spec.defaults
+    # a free discussion without a FreeState of its own and a system DM use the scenario defaults
+    assert by_id(build_board(world, "u1")["channels"], "public")["max_chars"] == defaults.free.max_chars_per_message
+    assert by_id(build_board(world, "u1")["channels"], "dm-u1")["max_chars"] == defaults.dm.max_chars_per_message
+    # the moderator is not capped by the gate; whoever cannot write has no cap to report
+    assert by_id(build_board(world, MODERATOR_ID)["channels"], "public")["max_chars"] is None
+    world.channel("public").mode = "closed"
+    assert by_id(build_board(world, "u1")["channels"], "public")["max_chars"] is None
+    # a free discussion reports its own per-message limit
+    free = FreeState(max_messages_per_member=3, max_chars_per_message=77, max_chars_total=500, duration_s=300, silence_s=30)
+    add_channel(world, id="chat", name="讨论", type="group", mode="free", members=[MODERATOR_ID, "u1", "u2"], free=free)
+    assert by_id(build_board(world, "u1")["channels"], "chat")["max_chars"] == 77
+    # a token: the per-message cap, clipped to what is left of its total
+    tokens = [token("u1", max_chars_per_message=100, max_chars_total=300, chars_used=250)]
+    add_channel(
+        world,
+        id="talk",
+        name="轮次",
+        type="group",
+        mode="turn",
+        members=[MODERATOR_ID, "u1", "u2"],
+        group=FloorGroup(id="g2", channel_id="talk", mode="turn", tokens=tokens),
+    )
+    assert by_id(build_board(world, "u1")["channels"], "talk")["max_chars"] == 50
+    assert by_id(build_board(world, "u2")["channels"], "talk")["max_chars"] is None  # no token: cannot write
 
 
 def code_of(block) -> str:

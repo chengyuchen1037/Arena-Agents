@@ -10,14 +10,18 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.archive import router as archive_router
+from app.api.games import router as games_router
 from app.api.pricing import router as pricing_router
 from app.api.providers import router as providers_router
 from app.api.roster import router as roster_router
 from app.api.routes import router as api_router
+from app.api.seat import router as seat_router
 from app.api.security import warn_if_exposed
-from app.api.workspaces import router as workspaces_router
+from app.api.takeover import router as takeover_router
 from app.config import APP_VERSION, BASE_DIR
 from app.game.orchestrator import get_orchestrator
+from app.storage.datadir import DataDirLockedError, ensure_data_dir
 from app.storage.errors import StorageError
 
 logger = logging.getLogger(__name__)
@@ -27,21 +31,26 @@ logger = logging.getLogger(__name__)
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.degraded = False
     try:
+        # Create and lock the data directory first: a second server on the same directory must stop here,
+        # before anything is read or written (DataDirLockedError is not a degraded state, it is a refusal).
+        ensure_data_dir()
         # Fail fast on config/scenario errors instead of on the first request.
         orchestrator = get_orchestrator()
-        # Migrate legacy data, restore the last game (paused) and enable autosave.
-        # startup() reports problems instead of raising; a failed restore keeps the
-        # files untouched and leaves the app in a "needs recovery" state.
+        # Restore the last game (paused) and enable autosave.  startup() reports problems instead of
+        # raising; a failed restore keeps the files untouched and leaves the app in a "needs recovery" state.
         startup = getattr(orchestrator, "startup", None)
         if startup is not None:
             report = await startup()
             if isinstance(report, dict) and report.get("recovery_error"):
                 application.state.degraded = True
                 logger.error("Last session could not be restored; recovery needed (see session.restore_notice)")
+    except DataDirLockedError:
+        logger.critical("Another Arena-Agents instance is using the data directory; refusing to start")
+        raise
     except StorageError:
-        # Encrypted storage unavailable (missing master key / data dir): do not
-        # crash-loop the container. Stay up in a degraded state; storage-backed
-        # endpoints answer 503 with a clear reason and nothing is written in plaintext.
+        # Storage unavailable (data directory not writable, missing master key): do not crash-loop the
+        # container. Stay up in a degraded state; storage-backed endpoints answer 503 with a clear
+        # reason and nothing is written in plaintext.
         application.state.degraded = True
         logger.error("Startup storage failure; running in degraded mode", exc_info=True)
     # Startup check: warn loudly when exposed beyond loopback without a token.
@@ -125,7 +134,10 @@ app.include_router(api_router)
 app.include_router(providers_router)
 app.include_router(pricing_router)
 app.include_router(roster_router)
-app.include_router(workspaces_router)
+app.include_router(takeover_router)
+app.include_router(seat_router)
+app.include_router(archive_router)
+app.include_router(games_router)
 
 STATIC_DIR = BASE_DIR / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)

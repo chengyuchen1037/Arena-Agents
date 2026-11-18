@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import io
 import json
-import zipfile
 from typing import Any
 
 import pytest
@@ -17,13 +15,14 @@ import pytest
 import app.game.orchestrator as orchestrator_module
 from app.game.orchestrator import GameOrchestrator
 from app.llm.types import LLMResponse
+from app.storage.errors import StorageError
 from app.storage.roster import RosterError, RosterStore, split_memory
 from app.world.types import MODERATOR_ID, UiEvent
 from game_fakes import (
     CFG,
     PROVIDER,
     FakeProviders,
-    FakeSessions,
+    FakeGames,
     FakeSettings,
     async_test,
     bound,
@@ -42,7 +41,7 @@ def make_orch(monkeypatch: pytest.MonkeyPatch, *, bound_all: bool = True) -> Gam
     orch = GameOrchestrator()
     orch.provider_store = FakeProviders(PROVIDER)
     orch.settings_store = FakeSettings({a: bound() for a in [MODERATOR_ID, *IDS]} if bound_all else {})
-    orch.session_store = FakeSessions()
+    orch.game_store = FakeGames()
     orch._autosave_delay = 0.01
     orch._reset_game(default_bindings=orch._load_defaults())
     orch.refresh_binding_issues()
@@ -119,7 +118,7 @@ class TextLlm:
 def test_the_first_game_is_built_without_touching_any_roster_file(monkeypatch, isolated_external_storage):
     monkeypatch.setattr(orchestrator_module, "load_config", lambda *a, **k: copy.deepcopy(ROSTER_CFG))
     orch = GameOrchestrator()
-    assert not (isolated_external_storage / "roster").exists()  # the workspace is not active yet
+    assert not (isolated_external_storage / "roster").exists()  # the data directory is not locked yet: startup() reads it
     assert [p.name for p in orch.session.participants] == ["Alice", "Bob", "Carol", "David"]
     orch._reset_game(default_bindings={})  # a later game may use the roster
     assert (isolated_external_storage / "roster").exists() is False or True  # (only avatars would write: none here)
@@ -229,8 +228,11 @@ async def test_the_start_of_a_game_does_not_touch_the_texts_when_the_roster_cann
     orch = make_orch(monkeypatch)
     play_with(orch, idle)
     await orch.update_roster_entry("N1", persona="先写好的设定")
-    orch._workspace_failed = True  # the workspace went away: nothing may be read or clobbered
-    orch._ensure_not_switching = lambda: None  # type: ignore[method-assign]  # (start_or_resume refuses a broken workspace itself)
+
+    def unreadable() -> Any:
+        raise StorageError("名册文件无法读取")
+
+    orch._roster = unreadable  # type: ignore[method-assign]  # the roster went away: nothing may be clobbered
     orch._refresh_idle_texts()
     assert orch.session.participants[0].persona == "先写好的设定"  # kept, not replaced by an empty text
 
@@ -265,22 +267,14 @@ async def test_a_new_game_import_or_restore_starts_with_no_conversations(monkeyp
 
 
 @async_test
-async def test_memory_pack_round_trip_dry_run_and_clear(monkeypatch):
+async def test_clearing_the_memory_keeps_the_persona_and_an_idle_game_takes_it_at_once(monkeypatch):
     orch = make_orch(monkeypatch)
     orch._roster().set_memory("N1", "## 经验与印象\n一")
     orch._roster().set_persona("N2", "二")
-    pack = orch.export_memory()
-    assert sorted(zipfile.ZipFile(io.BytesIO(pack)).namelist()) == ["N1.memory.md", "N2.persona.md"]
-
     await orch.clear_memory()
     assert orch._roster().entry("N1")["memory"] == "" and orch._roster().entry("N2")["persona"] == "二"
-    dry = await orch.import_memory(pack, dry_run=True)
-    assert dry["dry_run"] is True and [c["id"] for c in dry["changes"]] == ["N1"] and orch._roster().entry("N1")["memory"] == ""
-    done = await orch.import_memory(pack, dry_run=False)
-    assert [c["id"] for c in done["changes"]] == ["N1"] and "一" in orch._roster().entry("N1")["memory"]
-    assert "一" in orch.session.participants[0].memory  # an idle game takes the imported memory at once
-    with pytest.raises(RosterError):
-        await orch.import_memory(b"garbage", dry_run=False)
+    assert orch.session.participants[0].memory == ""
+    assert not hasattr(orch, "export_memory") and not hasattr(orch, "import_memory")  # the memory pack is gone (F26)
 
 
 # ------------------------------------------------------------------------------------ refine
@@ -515,7 +509,9 @@ async def test_the_cost_limit_counts_money_not_tokens(monkeypatch):
 async def test_the_public_session_has_the_v3_fields_and_no_execution_depth(monkeypatch):
     orch = make_orch(monkeypatch)
     s = orch.public_session()
-    assert s["schema_version"] == 5 and s["version"] == "v0.12.1" and "execution_depth" not in s
+    from app.game.session import APP_ENGINE_VERSION
+
+    assert s["schema_version"] == 5 and s["version"] == APP_ENGINE_VERSION and "execution_depth" not in s
     assert s["budget"]["state"] == "ok" and s["memory_enabled"] is True and s["review"] == {"available": False, "done": [], "running": False}
     moderator = s["moderator"]
     assert s["stall_notice"] == "" and {k: moderator[k] for k in ("id", "name", "state", "sleep_until")} == {
@@ -565,8 +561,8 @@ async def test_a_finished_review_is_saved_so_a_restart_cannot_review_the_same_ga
     orch.llm_port_factory = lambda o: TextLlm("复盘")
     await orch.start_review()
     await wait_for(lambda: len(orch.session.review_done) == 4 and not orch._review_running)
-    await wait_for(lambda: any(len(saved.get("review_done", [])) == 4 for saved in orch.session_store.data.values()))
-    saved = next(v for v in orch.session_store.data.values() if len(v.get("review_done", [])) == 4)
+    await wait_for(lambda: any(len(saved.get("review_done", [])) == 4 for saved in orch.game_store.data.values()))
+    saved = next(v for v in orch.game_store.data.values() if len(v.get("review_done", [])) == 4)
     assert sorted(saved["review_done"]) == sorted(IDS)
     other = make_orch(monkeypatch)
     await other.load_session_data(copy.deepcopy(saved))
@@ -667,52 +663,24 @@ async def test_the_moderators_avatar_is_part_of_the_save_and_survives_a_restore(
     assert other.public_session()["moderator"]["avatar"] == moderator  # the game keeps the host it started with
 
 
-# ------------------------------------------------------------------------------------ no usable workspace
-def roster_dir_exists(orch):
-    return (orch._roster().data_dir / "roster").exists()
-
-
+# ------------------------------------------------------------------------------------ unreadable roster
 @async_test
-async def test_without_a_usable_workspace_the_roster_is_read_only_and_creates_nothing(monkeypatch, isolated_external_storage):
+async def test_an_unreadable_roster_is_a_storage_error_for_the_panel_and_does_not_block_a_game(monkeypatch):
     orch = make_orch(monkeypatch)
-    orch._workspace_failed = True  # the workspace could not be opened: the legacy global directory must stay untouched
-    payload = orch.roster_payload()
-    assert payload["editable"] is False and payload["memory_enabled"] is True
-    assert [s["id"] for s in payload["seats"]] == IDS and [s["name"] for s in payload["seats"]] == ["Alice", "Bob", "Carol", "David"]
-    assert all(s["avatar"] is None and s["persona"] == "" and s["memory"] == "" for s in payload["seats"])
-    assert payload["moderator"] == {"id": "moderator", "name": "主持人", "avatar": None}
-    for call in (
-        lambda: orch.update_roster_entry("N1", persona="x"),
-        lambda: orch.update_roster_entry("N1", memory="x"),
-        lambda: orch.update_roster_entry("N1", name="Zed"),
-        lambda: orch.set_memory_enabled(False),
-        lambda: orch.clear_memory(),
-        lambda: orch.import_memory(b"x", dry_run=False),
-        lambda: orch.regenerate_avatars("moderator"),
-    ):
-        with pytest.raises(RuntimeError, match="工作文件夹不可用"):
-            await call()
-    with pytest.raises(RosterError, match="工作文件夹不可用"):
-        orch.export_memory()
-    orch._workspace_failed = False
-    shutil_rmtree = __import__("shutil").rmtree
-    shutil_rmtree(isolated_external_storage / "roster", ignore_errors=True)  # forget what the make_orch game created
-    orch._workspace_failed = True
-    orch.roster_payload()
-    assert not (isolated_external_storage / "roster").exists(), "reading the roster of a broken workspace created files"
 
+    def unreadable() -> Any:
+        raise StorageError("名册文件无法读取")
 
-@async_test
-async def test_roster_changes_wait_for_a_workspace_switch_to_finish(monkeypatch):
-    orch = make_orch(monkeypatch)
-    orch._switching_workspace = True
-    for call in (lambda: orch.update_roster_entry("N1", persona="x"), lambda: orch.set_memory_enabled(False), lambda: orch.clear_memory()):
-        with pytest.raises(RuntimeError, match="正在切换工作文件夹"):
-            await call()
-    assert orch.roster_payload()["editable"] is False
+    orch._roster = unreadable  # type: ignore[method-assign]
+    with pytest.raises(StorageError):
+        orch.roster_payload()  # the API answers 503 for this
+    with pytest.raises(StorageError):
+        await orch.update_roster_entry("N1", persona="x")
+    players = orch._roster_players()  # ... but a new game falls back to the names of config.yml
+    assert [p["name"] for p in players] == ["Alice", "Bob", "Carol", "David"] and all(p["avatar"] is None for p in players)
 
 
 def test_the_incompatible_save_notice_names_the_versions_of_this_release():
     from app.game.session_runtime import OLD_SAVE_NOTICE
 
-    assert "v0.12.0" in OLD_SAVE_NOTICE and "v0.12.1" in OLD_SAVE_NOTICE and "未被改动" in OLD_SAVE_NOTICE
+    assert "v0.12.1" in OLD_SAVE_NOTICE and "v0.13" in OLD_SAVE_NOTICE and "未被改动" in OLD_SAVE_NOTICE

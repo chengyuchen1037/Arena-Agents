@@ -1104,6 +1104,152 @@ body {
   color: var(--text-muted);
 }
 
+/* ---- v0.13: the history of games (history.js) ---- */
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-card-subtle);
+  border-radius: 8px;
+}
+
+.history-item.is-current {
+  border-color: var(--blue-border);
+  background: var(--blue-bg-tint);
+}
+
+.history-item.is-unreadable {
+  opacity: 0.7;
+}
+
+.history-main {
+  min-width: 0;
+}
+
+.history-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.history-meta {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.history-id {
+  word-break: break-all;
+  opacity: 0.8;
+}
+
+.history-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+}
+
+.history-error {
+  color: var(--danger-text);
+}
+
+.history-footer-note {
+  margin-right: auto;
+}
+
+html[data-layout="phone"] .history-item {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+html[data-layout="phone"] .history-actions {
+  justify-content: flex-end;
+}
+
+/* ---- v0.13: the replay bar (replay.js): shown under the top bar while a saved game is played back ---- */
+.replay-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 6px 16px;
+  background: var(--blue-bg-tint);
+  color: var(--blue-text);
+  border-bottom: 1px solid var(--blue-border);
+  font-size: 13.5px;
+}
+
+.replay-bar[hidden] {
+  display: none;
+}
+
+.replay-badge {
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.replay-title {
+  max-width: 28ch;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.replay-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.replay-speed {
+  width: auto;
+  min-height: 26px;
+  padding: 2px 6px;
+}
+
+.replay-skip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.replay-seek {
+  flex: 1 1 200px;
+  min-width: 120px;
+  accent-color: var(--blue-border);
+}
+
+.replay-time {
+  min-width: 8.5em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+html[data-layout="phone"] .replay-bar {
+  padding: 6px 10px;
+}
+
+html[data-layout="phone"] .replay-seek {
+  flex-basis: 100%;
+  order: 5;
+}
+
 .notice-bar {
   display: flex;
   align-items: center;
@@ -1133,24 +1279,21 @@ body {
    v0.11 — Layout: collapse buttons and drag separators
    ========================================================================== */
 
-/* Top bar: workspace entry + board collapse toggle */
-.btn-workspace {
-  gap: 7px;
+/* Top bar: settings entry (v0.13) + board collapse toggle */
+.btn-settings {
+  gap: 6px;
   padding: 5px 12px;
   border-radius: 9px;
-  max-width: 260px;
   border-color: var(--border-card-subtle);
 }
 
-.btn-workspace .workspace-name {
+.btn-settings .settings-label {
   font-size: 13.5px;
   font-weight: 700;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.btn-workspace .folder-icon {
+.btn-settings .settings-icon {
   font-size: 14px;
   line-height: 1;
 }
@@ -1401,95 +1544,6 @@ body.arena-resizing * {
   cursor: pointer;
 }
 
-/* ==========================================================================
-   v0.11 — Workspace (工作文件夹) modal
-   ========================================================================== */
-.workspace-modal-body {
-  max-height: 74vh;
-  overflow-y: auto;
-}
-
-.workspace-current {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 12px 14px;
-  background: var(--bg-muted);
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-}
-
-.workspace-current-label {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-muted);
-}
-
-.workspace-current-name {
-  font-size: 17px;
-  font-weight: 800;
-  color: var(--text-primary);
-  word-break: break-all;
-}
-
-.workspace-current-path {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12.5px;
-  color: var(--text-secondary);
-  word-break: break-all;
-}
-
-.workspace-recent,
-.workspace-switch,
-.workspace-sessions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.workspace-recent-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.workspace-recent-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 7px 10px;
-  border: 1px solid var(--border-card-subtle);
-  border-radius: 8px;
-}
-
-.workspace-recent-item.current {
-  border-color: var(--blue-border);
-  background: var(--blue-bg-tint);
-}
-
-.workspace-recent-name {
-  font-size: 13.5px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.workspace-recent-path {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11.5px;
-  color: var(--text-muted);
-  word-break: break-all;
-}
-
-.workspace-picker-row,
-.workspace-switch-actions,
-.workspace-sessions-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
 @media (max-width: 1100px) {
   .template-row {
     grid-template-columns: 1fr 1fr;
@@ -1505,12 +1559,6 @@ body.arena-resizing * {
 @media (max-width: 820px) {
   .binding-row {
     grid-template-columns: 26px 1fr;
-  }
-  .workspace-modal-body {
-    max-height: 80vh;
-  }
-  .btn-workspace {
-    max-width: 150px;
   }
 }
 
@@ -2394,20 +2442,13 @@ html[data-layout="phone"] .more-menu-list > .viewpoint-picker {
   display: inline;
 }
 
-.more-menu-list #btn-open-workspace-modal .workspace-name::before {
-  content: "工作文件夹 · ";
-  color: var(--text-muted);
-  font-weight: 500;
-}
-
 .more-menu-list #btn-open-bindings-modal #api-status-label::before {
   content: "模型绑定 · ";
   color: var(--text-muted);
   font-weight: 500;
 }
 
-.more-menu-list #btn-open-bindings-modal #api-status-label,
-.more-menu-list #btn-open-workspace-modal .workspace-name {
+.more-menu-list #btn-open-bindings-modal #api-status-label {
   min-width: 0;
   overflow: hidden;
   text-align: left;
@@ -2432,10 +2473,6 @@ html[data-layout="phone"] .more-menu-list > .viewpoint-picker {
 
 .more-menu-list .theme-label {
   display: inline;
-}
-
-.more-menu-list .btn-workspace .workspace-name {
-  max-width: none;
 }
 
 /* ==========================================================================
@@ -4845,11 +4882,6 @@ html[data-layout="phone"] .template-row .template-slot-label {
   grid-column: 1 / -1;
 }
 
-html[data-layout="phone"] .workspace-picker-row,
-html[data-layout="phone"] .workspace-switch-actions {
-  flex-wrap: wrap;
-}
-
 html[data-layout="phone"] .toast-container {
   right: 12px;
   bottom: calc(var(--tabbar-h) + 12px + env(safe-area-inset-bottom));
@@ -4875,10 +4907,6 @@ html[data-layout="phone"] .conn-banner {
   .pcard-tag {
     padding: 0 6px;
     font-size: 11px;
-  }
-
-  .btn-workspace {
-    max-width: 160px;
   }
 }
 
@@ -4947,16 +4975,11 @@ html[data-layout="phone"] .conn-banner {
   }
 }
 
-/* 1280-1439: keep the top bar at two rows (the unit " Tokens", dividers and the long workspace name go) */
+/* 1280-1439: keep the top bar at two rows (the unit " Tokens" and the dividers go) */
 @media (max-width: 1439px) {
   html[data-layout="wide"] .usage-unit,
   html[data-layout="wide"] .topbar-divider {
     display: none;
-  }
-
-  html[data-layout="wide"] .btn-workspace,
-  html[data-layout="wide"] .topbar .btn-workspace {
-    max-width: 128px;
   }
 
   html[data-layout="wide"] .topbar-left,
@@ -5004,4 +5027,724 @@ html[data-layout="phone"] .banner-short {
 [data-theme="dark"] .req-avatar,
 [data-theme="dark"] .mod-chip .avatar-img {
   border-radius: 5px;
+}
+
+/* ==========================================================================
+   v0.13 — playing a seat: the viewpoint bar, the takeover bar, the input box, request answers
+   (docs/v0.13-plan.md F1-F19; static/js/takeover.js, composer.js)
+   ========================================================================== */
+
+/* [视角▾][切换][接管] */
+.viewpoint-bar {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.viewpoint-bar .btn-xs {
+  white-space: nowrap;
+}
+
+.btn-takeover:not(:disabled) {
+  border-color: var(--success-tag-border);
+  color: var(--success-text);
+}
+
+.btn-takeover:hover:not(:disabled) {
+  background: var(--success-bg);
+}
+
+/* in the phone's "⋯" menu the whole bar is one row: the drop-down takes what the two buttons leave */
+.more-menu-list > .viewpoint-bar {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+}
+
+.more-menu-list > .viewpoint-bar .viewpoint-picker {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 46px;
+  padding: 0 12px;
+  border: 1px solid var(--border-card-subtle);
+  border-radius: 10px;
+  background: var(--bg-subtle);
+}
+
+.more-menu-list > .viewpoint-bar .btn {
+  flex: none;
+  min-height: 46px;
+  padding: 0 14px;
+  font-size: 15px;
+  border-radius: 10px;
+}
+
+/* 🎮 正在扮演 3 · Carol [退出接管]: replaces the viewpoint bar while a seat is played */
+.takeover-bar {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 3px 2px 12px;
+  border: 1px solid var(--success-tag-border);
+  border-radius: 999px;
+  background: var(--success-bg);
+  color: var(--success-text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.takeover-badge {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.takeover-badge strong {
+  font-weight: 800;
+}
+
+/* the first row of a phone is narrow: while a seat is played the bar takes the place of the title (it stays in the
+   first row - it is not moved into the "⋯" menu - and the name gives way with an ellipsis on a 360 px screen) */
+html[data-layout="phone"][data-takeover="1"] .brand-group {
+  display: none;
+}
+
+html[data-layout="phone"] .takeover-bar {
+  flex: 1 1 auto;
+  justify-content: space-between;
+  max-width: 100%;
+}
+
+html[data-layout="phone"] .takeover-bar .takeover-badge {
+  flex: 1 1 auto;
+}
+
+/* F5: "你已经知道自己的身份，建议点击「重新发牌」" */
+.takeover-reminder {
+  background: var(--success-bg);
+  color: var(--success-text);
+  border-bottom-color: var(--success-tag-border);
+}
+
+html[data-layout="phone"] .takeover-reminder {
+  justify-content: space-between;
+}
+
+/* a seat a person plays: 🎮 on its card */
+.pcard-state.st-human {
+  border-color: var(--success-text);
+  background: var(--success-bg);
+}
+
+.pcard.st-human {
+  border-color: color-mix(in srgb, var(--success-text) 65%, var(--border-card-subtle));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--success-text) 24%, transparent), var(--card-shadow);
+}
+
+/* the channel bar: "待你操作" (the floor is yours / a request waits) and the seat's own chips */
+.channel-item.needs-action {
+  border-color: var(--amber-border);
+  box-shadow: 0 0 0 1px var(--amber-border);
+}
+
+.channel-item.needs-action.active {
+  border-color: var(--amber-border);
+  box-shadow: inset 0 0 0 1px var(--amber-border), 0 0 0 1px var(--amber-border);
+}
+
+.attn-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border: 1px solid var(--warning-tag-border);
+  border-radius: 999px;
+  background: var(--amber-bg-tint);
+  color: var(--amber-text);
+  font-size: 11.5px;
+  font-weight: 800;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.floor-chip.floor-muted {
+  color: var(--text-muted);
+  background: var(--bg-subtle);
+}
+
+.floor-chip.floor-mine {
+  color: var(--success-text);
+  background: var(--success-bg);
+}
+
+.workspace-grid.left-collapsed .ov-attn,
+.workspace-grid.narrow-layout .ov-attn {
+  top: -9px;
+  left: -9px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--amber-border);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.workspace-grid.left-collapsed .attn-chip,
+.workspace-grid.narrow-layout .attn-chip {
+  display: none;
+}
+
+/* ---- the input box (under the feed, one per channel) ---- */
+.composer {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 14px 10px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-surface);
+}
+
+.composer-input {
+  display: block;
+  width: 100%;
+  min-height: 56px; /* two lines on a desktop (the markup says rows=1: the box grows with the text, composer.js) */
+  max-height: 148px;
+  padding: 8px 11px;
+  border: 1px solid var(--border-card-subtle);
+  border-radius: 10px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14.5px;
+  line-height: 1.5;
+  resize: none;
+}
+
+.composer-input:focus {
+  border-color: var(--blue-border);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--blue-bg-tint);
+}
+
+/* muted / paused: typing still works, the box just looks calmer */
+.composer.is-muted .composer-input,
+.composer.is-paused .composer-input,
+.composer.is-idle .composer-input,
+.composer.is-finished .composer-input {
+  background: var(--bg-muted);
+}
+
+.composer-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.composer-count {
+  flex: none;
+  min-width: 52px;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.composer-count.over {
+  color: var(--danger-text);
+}
+
+.composer-hint {
+  flex: 1 1 180px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.composer-hint:empty {
+  display: none;
+}
+
+.composer-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.composer-send {
+  min-width: 88px;
+  font-weight: 700;
+}
+
+.composer.is-send .composer-send:not(:disabled) {
+  background: var(--blue-primary);
+  border-color: var(--blue-primary);
+  color: #fff;
+}
+
+.composer.is-send .composer-send:not(:disabled):hover {
+  background: var(--blue-text);
+}
+
+.composer-notice {
+  padding: 6px 10px;
+  border: 1px solid var(--warning-tag-border);
+  border-radius: 8px;
+  background: var(--warning-bg);
+  color: var(--amber-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* ---- a request card answered by the person who plays a recipient (F17) ---- */
+.req-card.has-action {
+  border-color: var(--blue-border);
+}
+
+.req-action {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border-card-subtle);
+}
+
+.req-mine {
+  color: var(--text-secondary);
+  font-size: 13.5px;
+}
+
+.req-mine strong {
+  color: var(--blue-text);
+}
+
+.req-mine.pending {
+  color: var(--amber-text);
+  font-weight: 700;
+}
+
+.req-mine-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.req-options {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(112px, 1fr));
+  gap: 6px;
+}
+
+.req-opt {
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-card-subtle);
+  border-radius: 9px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+}
+
+.req-opt:hover:not(:disabled) {
+  border-color: var(--blue-border);
+  background: var(--blue-bg-tint);
+}
+
+.req-opt.selected {
+  border-color: var(--blue-primary);
+  background: var(--blue-bg-tint);
+  color: var(--blue-text);
+  box-shadow: inset 0 0 0 1px var(--blue-border);
+}
+
+.req-opt:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.req-text {
+  display: block;
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 11px;
+  border: 1px solid var(--border-card-subtle);
+  border-radius: 9px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 14px;
+  resize: vertical;
+}
+
+.req-text:focus {
+  border-color: var(--blue-border);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--blue-bg-tint);
+}
+
+.req-text-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.req-action-hint {
+  color: var(--amber-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+html[data-input="touch"] .req-opt {
+  min-height: 44px;
+}
+
+/* ---- the ability dialog: a list, the form of the picked one, a confirmation ---- */
+.ability-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-muted);
+}
+
+.ability-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.ability-left {
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.ability-desc {
+  color: var(--text-secondary);
+  font-size: 13.5px;
+  white-space: pre-wrap;
+}
+
+.ability-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ability-form textarea.form-input {
+  font: inherit; /* a textarea does not inherit the page's font by itself */
+  font-size: 14px;
+  resize: vertical;
+}
+
+.ability-checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(124px, 1fr));
+  gap: 4px 8px;
+}
+
+.ability-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--bg-muted);
+  list-style: none;
+  font-size: 13.5px;
+}
+
+.ability-summary li {
+  display: flex;
+  gap: 10px;
+}
+
+.ability-k {
+  min-width: 3em;
+  color: var(--text-muted);
+}
+
+.ability-v {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.dialog-p {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.dialog-warn {
+  color: var(--danger-text);
+  font-weight: 600;
+}
+
+/* ---- phone: the input box sits right above the tab bar; the soft keyboard pushes both up ---- */
+html[data-layout="phone"] .composer {
+  padding: 6px 10px 8px;
+}
+
+html[data-layout="phone"] .composer-input {
+  min-height: 42px; /* one line; it grows with the text (composer.js) */
+  font-size: 16px; /* (iOS zooms into smaller text fields) */
+}
+
+html[data-layout="phone"] .composer-hint {
+  flex-basis: 100%;
+  order: 3;
+}
+
+html[data-layout="phone"] .composer-count {
+  min-width: 0;
+}
+
+html[data-layout="phone"] .composer-buttons .btn {
+  min-height: 42px;
+}
+
+/* the keyboard is open: the page is as tall as what is left, the tab bar makes room, and only what is needed to
+   write stays - the status pills and the mini cards give way to the feed (they come back when it closes) */
+html[data-layout="phone"].kb-open body {
+  height: var(--vvh, 100%);
+}
+
+html[data-layout="phone"].kb-open .tabbar,
+html[data-layout="phone"].kb-open .topbar-status,
+html[data-layout="phone"].kb-open .main-container[data-phone-tab="feed"] > .board-section {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .attn-chip {
+    animation: none !important;
+  }
+}
+
+/* ==========================================================================
+   v0.13 — settings dialog (export / import an archive) and the "old data found" notice
+   ========================================================================== */
+.settings-card {
+  width: 560px;
+}
+
+.settings-body {
+  gap: 14px;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-muted);
+}
+
+.settings-section p {
+  margin: 0;
+}
+
+.settings-section-title {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+
+.settings-footer {
+  flex-wrap: wrap;
+}
+
+.settings-footer:empty {
+  display: none; /* the import progress has no buttons: no empty strip either */
+}
+
+.archive-phase {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.archive-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.archive-bar-fill {
+  width: 0;
+  height: 100%;
+  background: var(--blue-primary);
+  transition: width 0.2s ease;
+}
+
+.archive-percent {
+  text-align: right;
+}
+
+.archive-rule-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+
+.archive-rule-list .ok {
+  color: var(--success-text);
+}
+
+.archive-rule-list .bad {
+  color: var(--amber-text); /* not met yet: visible, but a to-do rather than an alarm */
+}
+
+.archive-facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 14px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--bg-muted);
+  font-size: 13.5px;
+}
+
+.archive-facts dt {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.archive-facts dd {
+  margin: 0;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.archive-replace-warning {
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--amber-border);
+  border-radius: 9px;
+  background: var(--amber-bg-tint);
+  color: var(--amber-text);
+  font-size: 13.5px;
+}
+
+.archive-warnings {
+  margin: 0;
+  padding: 8px 12px 8px 28px;
+  border-radius: 9px;
+  background: var(--amber-bg-tint);
+  color: var(--amber-text);
+  font-size: 13px;
+}
+
+.archive-ok {
+  margin: 0;
+  color: var(--success-text);
+  font-weight: 700;
+}
+
+.archive-fail {
+  margin: 0;
+  color: var(--danger-text);
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.archive-result {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  background: var(--bg-muted);
+  font-size: 13.5px;
+}
+
+.archive-result code,
+.archive-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  word-break: break-all;
+}
+
+.archive-pending {
+  padding: 8px 10px;
+  border: 1px dashed var(--blue-border);
+  border-radius: 9px;
+  background: var(--blue-bg-tint);
+  color: var(--blue-text);
+  font-size: 13px;
+}
+
+.archive-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13.5px;
+}
+
+.archive-code {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  font-size: 12.5px;
+  overflow-x: auto;
+}
+
+.legacy-notice {
+  background: var(--amber-bg-tint);
+  color: var(--amber-text);
+  border-bottom-color: var(--amber-border);
+}
+
+html[data-layout="phone"] .settings-card {
+  width: 100%;
+  max-width: 100vw;
+  max-height: 100vh;
+  border-radius: 0;
+}
+
+html[data-layout="phone"] .archive-facts {
+  grid-template-columns: 1fr;
+  gap: 2px;
+}
+
+html[data-layout="phone"] .archive-facts dd {
+  margin-bottom: 6px;
+}
+
+html[data-layout="phone"] .legacy-notice {
+  flex-wrap: wrap;
+}
+
+.more-menu-list .btn-settings .settings-label {
+  display: inline;
 }
