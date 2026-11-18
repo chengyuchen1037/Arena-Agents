@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.archive import router as archive_router
+from app.api.calls import router as calls_router
 from app.api.games import router as games_router
 from app.api.pricing import router as pricing_router
 from app.api.providers import router as providers_router
@@ -18,7 +19,9 @@ from app.api.roster import router as roster_router
 from app.api.routes import router as api_router
 from app.api.seat import router as seat_router
 from app.api.security import warn_if_exposed
+from app.api.softpause import router as softpause_router
 from app.api.takeover import router as takeover_router
+from app.api.thoughts import router as thoughts_router
 from app.config import APP_VERSION, BASE_DIR
 from app.game.orchestrator import get_orchestrator
 from app.storage.datadir import DataDirLockedError, ensure_data_dir
@@ -138,6 +141,9 @@ app.include_router(takeover_router)
 app.include_router(seat_router)
 app.include_router(archive_router)
 app.include_router(games_router)
+app.include_router(softpause_router)  # v0.13.1 (G1-G9)
+app.include_router(thoughts_router)  # v0.13.1 (G21-G26)
+app.include_router(calls_router)  # v0.13.1 (G32-G36)
 
 STATIC_DIR = BASE_DIR / "static"
 STATIC_DIR.mkdir(parents=True, exist_ok=True)

@@ -28,6 +28,7 @@ from app.agents.brain import ArenaBrain
 from app.config import load_config
 from app.engine.llm import LLMClient
 from app.game.bindings import BindingError
+from app.game.observe_runtime import ObserveRuntimeMixin
 from app.game.roster_runtime import RosterRuntimeMixin
 from app.game.session import (
     APP_ENGINE_VERSION,
@@ -38,6 +39,7 @@ from app.game.session import (
     utc_now_iso,
 )
 from app.game.session_runtime import OLD_SAVE_LOAD_NOTICE, SessionRuntimeMixin
+from app.game.softpause_runtime import SoftPauseRuntimeMixin
 from app.game.takeover_runtime import TakeoverError, TakeoverRuntimeMixin
 from app.runtime.agent import Agent, AgentConfig
 from app.runtime.bus import EventBus
@@ -110,7 +112,9 @@ def load_config_spec(cfg: dict[str, Any]) -> ScenarioSpec:
     return load_scenario_v2(str(path))
 
 
-class GameOrchestrator(TakeoverRuntimeMixin, RosterRuntimeMixin, SessionRuntimeMixin):
+class GameOrchestrator(
+    SoftPauseRuntimeMixin, ObserveRuntimeMixin, TakeoverRuntimeMixin, RosterRuntimeMixin, SessionRuntimeMixin
+):
     # Class-level defaults so partially initialized instances (tests) stay valid.
     _supervisor: Supervisor | None = None
     _reload_deferred: bool = False
