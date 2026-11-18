@@ -54,6 +54,11 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
+#: The workspace paths the mock reports are FICTIONAL on purpose (never ``ROOT``-based): the dialog shows
+#: them, so a screenshot taken from the mock must not carry the path of the checkout or the user name.
+MOCK_WORKSPACE_PATH = "D:\\Arena-Workspaces\\Demo"
+MOCK_OTHER_WORKSPACE_PATH = "D:\\Arena-Workspaces\\Weekend-League"
+MOCK_DEFAULT_WORKSPACE_PATH = "D:\\Arena-Workspaces\\Default"
 STATIC_DIR = ROOT / "static"
 PARTS_REAL = STATIC_DIR / "avatar" / "parts.json"
 PARTS_FIXTURE = ROOT / "tests" / "frontend" / "fixtures" / "parts.min.json"
@@ -451,6 +456,7 @@ SESSION_UPDATED_KEYS = {
     "memory_enabled",
     "review",
     "stall_notice",
+    "clock",  # the real backend adds the game clock (seconds) to every session.updated (contracts §10.8)
 }
 METRIC_FIELDS = (
     "activations",
@@ -2041,7 +2047,7 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             {"slot": 1, "name": "旗舰", "provider_id": "mock-claude", "model_id": "claude-sonnet", "reasoning_depth": "high", "valid": True},
         ],
         "sessions": [],
-        "workspace": {"id": "w-mock", "name": "mock-workspace", "path": str(ROOT / ".mock-workspace"), "status": "ok"},
+        "workspace": {"id": "w-mock", "name": "mock-workspace", "path": MOCK_WORKSPACE_PATH, "status": "ok"},
         "pricing": {"url": DEFAULT_PRICING_URL, "default_url": DEFAULT_PRICING_URL, "fetched_at": now_iso(), "entries": 2345, "error": None},
     }
     initial_budget = default_budget(budget_tokens if budget_tokens else None, True)
@@ -2352,8 +2358,8 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         return {
             "enabled": True,
             "current": cur,
-            "recent": [cur, {"id": "w-other", "name": "other-workspace", "path": str(ROOT / ".other-workspace")}],
-            "default_path": str(ROOT / ".mock-workspace"),
+            "recent": [cur, {"id": "w-other", "name": "other-workspace", "path": MOCK_OTHER_WORKSPACE_PATH}],
+            "default_path": MOCK_DEFAULT_WORKSPACE_PATH,
             "native_picker": False,
         }
 
