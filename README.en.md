@@ -69,7 +69,7 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
   Windows the workspace key is protected by DPAPI.
 - **Endpoint preview** — see the exact message and model-list URLs before saving a Provider;
   either auto-append `/v1/...` paths or point at a complete custom endpoint.
-- **Spectator UI** — players are shown as a pixel avatar + name + role tag; click a tag for the
+- **Spectator UI** — players are shown as a pixel avatar + name + role tag; click a player card for the
   agent's tool-call / thinking / token statistics. The feed shows spoken messages and request cards only
   (whole messages, no streaming) and supports a god view or any player's view.
 - **Demo mode** — `ARENA_DEMO=1` replaces the models with scripted bots, so you can watch a whole
@@ -88,36 +88,55 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 | <img src="docs/images/workspace-modal.png" alt="Workspace selector" width="100%"> | <img src="docs/images/templates-bindings.png" alt="Model templates and bindings" width="100%"> |
 
 > Screenshots are taken from a local **demo-mode** game (scripted bots). The provider is a demo example (placeholder
-> key); no credentials are displayed. The workspace and template/bindings pictures are carried over from v0.12 (their
-> paths and hostnames were pixelated before publication).
+> key); no credentials are displayed. The workspace and template/bindings pictures come from the mock server
+> (`tools/mock_ui_server.py`); every path and name in them is made up.
 
 More UI walkthrough: [docs/ui-guide.md](docs/ui-guide.md).
 
-## How it works
+## Architecture: Actor + Worker
 
-```text
-Browser ──REST + SSE v2 (numbered incremental events, resumable)──► FastAPI API ── workspace (.arena/)
-                                                                      │             ├─ providers.v1.enc
-                                                                      ▼             ├─ settings.json
-                                                              GameOrchestrator      ├─ sessions/*.enc
-                                                                      │             ├─ logs/<game>/trace-*.jsonl
-                                  ┌───────────────────────────────────┴───┐         └─ workspace key
-                                  ▼                                       ▼
-          World (synchronous, game-agnostic)               Runtime (asyncio)
-          commit gate → ledger (append-only)               13 agents = Actor (pending) + Worker (LLM loop)
-          channels · floors · requests · templates         persistent conversations · sleep alarms · watchdog
-          abilities · challenges · RNG · game clock        Brain: state board + memory + visible history + tools
-                                                                      │
-                                                                      ▼
-                                    OpenAI Chat / OpenAI Responses / Anthropic Messages adapters
-```
+The core of the engine is a single idea: **every role (12 players + the moderator) is an asynchronous agent made of two halves — a front *Actor* and a back *Worker*.**
+
+- **The Actor is always on.** It is the agent's mailbox: synchronous, non-blocking, it never calls a model. Whenever the world commits an entry it delivers an Envelope to every agent that can see it, and a sleeping agent wakes at once — no debounce, no "only wake for important messages" money-saving rule.
+- **The Worker thinks.** One activation = one asyncio task: open (or continue) **the one persistent conversation** of this agent → call the model → run tools → merge the messages that arrived meanwhile → call the model again … until the agent calls `sleep` itself. There is no round cap within an activation; the one brake is the spending limit you set.
+- **The world only accepts commits.** Every agent action (speech, a vote, an ability, a challenge …) is an Intent that the commit gate re-validates **at the moment of commit** (floor, membership, length, staleness …). So "the world changed while the agent was thinking" cannot produce a wrong write; cancelling a call in flight only avoids wasting tokens, it is not what makes the game correct.
+
+### Overview
+
+<img src="docs/images/arch-overview.en.svg" alt="Arena-Agents overall architecture: browser, FastAPI, GameOrchestrator, Runtime (Actor + Worker), Brain and World, plus the LLM adapters, the workspace and the scenario" width="100%">
+
+From top to bottom: the browser controls the game over REST and spectates over SSE v2 → FastAPI → the **GameOrchestrator** owns a game's lifecycle (it builds the world and 13 agents, enforces the budget, runs the roster, writes encrypted saves) → in the **Runtime** every agent is an Actor + Worker and the **Supervisor** pumps the world's deliveries into them → the **Brain** translates the world into prompts and tools a model can read and tool calls back into Intents → the **World**'s commit gate and its append-only ledger. Solid arrows are calls and data; dashed arrows are notifications (an Envelope wakes an agent, a UiEvent goes to the browser).
+
+### Actor: the always-on mailbox
+
+<img src="docs/images/arch-actor.en.svg" alt="The Actor's decision tree: deliver puts the envelope into pending; a sleeping agent gets one activation via call_soon; a running one merges, or cancels the call in flight when an interrupt hits its focus; plus the alarm, retry and stop paths" width="100%">
+
+- A sleeping agent receives an envelope → **one activation is scheduled** (everything delivered in the same pump is one activation; there is no timer).
+- A running agent receives an envelope → it **stays in pending and is merged at the next round boundary** as one DELTA message; nothing is interrupted. Only an `interrupt` (a floor was revoked, a request cancelled …) **that also hits a channel or request the current run has read** cancels the model call in flight; after 2 cancellations in a row the next one is merged instead (starvation guard).
+- `gen` (a generation counter) makes a stale run **unable to write anything into the world**; the alarm set by `sleep(seconds)` runs on the game clock (frozen while paused); a failure only affects this agent (exponential backoff, 2 retries, then give up); stopping is synchronous and idempotent.
+
+### Worker: one activation
+
+<img src="docs/images/arch-worker.en.svg" alt="The Worker loop: open the conversation, think, account and check gen, act, keep the conversation healthy, merge envelopes that arrived meanwhile, until sleep; on the right the persistent conversation, the compaction thresholds and what the Brain tells the model" width="100%">
+
+- **A persistent conversation**: every agent has one append-only conversation (`system` and the tool schemas never change after creation), so the provider's prefix cache can hit; pause → resume keeps the same conversation.
+- A round's tools run in one stretch **without `await`**, so a run can never be cancelled half-way; the assistant message and all tool results are appended together.
+- **Three states**: 💭 thinking (an LLM call is in flight) · ⚡ acting (running tools) · 💤 sleeping.
+- **Compaction on demand**: at 60 % of the model window the agent is reminded to compact, at 90 % the oldest complete rounds are trimmed if it still has not; there is no other limit.
+
+### Timeline: how one message wakes everybody
+
+<img src="docs/images/arch-timeline.en.svg" alt="A timeline of three commits: sleeping agents wake up, an agent that is thinking merges at its next round boundary, a player who is out is not woken by broadcasts" width="100%">
+
+Every message wakes (the sender excepted); an agent that is thinking is not interrupted and the new message is merged at its next round boundary; a player who is out is not woken by broadcasts.
 
 The engine never knows game-specific phases or role names (`tests/v12/test_neutrality.py` scans for
 them). The scenario provides rules and a manual, the **moderator agent** drives the game with tools,
 and players act with `speak` / `respond` / `use_ability` / `challenge_moderator`. Chains of thought
-and tool calls go only to a plaintext trace log; the UI never shows them. See
-[docs/architecture.md](docs/architecture.md) for the module map and
-[docs/v0.12-contracts.md](docs/v0.12-contracts.md) for the implementation contract.
+and tool calls go only to a plaintext trace log; the UI never shows them. A layer-by-layer description is in
+[docs/architecture.en.md](docs/architecture.en.md) (中文: [architecture.md](docs/architecture.md)) and the implementation
+contract is [docs/v0.12-contracts.md](docs/v0.12-contracts.md). The pictures are generated by `tools/make_diagrams.py`
+(SVG, one Chinese and one English file each).
 
 ## Quick start
 
@@ -204,8 +223,11 @@ separate readable file; without it the app fails closed instead of writing plain
      `/v1/chat/completions`, `/v1/responses` or `/v1/messages`, and `/v1/models` for discovery.
    - **Off**: Base URL is the complete message endpoint. It is sent verbatim; automatic model
      discovery is disabled, so enter model IDs manually.
-5. Fetch models (when auto-append is on), select **one** model, and enter its input/output prices
-   per 1M tokens. Prices are required and never default to a hidden value.
+5. Fetch models (when auto-append is on) and select **one** model. A model has **four** prices per
+   1M tokens: input (uncached, required), output (required), cache read and cache write (optional:
+   empty = billed like input). The dialog's **price source** (by default LiteLLM's price table) can
+   match the model and fill in the four prices and the context window; you can still edit every number.
+   No match = nothing is filled in; prices never default to a hidden value.
 6. In **Model Bindings**, create templates 1/2/3 or bind a Provider/model/reasoning depth per
    player and the moderator. Check players and click a template to apply it.
 
@@ -229,7 +251,9 @@ A workspace is a normal folder. Everything that belongs to a set of games lives 
    ├─ master.v1.dpapi         Windows DPAPI-wrapped workspace key
    ├─ providers.v1.enc        encrypted provider registry
    ├─ providers.v1.backup.enc known-good backup
-   ├─ settings.json           default bindings, templates, last session
+   ├─ settings.json           default bindings, templates, last session, default spending limit
+   ├─ pricing.v1.json         the downloaded price table (public data, plain JSON)
+   ├─ roster/                 the roster: names, avatars, persona, memory (plain files, no keys)
    ├─ sessions/<id>/          encrypted sessions and previous copy
    ├─ logs/  exports/
    └─ workspace.lock
@@ -239,8 +263,9 @@ A workspace is a normal folder. Everything that belongs to a set of games lives 
 - The current game is saved first; a failed save or invalid target leaves the current workspace
   unchanged.
 - Running games cannot switch workspaces.
-- The native folder picker is available to loopback clients only. Headless/Docker deployments use
-  an absolute path instead.
+- Picking and switching a workspace is allowed for loopback clients only (even when `ARENA_API_TOKEN`
+  is set). The native folder picker needs a desktop; without one, type an absolute path in the
+  dialog. A Docker deployment is pinned to `/data/workspace/default` and cannot switch from the UI.
 - Code assets (`config.yml`, `scenarios/`, `prompts/`) are shared by all workspaces.
 - An earlier single-directory data layout is copied into the default workspace and verified while
   the originals are kept untouched.
@@ -249,17 +274,26 @@ Full details: [docs/workspaces.md](docs/workspaces.md).
 
 ## Using the UI
 
-- **Player tiles**: a minimal glyph + short id + one main tag; click the tag to see that agent's
-  tool-call count, thinking rounds, LLM calls, tokens and cost. Players who are out are greyed.
-- **Feed**: spoken messages, announcements and challenge replies only, rendered whole; no chain of
-  thought, no tool calls, no streaming.
+- **Participant bar**: one card per player — pixel avatar + name + one role tag, with the state on the
+  avatar's corner (💭 thinking / ⚡ acting / 💤 sleeping; the tooltip of a timed sleep shows the seconds
+  left). Click a card for that agent's tool calls, thinking rounds, LLM calls, the four token kinds, the
+  cache hit rate, cost, and its persona and memory. Players who are out are greyed.
+- **Feed**: spoken messages, announcements and **request cards** (votes, choices, questions; with
+  progress and results), rendered whole; no chain of thought, no tool calls, no streaming.
 - **Spectating**: the top-bar selector switches between the god view and any player's view (only the
   channels and messages that player may see).
-- **Channel list**: shows each channel's floor state (🔒 closed / 🎤 holder / 📋 queue / 💬 free
-  discussion / ❄ frozen); challenge tickets form their own group.
-- **Controls**: Start / Pause / Resume; a finished game can still be resumed (the moderator is told).
-- **Layout**: collapse the board or side panels from their headers; drag the separators, double-click
-  to reset. Layout is stored in the browser's `localStorage`.
+- **Channel list**: shows each channel's floor state (🎤 turn / 📋 queue / 💬 free discussion /
+  ❄ frozen / 👁 listen-only / 🔇 muted); challenge tickets form their own group; private channels are
+  named after the other person.
+- **Spending limit**: the button next to the token / cost counter sets a per-game token and / or USD
+  limit, optionally with "stop when reached".
+- **Controls**: Start / Pause / Resume; a finished game can still be resumed (the moderator is told);
+  after a game you can run the **Review** manually.
+- **Responsive layout**: wide, narrow, tablet and phone portrait (mini cards + a bottom tab bar) are
+  chosen from the platform and the width. The board collapses as a whole, separators can be dragged
+  (double-click to reset), and the layout is stored in the browser's `localStorage`.
+
+Every control is described in [docs/ui-guide.md](docs/ui-guide.md).
 
 ## Configuration
 
@@ -279,9 +313,12 @@ reads only these deployment-level environment variables:
 | `ARENA_MAX_IMPORT_BYTES` | `20971520` | Maximum session import size |
 | `ARENA_BIND` | `127.0.0.1` | Docker host bind address |
 | `ARENA_DEMO` | unset | `1` enables demo mode (scripted bots, no model calls) |
+| `ARENA_DISABLE_LEGACY_MIGRATION` | unset | `1` skips the migration of an old `.env` / `saves` |
 
-`config.yml` contains only game defaults, seats/personas, tag styles and the scenario path. The
-cryptographic provider registry is never stored in YAML or `.env`.
+`config.yml` contains only the scenario path, the runtime parameters (`runtime:`, see the
+[contract](docs/v0.12-contracts.md) §6, in Chinese), the knowledge-base directory, the seats' default
+names, tag styles, prompt paths and the legacy LLM defaults. The provider registry is encrypted and is never
+stored in YAML or `.env`.
 
 ## Security
 
@@ -305,7 +342,9 @@ python -m pytest -q tests
 
 The suite is offline and never calls a real LLM (engine tests use a scripted FakeLLM / the demo
 bots). Node.js enables the frontend tests; they are skipped when Node is unavailable. CI runs on
-Ubuntu and Windows.
+Ubuntu and Windows. `tests/test_docs.py` checks the documentation: every relative link and image
+exists, the version numbers agree, and the architecture pictures equal what `tools/make_diagrams.py`
+generates.
 
 ## Project structure
 
@@ -325,9 +364,13 @@ app/
 scenarios/       Markdown scenarios (schema v2)
 prompts/         moderator / player prompt templates
 knowledge/       moderator guide and strategy documents
-static/          single-page arena UI
-tests/           offline regression, API, storage and UI tests
-docs/            architecture, provider, workspace and UI guides
+static/          single-page arena UI (static/js front-end modules, static/avatar parts library)
+tools/           dev tools: dev_server (isolated instances), real_smoke (real-model smoke test),
+                 mock_ui_server (mock server), live_replay (event replay check), avatar_lab (avatar
+                 parts library), make_diagrams (architecture pictures)
+tests/           offline regression, API, storage, documentation and UI tests
+docs/            architecture, contract, provider, workspace and UI guides; docs/images holds the
+                 screenshots and the architecture pictures
 ```
 
 ## Release
@@ -341,8 +384,8 @@ older) saves** — they stay in the saved-game list untouched. The latest stable
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [v0.12 plan and decision log](docs/v0.12-async-agents-plan.md) · [v0.12.1 plan](docs/v0.12.1-plan.md) · [implementation contract](docs/v0.12-contracts.md)
+- [Architecture (Actor + Worker)](docs/architecture.en.md) · [中文](docs/architecture.md)
+- [Implementation contract](docs/v0.12-contracts.md) (current, Chinese) · [v0.12.1 plan](docs/v0.12.1-plan.md) (decisions E1–E26) · [v0.12 plan](docs/v0.12-async-agents-plan.md) (history; some decisions were superseded)
 - [Providers and models](docs/providers.md)
 - [Workspaces and encrypted data](docs/workspaces.md)
 - [UI guide](docs/ui-guide.md)
@@ -357,6 +400,9 @@ Issues and pull requests are welcome. Before opening a PR:
 2. Add or update offline tests for behavior changes.
 3. Never commit `.env`, API keys, workspaces, local paths or generated runtime data.
 4. Run `python -m pytest -q tests` and `node --check static/js/*.js`.
+5. When you change the architecture or the UI, update the documentation; the source of the architecture
+   pictures is `tools/make_diagrams.py` — run `python tools/make_diagrams.py` after editing it (never
+   edit an SVG by hand).
 
 ## License
 
