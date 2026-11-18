@@ -375,12 +375,14 @@ docs/            architecture, contract, provider, workspace and UI guides; docs
 
 ## Release
 
-The current development version is **0.12.1**: on top of 0.12's asynchronous agents it removes every
+The current version is **0.12.1**: on top of 0.12's asynchronous agents it removes every
 engine-side limit that saved money for the user (replaced by persistent conversations, caching, merging
 and compaction), and adds a per-game spending limit, four-price billing with a price source, the
 roster (pixel avatars, persona and memory) and a responsive UI. **v0.12.1 does not open v0.12.0 (or
-older) saves** — they stay in the saved-game list untouched. The latest stable release is 0.11.0; see
-[CHANGELOG.md](CHANGELOG.md) for the release notes.
+older) saves** — they stay in the saved-game list untouched. The previous public release is
+[0.11.0](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.11.0); every version has a page under
+[Releases](https://github.com/chengyuchen1037/Arena-Agents/releases), and [CHANGELOG.md](CHANGELOG.md) has the
+release notes.
 
 ## Documentation
 

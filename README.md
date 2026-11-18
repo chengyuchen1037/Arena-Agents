@@ -312,10 +312,11 @@ docs/            架构、契约、Provider、工作区与 UI 文档，docs/imag
 
 ## 版本说明
 
-当前开发版本为 **0.12.1**：在 0.12 的异步 Agent 之上，去掉引擎里所有“替用户省钱”的限制，
+当前版本为 **0.12.1**：在 0.12 的异步 Agent 之上，去掉引擎里所有“替用户省钱”的限制，
 改为持久会话 + 缓存 + 合并 + 压缩的编排，并加入按局预算、四价计费与价格源、角色名册（像素头像、性格与记忆）
 和自适应界面。**v0.12.1 不兼容 v0.12.0 及更早的对局存档**（旧存档会保留在存档列表中、不会被改动）。
-最近的稳定版本是 0.11.0。高层发布说明见 [CHANGELOG.md](CHANGELOG.md)。
+上一个公开版本是 [0.11.0](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.11.0)。各版本的发布页见
+[Releases](https://github.com/chengyuchen1037/Arena-Agents/releases)，高层发布说明见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 文档
 

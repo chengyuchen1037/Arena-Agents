@@ -1,6 +1,6 @@
 # Release Notes
 
-## 0.12.1 — (development branch `dev/v0.12.0`, not tagged yet)
+## 0.12.1
 
 0.12.1 keeps the 0.12 architecture and changes its philosophy: **the engine no longer saves money for
 you.** Every limit that used to throttle the agents (ambient messages, debounce, per-run round caps, the
@@ -113,9 +113,9 @@ contract: [docs/v0.12-contracts.md](docs/v0.12-contracts.md) section 10.
   session and the API; `config.yml` no longer has `runtime.debounce` / `max_rounds` / `llm.execution_depth`
   (concurrency limits default to *unlimited*; `compact_at` / `trim_at` are new).
 
-## 0.12 — in development (branch `dev/v0.12.0`, not yet released)
+## 0.12.0 — a development milestone, never released on its own (everything in it ships in 0.12.1)
 
-The 0.12 release rebuilds the game loop: **every player and the moderator is now an asynchronous
+The 0.12 line rebuilds the game loop: **every player and the moderator is now an asynchronous
 agent**, the moderator is an LLM that drives the game by following the scenario's manual, and the
 engine shrinks to a game-agnostic "physical layer". See
 [docs/v0.12-async-agents-plan.md](docs/v0.12-async-agents-plan.md) for the decision log (D1–D25) and
