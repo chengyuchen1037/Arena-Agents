@@ -1,8 +1,9 @@
 """Conversation-message helpers for the worker.
 
 Messages use the canonical, OpenAI-chat-shaped form that every protocol adapter understands (see
-:mod:`app.llm.messages`).  The worker builds a *fresh* conversation for every run, so none of this
-has to survive a cancellation.
+:mod:`app.llm.messages`).  An agent's conversation is persistent and append-only
+(:mod:`app.runtime.conversation`); these helpers only build single messages.  A call that was cancelled or
+went stale never writes anything into it, so the conversation never holds a half-finished round.
 """
 
 from __future__ import annotations

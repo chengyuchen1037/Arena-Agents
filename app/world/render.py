@@ -1,4 +1,4 @@
-"""Parameter validation and text rendering shared by templates and abilities (contracts §2.5).
+"""Parameter validation and text rendering shared by templates and abilities (contracts §2.3 ``speak_template`` / ``use_ability``).
 
 Both are pure functions over a :class:`~app.world.spec.ParamSpec` mapping and the world's players.
 """

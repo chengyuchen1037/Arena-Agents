@@ -15,7 +15,7 @@ Persistence rules (see docs/workspaces.md):
   logged — never swallowed and never turned into overwriting the live game;
 * if the last game cannot be restored, the (untouched) files are kept and automatic saving is held
   back until the user explicitly starts, creates or imports a game;
-* a game saved by an older engine (schema < 3) is *not* an error state (D3): it stays in the saved
+* a game saved by an older engine (schema < 4, i.e. v0.12.0 or older) is *not* an error state (D3): it stays in the saved
   list untouched, a fresh game is created and the user is told why.
 """
 

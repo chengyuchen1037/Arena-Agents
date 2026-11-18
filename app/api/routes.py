@@ -40,7 +40,7 @@ class NewGameRequest(BaseModel):
 
 
 def _public_session(session: GameSession | None = None) -> dict[str, Any]:
-    """PublicSession v2 of the live game (spectator view: no thoughts, no tool calls)."""
+    """PublicSession v3 of the live game (spectator view: no thoughts, no tool calls)."""
     return orchestrator.public_session()
 
 

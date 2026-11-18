@@ -522,7 +522,7 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         return f"{why}{('：' + s.hold_reason) if s.hold_reason else ''}"
 
     def public_session(self) -> dict[str, Any]:
-        """The PublicSession v2 document (docs/v0.12-contracts.md §8.1): everything a spectator sees,
+        """The PublicSession v3 document (docs/v0.12-contracts.md §8.1): everything a spectator sees,
         never thoughts or tool calls."""
         s = self.session
         snap = world_snapshot(self.world)

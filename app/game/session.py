@@ -64,7 +64,7 @@ class GameSession(BaseModel):
     scenario_name: str = ""
     scenario_title: str = ""
     status: Literal["idle", "running", "paused", "finished"] = "idle"
-    pause_reason: str = ""  # user | hold | error | stall | ""
+    pause_reason: str = ""  # user | hold | budget | "" (error / stall are accepted and have UI texts, but nothing sets them)
     hold_reason: str = ""
 
     participants: list[Participant] = Field(default_factory=list)

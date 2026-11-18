@@ -77,7 +77,7 @@ class Brain(Protocol):
 
     def no_tool_nudge(self, agent_id: str, content: str, round_idx: int) -> str | None:
         """Called when the model answered without any tool call.  Return a user message to nudge it
-        (e.g. "your plain text is not sent anywhere; call speak or wait"), or ``None`` to end the run."""
+        (e.g. "your plain text is not sent anywhere; call speak or sleep"), or ``None`` to end the run."""
 
     def execute_tool(
         self, agent_id: str, name: str, args: dict[str, Any], *, gen_id: int, seen_seq: int

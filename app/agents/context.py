@@ -342,13 +342,13 @@ def render_memory(memory: AgentMemory, notes_text: str) -> str:
 MAX_WAKE_LINES = 14
 
 
-def render_wake(reasons: list[Envelope], namer: Namer, *, agent_id: str, ambient: list[Envelope] | None = None) -> str:
+def render_wake(reasons: list[Envelope], namer: Namer, *, agent_id: str) -> str:
     """Why the agent was woken.  New messages are summed up per channel (a busy channel would otherwise
     fill the section with one line per message); everything else gets a line of its own."""
     lines = ["【本次唤醒】"]
     per_channel: dict[str, tuple[list[str], int]] = {}
     others: list[str] = []
-    for env in [*reasons, *(ambient or [])]:
+    for env in reasons:
         if env.payload.get("event") == "message.new":
             who = namer.who(env.sender)
             senders, count = per_channel.setdefault(str(env.channel_id or ""), ([], 0))

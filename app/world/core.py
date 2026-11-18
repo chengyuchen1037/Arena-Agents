@@ -231,7 +231,7 @@ class WorldCore:
         payload: dict[str, Any] | None = None,
         **extra: Any,
     ) -> None:
-        """Queue one mailbox delivery (contracts §10.1).
+        """Queue one mailbox delivery (contracts §2.6; the E1 / E23 change log is §10.1).
 
         Every delivered envelope wakes its target at once (v0.12.1, E1): there is no ambient level, no
         debounce.  Two rules decide whether an envelope is delivered at all:
@@ -472,7 +472,7 @@ class WorldCore:
         self._notify()
 
     def submit(self, intent: Intent) -> Receipt:
-        """The commit gate (contracts §3).  Never raises: returns a rejected receipt instead."""
+        """The commit gate (contracts §2.2).  Never raises: returns a rejected receipt instead."""
         try:
             receipt = self._submit(intent)
         except Exception:  # noqa: BLE001 - an engine bug must not crash the caller

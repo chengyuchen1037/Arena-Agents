@@ -7,7 +7,8 @@ builders shared by the snapshot and the UI events.
   from ``app.world.chat.channel_view`` (imported lazily, so this module never depends on chat at
   import time).
 
-Nothing here ever includes request *answers*, thoughts or tool calls.
+The snapshot is the *god view*: it carries the answers of requests (sealed ones too - the front end decides
+what a player's viewpoint may show), but never thoughts or tool calls.
 """
 
 from __future__ import annotations

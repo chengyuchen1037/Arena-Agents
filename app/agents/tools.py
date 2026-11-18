@@ -64,14 +64,14 @@ class ToolExecutor:
         """What a *player* still owes right now, as ``(key, text)``: unanswered requests and a floor it holds.
 
         The moderator never owes anything (waiting for answers is its job).  A model that writes a note
-        and calls ``wait`` — or answers with nothing at all — would otherwise silently let a request run
+        and calls ``sleep`` — or answers with nothing at all — would otherwise silently let a request run
         into its deadline (a defaulted answer) or sit on the floor until its time is up.
         """
         if agent_id == MODERATOR_ID:
             return []
         try:
             board = self.world.board(agent_id)
-        except Exception:  # noqa: BLE001 - a broken board must not break ``wait``
+        except Exception:  # noqa: BLE001 - a broken board must not break ``sleep``
             return []
         duties: list[tuple[str, str]] = []
         for request in board.get("requests") or []:
@@ -105,7 +105,7 @@ class ToolExecutor:
         return "；".join(text for _key, text in self.open_duties(agent_id))
 
     def _wait_warning(self, agent_id: str) -> str | None:
-        """The first ``wait`` with unfinished business is answered with a reminder instead (once per duty)."""
+        """The first ``sleep`` with unfinished business is answered with a reminder instead (once per duty)."""
         warned = self._warned.setdefault(agent_id, set())
         fresh = [(key, text) for key, text in self.open_duties(agent_id) if key not in warned]
         if not fresh:

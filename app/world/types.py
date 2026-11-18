@@ -19,7 +19,8 @@ MODERATOR_ID = "moderator"
 ENGINE_ID = "engine"  # sender of engine-generated notices / the target of engine notifications
 
 # v0.12.1 (E1): *every* delivered envelope wakes its target at once - there is no ``ambient`` level and no
-# debounce.  ``urgent`` only marks envelopes the agent is expected to act on (ordering of wake reasons).
+# debounce.  ``urgent`` only marks envelopes the agent is expected to act on: it is a label (it goes to the
+# trace) and changes neither when nor in which order an agent is woken.  ``PRIORITY_RANK`` has no user.
 Priority = Literal["urgent", "normal"]
 PRIORITY_RANK: dict[str, int] = {"urgent": 0, "normal": 1}
 

@@ -77,7 +77,7 @@ class WorldPort(Protocol):
         oldest first.  ``limit`` keeps the *newest* ``limit`` entries."""
 
     def board(self, agent_id: str) -> dict[str, Any]:
-        """The agent's *state board* (JSON-serializable; shape in docs/v0.12-contracts.md §6)."""
+        """The agent's *state board* (JSON-serializable; shape in docs/v0.12-contracts.md §2.7)."""
 
     def display_name(self, agent_id: str) -> str:
         """Human name of a player / the moderator / the engine."""
