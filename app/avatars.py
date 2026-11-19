@@ -24,6 +24,11 @@
 
 **名册**：``make_description`` 为一个座位挑一个与已有头像都明显不同的新描述（任意两个至少 3 项不同，肤色与发色不会同时
 相同）；``make_roster`` 一次挑 n 个。
+
+**头像编号**（v0.13.1，G27；契约 §12.6）：编号就是 8 个部件 id 按 ``FIELDS`` 的顺序直接连起来，如
+``f03s05h12c07e04m02a09k03``；``encode_description`` 编码，``decode_code`` 解码（宽松：不分大小写，忽略空白与 ``-`` ``_``
+``:``，字段顺序不限）。编号不是随机种子——随机挑选依赖其他头像，种子无法复现。前端 ``static/js/avatar.js`` 的
+``Avatar.encode`` / ``Avatar.decode`` 实现同一套规则，两边共用 ``tests/avatar_code_cases.json`` 里的格式向量。
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ import hashlib
 import json
 import random
 import re
+import unicodedata
 from collections.abc import Iterable, Sequence
 from functools import lru_cache
 from pathlib import Path
@@ -64,6 +70,12 @@ __all__ = [
     "make_roster",
     "description_distance",
     "REASONS",
+    "FIELD_LETTERS",
+    "CODE_REASONS",
+    "CODE_IGNORED_CHARS",
+    "AvatarCodeError",
+    "encode_description",
+    "decode_code",
 ]
 
 SIZE = 20
@@ -277,6 +289,146 @@ def validate_description(desc: Any, parts: dict[str, Any] | None = None) -> dict
             raise ValueError(f"头像描述的 {field}（{_FIELD_LABEL[field]}）含有未知的 id：{value!r}")
         out[field] = value
     return out
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# 头像编号（v0.13.1，G27；契约 §12.6）
+# ----------------------------------------------------------------------------------------------------------------
+
+#: 描述字段 -> 该字段部件 id 的首字母（素材库里每一类部件的 id 前缀）；解码靠首字母认字段，所以字段顺序不限
+FIELD_LETTERS = {
+    "face": "f",
+    "skin": "s",
+    "hair": "h",
+    "hair_color": "c",
+    "eyes": "e",
+    "mouth": "m",
+    "accessory": "a",
+    "accessory_color": "k",
+}
+_LETTER_FIELD = {letter: field for field, letter in FIELD_LETTERS.items()}
+#: 解码 / 编码失败的机器可读原因（前后端共用，见 ``tests/avatar_code_cases.json``）
+CODE_REASONS = ("empty", "bad_format", "missing_field", "duplicate_field", "unknown_part")
+#: 没有配饰时配饰颜色没有意义，描述里允许留空（``validate_description``）；编号里它仍占一段，用第一个配饰色
+_EMPTY_ACCESSORY_COLOR = "k00"
+_CODE_EXAMPLE = "f03s05h12c07e04m02a09k03"
+# 部件 id：一个字母 + 2–3 位数字（不用 ``_ID_RE``：它的 ``$`` 会放过结尾的换行）
+_CODE_ID_RE = re.compile(r"[a-z][0-9]{2,3}")
+#: 解码时忽略的字符（NFKC 与小写之后），**显式列举，不用 ``\s``**：各语言的 ``\s`` 不一样（Python 含 U+001C–U+001F，JS 含 U+FEFF），
+#: 同一个输入两端会得到不同的结果。清单：空格、制表、换行、垂直制表、换页、回车、U+0085、U+2028、U+2029、U+FEFF（BOM），
+#: 以及 ``-`` ``_`` ``:``。NFKC 已经把 NBSP、全角空格、U+2000–U+200A 等变成了空格；其余字符（零宽空格、软连字符、U+2010、
+#: U+2212、U+001C–U+001F ……）都不忽略，会得到 ``bad_format``。前端 ``static/js/avatar.js`` 用同一个清单：
+#: ``/[ \t\n\v\f\r\u0085\u2028\u2029\ufeff\-_:]+/g``（共享向量 ``tests/avatar_code_cases.json`` 里有两边都要通过的例子）。
+CODE_IGNORED_CHARS = " \t\n\x0b\x0c\r\x85\u2028\u2029\ufeff-_:"
+_CODE_IGNORED_RE = re.compile("[" + re.escape(CODE_IGNORED_CHARS) + "]+")
+_CODE_BODY_RE = re.compile(r"(?:[a-z][0-9]*)+")
+_CODE_TOKEN_RE = re.compile(r"[a-z][0-9]*")
+
+
+class AvatarCodeError(ValueError):
+    """头像编号编码 / 解码失败。
+
+    ``reason`` 是机器可读的原因（``CODE_REASONS``）：``empty`` 空；``bad_format`` 格式不对；``missing_field`` 缺一段
+    （``field`` 是缺的描述字段）；``duplicate_field`` 同一段出现了两次（``field``）；``unknown_part`` 素材库里没有这个部件
+    （``field`` 与 ``part``，只有给了素材库才会出现）。消息是中文，可以直接显示给用户。
+    """
+
+    def __init__(self, reason: str, message: str, *, field: str | None = None, part: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.field = field
+        self.part = part
+
+
+def _field_hint(field: str) -> str:
+    """“以 f 开头，如 f03”：告诉用户这一段长什么样。"""
+    return f"以 {FIELD_LETTERS[field]} 开头，如 {FIELD_LETTERS[field]}03"
+
+
+def encode_description(desc: Any) -> str:
+    """头像描述 -> 编号：脸型、肤色、发型、发色、眼睛、嘴、配饰、配饰颜色的部件 id 依次连起来（全小写）。
+
+    ``accessory == "none"`` 编成 ``a00``；没有配饰时配饰颜色留空（``""`` / 缺省）编成 ``k00``。不查素材库，只检查每个 id 的
+    格式和首字母（首字母对不上的 id 解码时会被认成别的字段，往返就坏了）；只看 8 个素材字段，``v`` 与多余的键被忽略。
+    描述不合格抛 :class:`AvatarCodeError`（``missing_field`` / ``bad_format``）。
+    """
+    if not isinstance(desc, dict):
+        raise AvatarCodeError("bad_format", f"头像描述必须是对象（dict），收到 {type(desc).__name__}")
+    no_accessory = desc.get("accessory") in ("none", NO_ACCESSORY)
+    parts: list[str] = []
+    for field in FIELDS:
+        value = desc.get(field)
+        if field == "accessory" and value == "none":
+            value = NO_ACCESSORY
+        if field == "accessory_color" and no_accessory and value in (None, ""):
+            value = _EMPTY_ACCESSORY_COLOR
+        if value is None:
+            raise AvatarCodeError("missing_field", f"头像描述缺少 {field}（{_FIELD_LABEL[field]}）", field=field)
+        if not isinstance(value, str) or not _CODE_ID_RE.fullmatch(value) or value[0] != FIELD_LETTERS[field]:
+            raise AvatarCodeError(
+                "bad_format",
+                f"头像描述的 {field}（{_FIELD_LABEL[field]}）不是合法的部件 id：{value!r}（{_field_hint(field)}）",
+                field=field,
+            )
+        parts.append(value)
+    return "".join(parts)
+
+
+def decode_code(text: Any, *, library: dict[str, Any] | None = None) -> dict[str, Any]:
+    """编号 -> 头像描述 ``{"v": 1, "face": …, …}``（键序同 :data:`FIELDS`，与 ``validate_description`` 的返回一致）。
+
+    宽松：先做 NFKC（全角字母数字 / 冒号也认），再转小写，忽略 :data:`CODE_IGNORED_CHARS` 里的字符（一份显式的清单：空白几种、
+    ``-`` ``_`` ``:``；不是各语言各自的 ``\\s``）；每个部件 id 是一个字母加 2–3 位
+    数字，按首字母认字段（顺序不限），八个字段各恰好一个；``a00`` 就是无配饰。检查顺序（前后端一致）：格式 → 重复 → 缺失
+    → （给了 ``library`` 才有）部件是否存在，各自报第一处问题。失败抛 :class:`AvatarCodeError`。``library`` 是素材库
+    （``load_parts()`` 的返回值）；不给就只检查格式，部件是否存在留给 ``validate_description``。
+    """
+    if text is None:
+        raise AvatarCodeError("empty", f"请输入头像编号（形如 {_CODE_EXAMPLE}）")
+    if not isinstance(text, str):
+        raise AvatarCodeError("bad_format", f"头像编号必须是文字，收到 {type(text).__name__}")
+    body = _CODE_IGNORED_RE.sub("", unicodedata.normalize("NFKC", text).lower())
+    if not body:
+        raise AvatarCodeError("empty", f"请输入头像编号（形如 {_CODE_EXAMPLE}）")
+    if not _CODE_BODY_RE.fullmatch(body):
+        stray = next((ch for ch in body if not ("a" <= ch <= "z" or "0" <= ch <= "9")), None)
+        why = f"含有无法识别的字符 {stray!r}" if stray is not None else "开头应是字母"
+        raise AvatarCodeError(
+            "bad_format", f"头像编号格式不对：{why}（应由 8 段组成，每段是一个字母加 2–3 位数字，如 {_CODE_EXAMPLE}）"
+        )
+    tokens = _CODE_TOKEN_RE.findall(body)
+    for token in tokens:
+        if not _CODE_ID_RE.fullmatch(token) or token[0] not in _LETTER_FIELD:
+            raise AvatarCodeError(
+                "bad_format",
+                f"头像编号格式不对：{token!r} 不是部件 id（每段是 f s h c e m a k 之一加 2–3 位数字，如 {_CODE_EXAMPLE}）",
+            )
+    found: dict[str, str] = {}
+    for token in tokens:
+        field = _LETTER_FIELD[token[0]]
+        if field in found:
+            raise AvatarCodeError(
+                "duplicate_field",
+                f"头像编号里「{_FIELD_LABEL[field]}」（{_field_hint(field)}）出现了不止一次，每种部件只能有一个",
+                field=field,
+            )
+        found[field] = token
+    for field in FIELDS:
+        if field not in found:
+            raise AvatarCodeError(
+                "missing_field", f"头像编号缺少「{_FIELD_LABEL[field]}」一段（{_field_hint(field)}）", field=field
+            )
+    if library is not None:
+        ids = part_ids(library)
+        for field in FIELDS:
+            if found[field] not in ids[field]:
+                raise AvatarCodeError(
+                    "unknown_part",
+                    f"素材库里没有{_FIELD_LABEL[field]} {found[field]}（头像编号里的这一段不存在）",
+                    field=field,
+                    part=found[field],
+                )
+    return {"v": DESC_VERSION, **{field: found[field] for field in FIELDS}}
 
 
 # ----------------------------------------------------------------------------------------------------------------

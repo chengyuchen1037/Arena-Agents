@@ -32,7 +32,9 @@ __all__ = ["REPLAY_VERSION", "build_replay"]
 
 REPLAY_VERSION = 1
 _FLOOR_MODES = ("turn", "queue")
-_NO_FLOOR = {"kind": "none", "active": None, "paused": False, "seconds_left": None, "queue": [], "free": None}
+_NO_FLOOR = {
+    "kind": "none", "active": None, "paused": False, "seconds_left": None, "untimed": False, "queue": [], "free": None,
+}
 
 
 def _r1(value: float | None) -> float | None:
@@ -92,12 +94,16 @@ class _Replayer:
         group = channel["group"] if channel["mode"] in _FLOOR_MODES else None
         if group is not None:
             active = [t for t in group["tokens"] if t["state"] == "active"]
-            lefts = [s for s in (self._token_left(group, t, now) for t in active) if s is not None]
+            # (v0.13.1) a token handed out without a deadline - the ledger says so (``floor.granted.untimed``) - draws
+            # no countdown: the view says ``untimed`` when every active token is one, exactly like the live one
+            timed = [t for t in active if not t["untimed"]]
+            lefts = [s for s in (self._token_left(group, t, now) for t in timed) if s is not None]
             return {
                 "kind": group["mode"],
                 "active": active[0]["holder"] if active else None,
                 "paused": bool(group["paused"]),
                 "seconds_left": min(lefts) if lefts else None,
+                "untimed": bool(active) and not timed,
                 "queue": [
                     {
                         "holder": t["holder"],
@@ -116,6 +122,7 @@ class _Replayer:
                 "active": None,
                 "paused": False,
                 "seconds_left": None,
+                "untimed": False,
                 "queue": [],
                 "free": {
                     "chars_used": free["chars_used"],
@@ -247,6 +254,7 @@ class _Replayer:
                         "duration_s": float(limits.get("duration_s", 0.0)),
                         "started_gt": e.gt,
                         "remaining": None,
+                        "untimed": False,
                     }
                     for h in holders
                 ],
@@ -270,6 +278,7 @@ class _Replayer:
         limits = e.data.get("limits") or {}
         token["state"] = "active"
         token["started_gt"] = e.gt
+        token["untimed"] = bool(e.data.get("untimed"))  # (an entry of an older game has no such key: a timed floor)
         for key in ("max_messages", "max_chars_per_message", "max_chars_total"):
             if key in limits:
                 token[key] = limits[key]

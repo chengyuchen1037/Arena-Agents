@@ -720,45 +720,144 @@ def test_the_moderator_gets_no_memory_block() -> None:
     assert "不应出现" not in prompt
 
 
-# ----------------------------------------------------------------------------- v0.12.1: review / refine prompts
+# ----------------------------------------------------------------------------- v0.13.1: persona section / review / refine prompts
 
 
-def test_the_review_conversation_contains_exactly_what_the_player_saw() -> None:
-    from app.agents.review import REVIEW_MAX_CHARS, build_review_messages
+def test_a_persona_over_the_limit_is_cut_in_the_prompt_and_a_blank_one_falls_back(tmp_path, monkeypatch) -> None:
+    from app.agents.brain import NO_PERSONA, PERSONA_PROMPT_CHARS
+    from app.storage.roster import PERSONA_CHARS
+
+    assert PERSONA_PROMPT_CHARS == PERSONA_CHARS == 500  # (the agents package does not import the storage: a test keeps the numbers equal)
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "participant.md").write_text("# 你的性格与行为指引\n\n{{persona}}\n\n{{rules}}", encoding="utf-8")
+    monkeypatch.setattr("app.config.BASE_DIR", tmp_path)
+    world = FakeWorld()
+
+    def prompt(persona: str) -> str:
+        return ArenaBrain(world, world.spec, docs_dir=None, personas={"p1": persona}).system_prompt("p1")
+
+    assert prompt("字" * 800) == "# 你的性格与行为指引\n\n" + "字" * 499 + "…\n\n规则正文"  # cut to the limit, and it says so
+    assert prompt("字" * 500) == "# 你的性格与行为指引\n\n" + "字" * 500 + "\n\n规则正文"  # at the limit: untouched
+    assert prompt("  \n") == f"# 你的性格与行为指引\n\n{NO_PERSONA}\n\n规则正文"
+
+
+def test_the_built_in_fallback_prompt_has_the_persona_section_too(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("app.config.BASE_DIR", tmp_path)  # no prompts directory: the built-in text is used
+    world = FakeWorld()
+    prompt = ArenaBrain(world, world.spec, docs_dir=None, personas={"p1": "寡言"}).system_prompt("p1")
+    assert "# 你的性格与行为指引\n\n寡言\n\n规则正文" in prompt
+
+
+def test_a_persona_or_a_memory_cannot_pull_the_moderators_manual_into_a_players_prompt() -> None:
+    """The variables are filled in ONE pass over the template: a text that is put in is never scanned again (replacing them one
+    after the other, a persona or a memory that said ``{{manual}}`` had it replaced by the moderator's manual - found in review)."""
+    world = FakeWorld()
+    persona = "寡言。{{manual}}{{rules}}{{id}}"
+    memory = "## 印象\n- p2 Blair：爱说 {{manual}} 和 {{name}} {{memory_block}}"
+    prompt = ArenaBrain(world, world.spec, docs_dir=None, personas={"p1": persona}, memories={"p1": memory}).system_prompt("p1")
+    assert world.spec.manual_text.strip() not in prompt  # the manual is for the moderator only
+    assert persona in prompt and "爱说 {{manual}} 和 {{name}} {{memory_block}}" in prompt  # a text is a text: its braces stay as they are
+    assert prompt.count(world.spec.rules_text.strip()) == 1  # the rules are in once: the template's
+    plain = ArenaBrain(world, world.spec, docs_dir=None).system_prompt("p1")
+    assert "p1 Alex" in plain and world.spec.rules_text.strip() in plain and "{{" not in plain  # the template's variables are filled as before
+    moderator = ArenaBrain(world, world.spec, docs_dir=None).system_prompt(MODERATOR_ID)
+    assert world.spec.manual_text.strip() in moderator and "{{" not in moderator  # ... and the moderator still gets the manual
+
+
+def test_a_placeholder_that_is_not_a_variable_stays_as_it_is_and_a_value_is_not_filled_twice(tmp_path, monkeypatch) -> None:
+    (tmp_path / "prompts").mkdir()
+    (tmp_path / "prompts" / "participant.md").write_text("{{id}}/{{ id }}/{{unknown}}/{{persona}}/{{rules}}", encoding="utf-8")
+    monkeypatch.setattr("app.config.BASE_DIR", tmp_path)
+    world = FakeWorld()
+    prompt = ArenaBrain(world, world.spec, docs_dir=None, personas={"p1": "{{id}}"}).system_prompt("p1")
+    assert prompt == "p1/{{ id }}/{{unknown}}/{{id}}/规则正文"
+
+
+def test_the_review_conversation_contains_exactly_what_the_player_saw_and_what_he_remembers() -> None:
+    from app.agents.review import build_review_messages
 
     world = FakeWorld()
     world.add("message", "p2", {"content": "大家都能看到的话", "kind": "speech", "sender_name": "Blair"}, channel="pub")
     world.add("message", MODERATOR_ID, {"content": "只有主持人看得到的话", "kind": "speech"}, channel="pub", visible=[MODERATOR_ID])
-    messages = build_review_messages(world, "p1", outcome_text="你的阵营获胜了", role_text="你是甲方", persona="寡言")
+    messages = build_review_messages(
+        world, "p1", outcome_text="你的阵营获胜了", role_text="你是甲方", persona="【定位】寡言",
+        impressions={"p2": "发言短，站边快"}, experience=["先听后说", "别太早表态"],
+    )
     assert [m["role"] for m in messages] == ["system", "user"]
     system, user = messages[0]["content"], messages[1]["content"]
-    assert "p1 Alex" in system and "第一人称" in system and str(REVIEW_MAX_CHARS) in system and "你的性格：寡言" in system
-    assert "你的阵营获胜了" in user and "你是甲方" in user and "p2 Blair" in user and "大家都能看到的话" in user
+    # the task (G39): revise the impression of every other seat, never write an identity or a camp, within the limits, as JSON
+    assert "p1 Alex" in system and "更新你对每一位其他玩家的印象" in system and "身份或阵营结论" in system and "座位号是固定的" in system
+    assert "不超过 80 字" in system and "最多 3 条" in system and "不超过 300 字" in system
+    assert '{"impressions": {"p2": "…"}, "experience": ["…"]}' in system  # the shape of the answer, with an id of this world
+    assert "你的性格与行为指引：\n【定位】寡言" in system and "旧记忆" not in system
+    assert "你的阵营获胜了" in user and "你是甲方" in user and "【其他玩家】p2 Blair" in user and "大家都能看到的话" in user
+    assert "【你目前的印象】\n- p2 Blair：发言短，站边快" in user and "【你目前的经验】\n- 先听后说\n- 别太早表态" in user
     assert "只有主持人看得到的话" not in user  # a player never reviews what he could not see
+    assert user.endswith("现在请按要求输出 JSON。")
 
 
-def test_the_review_prompt_without_a_persona_has_no_empty_persona_line() -> None:
+def test_a_review_without_a_persona_a_memory_or_old_notes_has_no_empty_sections() -> None:
     from app.agents.review import build_review_messages
 
     world = FakeWorld()
-    system = build_review_messages(world, "p1", outcome_text="x", role_text="y")[0]["content"]
-    assert "你的性格" not in system
+    system, user = (m["content"] for m in build_review_messages(world, "p1", outcome_text="x", role_text="y"))
+    assert "你的性格" not in system and "旧记忆" not in system and "旧记忆" not in user
+    assert "【你目前的印象】\n- p2 Blair：（暂无）" in user and "【你目前的经验】\n（还没有）" in user
+    custom = build_review_messages(world, "p1", outcome_text="x", role_text="y", limits={"impression_chars": 55, "experience_items": 2, "experience_chars": 120})
+    assert "不超过 55 字" in custom[0]["content"] and "最多 2 条" in custom[0]["content"] and "不超过 120 字" in custom[0]["content"]  # (the caller's limits)
+
+
+def test_old_notes_are_handed_to_the_review_together_with_the_rule_that_they_are_tidied_up() -> None:
+    from app.agents.review import build_review_messages
+
+    world = FakeWorld()
+    system, user = (m["content"] for m in build_review_messages(world, "p1", outcome_text="x", role_text="y", legacy="  第一局：太保守。\n Bob 爱撒谎。 "))
+    assert "5. 下面的【旧记忆（待整理）】" in system and "整理之后它会被删除" in system
+    assert "【旧记忆（待整理）】\n第一局：太保守。\n Bob 爱撒谎。\n" in user
 
 
 def test_refine_prompts_exist_for_both_kinds_and_refuse_anything_else() -> None:
     from app.agents.review import build_refine_messages
 
     persona = build_refine_messages("persona", "  爱说冷笑话  ", name="Alex")
-    assert "性格设定" in persona[0]["content"] and persona[1]["content"] == "（玩家名：Alex）要点：\n爱说冷笑话"
-    memory = build_refine_messages("memory", "上局被 Blair 骗过")
-    assert "对其他玩家的印象" in memory[0]["content"] and "不要编造" in memory[0]["content"]
+    system = persona[0]["content"]
+    for heading in ("【定位】", "【说话风格】", "【思考方式】", "【决策偏好】", "【压力下】", "【口头禅】"):
+        assert heading in system  # the fixed format (G43)
+    assert "最多 3 条" in system and "最多 2 条" in system and "不超过 40 字" in system and "不超过 500 字" in system
+    assert "第二人称" in system and "不要写游戏规则" in system and "性格与行为指引" in system
+    assert persona[1]["content"] == "（玩家名：Alex）要点：\n爱说冷笑话"
+    memory = build_refine_messages(
+        "memory", "上局被 Blair 骗过", name="Alex", others=[("p2", "Blair"), ("p3", "")], impressions={"p2": "发言短"}, experience=["先听后说"]
+    )
+    system, user = memory[0]["content"], memory[1]["content"]
+    assert '{"impressions": {"p2": "…"}, "experience": ["…"]}' in system and "不超过 80 字" in system and "不超过 300 字" in system
+    assert "不要编造" in system and "身份或阵营结论" in system
+    assert user == "（玩家名：Alex）\n【其他玩家】p2 Blair、p3\n【当前印象】\n- p2 Blair：发言短\n- p3：（暂无）\n【当前经验】\n- 先听后说\n要点：\n上局被 Blair 骗过"
+    assert build_refine_messages("memory", "x")[1]["content"] == "【其他玩家】（无）\n【当前印象】\n（无）\n【当前经验】\n（还没有）\n要点：\nx"
     with pytest.raises(ValueError):
         build_refine_messages("secrets", "x")
 
 
+def test_the_review_prompts_stay_game_neutral_and_the_example_uses_the_ids_of_the_world() -> None:
+    import app.agents.review as review
+
+    from ..test_neutrality import FIXED_PARTICIPANT_ID_RE, FORBIDDEN_TERMS
+
+    text = Path(review.__file__).read_text(encoding="utf-8")
+    assert not [term for term in FORBIDDEN_TERMS if term in text] and not FIXED_PARTICIPANT_ID_RE.search(text)
+    assert review.answer_example("x9") == '{"impressions": {"x9": "…"}, "experience": ["…"]}' and "<座位号>" in review.answer_example(None)
+
+
 @pytest.mark.parametrize(
     "raw,expected",
-    [("  正文  ", "正文"), ("```\n正文\n```", "正文"), ("```markdown\n# 标题\n正文\n```", "# 标题\n正文"), ("", ""), ("字" * 50, "字" * 10)],
+    [
+        ("  正文  ", "正文"),
+        ("```\n正文\n```", "正文"),
+        ("```markdown\n# 标题\n正文\n```", "# 标题\n正文"),
+        ('```json\n{"impressions": {}}\n```', '{"impressions": {}}'),
+        ("", ""),
+        ("字" * 50, "字" * 10),
+    ],
 )
 def test_generated_text_is_tidied_and_capped(raw, expected) -> None:
     from app.agents.review import clean_generated_text

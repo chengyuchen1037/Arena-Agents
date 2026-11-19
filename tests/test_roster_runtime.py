@@ -16,7 +16,7 @@ import app.game.orchestrator as orchestrator_module
 from app.game.orchestrator import GameOrchestrator
 from app.llm.types import LLMResponse
 from app.storage.errors import StorageError
-from app.storage.roster import RosterError, RosterStore, split_memory
+from app.storage.roster import PERSONA_CHARS, RecordTally, RosterError, RosterInputError, RosterStore
 from app.world.types import MODERATOR_ID, UiEvent
 from game_fakes import (
     CFG,
@@ -101,17 +101,30 @@ async def wait_for(predicate: Any, timeout: float = 10.0) -> None:
         await asyncio.sleep(0.02)
 
 
-class TextLlm:
-    """One-shot port: ``complete`` returns plain text (what a review / refine call gets)."""
+def review_answer(impressions: dict[str, str] | None = None, experience: list[str] | None = None) -> str:
+    """What a review model answers (the JSON the prompt asks for).  One answer serves every player of the table: the id of
+    the player himself is simply not an impression he writes."""
+    given = impressions if impressions is not None else {pid: f"{pid} 发言平稳" for pid in IDS}
+    return json.dumps({"impressions": given, "experience": experience if experience is not None else ["先听后说"]}, ensure_ascii=False)
 
-    def __init__(self, text: str = "我的复盘：下次早点发言。", fail_for: tuple[str, ...] = ()) -> None:
-        self.text, self.fail_for, self.calls = text, fail_for, []
+
+PERSONA_ANSWER = "【定位】冷静的逻辑派。\n【说话风格】\n- 句子短。\n- 少用感叹号。\n【思考方式】\n- 先看票型。\n【口头禅】我们看票。"
+
+
+class TextLlm:
+    """One-shot port: ``complete`` returns plain text.  A player (a review) gets ``text`` — by default the JSON of a review —
+    and the moderator (the model of "complete it for me") gets ``refine``, by default a persona in the fixed format."""
+
+    def __init__(self, text: str | None = None, fail_for: tuple[str, ...] = (), refine: str = PERSONA_ANSWER) -> None:
+        self.text = review_answer() if text is None else text
+        self.refine, self.fail_for, self.calls = refine, fail_for, []
 
     async def complete(self, agent_id: str, messages: list[dict[str, Any]], tools: Any, *, max_tokens: int | None = None) -> LLMResponse:
         self.calls.append((agent_id, messages, max_tokens))
         if agent_id in self.fail_for:
             raise RuntimeError("upstream exploded sk-secret-1234")
-        return LLMResponse(content=self.text, prompt_tokens=50, completion_tokens=20, provider_id="bot", model_id="scripted")
+        content = self.refine if agent_id == MODERATOR_ID else self.text
+        return LLMResponse(content=content, prompt_tokens=50, completion_tokens=20, provider_id="bot", model_id="scripted")
 
 
 # ------------------------------------------------------------------------------------ roster
@@ -198,6 +211,62 @@ async def test_texts_edited_before_the_start_reach_the_system_prompt_and_memory_
 
 
 @async_test
+async def test_the_persona_is_a_section_of_its_own_and_the_memory_block_lists_the_impressions(monkeypatch):
+    orch = make_orch(monkeypatch)
+    persona = "【定位】冷静的逻辑派。\n【说话风格】\n- 句子短。"
+    await orch.update_roster_entry("N1", persona=persona, memory_parts={"impressions": {"N2": "爱撒谎，下次别信"}, "experience": ["先听后说"]})
+    assert orch.session.participants[0].persona == persona  # an idle game takes the texts at once
+    prompt = orch._ensure_brain(fresh=True).system_prompt("N1")
+    assert "# 你的性格与行为指引\n\n【定位】冷静的逻辑派。\n【说话风格】\n- 句子短。\n" in prompt  # its own section, the text as it is
+    assert "你的性格与表达风格" not in prompt
+    assert "# 你的记忆与经验\n\n## 印象\n" in prompt and "- N2 Bob：爱撒谎，下次别信" in prompt and "## 经验\n- 先听后说" in prompt
+    assert "- N3 Carol" not in prompt  # no row for a seat he has no impression of
+    other = orch._ensure_brain(fresh=True).system_prompt("N2")
+    assert "（没有特别设定，按你自己的判断行事。）" in other and "爱撒谎，下次别信" not in other and "# 你的记忆与经验" not in other
+
+
+@async_test
+async def test_a_persona_over_the_limit_is_refused_and_an_old_longer_one_is_cut_in_the_prompt(monkeypatch):
+    orch = make_orch(monkeypatch)
+    with pytest.raises(RosterError, match="最多 500"):
+        await orch.update_roster_entry("N1", persona="字" * (PERSONA_CHARS + 1))
+    store = orch._roster()
+    store._dir.mkdir(parents=True, exist_ok=True)
+    (store._dir / "N1.persona.md").write_text("旧的长性格。" * 200 + "\n", encoding="utf-8")  # written by an older version
+    assert len(store.entry("N1")["persona"]) == 1200  # the panel gets the text as it is
+    orch._refresh_idle_texts()  # (what starting the game does)
+    brain = orch._ensure_brain(fresh=True)
+    assert len(orch.session.participants[0].persona) == PERSONA_CHARS  # the game copy is cut ...
+    assert "旧的长性格。" * 83 in brain.system_prompt("N1") and "旧的长性格。" * 84 not in brain.system_prompt("N1")
+    assert len(store.entry("N1")["persona"]) == 1200  # ... the file is not
+
+
+@async_test
+async def test_one_put_is_applied_whole_or_not_at_all_and_memory_and_memory_parts_exclude_each_other(monkeypatch):
+    orch = make_orch(monkeypatch)
+    with pytest.raises(RosterError, match="最多 500"):
+        await orch.update_roster_entry("N1", name="Zed", persona="字" * 501)  # the name is not applied: the persona is refused first
+    assert orch._roster().entry("N1")["name"] == "Alice" and orch.world.player("N1").name == "Alice"
+    with pytest.raises(RosterError, match="印象最多"):
+        await orch.update_roster_entry("N1", name="Zed", memory_parts={"impressions": {"N2": "字" * 81}})
+    assert orch._roster().entry("N1")["name"] == "Alice"
+    with pytest.raises(RosterInputError, match="只能给一个"):
+        await orch.update_roster_entry("N1", memory="## 经验\n- x", memory_parts={"experience": ["y"]})
+    for parts, message in (({"impressions": {"N1": "自己"}}, "不能给自己"), ({"impressions": {"N9": "x"}}, "没有这个座位")):
+        with pytest.raises(RosterInputError, match=message):
+            await orch.update_roster_entry("N1", memory_parts=parts)
+    assert orch._roster().entry("N1")["memory"] == "" and orch._roster().entry("N1")["persona"] == ""  # nothing was written
+    entry = await orch.update_roster_entry("N1", name="Zed", persona="好性格", memory_parts={"impressions": {"N2": "爱撒谎"}})
+    assert (entry["name"], entry["persona"], entry["memory_parts"]["impressions"]["N2"]) == ("Zed", "好性格", "爱撒谎")
+    assert orch.session.participants[0].memory.count("爱撒谎") == 1 and orch.world.player("N1").name == "Zed"
+    unchanged = orch._roster().entry("N1")["memory"]
+    assert (await orch.update_roster_entry("N1", memory_parts={}))["memory"] == unchanged  # an empty object changes nothing
+    for kwargs in ({"memory_parts": {"experience": ["x"]}}, {"persona": "x"}):
+        with pytest.raises(RosterError, match="只能更换头像"):
+            await orch.update_roster_entry("moderator", **kwargs)
+
+
+@async_test
 async def test_files_edited_outside_the_app_while_the_game_is_idle_are_what_the_game_starts_with(monkeypatch):
     orch = make_orch(monkeypatch)
     play_with(orch, idle)
@@ -279,16 +348,41 @@ async def test_clearing_the_memory_keeps_the_persona_and_an_idle_game_takes_it_a
 
 # ------------------------------------------------------------------------------------ refine
 @async_test
-async def test_refine_returns_a_draft_and_saves_nothing(monkeypatch):
+async def test_refine_returns_a_persona_in_the_fixed_format_and_saves_nothing(monkeypatch):
     orch = make_orch(monkeypatch)
-    port = TextLlm("```markdown\n你说话慢条斯理，爱讲冷笑话。\n```")
+    port = TextLlm(refine="好的，设定如下：\n```markdown\n**【定位】**爱讲冷笑话的老好人。\n【说话风格】\n- 慢条斯理。\n- 爱讲冷笑话。\n【口头禅】先喝口茶。\n```")
     orch.llm_port_factory = lambda o: port
     draft = await orch.refine_text("N1", "persona", "爱说冷笑话")
-    assert draft == "你说话慢条斯理，爱讲冷笑话。"
+    assert draft == "【定位】爱讲冷笑话的老好人。\n【说话风格】\n- 慢条斯理。\n- 爱讲冷笑话。\n【口头禅】先喝口茶。"  # normalized
     agent, messages, _ = port.calls[0]
     assert agent == MODERATOR_ID and "爱说冷笑话" in messages[1]["content"] and "Alice" in messages[1]["content"]
+    assert "【定位】" in messages[0]["content"] and "500" in messages[0]["content"] and "40" in messages[0]["content"]  # the template and its limits
     assert orch._roster().entry("N1")["persona"] == ""  # the user reads it first
     assert orch.usage.actor("roster").calls == 1  # the cost is accounted
+    assert await orch.refine_entry("N1", "persona", "爱说冷笑话") == {"draft": draft}  # (the API's answer)
+
+
+@async_test
+async def test_refine_of_a_memory_merges_the_notes_into_the_current_impressions_and_saves_nothing(monkeypatch):
+    orch = make_orch(monkeypatch)
+    roster = orch._roster()
+    roster.set_memory_parts("N1", impressions={"N2": "发言短", "N3": "爱附和"}, experience=["先听后说"], legacy="旧笔记")
+    answer = json.dumps({"impressions": {"N2": "发言短，爱撒谎", "N1": "自己", "N9": "不存在"}, "experience": ["别太早表态"]}, ensure_ascii=False)
+    port = TextLlm(refine=answer)
+    orch.llm_port_factory = lambda o: port
+    result = await orch.refine_entry("N1", "memory", "Bob 爱撒谎；别太早表态")
+    parts = result["memory_parts"]
+    assert set(result) == {"draft", "memory_parts"} and set(parts) == {"impressions", "experience"}
+    assert parts["impressions"] == {"N2": "发言短，爱撒谎", "N3": "爱附和", "N4": ""}  # merged into what is there; the owner and N9 are gone
+    assert parts["experience"] == ["别太早表态"]
+    assert result["draft"].startswith("## 印象\n- N2 Bob：发言短，爱撒谎\n- N3 Carol：爱附和\n- N4 David：（暂无）") and result["draft"].endswith("## 经验\n- 别太早表态")
+    assert "旧笔记" not in result["draft"]  # the draft is the two sections: the legacy text is not part of it, and is not deleted by a draft
+    agent, messages, _ = port.calls[0]
+    system, user = messages[0]["content"], messages[1]["content"]
+    assert agent == MODERATOR_ID and "JSON" in system and "80" in system and "300" in system
+    assert "N2 Bob" in user and "- N2 Bob：发言短" in user and "【当前经验】\n- 先听后说" in user and user.endswith("要点：\nBob 爱撒谎；别太早表态")
+    entry = orch._roster().entry("N1")["memory_parts"]
+    assert entry["impressions"]["N2"] == "发言短" and entry["experience"] == ["先听后说"] and entry["legacy"] == "旧笔记"  # nothing was saved
 
 
 @async_test
@@ -307,9 +401,20 @@ async def test_refine_refuses_bad_requests_with_a_reason(monkeypatch):
 @async_test
 async def test_an_empty_model_answer_is_an_error_not_an_empty_draft(monkeypatch):
     orch = make_orch(monkeypatch)
-    orch.llm_port_factory = lambda o: TextLlm("   ")
+    orch.llm_port_factory = lambda o: TextLlm(refine="   ")
     with pytest.raises(RosterError, match="没有返回内容"):
         await orch.refine_text("N1", "memory", "x")
+
+
+@async_test
+async def test_an_answer_that_is_not_in_the_asked_format_is_an_error_not_a_draft(monkeypatch):
+    orch = make_orch(monkeypatch)
+    orch.llm_port_factory = lambda o: TextLlm(refine="你说话慢条斯理，爱讲冷笑话。")  # prose: none of the template's headings
+    with pytest.raises(RosterError, match="固定格式"):
+        await orch.refine_text("N1", "persona", "爱说冷笑话")
+    with pytest.raises(RosterError, match="JSON"):
+        await orch.refine_text("N1", "memory", "Bob 爱撒谎")  # ... and prose is no memory either
+    assert orch._roster().entry("N1")["persona"] == "" and orch._roster().entry("N1")["memory"] == ""
 
 
 # ------------------------------------------------------------------------------------ review
@@ -328,10 +433,10 @@ async def test_a_review_needs_a_finished_game(monkeypatch):
 
 
 @async_test
-async def test_a_review_updates_each_players_record_and_memory_once(monkeypatch):
+async def test_a_review_revises_each_players_impressions_and_counts_the_game_once(monkeypatch):
     orch = make_orch(monkeypatch)
     await finished_game(orch, "红队")
-    port = TextLlm("我这局发言太少。")
+    port = TextLlm(review_answer({pid: f"{pid} 这局发言平稳" for pid in IDS}, ["别太保守"]))
     orch.llm_port_factory = lambda o: port
     assert orch.review_view()["available"] is True
     started = await orch.start_review()
@@ -340,16 +445,70 @@ async def test_a_review_updates_each_players_record_and_memory_once(monkeypatch)
 
     reds = {p.id for p in orch.world.state.players if p.faction == "red"}
     for player in orch.world.state.players:
-        memory = orch._roster().entry(player.id)["memory"]
-        sections = split_memory(memory)
-        assert "我这局发言太少。" in sections["对局记忆"]
+        parts = orch._roster().entry(player.id)["memory_parts"]
         won = player.id in reds
-        assert sections["战绩"].splitlines()[0] == f"场次 1，胜 {1 if won else 0}，负 {0 if won else 1}，胜率 {'100%' if won else '0%'}"
+        assert parts["record"].splitlines()[0] == f"场次 1，胜 {1 if won else 0}，负 {0 if won else 1}，胜率 {'100%' if won else '0%'}"
+        assert set(parts["impressions"]) == set(IDS) - {player.id}  # an impression of everybody else, none of himself
+        assert all(text == f"{sid} 这局发言平稳" for sid, text in parts["impressions"].items())
+        assert parts["experience"] == ["别太保守"] and parts["legacy"] == ""
     sent = {agent: messages for agent, messages, _ in port.calls}
-    assert set(sent) == set(IDS) and all("第一人称" in m[0]["content"] for m in sent.values())
-    assert [e.data["state"] for e in events_of(orch, "review.progress")].count("done") == 4
+    assert set(sent) == set(IDS)
+    for agent, messages in sent.items():
+        system, user = messages[0]["content"], messages[1]["content"]
+        assert "JSON" in system and "身份或阵营结论" in system and "80" in system and "300" in system  # the task, the ban and the limits
+        assert "【其他玩家】" in user and f"{agent} " not in user.split("【其他玩家】", 1)[1].split("\n", 1)[0]  # (not himself)
+        assert "【你目前的印象】" in user and "【你目前的经验】\n（还没有）" in user and "【旧记忆（待整理）】" not in user
+    done = [e.data for e in events_of(orch, "review.progress") if e.data["state"] == "done"]
+    assert len(done) == 4 and all(set(d) == {"id", "state", "message", "changes"} for d in done)
+    first = next(d for d in done if d["id"] == "N1")
+    assert first["changes"]["experience"] == {"before": [], "after": ["别太保守"]}
+    assert first["changes"]["impressions"] == [{"id": f"N{i}", "before": "", "after": f"N{i} 这局发言平稳"} for i in (2, 3, 4)]
+    assert all("changes" not in e.data for e in events_of(orch, "review.progress") if e.data["state"] == "running")
     assert await orch.start_review() == []  # every player reviews each game once
-    assert orch.review_view() == {"available": True, "done": sorted(IDS, key=IDS.index), "running": False} or len(orch.review_view()["done"]) == 4
+    assert len(orch.review_view()["done"]) == 4
+
+
+@async_test
+async def test_a_second_games_review_revises_the_impressions_instead_of_adding_to_them(monkeypatch):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch, "红队")
+    roster = orch._roster()
+    roster.set_memory_parts("N1", impressions={"N2": "上局的印象：爱附和", "N3": "上局的印象：很沉默"}, experience=["先听后说"], legacy="很早以前的笔记")
+    port = TextLlm(review_answer({"N2": "改观：其实有主见"}, []))  # about N2 only, no new lessons
+    orch.llm_port_factory = lambda o: port
+    await orch.start_review(["N1"])
+    await wait_for(lambda: "N1" in orch.session.review_done)
+    system, user = (port.calls[0][1][0]["content"], port.calls[0][1][1]["content"])
+    assert "- N2 Bob：上局的印象：爱附和" in user and "- N3 Carol：上局的印象：很沉默" in user and "- N4 David：（暂无）" in user  # he sees what he thought
+    assert "【你目前的经验】\n- 先听后说" in user and "【旧记忆（待整理）】\n很早以前的笔记" in user  # ... and what he had written down before
+    assert "5." in system and "整理" in system  # the legacy text is handed over to be tidied up
+    parts = roster.entry("N1")["memory_parts"]
+    assert parts["impressions"]["N2"] == "改观：其实有主见"  # revised
+    assert parts["impressions"]["N3"] == "上局的印象：很沉默"  # the model said nothing about N3: unchanged
+    assert parts["experience"] == ["先听后说"]  # no new lessons: the old ones stay
+    assert parts["legacy"] == ""  # tidied up: the section is gone
+    memory = roster.entry("N1")["memory"]
+    assert memory.count("- N2 Bob：") == 1 and "上局的印象：爱附和" not in memory  # overwritten, not appended
+    done = next(e.data for e in events_of(orch, "review.progress") if e.data["state"] == "done" and e.data["id"] == "N1")
+    assert done["changes"] == {"impressions": [{"id": "N2", "before": "上局的印象：爱附和", "after": "改观：其实有主见"}], "experience": None}
+
+
+@async_test
+async def test_the_answer_may_be_lines_and_the_raw_answer_is_written_to_the_trace_log(monkeypatch):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch, "红队")
+    lines = "我的更新：\nN2：发言短，站边快\n- N3 Carol: 爱附和\n经验：\n- 先听后说"
+    orch.llm_port_factory = lambda o: TextLlm(lines)
+    await orch.start_review(["N1"])
+    await wait_for(lambda: "N1" in orch.session.review_done)
+    parts = orch._roster().entry("N1")["memory_parts"]
+    assert (parts["impressions"]["N2"], parts["impressions"]["N3"], parts["experience"]) == ("发言短，站边快", "爱附和", ["先听后说"])
+    from app.runtime.trace_log import trace_dir
+
+    files = sorted(trace_dir(orch._logs_root(), orch.session.session_id).glob("trace-*.jsonl"))
+    records = [json.loads(line) for path in files for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    review = [r for r in records if r.get("event") == "review"]
+    assert review and review[-1]["agent_id"] == "N1" and review[-1]["mode"] == "lines" and review[-1]["text"] == lines  # what the model said stays readable
 
 
 def summed_metrics(orch: GameOrchestrator) -> dict[str, dict[str, Any]]:
@@ -365,7 +524,7 @@ async def test_the_calls_outside_the_game_loop_publish_their_numbers_so_the_clie
     orch = make_orch(monkeypatch)
     await finished_game(orch)
     before = summed_metrics(orch)
-    orch.llm_port_factory = lambda o: TextLlm("复盘")
+    orch.llm_port_factory = lambda o: TextLlm()
     await orch.start_review()
     await wait_for(lambda: len(orch.session.review_done) == 4 and not orch._review_running)
     await orch.refine_text("N1", "persona", "爱说冷笑话")  # "complete it": accounted under the pseudo-actor "roster"
@@ -406,20 +565,54 @@ async def test_a_failed_review_of_one_player_does_not_stop_the_others_and_leaks_
     errors = [e for e in events_of(orch, "review.progress") if e.data["state"] == "error"]
     assert [e.data["id"] for e in errors] == ["N2"] and "sk-secret" not in str(errors[0].data)
     assert orch._roster().entry("N2")["memory"] == ""  # nothing half-written
-    orch.llm_port_factory = lambda o: TextLlm("补写的复盘")
+    orch.llm_port_factory = lambda o: TextLlm(review_answer({"N1": "补写的印象"}))
     assert await orch.start_review(["N2"]) == ["N2"]  # the one that failed can be retried
     await wait_for(lambda: "N2" in orch.session.review_done)
+    assert orch._roster().entry("N2")["memory_parts"]["impressions"]["N1"] == "补写的印象"
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "这一局我发言太少，下次早点表态。",
+        "{not json",
+        '{"foo": 1}',
+        "N99：不存在的座位",
+        '{"impressions": {"N99": "鬼", "N1": "自己"}, "experience": [null, 5]}',  # no seat of the right kind, nothing that is text
+    ],
+)
+@async_test
+async def test_an_answer_with_no_impressions_fails_that_players_review_and_changes_nothing(monkeypatch, answer):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch)
+    orch._roster().set_memory_parts("N1", impressions={"N2": "原来的印象"})
+    before = orch._roster().entry("N1")["memory"]
+    orch.llm_port_factory = lambda o: TextLlm(answer)
+    await orch.start_review(["N1"])
+    await wait_for(lambda: not orch._review_running)
+    errors = [e.data for e in events_of(orch, "review.progress") if e.data["state"] == "error"]
+    assert [e["id"] for e in errors] == ["N1"] and "印象" in errors[0]["message"] and "重试" in errors[0]["message"]
+    assert "N1" not in orch.session.review_done  # not counted: it can be asked again
+    assert orch._roster().entry("N1")["memory"] == before  # the record was not counted either
+    from app.runtime.trace_log import trace_dir
+
+    records = [json.loads(line) for p in trace_dir(orch._logs_root(), orch.session.session_id).glob("trace-*.jsonl") for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert [r["text"] for r in records if r.get("event") == "review_failed"] == [answer]  # the raw answer is in the log
+    orch.llm_port_factory = lambda o: TextLlm(review_answer({"N2": "这次对了"}))
+    assert await orch.start_review(["N1"]) == ["N1"]
+    await wait_for(lambda: "N1" in orch.session.review_done)
+    assert orch._roster().entry("N1")["memory_parts"]["impressions"]["N2"] == "这次对了"
 
 
 @async_test
-async def test_an_unknown_winner_adds_the_review_but_leaves_the_record_alone(monkeypatch):
+async def test_an_unknown_winner_revises_the_impressions_but_leaves_the_record_alone(monkeypatch):
     orch = make_orch(monkeypatch)
     await finished_game(orch, "平局")
-    orch.llm_port_factory = lambda o: TextLlm("平局的复盘")
+    orch.llm_port_factory = lambda o: TextLlm(review_answer({"N2": "平局里的印象"}))
     await orch.start_review(["N1"])
     await wait_for(lambda: "N1" in orch.session.review_done)
-    sections = split_memory(orch._roster().entry("N1")["memory"])
-    assert sections["对局记忆"] == "平局的复盘" and sections.get("战绩", "") == ""
+    parts = orch._roster().entry("N1")["memory_parts"]
+    assert parts["impressions"]["N2"] == "平局里的印象" and parts["record"] == ""  # nobody won: no game is counted
 
 
 @async_test
@@ -558,7 +751,7 @@ async def test_a_finished_review_is_saved_so_a_restart_cannot_review_the_same_ga
     orch = make_orch(monkeypatch)
     orch._autosave_enabled = True  # what startup() switches on
     await finished_game(orch)
-    orch.llm_port_factory = lambda o: TextLlm("复盘")
+    orch.llm_port_factory = lambda o: TextLlm()
     await orch.start_review()
     await wait_for(lambda: len(orch.session.review_done) == 4 and not orch._review_running)
     await wait_for(lambda: any(len(saved.get("review_done", [])) == 4 for saved in orch.game_store.data.values()))
@@ -684,3 +877,281 @@ def test_the_incompatible_save_notice_names_the_versions_of_this_release():
     from app.game.session_runtime import OLD_SAVE_NOTICE
 
     assert "v0.12.1" in OLD_SAVE_NOTICE and "v0.13" in OLD_SAVE_NOTICE and "未被改动" in OLD_SAVE_NOTICE
+
+
+# ====================================================================================== second round (lead's review)
+BAD_AVATAR = {"v": 1, "face": "f99", "skin": "s05", "hair": "h12", "hair_color": "c07", "eyes": "e04", "mouth": "m02", "accessory": "a09", "accessory_color": "k03"}
+
+
+def roster_files(orch: GameOrchestrator) -> dict[str, bytes]:
+    folder = orch._roster()._dir
+    return {p.name: p.read_bytes() for p in sorted(folder.glob("*"))} if folder.is_dir() else {}
+
+
+def game_state(orch: GameOrchestrator) -> tuple[Any, ...]:
+    """What a refused change must leave alone: the live world, the seats of the session, the roster files, the events."""
+    seats = [(p.id, p.name, p.persona, p.memory, p.avatar) for p in orch.session.participants]
+    return (id(orch.world), seats, orch.world.player("N1").name, roster_files(orch), len(events_of(orch, "roster.updated")))
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        ({"name": "Zed", "avatar": BAD_AVATAR}, "f99"),  # (the name used to be written before the avatar was looked at)
+        ({"name": "Zed", "persona": "ok\ud800"}, "无法保存"),  # (a lone surrogate used to fail at the write: a 500, after the name was saved)
+        ({"name": "Zed", "memory": "a\ud800"}, "无法保存"),
+        ({"name": "Zed", "memory_parts": {"impressions": {"N2": "a\ud800"}}}, "无法保存"),
+        ({"name": "Zed", "memory_parts": {"legacy": "旧\n## 战绩\n场次 99，胜 99"}}, "小节标题"),
+        ({"name": "Zed", "persona": "字" * 501}, "最多 500"),
+        ({"name": "Zed", "memory_parts": {"experience": ["a", "b", "c", "d"]}}, "经验最多"),
+        ({"name": "bob", "persona": "好性格"}, "已被 N2 使用"),
+        ({"name": "A:B", "persona": "好性格"}, "冒号"),
+        ({"name": "A：B", "memory_parts": {"experience": ["先听后说"]}}, "冒号"),
+        ({"name": "Zed", "avatar": "GOOD", "persona": "字" * 501}, "最多 500"),
+        ({"avatar": BAD_AVATAR, "persona": "好性格", "memory_parts": {"experience": ["先听后说"]}}, "f99"),
+    ],
+)
+@async_test
+async def test_a_refused_put_changes_nothing_not_the_name_not_the_files_not_the_live_game(monkeypatch, kwargs, message):
+    from app import avatars
+
+    orch = make_orch(monkeypatch)
+    if kwargs.get("avatar") == "GOOD":
+        kwargs = {**kwargs, "avatar": avatars.make_roster(2, seed=3)[0]}  # a valid description: the rest of the request is what is wrong
+    before = game_state(orch)
+    with pytest.raises(RosterError, match=message):
+        await orch.update_roster_entry("N1", **kwargs)
+    assert game_state(orch) == before  # same world object, same seats, same files, no roster.updated
+    assert orch._roster().entry("N1")["name"] == "Alice" and orch.world.player("N1").name == "Alice"
+
+
+@async_test
+async def test_a_put_with_everything_valid_applies_all_of_it(monkeypatch):
+    from app import avatars
+
+    orch = make_orch(monkeypatch)
+    good = avatars.make_roster(2, seed=3)[0]
+    world_before = orch.world
+    entry = await orch.update_roster_entry("N1", name="Zed", avatar=good, persona="好性格", memory_parts={"experience": ["先听后说"]})
+    assert (entry["name"], entry["avatar"], entry["persona"], entry["memory_parts"]["experience"]) == ("Zed", good, "好性格", ["先听后说"])
+    assert orch.world is not world_before and orch.world.player("N1").name == "Zed" and orch.session.participants[0].avatar == good
+
+
+@async_test
+async def test_the_check_of_the_game_state_still_comes_before_the_check_of_the_values(monkeypatch):
+    orch = make_orch(monkeypatch)
+    play_with(orch, idle)
+    await orch.start_or_resume()
+    try:
+        for kwargs in ({"name": "A:B"}, {"avatar": BAD_AVATAR}, {"name": "Zed", "avatar": BAD_AVATAR, "persona": "字" * 501}):
+            with pytest.raises(RuntimeError, match="开始之前"):  # 409: not 400
+                await orch.update_roster_entry("N1", **kwargs)
+        with pytest.raises(RosterError, match="最多 500"):  # a persona may be changed at any time, and is checked
+            await orch.update_roster_entry("N1", persona="字" * 501)
+    finally:
+        await orch.pause()
+
+
+@async_test
+async def test_a_stored_name_with_a_colon_can_be_kept_but_not_given(monkeypatch):
+    orch = make_orch(monkeypatch)
+    store = orch._roster()
+    store._dir.mkdir(parents=True, exist_ok=True)
+    (store._dir / "roster.json").write_text(json.dumps({"seats": {"N1": {"name": "A：B"}}}, ensure_ascii=False), encoding="utf-8")
+    entry = await orch.update_roster_entry("N1", name="A：B", persona="好")  # (the panel sends the name along: unchanged, so it is not checked again)
+    assert entry["name"] == "A：B" and entry["persona"] == "好"
+    with pytest.raises(RosterError, match="冒号"):
+        await orch.update_roster_entry("N2", name="C：D")
+
+
+# ------------------------------------------------------------------------------------ a review while the user edits
+class SlowLlm(TextLlm):
+    """A one-shot model that takes its time for the players of ``slow_for``: they answer when ``gate`` is set."""
+
+    def __init__(self, text: str | None = None, *, gate: asyncio.Event, slow_for: tuple[str, ...] = ("N1",)) -> None:
+        super().__init__(text)
+        self.gate, self.slow_for, self.entered = gate, slow_for, []
+
+    async def complete(self, agent_id: str, messages: list[dict[str, Any]], tools: Any, *, max_tokens: int | None = None) -> LLMResponse:
+        if agent_id in self.slow_for:
+            self.entered.append(agent_id)  # the review has read the memory it shows the model: from here on it is "while the model works"
+            await self.gate.wait()
+        return await super().complete(agent_id, messages, tools, max_tokens=max_tokens)
+
+
+def trace_records(orch: GameOrchestrator, session_id: str) -> list[dict[str, Any]]:
+    from app.runtime.trace_log import trace_dir
+
+    folder = trace_dir(orch._logs_root(), session_id)
+    if not folder.is_dir():
+        return []
+    return [json.loads(line) for p in sorted(folder.glob("trace-*.jsonl")) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def done_event(orch: GameOrchestrator, agent_id: str) -> dict[str, Any]:
+    return next(e.data for e in events_of(orch, "review.progress") if e.data["state"] == "done" and e.data["id"] == agent_id)
+
+
+@async_test
+async def test_an_edit_made_while_the_model_works_is_not_overwritten_by_the_review(monkeypatch):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch, "红队")
+    roster = orch._roster()
+    roster.set_memory_parts("N1", impressions={"N2": "旧印象二", "N3": "旧印象三"}, experience=["旧经验"])
+    gate = asyncio.Event()
+    # the model copies N2 and the lessons as they were shown (the prompt allows it), has a new text for N3 and one for N4
+    port = SlowLlm(review_answer({"N2": "旧印象二", "N3": "模型新三", "N4": "模型新四"}, ["旧经验"]), gate=gate)
+    orch.llm_port_factory = lambda o: port
+    await orch.start_review(["N1"])
+    await wait_for(lambda: "N1" in port.entered)  # the review is waiting for its model
+    await orch.update_roster_entry(
+        "N1", memory_parts={"impressions": {"N2": "用户刚改的二", "N3": "用户改的三"}, "experience": ["用户改的经验"]}
+    )
+    gate.set()
+    await wait_for(lambda: "N1" in orch.session.review_done)
+    parts = roster.entry("N1")["memory_parts"]
+    assert parts["impressions"]["N2"] == "用户刚改的二"  # the old text given back as it was: no news, his edit is not overwritten
+    assert parts["impressions"]["N3"] == "用户改的三"  # the model had a new text, but he edited this one meanwhile: his stays
+    assert parts["impressions"]["N4"] == "模型新四"  # nobody touched N4 meanwhile: the model's
+    assert parts["experience"] == ["用户改的经验"]
+    assert done_event(orch, "N1")["changes"] == {"impressions": [{"id": "N4", "before": "", "after": "模型新四"}], "experience": None}
+
+
+@async_test
+async def test_clearing_the_memory_while_the_model_works_is_not_undone_by_the_review(monkeypatch):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch, "红队")
+    roster = orch._roster()
+    roster.set_memory_parts("N1", impressions={"N2": "旧印象二", "N3": "旧印象三"}, experience=["旧经验"], legacy="旧笔记")
+    gate = asyncio.Event()
+    port = SlowLlm(review_answer({"N2": "旧印象二", "N3": "旧印象三", "N4": "模型新四"}, ["旧经验"]), gate=gate)
+    orch.llm_port_factory = lambda o: port
+    await orch.start_review(["N1"])
+    await wait_for(lambda: "N1" in port.entered)
+    await orch.clear_memory()  # "clear all memories" while the review waits for its model
+    assert roster.entry("N1")["memory"] == ""
+    gate.set()
+    await wait_for(lambda: "N1" in orch.session.review_done)
+    parts = roster.entry("N1")["memory_parts"]
+    assert parts["impressions"]["N2"] == "" and parts["impressions"]["N3"] == "" and parts["experience"] == [] and parts["legacy"] == ""  # nothing came back
+    assert parts["impressions"]["N4"] == "模型新四"  # (what there was nothing about, the model may fill in)
+    assert RecordTally.parse(parts["record"]).games == 1  # ... and the game that was just reviewed is counted
+
+
+@async_test
+async def test_a_review_that_nothing_interfered_with_still_takes_the_models_new_texts(monkeypatch):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch, "红队")
+    roster = orch._roster()
+    roster.set_memory_parts("N1", impressions={"N2": "旧印象二", "N3": "旧印象三"}, experience=["旧经验"], legacy="旧笔记")
+    gate = asyncio.Event()
+    port = SlowLlm(review_answer({"N2": "改观：有主见", "N3": "旧印象三", "N4": "新四"}, ["新经验"]), gate=gate)
+    orch.llm_port_factory = lambda o: port
+    await orch.start_review(["N1"])
+    await wait_for(lambda: "N1" in port.entered)
+    await orch.update_roster_entry("N1", persona="只改了性格")  # an edit of something else does not matter
+    gate.set()
+    await wait_for(lambda: "N1" in orch.session.review_done)
+    parts = roster.entry("N1")["memory_parts"]
+    assert (parts["impressions"]["N2"], parts["impressions"]["N3"], parts["impressions"]["N4"]) == ("改观：有主见", "旧印象三", "新四")
+    assert parts["experience"] == ["新经验"] and parts["legacy"] == ""  # (the notes were tidied up: something was taken)
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        '{"impressions": {}, "experience": []}',  # a valid, empty answer
+        '{"impressions": {"N2": "…", "N3": "保持原样"}, "experience": ["…"]}',  # only placeholders
+        '{"impressions": {"N2": "旧印象二"}, "experience": ["旧经验"]}',  # only what he was shown
+        '{"impressions": {"N2": "无变化", "N3": "（暂无）"}, "experience": ["同上", "N/A"]}',  # only words that say "no change"
+    ],
+)
+@async_test
+async def test_an_answer_that_says_nothing_new_changes_nothing_keeps_the_old_notes_and_still_counts_the_game(monkeypatch, answer):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch, "红队")
+    roster = orch._roster()
+    roster.set_memory_parts("N1", impressions={"N2": "旧印象二", "N3": "旧印象三"}, experience=["旧经验"], legacy="旧笔记")
+    before = roster.entry("N1")["memory_parts"]
+    orch.llm_port_factory = lambda o: TextLlm(answer)
+    await orch.start_review(["N1"])
+    await wait_for(lambda: "N1" in orch.session.review_done and not orch._review_running)
+    after = roster.entry("N1")["memory_parts"]
+    assert after["impressions"] == before["impressions"] and after["experience"] == before["experience"]
+    assert after["legacy"] == "旧笔记"  # nothing was taken, so the old notes are not thrown away
+    assert RecordTally.parse(after["record"]).games == 1 and done_event(orch, "N1")["changes"] == {"impressions": [], "experience": None}
+
+
+@pytest.mark.parametrize(
+    "answer,event",
+    [(review_answer({"N2": "新印象"}, []), "review"), ("这不是约定的格式", "review_failed")],
+    ids=["a usable answer", "an unusable one"],
+)
+@async_test
+async def test_the_raw_answer_of_a_review_belongs_to_the_game_that_was_reviewed_not_the_one_that_is_live(monkeypatch, answer, event):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch, "红队")
+    old_id = orch.session.session_id
+    gate = asyncio.Event()
+    port = SlowLlm(answer, gate=gate)
+    orch.llm_port_factory = lambda o: port
+    await orch.start_review(["N1"])
+    await wait_for(lambda: "N1" in port.entered)
+    await orch.new_game()  # a new game while the model is still thinking
+    new_id = orch.session.session_id
+    assert new_id != old_id
+    gate.set()
+    await wait_for(lambda: not orch._review_running)
+    lines = [r for r in trace_records(orch, old_id) if r.get("event") == event]
+    assert len(lines) == 1 and lines[0]["agent_id"] == "N1" and lines[0]["text"] == answer
+    assert [r for r in trace_records(orch, new_id) if r.get("event") in ("review", "review_failed")] == []
+
+
+@async_test
+async def test_a_port_that_cannot_be_built_fails_the_reviews_and_they_can_be_asked_for_again(monkeypatch):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch, "红队")
+
+    def boom(o: GameOrchestrator) -> Any:
+        raise RuntimeError("factory exploded sk-secret-1234")
+
+    orch.llm_port_factory = boom
+    started = await orch.start_review(["N1", "N2"])
+    assert sorted(started) == ["N1", "N2"]
+    await wait_for(lambda: not orch._review_running)  # (it used to stay "running" for ever)
+    errors = [e.data for e in events_of(orch, "review.progress") if e.data["state"] == "error"]
+    assert sorted(e["id"] for e in errors) == ["N1", "N2"]
+    assert all("重试" in e["message"] and "sk-secret" not in e["message"] and "RuntimeError" in e["message"] for e in errors)
+    assert orch.review_view() == {"available": True, "done": [], "running": False}
+    orch.llm_port_factory = lambda o: TextLlm(review_answer({"N3": "补上的印象"}))
+    assert sorted(await orch.start_review(["N1", "N2"])) == ["N1", "N2"]  # asked for again
+    await wait_for(lambda: len(orch.session.review_done) == 2 and not orch._review_running)
+    assert orch._roster().entry("N1")["memory_parts"]["impressions"]["N3"] == "补上的印象"
+
+
+@async_test
+async def test_an_old_longer_persona_copy_of_the_game_is_cut_in_the_review_prompt(monkeypatch):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch, "红队")
+    orch.session.participants[0].persona = "旧的长性格。" * 200  # a game made by v0.13.0 may carry a persona of up to 20000 characters
+    port = TextLlm(review_answer({"N2": "x"}))
+    orch.llm_port_factory = lambda o: port
+    await orch.start_review(["N1"])
+    await wait_for(lambda: "N1" in orch.session.review_done)
+    system = port.calls[0][1][0]["content"]
+    persona = system.split("你的性格与行为指引：\n", 1)[1].split("\n", 1)[0]
+    assert len(persona) == PERSONA_CHARS and persona.endswith("旧…") and persona.startswith("旧的长性格。" * 83)
+
+
+@async_test
+async def test_a_deeply_nested_answer_fails_that_review_like_any_unusable_answer(monkeypatch):
+    orch = make_orch(monkeypatch)
+    await finished_game(orch, "红队")
+    garbage = "[" * 6000
+    orch.llm_port_factory = lambda o: TextLlm(garbage)
+    await orch.start_review(["N1"])
+    await wait_for(lambda: not orch._review_running)
+    errors = [e.data for e in events_of(orch, "review.progress") if e.data["state"] == "error"]
+    assert [e["id"] for e in errors] == ["N1"] and "印象" in errors[0]["message"] and "RecursionError" not in errors[0]["message"]
+    assert [r["text"] for r in trace_records(orch, orch.session.session_id) if r.get("event") == "review_failed"] == [garbage]
+    assert "N1" not in orch.session.review_done and orch._roster().entry("N1")["memory"] == ""

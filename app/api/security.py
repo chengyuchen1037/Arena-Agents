@@ -151,6 +151,19 @@ async def verify_api_access(request: Request) -> None:
     check_token(request)
 
 
+def is_trusted_request(request: Request) -> bool:
+    """The rule of :func:`require_trusted_client` as a plain yes / no, for a response that cannot be refused as a whole
+    (the SSE stream is open to everybody, but only a trusted client is sent the error log, v0.13.1).
+
+    With a token configured the router dependency (:func:`verify_api_access`) has authenticated the caller already;
+    without one only a loopback peer is trusted."""
+
+    if get_api_token():
+        return True
+    client = request.client
+    return is_loopback_host(client.host if client else None)
+
+
 async def require_trusted_client(request: Request) -> None:
     """Extra guard for configuration-changing endpoints.
 
@@ -158,11 +171,7 @@ async def require_trusted_client(request: Request) -> None:
     caller. Without one only loopback clients may use these endpoints.
     """
 
-    if get_api_token():
-        return
-    client = request.client
-    host = client.host if client else None
-    if not is_loopback_host(host):
+    if not is_trusted_request(request):
         raise HTTPException(
             status_code=403,
             detail="This endpoint is restricted to local clients unless ARENA_API_TOKEN is set.",

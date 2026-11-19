@@ -51,6 +51,36 @@ def test_pause_and_resume_are_idempotent():
     assert clock.now() == pytest.approx(1.0)
 
 
+def test_a_soft_pause_followed_by_a_hard_pause_freezes_once_and_one_resume_runs_the_clock_again():
+    # v0.13.1: the click of a soft pause freezes the clock, the hard pause that may follow freezes it "again"
+    # (the orchestrator's ``_halt``), and the continue after that resumes it - both pairs may be doubled up
+    wall = WallClock()
+    clock = GameClock(0.0, time_source=wall, paused=False)
+    wall.t += 2
+    clock.pause()  # the soft pause
+    wall.t += 30
+    clock.pause()  # the hard pause on top of it
+    wall.t += 30
+    assert clock.now() == pytest.approx(2.0) and clock.paused
+    clock.resume()
+    clock.resume()  # (a soft resume followed by the start of the runtime)
+    wall.t += 1
+    assert clock.now() == pytest.approx(3.0) and not clock.paused
+
+
+def test_manual_clock_pause_and_resume_are_idempotent_too():
+    clock = ManualClock()
+    clock.advance(5)
+    clock.pause()
+    clock.pause()
+    clock.advance(50)
+    assert clock.now() == pytest.approx(5.0)
+    clock.resume()
+    clock.resume()
+    clock.advance(1)
+    assert clock.now() == pytest.approx(6.0)
+
+
 def test_set_jumps_and_keeps_the_paused_state():
     wall = WallClock()
     clock = GameClock(time_source=wall)  # paused

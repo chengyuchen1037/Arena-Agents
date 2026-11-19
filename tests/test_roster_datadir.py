@@ -63,7 +63,7 @@ async def test_the_first_game_gets_the_roster_of_the_data_directory_and_the_file
 async def test_names_texts_and_avatars_survive_a_restart_and_the_new_game_uses_them(data):
     orch = await boot()
     await orch.update_roster_entry("N3", name="Caroline")
-    await orch.update_roster_entry("N1", persona="冷静的分析派", memory="## 经验与印象\n上局被 N5 骗过。")
+    await orch.update_roster_entry("N1", persona="冷静的分析派", memory_parts={"impressions": {"N5": "上局骗过我，爱悍跳。"}})
     rolled = await orch.regenerate_avatars("moderator")
     before = orch.roster_payload()
     assert sorted(roster_files(data)) == ["N1.memory.md", "N1.persona.md", "roster.json"]  # plain files, editable by hand
@@ -74,10 +74,35 @@ async def test_names_texts_and_avatars_survive_a_restart_and_the_new_game_uses_t
     view = orch.public_session()  # the first game of the new process was built from the stored roster
     assert view["participants"][2]["name"] == "Caroline" and view["moderator"]["avatar"] == rolled["avatar"]
     assert view["participants"][0]["avatar"] == before["seats"][0]["avatar"]
-    assert orch.session.participants[0].persona == "冷静的分析派" and "被 N5 骗过" in orch.session.participants[0].memory
+    assert orch.session.participants[0].persona == "冷静的分析派" and "- N5 Eve：上局骗过我，爱悍跳。" in orch.session.participants[0].memory
     assert orch.session.memory_enabled is True
     await orch.new_game()  # ... and so does every game after it
     assert orch.public_session()["participants"][2]["name"] == "Caroline"
+    await orch.shutdown()
+
+
+@async_test
+async def test_a_v0130_memory_file_is_read_migrated_and_left_alone_until_the_next_save(data):
+    """G41: the file of the old format is not rewritten by reading it (not at boot, not by the panel, not by a new game)."""
+    orch = await boot()
+    await orch.shutdown()
+    reset_stores_for_tests()
+    folder = data / "roster"
+    old = "## 战绩\n场次 2，胜 1，负 1，胜率 50%\n\n## 对局记忆\n第一局：太保守。\n\n## 经验与印象\nBob 爱撒谎。\n"
+    (folder / "N2.memory.md").write_text(old, encoding="utf-8")
+    orch = await boot()
+    entry = orch.roster_payload()["seats"][1]
+    assert entry["memory_parts"]["record"] == "场次 2，胜 1，负 1，胜率 50%"
+    assert entry["memory_parts"]["legacy"] == "第一局：太保守。\n\nBob 爱撒谎。" and not any(entry["memory_parts"]["impressions"].values())
+    assert (folder / "N2.memory.md").read_text(encoding="utf-8") == old
+    await orch.new_game()
+    memory = orch.session.participants[1].memory  # the agent reads the old notes too, until the next review tidies them up
+    assert "场次 2，胜 1" in memory and "Bob 爱撒谎。" in memory and "## 旧记忆（待整理）" in memory
+    assert (folder / "N2.memory.md").read_text(encoding="utf-8") == old
+    await orch.update_roster_entry("N2", memory_parts={"experience": ["先听后说"]})  # the first save writes the new format
+    new = (folder / "N2.memory.md").read_text(encoding="utf-8")
+    assert "## 对局记忆" not in new and "## 经验与印象" not in new and "- 先听后说" in new
+    assert "## 战绩\n场次 2，胜 1，负 1，胜率 50%\n\n## 印象\n- N1 Alice：（暂无）" in new and "## 旧记忆（待整理）\n第一局：太保守。\n\nBob 爱撒谎。" in new
     await orch.shutdown()
 
 

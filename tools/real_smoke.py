@@ -303,6 +303,17 @@ async def apply_price_source(orch) -> None:
         print(line)
 
 
+def is_successful_turn(row: dict) -> bool:
+    """Is this ``llm_call`` row of the trace a model call that ANSWERED a player's or the moderator's turn?
+
+    Since v0.13.1 the trace also holds rows for the attempts that failed or were cancelled (``status``: ``retry`` /
+    ``timeout`` / ``error`` / ``cancelled``) and for the one-shot calls outside the game loop (``purpose``: ``review`` /
+    ``refine``).  The rows an agent writes for its own successful calls carry neither field (older traces never do).
+    Only those say anything about whether the provider's prompt cache keeps hitting across the turns of a conversation:
+    a failed call reports no tokens at all, and a one-shot call starts a conversation of its own."""
+    return row.get("status") in (None, "ok") and row.get("purpose") in (None, "turn")
+
+
 def report(orch, calls, seconds: float) -> None:
     world = orch.world
     usage = orch.usage
@@ -346,6 +357,8 @@ def report(orch, calls, seconds: float) -> None:
                 if row.get("kind") == "merge":
                     merged_reasons += len(row.get("reasons") or [])
             elif row.get("event") == "llm_call":
+                if not is_successful_turn(row):
+                    continue  # (a failed / cancelled attempt, a review or a "complete it": not a turn of a conversation)
                 agent = str(row.get("agent_id"))
                 if agent in seen_first:
                     later_calls += 1

@@ -135,7 +135,7 @@ def test_a_token_reports_what_is_left_of_it_and_how_long():
     assert state["can_write"] and state["max_chars"] == 40 and state["can_pass"] is True
     assert state["floor"] == {
         "kind": "queue", "mine": True, "paused": False,
-        "messages_left": 3, "chars_left": 100, "seconds_left": 30.0, "deadline_clock": 30.0,
+        "messages_left": 3, "chars_left": 100, "seconds_left": 30.0, "deadline_clock": 30.0, "untimed": False,
     }
     assert speak(world, "u1", "public", "字" * 10).ok
     world.clock.advance(7)

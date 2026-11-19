@@ -18,6 +18,10 @@ same order of checks as the ``speak`` commit gate (contracts §2.3):
 total (turn / queue), ``max_chars_per_message`` of the discussion (free), the ``dm`` default (system DM).
 ``None`` when the agent cannot write or the moderator writes (no cap).  ``seat_status`` (``seat.py``) and
 ``speech_gate`` (``chat.py``) say the same; ``tests/v12/world`` locks the three together.
+
+The board never reveals that a person plays a seat (v0.13.1, G15): a floor the person holds in a public channel has
+no deadline, yet the board shows the nominal length of the turn for it like for any other holder - there is no
+"untimed" anywhere in it.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from app.world.chat import token_untimed
 from app.world.game import ability_holders
 from app.world.projection import seat_sorted
 from app.world.spec import ParamSpec
@@ -56,7 +61,11 @@ def param_brief(spec: ParamSpec) -> str:
 # --------------------------------------------------------------------------- channels
 
 
-def _token_seconds(group: Any, token: Any, now: float) -> float | None:
+def _token_seconds(world: Any, channel: ChannelState, group: Any, token: Any, now: float) -> float | None:
+    if token_untimed(world, channel, token):
+        # G15 (v0.13.1): the seat a person plays holds this floor without a deadline - but the board must not say so.
+        # It shows the nominal length of the turn, as it would for any other holder, and never a word about "untimed".
+        return _secs(token.duration_s)
     if group.paused:
         return _secs(token.remaining)
     if token.deadline is not None:
@@ -171,7 +180,7 @@ def _floor_block(world: Any, channel: ChannelState, agent_id: str, is_moderator:
         active = next((t for t in group.tokens if t.status == "active"), None)
         if active is not None:
             floor["active"] = active.holder
-            floor["seconds_left"] = _token_seconds(group, active, now)
+            floor["seconds_left"] = _token_seconds(world, channel, group, active, now)
         if not is_moderator:
             mine = next((t for t in group.tokens if t.holder == agent_id and t.status == "active"), None)
             if mine is not None:
@@ -179,7 +188,7 @@ def _floor_block(world: Any, channel: ChannelState, agent_id: str, is_moderator:
                     "messages_left": max(0, mine.max_messages - mine.messages_used),
                     "chars_per_message": mine.max_chars_per_message,
                     "chars_left": max(0, mine.max_chars_total - mine.chars_used),
-                    "seconds_left": _token_seconds(group, mine, now),
+                    "seconds_left": _token_seconds(world, channel, group, mine, now),
                 }
     free = channel.free
     if mode == "free" and free is not None and not channel.system:

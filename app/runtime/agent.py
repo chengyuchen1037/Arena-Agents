@@ -6,7 +6,9 @@ a persistent, append-only conversation (so the provider's prefix cache hits), me
 while a call is in flight, and compaction that happens rarely and on purpose.
 
 States (only three): ``thinking`` (a model call is in flight), ``acting`` (tools run / between two calls),
-``sleeping`` (no run: waiting for the next envelope, or for a timer the agent chose itself).
+``sleeping`` (no run: waiting for the next envelope, or for a timer the agent chose itself).  A fourth one exists
+only during a *soft pause* (v0.13.1, :mod:`app.runtime.soft_gate`): ``held`` - the agent has a run but waits at the
+gate in front of its next model call.
 
 Actor
     :meth:`Agent.deliver` puts the envelope into ``pending``.  A sleeping agent schedules **one**
@@ -53,6 +55,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from app.llm.types import LLMResponse
+from app.runtime.call_log import http_status_of
 from app.runtime.conversation import Conversation, ConversationBook, tools_signature
 from app.runtime.messages import (
     args_error_text,
@@ -73,6 +76,7 @@ from app.runtime.ports import (
     UsageSink,
     WakeContext,
 )
+from app.runtime.soft_gate import GateClosed, SoftGate
 from app.world.types import ENGINE_ID, Envelope, UiEvent
 
 logger = logging.getLogger(__name__)
@@ -97,7 +101,8 @@ TRIM_NOTICE = (
 TRUNCATION_REASONS = frozenset({"length", "max_tokens"})
 
 AgentKind = Literal["player", "moderator"]
-AgentState = Literal["thinking", "acting", "sleeping"]
+#: ``held`` (v0.13.1): the agent has a run but waits at the soft-pause gate before its next model call.
+AgentState = Literal["thinking", "acting", "sleeping", "held"]
 
 _CONSUMED_CAP = 60  # envelopes remembered per run (for a rebuild's wake reasons)
 
@@ -132,6 +137,7 @@ class _Run:
     sleep_s: float | None = None  # a timed sleep the run ended with
     prev_sleep_until: float | None = None  # the timer this activation voided (restored by a no-op run)
     prev_slept_s: float | None = None
+    call_open: bool = False  # a model call of this run is counted as in flight by the soft-pause gate
 
     def absorb(self, envelopes: list[Envelope]) -> None:
         """Remember the envelopes this run has consumed and widen its focus."""
@@ -204,6 +210,7 @@ class Agent:
         *,
         book: ConversationBook | None = None,
         context_window: Callable[[], int] | None = None,
+        soft_gate: SoftGate | None = None,
     ) -> None:
         self.agent_id = agent_id
         self.kind: AgentKind = kind
@@ -218,6 +225,9 @@ class Agent:
         #: ``() -> int``: the context window (tokens) of this agent's model; ``None`` / ``<= 0`` = unknown
         #: (then neither the compaction reminder nor the emergency trim ever happens).
         self.context_window = context_window
+        #: The soft-pause gate (v0.13.1): while it is closed the agent starts no model call (state ``held``).  The
+        #: supervisor hands the same gate to all its agents; ``None`` = no soft pause (plain agents, most tests).
+        self.soft_gate = soft_gate
         self.status: AgentState = "sleeping"
         self.stats: dict[str, int] = {
             "activations": 0, "runs": 0, "cancels": 0, "failures": 0, "gave_up": 0, "injections": 0,
@@ -299,14 +309,24 @@ class Agent:
 
         It becomes pending and wakes the agent: a sleeping agent is activated on the next loop iteration
         (all envelopes delivered meanwhile are one activation); a busy one gets it merged at the next round
-        boundary - unless it is an ``interrupt`` that invalidates the work in flight."""
+        boundary - unless it is an ``interrupt`` that invalidates the work in flight (and no soft pause is on: while
+        the gate is closed nothing is cancelled)."""
         if self._stopped:
             return
         self._pending.append(envelope)
         run = self._run
         if run is not None and not self._cancelling:
             if envelope.interrupt and self._matches_focus(run, envelope):
-                if self._cancel_streak < self.config.starvation_limit:
+                gate = self.soft_gate
+                if gate is not None and gate.closed:
+                    # A soft pause (v0.13.1, G2): nothing in flight is cancelled - the tokens are spent, the answer is
+                    # still wanted - and a held run is not torn down and rebuilt for every interrupt.  The envelope is
+                    # plain pending: it is merged when the gate opens, and whatever the call in flight does in the
+                    # meantime meets the commit gate (a revoked floor is NO_FLOOR, a stale draft STALE).
+                    self._trace(
+                        "inject_instead_of_cancel", gen=run.gen, why="soft_pause", envelope=_brief(envelope)
+                    )
+                elif self._cancel_streak < self.config.starvation_limit:
                     self._cancel_run(envelope)
                 else:
                     # Starvation guard: this interrupt is merged at the next round boundary instead.
@@ -423,6 +443,7 @@ class Agent:
             self._pending[:0] = run.reasons  # cancelled before it could tell the agent anything: tell it next time
         self._run = None
         self._task = None
+        self._call_finished(run)  # its call is dropped: it is no longer "in flight" for the soft pause
         if task.done():
             self._request_activation()
             return
@@ -452,10 +473,13 @@ class Agent:
         tasks = [t for t in (self._task, self._cancel_target, *self._abandoned) if t is not None and not t.done()]
         for task in tasks:
             task.cancel()
+        dropped = self._run
         self._run = None
         self._task = None
         self._cancel_target = None
         self._cancelling = False
+        if dropped is not None:
+            self._call_finished(dropped)  # (a stopped agent holds nobody up: the soft pause need not wait for it)
         self._reset_volatile()
         if not was_stopped:
             self._set_status("sleeping")  # a paused / finished game shows every agent as sleeping
@@ -555,6 +579,9 @@ class Agent:
             gen=run.gen,
             attempt=self._failures,
             message=text,
+            error_class=type(exc).__name__,
+            http_status=http_status_of(exc),
+            will_retry=self._failures <= self.config.llm_retries,  # (the error log lists a retry and a give-up apart)
             traceback="".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-3000:],
         )
         if self._failures <= self.config.llm_retries:
@@ -609,6 +636,13 @@ class Agent:
             return float(self.world.clock.now())
         except Exception:  # noqa: BLE001
             return 0.0
+
+    def _game_time(self) -> float | None:
+        """The game clock now, for the trace (``None`` when there is no clock to ask)."""
+        try:
+            return round(float(self.world.clock.now()), 3)
+        except Exception:  # noqa: BLE001
+            return None
 
     def _open_conversation(self, run: _Run) -> Conversation | None:
         """Create the conversation (FULL opening message) or append this activation's DELTA.
@@ -666,9 +700,19 @@ class Agent:
             if round_idx and round_idx % 50 == 0:
                 # (a diagnostic only: the user's token / cost limit is the one brake, see the module docstring)
                 self._trace("long_run", gen=run.gen, rounds=round_idx, epoch=conv.epoch)
+            if not await self._pass_soft_gate(run, conv):  # v0.13.1: a soft pause holds the agent *before* the call
+                run.end_reason = "stale"
+                self._trace("discard", gen=run.gen, reason="stale at the soft-pause gate")
+                return
             self._set_status("thinking")
             started = _now()
-            resp = await self.llm.complete(aid, conv.request_messages(), conv.tools, max_tokens=max_tokens)
+            try:
+                resp = await self._call_model(run, conv, max_tokens)
+            except GateClosed:
+                # (v0.13.1) the model port queued this call for a concurrency slot and found the soft pause on when the
+                # slot came: nothing was sent.  Back to the top of the round - it waits at the gate (``held``), merges
+                # what arrived, and asks again once the pause is over.
+                continue
             if self._stale(run):  # superseded while we waited: the answer is dropped, never written
                 run.end_reason = "stale"
                 self._trace("discard", gen=run.gen, reason="stale after llm call")
@@ -741,6 +785,58 @@ class Agent:
                 if parts:
                     conv.messages.append(user_message("\n\n".join(parts)))
             round_idx += 1
+
+    # ------------------------------------------------------------------ soft pause ---
+    async def _pass_soft_gate(self, run: _Run, conv: Conversation) -> bool:
+        """Wait at the soft-pause gate (v0.13.1, G2-G5) while it is closed; ``False`` when the run went stale.
+
+        The gate sits *before* every model call: a new activation, a retry, a timer wake-up and the next round
+        after a batch of tools all stop here.  A call that is already in flight is not touched: its answer is
+        written and its tools run (synchronously) before the agent gets back to this point.  When the gate opens,
+        whatever arrived meanwhile is merged into ONE message - so a person's words typed during the pause are one
+        call, not many.  The wait is a plain ``await``: ``stop()`` cancels it like any other.  An interrupt does not:
+        while the gate is closed it is plain pending (see :meth:`deliver`) and is merged here when the gate opens."""
+        gate = self.soft_gate
+        if gate is None or not gate.closed:
+            return True
+        self._set_status("held")
+        self._trace("held", gen=run.gen, round=run.rounds - 1)
+        await gate.wait_open()
+        if self._stale(run):  # (a gate that was dropped lets a worker the supervisor gave up on through)
+            return False
+        self._trace("released", gen=run.gen, round=run.rounds - 1)
+        if self._pending:
+            merged = self._merge_pending(run, conv)
+            if merged:
+                conv.messages.append(user_message("\n\n".join([merged, *conv.take_notes()])))
+        return True
+
+    async def _call_model(self, run: _Run, conv: Conversation, max_tokens: int | None) -> LLMResponse:
+        """The one model call of a round.  The gate counts it as *in flight* until it has come back, failed or
+        been dropped, which is what the soft pause waits for (``draining`` -> ``held``).
+
+        A port that counts for itself (it was given the very same gate: :class:`~app.runtime.llm_gate.GatedEngineLlm`
+        with a concurrency limit) is left to do so: it counts a call only from the moment its slot is granted and the
+        request is about to be sent, so a call that merely waits for a slot is neither in flight nor sent after the click
+        (it raises ``GateClosed`` instead, see :meth:`_run_rounds`).  Every other port - the scripted bots, the fakes of the
+        tests - has no slots, and the agent counts its calls here."""
+        gate = self.soft_gate
+        if gate is None or getattr(self.llm, "soft_gate", None) is gate:
+            return await self.llm.complete(self.agent_id, conv.request_messages(), conv.tools, max_tokens=max_tokens)
+        run.call_open = True
+        gate.call_started()
+        try:
+            return await self.llm.complete(self.agent_id, conv.request_messages(), conv.tools, max_tokens=max_tokens)
+        finally:
+            self._call_finished(run)
+
+    def _call_finished(self, run: _Run) -> None:
+        """The call of ``run`` no longer counts as in flight (idempotent: a dropped run and its unwinding worker
+        both get here)."""
+        if run.call_open:
+            run.call_open = False
+            if self.soft_gate is not None:
+                self.soft_gate.call_finished()
 
     # ------------------------------------------------------------ conversation upkeep ---
     def _merge_pending(self, run: _Run, conv: Conversation) -> str | None:
@@ -892,6 +988,8 @@ class Agent:
         thought = (resp.thought or "").strip()
         if thought:
             self._count("thinking_rounds")
+        gt = self._game_time()  # (v0.13.1) when, on the game clock: the thinking record and the error log show it
+        model = resp.model_id or None
         fields: dict[str, Any] = {
             "gen": run.gen,
             "round": round_idx,
@@ -905,15 +1003,20 @@ class Agent:
             "finish_reason": resp.finish_reason,
             "tool_calls": [call.name for call in resp.tool_calls],
             "elapsed_ms": int(elapsed * 1000),
+            "gt": gt,
         }
         if self.config.trace_messages:
             fields["messages"] = conv.request_messages()  # a snapshot: the conversation keeps growing
         self._trace("llm_call", **fields)
         if thought:
-            self._trace("thought", gen=run.gen, round=round_idx, text=thought)
+            self._trace("thought", gen=run.gen, round=round_idx, text=thought, gt=gt, model=model)
         if (resp.content or "").strip():
-            # Without a ``speak`` call the plain text is only an inner monologue (D5): log it, nothing else.
-            self._trace("content", gen=run.gen, round=round_idx, text=resp.content)
+            # Without a ``speak`` call the plain text is only an inner monologue (D5): log it, nothing else.  (The
+            # thinking record, v0.13.1, shows only the monologue of a call with no tool calls: ``with_tools``.)
+            self._trace(
+                "content", gen=run.gen, round=round_idx, text=resp.content, gt=gt, model=model,
+                with_tools=bool(resp.tool_calls),
+            )
 
     # ================================================================ plumbing ==
     def _set_status(self, state: AgentState) -> None:

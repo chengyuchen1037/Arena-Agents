@@ -45,7 +45,7 @@ from app.runtime.agent import Agent, AgentConfig
 from app.runtime.bus import EventBus
 from app.runtime.clock import GameClock
 from app.runtime.conversation import ConversationBook
-from app.runtime.llm_gate import GatedEngineLlm, LlmGate
+from app.runtime.llm_gate import GatedEngineLlm, LlmGate, LoggedLlm
 from app.runtime.supervisor import Supervisor, SupervisorConfig
 from app.runtime.trace_log import TraceLog
 from app.runtime.usage import UsageBook
@@ -206,6 +206,10 @@ class GameOrchestrator(
             clock,
             seed=seed if seed is not None else random.SystemRandom().randrange(1, 2**31),
         )
+        # (v0.13.1) A re-dealt / renamed game keeps the seat a person plays.  The seat is read from the session that is live
+        # *now*: for a brand-new game (``_reset_game``) that is still the old one, which is why ``_set_session`` - called right
+        # after, with the new session - tells the world again and has the last word.
+        self._sync_untimed_holders(world)
         world.drain_outbox()  # nobody is listening yet; the snapshot is built from state
         world.drain_events()
         return world, clock
@@ -297,8 +301,12 @@ class GameOrchestrator(
 
     def _build_runtime(self, *, fresh: bool = False) -> Supervisor:
         rt = self.cfg.get("runtime") or {}
+        call_log = self.call_log()  # (v0.13.1, G34) the error log of this game: every model request leaves lines in it
+        # (v0.13.1) one soft-pause gate per runtime, shared by the real model port (which counts its own calls from the moment
+        # their concurrency slot is granted and sends nothing while the gate is closed) and by every agent / the supervisor
+        soft_gate = self._new_soft_gate()
         if self.llm_port_factory is not None:
-            llm_port = self.llm_port_factory(self)
+            llm_port = LoggedLlm(self.llm_port_factory(self), call_log, self.session.get_model_binding)
         else:
             gate = LlmGate(
                 max_concurrent=int(rt.get("llm_concurrency", 0)),
@@ -309,10 +317,13 @@ class GameOrchestrator(
                 self.session.get_model_binding,
                 gate,
                 float(rt.get("llm_timeout_seconds", 120)),
+                call_log=call_log,
+                soft_gate=soft_gate,
             )
         brain = self._ensure_brain(fresh=fresh)
         trace = TraceLog(self._logs_root(), self.session.session_id)
         self._register_trace_secrets(trace)
+        trace = self._observe_trace(trace)  # (v0.13.1) the agents' errors become lines of the error log, too
         agent_config = AgentConfig(
             compact_at=float(rt.get("compact_at", 0.6)),
             trim_at=float(rt.get("trim_at", 0.9)),
@@ -356,6 +367,7 @@ class GameOrchestrator(
             usage=self.usage,
             trace=trace,
             book=self._book,
+            soft_gate=soft_gate,  # (v0.13.1) a soft pause holds all the agents of this runtime
         )
 
     def _register_trace_secrets(self, trace: TraceLog) -> None:
@@ -424,6 +436,7 @@ class GameOrchestrator(
         supervisor, self._supervisor = self._supervisor, None
         if supervisor is not None:
             await supervisor.stop()
+        self._clear_soft_pause()  # (v0.13.1, G6) a hard pause, the end, the budget, hold_game, a new / loaded game ...
         if self.world.running:
             self.world.set_running(False, why)
         self.clock.pause()
@@ -491,6 +504,8 @@ class GameOrchestrator(
             self.schedule_autosave(event.type)
         self.bus.publish(event)
         self._after_publish(event)  # v0.13: the state of a played seat follows the world (one push per loop turn)
+        if event.type == "error":
+            self._log_error_event(event)  # (v0.13.1, G33) a runtime error is a line of the error log, too
 
     async def broadcast_state(self, event_type: str = "state_update") -> None:
         """Tell spectators that session-level state changed (the world publishes its own events)."""
@@ -521,6 +536,9 @@ class GameOrchestrator(
                     "review": self.review_view(),
                     "stall_notice": self._stall_notice,
                     "clock": round(float(self.clock.now()), 3),
+                    # (v0.13.1, §12.2) the soft pause and whether the game clock runs - the page's countdown follows it
+                    "soft_pause": self.soft_pause_payload(),
+                    "clock_running": self.clock_running(),
                 },
             )
         )
@@ -609,6 +627,9 @@ class GameOrchestrator(
             "demo": bool(getattr(self, "demo_mode", False)),  # scripted bots, no models
             # v0.13 (F10, F12): the seat a person plays and what it may do (docs/v0.12-contracts.md §11.7)
             "takeover": self.takeover_payload(),
+            # v0.13.1 (G2, G6): null, or {"state": "draining" | "held", "in_flight": n}; and whether the game clock runs
+            "soft_pause": self.soft_pause_payload(),
+            "clock_running": self.clock_running(),
         }
 
     def _sleep_until(self, agent_id: str) -> float | None:
@@ -700,6 +721,7 @@ class GameOrchestrator(
     def _set_session(self, session: GameSession) -> None:
         self._session_generation += 1
         self.session = session
+        self._sync_untimed_holders()  # (v0.13.1) the world is told which seat this game's person plays (if any)
 
 
 # ---------------------------------------------------------------------------

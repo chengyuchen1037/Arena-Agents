@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 #: UI events after which the seat state is not recomputed: they cannot change what the person may do.
 SEAT_QUIET_EVENTS = frozenset(
-    {"takeover.updated", "agent.metrics", "budget.updated", "budget.warning", "budget.reached"}
+    {"takeover.updated", "agent.metrics", "budget.updated", "budget.warning", "budget.reached", "llm.call"}
 )
 
 
@@ -134,6 +134,21 @@ class TakeoverRuntimeMixin:
             states[seat] = "human"
         return states
 
+    def _sync_untimed_holders(self, world: Any = None, *, publish: bool = False) -> None:
+        """Tell the world which seat a person plays: its floor in a public channel has no deadline (v0.13.1, G10 / G14).
+
+        Called whenever the played seat changes or a world / session becomes the live one (a new game, a restored or
+        imported one, a re-deal).  A floor the seat holds at that moment is re-judged by the world.  With ``publish``
+        (taking over / giving back, when somebody is looking) the ``floor.changed`` events of that are published."""
+        world = world if world is not None else getattr(self, "world", None)
+        session = getattr(self, "session", None)
+        if world is None:
+            return
+        seat = session.takeover.seat if session is not None else None
+        world.set_untimed_holders([str(seat)] if seat else [])
+        if publish:
+            self._flush_world()  # type: ignore[attr-defined]
+
     # ----------------------------------------------------------------------- the push ---
     def _after_publish(self, event: UiEvent) -> None:
         """Called by the orchestrator after every UI event it published."""
@@ -201,6 +216,7 @@ class TakeoverRuntimeMixin:
             session.takeover.seat = seat
             session.human_spans.append(HumanSpan(seat=seat, from_seq=int(self.world.seq)))  # type: ignore[attr-defined]
             self.agent_state[seat] = "human"  # type: ignore[attr-defined]
+            self._sync_untimed_holders(publish=True)  # (v0.13.1) its public floors lose their deadline, now and later
             self.schedule_autosave("takeover")  # type: ignore[attr-defined]
             self._push_takeover(force=True)
             logger.info("Seat %s is played by a person", seat)
@@ -225,6 +241,7 @@ class TakeoverRuntimeMixin:
             brain = self._brain  # type: ignore[attr-defined]
             if brain is not None:
                 brain.reset_conversation(seat)
+            self._sync_untimed_holders(publish=True)  # (v0.13.1) a floor it holds is timed again, with the time it had left
             self.schedule_autosave("takeover")  # type: ignore[attr-defined]
             self._push_takeover(force=True)
             logger.info("Seat %s is given back to its agent", seat)

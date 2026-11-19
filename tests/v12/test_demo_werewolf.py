@@ -88,8 +88,40 @@ def test_a_scripted_werewolf_game_plays_to_the_end(monkeypatch: pytest.MonkeyPat
         assert sorted(started) == sorted(p["id"] for p in public["participants"])
         await wait_for(lambda: len(orch.session.review_done) == len(started) and not orch._review_running, timeout=30)
         assert "（演示）" in orch._roster().entry("N1")["memory"] and "场次 1" in orch._roster().entry("N1")["memory"]
+        # v0.13.1 (G39): the review revised an impression of every other seat (the bots answer the JSON the prompt asks for)
+        parts = orch._roster().entry("N1")["memory_parts"]
+        assert set(parts["impressions"]) == {f"N{i}" for i in range(2, 13)} and all(t.startswith("（演示）") for t in parts["impressions"].values())
+        assert parts["experience"] == ["（演示）先听后说，别在信息不足时站队。"] and parts["legacy"] == "" and "场次 1" in parts["record"]
+        done = [e.data for e in orch.bus._ring if e.type == "review.progress" and e.data["state"] == "done"]
+        assert len(done) == len(started) and all(len(d["changes"]["impressions"]) == 11 for d in done)  # (the first review: eleven new impressions)
+        # ... "complete the persona" answers in the fixed format, "complete the memory" in impressions and lessons (G42, G43)
         draft = await orch.refine_text("N1", "persona", "沉着冷静")
-        assert "沉着冷静" in draft and orch._roster().entry("N1")["persona"] == ""  # a draft only
+        assert draft.startswith("【定位】（演示）沉着冷静") and "【说话风格】\n- " in draft and draft.endswith("【口头禅】我们再看看。")
+        assert orch._roster().entry("N1")["persona"] == ""  # a draft only
+        memory = await orch.refine_entry("N1", "memory", "N5 爱悍跳")
+        assert memory["memory_parts"]["impressions"]["N2"] == "（演示）N5 爱悍跳" and memory["draft"].startswith("## 印象\n- N2 Bob：（演示）N5 爱悍跳")
+        assert orch._roster().entry("N1")["memory_parts"]["impressions"]["N2"].startswith("（演示）Bob")  # a draft only
         await orch.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_the_demo_bot_answers_each_one_shot_prompt_with_what_it_asks_for() -> None:
+    """The bot tells the calls apart by the sections ``app.agents.review`` builds (it used to look for the words "复盘" and
+    "性格设定"): a change of a prompt that breaks this shows up here, not as a demo game that cannot be reviewed."""
+    import json
+
+    from app.agents.review import build_refine_messages, build_review_messages
+    from app.game.demo import DemoLlm
+    from app.storage.roster import normalize_persona
+
+    from .agents.fakes import FakeWorld
+
+    answer = lambda messages: DemoLlm._text(object(), messages)  # noqa: E731 - (the text of an answer needs nothing of the bot)
+    review = json.loads(answer(build_review_messages(FakeWorld(), "p1", outcome_text="x", role_text="y")))
+    assert list(review["impressions"]) == ["p2"] and review["impressions"]["p2"].startswith("（演示）Blair") and review["experience"]
+    persona = answer(build_refine_messages("persona", "沉着冷静", name="Alex"))
+    assert persona == normalize_persona(persona) and persona.startswith("【定位】（演示）沉着冷静")  # (already the fixed format)
+    memory = json.loads(answer(build_refine_messages("memory", "p2 爱悍跳", others=[("p2", "Blair"), ("p3", "Cleo")])))
+    assert memory["impressions"] == {"p2": "（演示）p2 爱悍跳"} and memory["experience"]
+    assert json.loads(answer(build_refine_messages("memory", "x")))["impressions"] == {}  # (no other seat to write about)

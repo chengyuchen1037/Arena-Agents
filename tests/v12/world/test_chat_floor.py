@@ -568,6 +568,7 @@ def test_floor_view_of_a_queue() -> None:
         "active": "N1",
         "paused": False,
         "seconds_left": 47.7,
+        "untimed": False,
         "queue": [
             {"holder": "N1", "state": "active", "messages_used": 1, "max_messages": 2},
             {"holder": "N2", "state": "pending", "messages_used": 0, "max_messages": 2},
@@ -586,6 +587,7 @@ def test_floor_view_without_a_floor() -> None:
         "active": None,
         "paused": False,
         "seconds_left": None,
+        "untimed": False,
         "queue": [],
         "free": None,
     }

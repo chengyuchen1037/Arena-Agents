@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.world.chat import FLOOR_MODES, speech_gate
+from app.world.chat import FLOOR_MODES, speech_gate, token_untimed
 from app.world.game import ability_holders
 from app.world.spec import ParamSpec
 from app.world.state import ChannelState, RequestState, Token
@@ -52,7 +52,10 @@ def _active_token(channel: ChannelState, seat: str) -> Token | None:
 
 
 def _token_clock(world: Any, channel: ChannelState, token: Token) -> tuple[float | None, float | None]:
-    """``(seconds_left, deadline_clock)`` of an active token: a paused / frozen group has no deadline."""
+    """``(seconds_left, deadline_clock)`` of an active token: a paused / frozen group has no deadline, and neither
+    has the token of a seat that is played in a public channel (v0.13.1, G10: ``untimed``, both are ``None``)."""
+    if token_untimed(world, channel, token):
+        return None, None
     group = channel.group
     if group is not None and group.paused:
         return _r1(token.remaining), None
@@ -90,11 +93,13 @@ def _floor_state(world: Any, channel: ChannelState, seat: str) -> tuple[dict[str
             "chars_left": None,
             "seconds_left": None,
             "deadline_clock": None,
+            "untimed": False,
         }
         if mine is not None:
             floor["messages_left"] = max(0, mine.max_messages - mine.messages_used)
             floor["chars_left"] = max(0, mine.max_chars_total - mine.chars_used)
             floor["seconds_left"], floor["deadline_clock"] = _token_clock(world, channel, mine)
+            floor["untimed"] = token_untimed(world, channel, mine)
         # ``pass`` ends an active token of a channel that is neither frozen nor paused (``ChatModule.on_pass``)
         return floor, mine is not None and not channel.frozen and not group.paused
     free = channel.free
@@ -107,6 +112,7 @@ def _floor_state(world: Any, channel: ChannelState, seat: str) -> tuple[dict[str
             "chars_left": None,
             "seconds_left": None,
             "deadline_clock": None,
+            "untimed": False,
         }
         return floor, False
     return None, False
@@ -235,7 +241,7 @@ def seat_status(world: Any, seat: str) -> dict[str, Any]:
         {"seat": id, "seq": ledger seq,
          "channels": {channel_id: {"can_write", "why_not", "code", "max_chars",
                                    "floor": {"kind", "mine", "paused", "messages_left", "chars_left",
-                                             "seconds_left", "deadline_clock"} | None,
+                                             "seconds_left", "deadline_clock", "untimed"} | None,
                                    "can_pass"}},
          "requests": [{"id", "kind", "max_chars", "answered", "my_answer", "seconds_left",
                        "deadline_clock", "channel_id"}],
@@ -246,7 +252,9 @@ def seat_status(world: Any, seat: str) -> dict[str, Any]:
     running state of the game is not part of it: the UI says "paused" itself).  ``seq`` is the ledger
     position the numbers were computed at: a draft the player starts now is ``based_on_seq`` it.
     ``deadline_clock`` is an absolute game-clock second, so a client can count down without further
-    events (``None`` while the clock of a paused floor is frozen).  ``attention`` lists the channels in
+    events (``None`` while the clock of a paused floor is frozen).  ``floor.untimed`` (v0.13.1, G10) is true when
+    the seat holds a floor in a public channel that has no deadline - the seat is the one a person plays - and
+    then ``seconds_left`` and ``deadline_clock`` are ``None``.  ``attention`` lists the channels in
     which the seat holds the floor and may write, and the channels that show an open request the seat has
     not answered yet.
     """

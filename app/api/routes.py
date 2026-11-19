@@ -10,12 +10,13 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.api import providers as provider_api
-from app.api.security import require_trusted_client, verify_api_access
+from app.api.security import is_trusted_request, require_trusted_client, verify_api_access
 from app.config import APP_VERSION
 from app.game.orchestrator import TakeoverError, orchestrator
 from app.game.session import GameSession
 from app.providers.models import ModelBinding, ProviderError
 from app.providers.store import get_provider_store
+from app.runtime.bus import TRUSTED_ONLY_TYPES
 from app.storage.errors import StorageError
 
 logger = logging.getLogger(__name__)
@@ -143,7 +144,10 @@ async def sse_events(request: Request) -> StreamingResponse:
     bus = orchestrator.bus
     # Subscribe and (if needed) build the snapshot with no ``await`` in between: the snapshot and
     # the queued events are exactly consecutive.
-    replay, queue = bus.subscribe(last)
+    # (v0.13.1) The stream is open to every client that may use the API at all, but the error log is not: ``llm.call``
+    # carries the provider, the model, the tokens and the text of errors, which ``GET /api/llm/calls`` only gives to a
+    # trusted client (a token, or a loopback peer).  Everybody else is subscribed without it - live and in a replay.
+    replay, queue = bus.subscribe(last, exclude=() if is_trusted_request(request) else TRUSTED_ONLY_TYPES)
     first = _snapshot_message() if replay is None else None
 
     async def event_generator():

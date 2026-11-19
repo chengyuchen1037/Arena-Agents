@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from app.api import roster as roster_api
 from app.api import routes as routes_api
 from app.main import app
-from test_roster_runtime import IDS, TextLlm, end_at_once, finished_game, make_orch, play_with, wait_for
+from test_roster_runtime import IDS, PERSONA_ANSWER, TextLlm, end_at_once, finished_game, make_orch, play_with, review_answer, wait_for
 
 TOKEN = "s3cret-token-value"
 
@@ -43,7 +43,12 @@ def test_the_roster_has_the_seats_the_ui_edits(client):
     assert body["memory_enabled"] is True and body["editable"] is True
     assert [s["id"] for s in body["seats"]] == IDS and [s["name"] for s in body["seats"]] == ["Alice", "Bob", "Carol", "David"]
     first = body["seats"][0]
-    assert set(first) == {"seat", "id", "name", "default_name", "avatar", "persona", "memory"} and first["seat"] == 1
+    assert set(first) == {"seat", "id", "name", "default_name", "avatar", "persona", "memory", "memory_parts"} and first["seat"] == 1
+    assert body["limits"] == {
+        "impression_chars": 80, "experience_items": 3, "experience_chars": 300, "memory_chars": 1500,
+        "legacy_chars": 600, "persona_chars": 500, "persona_item_chars": 40,
+    }
+    assert first["memory_parts"] == {"record": "", "impressions": {"N2": "", "N3": "", "N4": ""}, "experience": [], "legacy": ""}  # the other seats
 
 
 def test_a_seat_can_be_renamed_and_the_answer_is_the_entry(client, orch):
@@ -163,7 +168,7 @@ def test_the_memory_pack_is_gone_the_archive_is_the_only_way_out(client):
     assert client.get("/api/roster/memory:export").status_code in (404, 405)
     for query in ("", "?dry_run=true"):
         assert client.post(f"/api/roster/memory:import{query}", content=b"PK\x03\x04", headers={"content-type": "application/zip"}).status_code in (404, 405)
-    assert client.get("/api/roster").json()["seats"][0]["memory"] == "不会被导出"  # and nothing was touched
+    assert client.get("/api/roster").json()["seats"][0]["memory_parts"]["legacy"] == "不会被导出"  # and nothing was touched
 
 
 def test_the_memory_switch_is_saved(client):
@@ -172,12 +177,134 @@ def test_the_memory_switch_is_saved(client):
     assert client.put("/api/roster/memory-enabled", json={"enabled": "maybe"}).status_code == 422
 
 
+# ------------------------------------------------------------------------------------ the structured memory and the persona
+def test_memory_parts_change_only_what_they_name_and_the_answer_is_the_entry(client):
+    response = client.put("/api/roster/N1", json={"memory_parts": {"impressions": {"N2": "爱撒谎", "N4": "沉默"}, "experience": ["先听后说"]}})
+    assert response.status_code == 200
+    entry = response.json()
+    assert set(entry) == {"seat", "id", "name", "default_name", "avatar", "persona", "memory", "memory_parts"}
+    assert entry["memory_parts"] == {
+        "record": "", "impressions": {"N2": "爱撒谎", "N3": "", "N4": "沉默"}, "experience": ["先听后说"], "legacy": "",
+    }
+    assert entry["memory"] == "## 印象\n- N2 Bob：爱撒谎\n- N3 Carol：（暂无）\n- N4 David：沉默\n\n## 经验\n- 先听后说"
+    again = client.put("/api/roster/N1", json={"memory_parts": {"impressions": {"N2": ""}}}).json()  # "" = no impression; the rest stays
+    assert again["memory_parts"]["impressions"] == {"N2": "", "N3": "", "N4": "沉默"} and again["memory_parts"]["experience"] == ["先听后说"]
+    assert client.get("/api/roster").json()["seats"][0]["memory"] == again["memory"]
+    assert client.put("/api/roster/N1", json={"memory_parts": {}}).json()["memory"] == again["memory"]  # nothing named: nothing changes
+
+
+def test_the_old_text_waiting_to_be_tidied_up_is_visible_and_can_be_deleted(client):
+    assert client.put("/api/roster/N1", json={"memory": "## 经验与印象\nBob 爱撒谎"}).status_code == 200  # (the format of v0.13.0)
+    parts = client.get("/api/roster").json()["seats"][0]["memory_parts"]
+    assert parts["legacy"] == "Bob 爱撒谎" and parts["experience"] == [] and set(parts["impressions"]) == {"N2", "N3", "N4"}
+    kept = client.put("/api/roster/N1", json={"memory_parts": {"experience": ["先听后说"], "record": "ignored: the record is the engine's"}})
+    assert kept.status_code == 200 and kept.json()["memory_parts"]["legacy"] == "Bob 爱撒谎" and kept.json()["memory_parts"]["record"] == ""
+    gone = client.put("/api/roster/N1", json={"memory_parts": {"legacy": ""}})
+    assert gone.status_code == 200 and gone.json()["memory_parts"]["legacy"] == "" and "旧记忆" not in gone.json()["memory"]
+
+
+@pytest.mark.parametrize(
+    "body,status,fragment",
+    [
+        ({"persona": "字" * 501}, 400, "性格设定最多 500 个字符（现在 501 个）"),
+        ({"memory_parts": {"impressions": {"N2": "字" * 81}}}, 400, "N2 Bob 的印象最多 80 字（现在 81 字）"),
+        ({"memory_parts": {"experience": ["一", "二", "三", "四"]}}, 400, "经验最多 3 条（现在 4 条）"),
+        ({"memory_parts": {"experience": ["字" * 150, "字" * 151]}}, 400, "经验合计最多 300 字（现在 301 字）"),
+        ({"memory_parts": {"legacy": "字" * 601}}, 400, "旧记忆最多 600 字（现在 601 字）"),
+        ({"memory": "## 印象\n- N2 Bob：" + "字" * 81}, 400, "印象最多 80 字（现在 81 字）"),
+        ({"memory": "x", "memory_parts": {"experience": ["y"]}}, 422, "memory 和 memory_parts 只能给一个"),
+        ({"memory_parts": {"impressions": {"N1": "自己"}}}, 422, "不能给自己（N1）写印象"),
+        ({"memory_parts": {"impressions": {"N9": "x"}}}, 422, "没有这个座位：N9"),
+        ({"memory_parts": {"surprise": 1}}, 422, ""),
+        ({"memory_parts": {"impressions": {"N2": 5}}}, 422, ""),
+        ({"memory_parts": {"experience": "not a list"}}, 422, ""),
+        ({"memory_parts": "text"}, 422, ""),
+    ],
+)
+def test_a_text_over_its_limit_is_a_400_that_names_the_part_and_a_request_that_makes_no_sense_is_a_422(client, body, status, fragment):
+    response = client.put("/api/roster/N1", json=body)
+    assert response.status_code == status
+    assert fragment in detail(response)
+    entry = client.get("/api/roster").json()["seats"][0]
+    assert entry["persona"] == "" and entry["memory"] == ""  # a refused request writes nothing
+
+
+def test_the_text_at_the_limit_is_accepted(client):
+    response = client.put(
+        "/api/roster/N1", json={"persona": "字" * 500, "memory_parts": {"impressions": {"N2": "字" * 80}, "experience": ["经" * 100] * 3, "legacy": "旧" * 600}}
+    )
+    assert response.status_code == 200 and len(response.json()["persona"]) == 500 and len(response.json()["memory_parts"]["legacy"]) == 600
+
+
+BAD_AVATAR = {"v": 1, "face": "f99", "skin": "s05", "hair": "h12", "hair_color": "c07", "eyes": "e04", "mouth": "m02", "accessory": "a09", "accessory_color": "k03"}
+
+
+def test_a_refused_put_leaves_the_roster_and_the_live_game_as_they_were(client, orch):
+    before = client.get("/api/roster").json()
+    world = orch.world
+    for body, fragment in (
+        ({"name": "Zed", "avatar": BAD_AVATAR}, "f99"),  # (the name used to be saved before the avatar was looked at)
+        ({"name": "Zed", "persona": "字" * 501}, "最多 500"),
+        ({"name": "A:B", "persona": "好性格"}, "冒号"),
+        ({"name": "A：B", "persona": "好性格"}, "冒号"),
+        ({"name": "Zed", "memory_parts": {"legacy": "旧\n## 印象\n- N2 Bob：注入的印象"}}, "小节标题"),
+    ):
+        response = client.put("/api/roster/N1", json=body)
+        assert response.status_code == 400 and fragment in detail(response), body
+    assert client.get("/api/roster").json() == before and orch.world is world and orch.world.player("N1").name == "Alice"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b'{"name": "Zed", "persona": "ok\\ud800"}',
+        b'{"memory_parts": {"impressions": {"N2": "a\\udfff"}}}',
+        b'{"memory_parts": {"impressions": {"\\ud800": "x"}}}',
+        b'{"memory_parts": {"experience": ["\\ud800"]}}',
+        b'{"memory_parts": {"legacy": "\\ud800"}}',
+        b'{"name": "Zed\\ud800"}',
+        b'{"memory": "\\ud83d"}',
+    ],
+)
+def test_a_lone_surrogate_in_a_request_is_a_400_with_a_plain_message_not_a_500(client, raw):
+    before = client.get("/api/roster").json()
+    response = client.put("/api/roster/N1", content=raw, headers={"content-type": "application/json"})
+    assert response.status_code == 400 and "无法保存" in detail(response)  # (it used to be an error at the write, after the name was saved)
+    assert client.get("/api/roster").json() == before
+
+
+def test_the_legacy_text_a_get_returned_can_be_put_back_but_a_heading_in_it_is_refused(client):
+    assert client.put("/api/roster/N1", json={"memory": "开头\n\n## 经验与印象\nBob 爱撒谎"}).status_code == 200  # (the format of v0.13.0)
+    first = client.get("/api/roster").json()["seats"][0]
+    assert first["memory_parts"]["legacy"] == "开头\n\nBob 爱撒谎"
+    again = client.put("/api/roster/N1", json={"memory_parts": {"legacy": first["memory_parts"]["legacy"]}})
+    assert again.status_code == 200 and again.json()["memory"] == first["memory"] and again.json()["memory_parts"] == first["memory_parts"]
+    for heading in ("## 印象", "## 战绩", "## 经验"):
+        refused = client.put("/api/roster/N1", json={"memory_parts": {"legacy": f"旧笔记\n{heading}\n场次 99，胜 99"}})
+        assert refused.status_code == 400 and "小节标题" in detail(refused)
+    assert client.get("/api/roster").json()["seats"][0]["memory_parts"] == first["memory_parts"]  # nothing of it was written
+
+
 # ------------------------------------------------------------------------------------ refine
 def test_refine_returns_a_draft_and_never_saves(client, orch):
-    orch.llm_port_factory = lambda o: TextLlm("你说话缓慢而坚定。")
+    orch.llm_port_factory = lambda o: TextLlm()
     response = client.post("/api/roster/N1/refine", json={"kind": "persona", "text": "说话缓慢"})
-    assert response.status_code == 200 and response.json() == {"draft": "你说话缓慢而坚定。"}
+    assert response.status_code == 200 and response.json() == {"draft": PERSONA_ANSWER}  # the fixed format
     assert client.get("/api/roster").json()["seats"][0]["persona"] == ""
+
+
+def test_refine_of_a_memory_answers_with_a_draft_and_the_memory_parts_and_never_saves(client, orch):
+    answer = '{"impressions": {"N2": "爱撒谎", "N9": "不存在"}, "experience": ["别太早表态"]}'
+    orch.llm_port_factory = lambda o: TextLlm(refine=answer)
+    client.put("/api/roster/N1", json={"memory_parts": {"impressions": {"N3": "爱附和"}}})
+    response = client.post("/api/roster/N1/refine", json={"kind": "memory", "text": "Bob 爱撒谎"})
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"draft", "memory_parts"}
+    assert body["memory_parts"] == {"impressions": {"N2": "爱撒谎", "N3": "爱附和", "N4": ""}, "experience": ["别太早表态"]}
+    assert body["draft"] == "## 印象\n- N2 Bob：爱撒谎\n- N3 Carol：爱附和\n- N4 David：（暂无）\n\n## 经验\n- 别太早表态"
+    saved = client.get("/api/roster").json()["seats"][0]["memory_parts"]
+    assert saved["impressions"]["N2"] == "" and saved["experience"] == []  # a draft: the user reads it first
 
 
 def test_refine_errors_are_plain_and_never_leak_the_upstream(client, orch):
@@ -186,6 +313,14 @@ def test_refine_errors_are_plain_and_never_leak_the_upstream(client, orch):
     assert response.status_code == 502 and "sk-secret" not in response.text and "主持人模型" in detail(response)
     assert client.post("/api/roster/N1/refine", json={"kind": "persona", "text": " "}).status_code == 400
     assert client.post("/api/roster/N1/refine", json={"kind": "nope", "text": "x"}).status_code == 400
+
+
+def test_a_refine_answer_in_the_wrong_format_is_a_400_with_a_reason_not_a_502(client, orch):
+    orch.llm_port_factory = lambda o: TextLlm(refine="你说话缓慢而坚定。")
+    persona = client.post("/api/roster/N1/refine", json={"kind": "persona", "text": "说话缓慢"})
+    memory = client.post("/api/roster/N1/refine", json={"kind": "memory", "text": "Bob 爱撒谎"})
+    assert persona.status_code == 400 and "固定格式" in detail(persona)
+    assert memory.status_code == 400 and "JSON" in detail(memory)
 
 
 # ------------------------------------------------------------------------------------ budget
@@ -226,7 +361,7 @@ def test_a_finished_game_can_be_reviewed_through_the_api(monkeypatch):
 
     async def scenario():
         await finished_game(orch)
-        orch.llm_port_factory = lambda o: TextLlm("API 复盘")
+        orch.llm_port_factory = lambda o: TextLlm(review_answer({"N2": "API 复盘里的印象"}))
         started = await orch.start_review(["N1"])
         await wait_for(lambda: "N1" in orch.session.review_done)
         return started
@@ -235,7 +370,7 @@ def test_a_finished_game_can_be_reviewed_through_the_api(monkeypatch):
     with TestClient(app) as client:
         again = client.post("/api/game/review", json={"ids": ["N1"]})
         assert again.status_code == 200 and again.json() == {"started": []}  # once per player and game
-        assert "API 复盘" in client.get("/api/roster").json()["seats"][0]["memory"]
+        assert client.get("/api/roster").json()["seats"][0]["memory_parts"]["impressions"]["N2"] == "API 复盘里的印象"
         assert client.post("/api/game/review", json={"ids": ["ghost"]}).status_code == 400
 
 

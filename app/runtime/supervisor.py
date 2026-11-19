@@ -15,7 +15,9 @@
   no moderator timer and no ledger progress for ``watchdog_s`` -> an urgent ``notice/watchdog`` to the
   moderator (and only to the moderator).  After ``max_watchdog_wakes`` wake-ups without progress
   ``on_stall(reason)`` is called once; when the ledger advances again, ``on_stall(None)``.  The supervisor
-  never pauses the game itself: the orchestrator shows a warning and the user decides.
+  never pauses the game itself: the orchestrator shows a warning and the user decides.  It stays quiet while a
+  soft pause is on (the gate is closed, v0.13.1) and while the world waits for a person who holds a floor that has
+  no deadline (``world.untimed_floor_open()``).
 * ``stop()`` stops polling and pumping first, then stops every agent (cancelling workers, publishing
   ``sleeping``) and awaits every task: nothing is left running.
 
@@ -34,6 +36,7 @@ from typing import Any
 from app.runtime.agent import Agent
 from app.runtime.conversation import ConversationBook
 from app.runtime.ports import EventSink, TraceSink
+from app.runtime.soft_gate import SoftGate
 from app.world.types import ENGINE_ID, MODERATOR_ID, Envelope, UiEvent
 
 logger = logging.getLogger(__name__)
@@ -77,6 +80,7 @@ class Supervisor:
         usage: Any = None,
         trace: TraceSink | None = None,
         book: ConversationBook | None = None,
+        soft_gate: SoftGate | None = None,
     ) -> None:
         self.world = world
         self.agents: dict[str, Agent] = (
@@ -96,6 +100,12 @@ class Supervisor:
         self.book = book
         for agent in self.agents.values():
             agent.book = book
+        #: The soft-pause gate of this game (v0.13.1): every agent waits at it while it is closed, and the watchdog
+        #: stays quiet (a person is thinking, the agents are held on purpose).  ``None`` = no soft pause.
+        self.soft_gate = soft_gate
+        if soft_gate is not None:
+            for agent in self.agents.values():
+                agent.soft_gate = soft_gate
 
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started = False
@@ -312,9 +322,18 @@ class Supervisor:
         if moderator is not None and moderator.has_timer:
             return False  # the moderator chose to wait: that is its plan, not a stall
         try:
+            if self._waiting_on_untimed_floor():
+                return False  # a person holds a floor that has no deadline: the game waits for them, however long
             return self.world.next_deadline() is None
         except Exception:  # noqa: BLE001
             return False
+
+    def _waiting_on_untimed_floor(self) -> bool:
+        """The world is waiting for a person who holds a floor without a deadline (v0.13.1, G13).  Such a floor has
+        no timer, so ``next_deadline()`` cannot tell: without this the moderator would be woken every
+        ``watchdog_s`` (and finally a "the game is stuck" banner shown) while somebody is simply thinking."""
+        asking = getattr(self.world, "untimed_floor_open", None)
+        return bool(asking()) if callable(asking) else False
 
     def _call_on_stall(self, reason: str | None) -> None:
         if self.on_stall is None:
@@ -342,6 +361,19 @@ class Supervisor:
                     if self.stalled:
                         self.stalled = False
                         self._trace("watchdog", MODERATOR_ID, action="recovered", seq=seq)
+                        self._call_on_stall(None)
+                    continue
+                if self.soft_gate is not None and self.soft_gate.closed:
+                    # A soft pause (v0.13.1, G8): the agents are held on purpose and the clock is frozen.  Nothing is
+                    # counted - no quiet time, no fruitless wake-up, no banner - and the time spent here is not idle time.
+                    # What was counted before the pause is forgotten (the silence is measured afresh afterwards), and a
+                    # "the game is stuck" banner that was up when the pause began comes down: nothing is stuck now.
+                    quiet_since = None
+                    last_progress = now
+                    wakes = 0
+                    if self.stalled:
+                        self.stalled = False
+                        self._trace("watchdog", MODERATOR_ID, action="soft_pause", seq=seq)
                         self._call_on_stall(None)
                     continue
                 if not self.world.running or not self._system_quiet():

@@ -23,7 +23,6 @@ from app.game.bindings import BindingError
 from app.game.orchestrator import AUTOSAVE_EVENT_TYPES, GameOrchestrator, TakeoverError
 from app.game.session import HumanSpan
 from app.llm.types import LLMResponse
-from app.storage.roster import split_memory
 from app.world.chat import speech_gate
 from app.world.seat import seat_status
 from app.world.types import ENGINE_ID, MODERATOR_ID, Envelope, Receipt, UiEvent
@@ -315,6 +314,7 @@ async def test_a_person_can_pass_and_a_token_that_runs_out_ends_like_an_agents(m
     await orch.start_or_resume()
     await table.run([
         ("create_channel", {"channel_id": "public", "name": "公共频道", "members": IDS, "type": "public"}),
+        ("create_channel", {"channel_id": "team", "name": "小队频道", "members": ["p02", "p03"], "type": "group"}),
         ("set_floor_queue", {"channel_id": "public", "order": ["p02", "p03"], "limits": {"max_messages": 3, "duration_s": 60}}),
     ])
     assert orch.takeover_payload()["channels"]["public"]["can_pass"] is True
@@ -322,11 +322,12 @@ async def test_a_person_can_pass_and_a_token_that_runs_out_ends_like_an_agents(m
     assert passed["accepted"] and orch.takeover_payload()["channels"]["public"]["can_write"] is False
     assert orch.seat_speak("public", "我已经让出发言权了")["code"] == "NO_FLOOR"
 
-    # the deadline is the world's: the next turn (p03's, an agent that is silent) runs out by itself - and so does ours
-    await table.run([("set_floor_queue", {"channel_id": "public", "order": ["p02"], "limits": {"max_messages": 3, "duration_s": 0.3}})])
-    assert orch.takeover_payload()["channels"]["public"]["can_write"] is True
-    await wait_for(lambda: not orch.takeover_payload()["channels"]["public"]["can_write"], timeout=5)
-    late = orch.seat_speak("public", "来晚了")
+    # the deadline is the world's: in any channel but a public one (v0.13.1, G10: there the person's turn has no deadline,
+    # see tests/test_softpause_runtime.py) the person's turn runs out by itself, just like an agent's
+    await table.run([("set_floor_queue", {"channel_id": "team", "order": ["p02"], "limits": {"max_messages": 3, "duration_s": 0.3}})])
+    assert orch.takeover_payload()["channels"]["team"]["can_write"] is True
+    await wait_for(lambda: not orch.takeover_payload()["channels"]["team"]["can_write"], timeout=5)
+    late = orch.seat_speak("team", "来晚了")
     assert not late["accepted"] and late["code"] in ("NO_FLOOR", "CHANNEL_CLOSED")  # (the engine closes a finished floor)
     await orch.shutdown()
 
@@ -849,14 +850,17 @@ def test_a_save_that_contradicts_itself_is_made_consistent_when_it_is_adopted(mo
 
 
 class ReviewLlm:
-    """The one-shot port of a review: plain text for every player, and a record of who was asked."""
+    """The one-shot port of a review: the impressions JSON the prompt asks for (the same answer for every player: a player's
+    own id is not an impression he writes), and a record of who was asked."""
+
+    ANSWER = json.dumps({"impressions": {f"N{i}": "这一局我学到了很多" for i in range(1, 5)}, "experience": []}, ensure_ascii=False)
 
     def __init__(self) -> None:
         self.asked: list[str] = []
 
     async def complete(self, agent_id: str, messages: list[dict[str, Any]], tools: Any, *, max_tokens: int | None = None) -> LLMResponse:
         self.asked.append(agent_id)
-        return LLMResponse(content="我的复盘：这一局我学到了很多。", prompt_tokens=30, completion_tokens=10, provider_id="bot", model_id="scripted")
+        return LLMResponse(content=self.ANSWER, prompt_tokens=30, completion_tokens=10, provider_id="bot", model_id="scripted")
 
 
 @async_test
@@ -878,11 +882,11 @@ async def test_the_seat_a_person_played_is_reviewed_like_any_other_with_its_own_
     assert sorted(started) == sorted(ids)  # the played seat is part of "review all"
     await wait_for(lambda: len(orch.session.review_done) == len(ids) and not orch._review_running)
     assert sorted(port.asked) == sorted(ids)
-    sections = split_memory(orch._roster().entry("N2")["memory"])
-    assert "这一局我学到了很多" in sections["对局记忆"]
+    parts = orch._roster().entry("N2")["memory_parts"]
+    assert parts["impressions"]["N1"] == "这一局我学到了很多" and "N2" not in parts["impressions"]  # (the impressions of the others)
     won = next(p for p in orch.world.state.players if p.id == "N2").faction == "red"
     expected = f"场次 1，胜 {1 if won else 0}，负 {0 if won else 1}，胜率 {'100%' if won else '0%'}"
-    assert sections["战绩"].splitlines()[0] == expected  # the record is kept for it as for everybody
+    assert parts["record"].splitlines()[0] == expected  # the record is kept for it as for everybody
     assert orch.usage.actor("N2").calls == 1  # the review is the only thing that was ever accounted for the seat
     states = [e.data["state"] for e in orch.bus._ring if e.type == "review.progress"]
     assert states.count("done") == len(ids) and "error" not in states

@@ -99,7 +99,7 @@ def populate(
     put("pricing.json", dumps({"schema": 1, "url": "https://example.com/p.json", "fetched_at": None, "entries": {}}))
     put("roster/roster.json", dumps({"memory_enabled": True, "seats": {"N1": {"name": "Alice"}, "N2": {"name": "Bob"}}}))
     put("roster/N1.persona.md", "说话简短。\n".encode("utf-8"))
-    put("roster/N2.memory.md", "## 经验与印象\n- 谨慎\n".encode("utf-8"))
+    put("roster/N2.memory.md", "## 印象\n- N1 Alice：发言短，站边快。\n\n## 经验\n- 谨慎\n".encode("utf-8"))  # (v0.13.1: impressions and lessons)
     for index, game_id in enumerate(games):
         put(f"games/{game_id}/game.json", dumps(game_payload(game_id, status="finished" if index else "paused", winner="villagers" if index else None)))
         if logs:
