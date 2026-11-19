@@ -7,7 +7,7 @@ from typing import Any
 
 import yaml
 
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.13.1"
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 

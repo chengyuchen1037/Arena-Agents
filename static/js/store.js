@@ -15,8 +15,9 @@
        toast,          // text for the user (error events)
        budgetEvent,    // "warning" | "reached" (budget.warning / budget.reached)
        rosterChanged,  // true when names / avatars changed (roster.updated)
-       reviewEvent,    // {id, state, message} (review.progress)
+       reviewEvent,    // {id, state, message, changes} (review.progress; changes: v0.13.1, only for a finished review)
        archiveEvent,   // the normalized archive.progress payload (v0.13: export / import progress), else null
+       llmCall,        // {call, errors} (llm.call, v0.13.1: one line of the error log - not part of the game's state), else null
        replaced,       // true when the whole session was swapped (snapshot)
        takeoverChanged,// true when the played seat changed (takeover.updated): v0.13 locks the viewpoint to it
      }
@@ -43,7 +44,8 @@
   const MAX_TICKETS = 500;
   // v0.12.1 (E2): only three states. Older servers' "idle" / "stopped" both mean "not running" => sleeping.
   // v0.13 (F6): "human" = a person plays the seat instead of its agent.
-  const AGENT_STATES = ["thinking", "acting", "sleeping", "human"];
+  // v0.13.1 (G3): "held" = the agent was woken up and now waits in front of the soft-pause gate (§12.2).
+  const AGENT_STATES = ["thinking", "acting", "sleeping", "human", "held"];
   const DIRTY_KEYS = ["topbar", "board", "channels", "feed", "dashboard", "popover"];
   const METRIC_KEYS = [
     "activations",
@@ -179,6 +181,8 @@
       active: f.active === undefined || f.active === null ? null : String(f.active),
       paused: Boolean(f.paused),
       seconds_left: f.seconds_left === undefined || f.seconds_left === null ? null : num(f.seconds_left, 0),
+      // v0.13.1 (G10, §12.2): the active tokens have no deadline (a person holds a public floor): "不限时"
+      untimed: Boolean(f.untimed),
       queue,
       free,
     };
@@ -349,6 +353,62 @@
     };
   }
 
+  /**
+   * v0.13.1 (docs/v0.12-contracts.md §12.5): what a finished review changed in the memory:
+   * {impressions: [{id, before, after}], experience: {before: [...], after: [...]} | null} (only what changed).
+   * null when the event carries nothing of the kind (an older server).
+   */
+  function normalizeReviewChanges(raw) {
+    if (!isObject(raw)) return null;
+    const impressions = (Array.isArray(raw.impressions) ? raw.impressions : [])
+      .filter(isObject)
+      .map((c) => ({ id: str(c.id), before: str(c.before), after: str(c.after) }))
+      .filter((c) => c.id);
+    const experience = isObject(raw.experience)
+      ? { before: strList(raw.experience.before), after: strList(raw.experience.after) }
+      : null;
+    return { impressions, experience };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.13.1: one line of the error log (docs/v0.12-contracts.md §12.3): `llm.call` events, GET /api/llm/calls
+  // -------------------------------------------------------------------------
+
+  const CALL_STATUSES = ["ok", "retry", "timeout", "error", "cancelled"];
+  const CALL_PURPOSES = ["turn", "review", "refine", "runtime"];
+
+  /**
+   * A `CallEntry` with every field present and typed (null = "not known"), or null for something that is no entry.
+   * An unknown status counts as an error: a failure that is not recognised must not look like a success.
+   */
+  function normalizeCall(raw) {
+    if (!isObject(raw)) return null;
+    const id = Math.floor(num(raw.id, 0));
+    if (id <= 0) return null;
+    return {
+      id,
+      ts: str(raw.ts),
+      gt: optNum(raw.gt),
+      kind: raw.kind === "event" ? "event" : "call",
+      status: CALL_STATUSES.includes(raw.status) ? raw.status : "error",
+      actor_id: str(raw.actor_id),
+      actor_name: str(raw.actor_name),
+      purpose: CALL_PURPOSES.includes(raw.purpose) ? raw.purpose : "turn",
+      provider_id: optStr(raw.provider_id),
+      model_id: optStr(raw.model_id),
+      attempt: optNum(raw.attempt),
+      elapsed_ms: optNum(raw.elapsed_ms),
+      prompt_tokens: optNum(raw.prompt_tokens),
+      completion_tokens: optNum(raw.completion_tokens),
+      cache_read_tokens: optNum(raw.cache_read_tokens),
+      cache_write_tokens: optNum(raw.cache_write_tokens),
+      finish_reason: optStr(raw.finish_reason),
+      http_status: optNum(raw.http_status),
+      error_class: optStr(raw.error_class),
+      message: optStr(raw.message),
+    };
+  }
+
   // -------------------------------------------------------------------------
   // v0.13: the seat a person plays (docs/v0.12-contracts.md §11.7)
   // -------------------------------------------------------------------------
@@ -368,6 +428,8 @@
         chars_left: optNum(f.chars_left),
         seconds_left: optNum(f.seconds_left),
         deadline_clock: optNum(f.deadline_clock),
+        // v0.13.1 (G10): an untimed token has neither a countdown nor a deadline (both null)
+        untimed: Boolean(f.untimed),
       };
     }
     return {
@@ -440,6 +502,18 @@
     return out;
   }
 
+  const SOFT_PAUSE_STATES = ["draining", "held"];
+
+  /**
+   * `PublicSession.soft_pause` (v0.13.1, docs/v0.12-contracts.md §12.2): null (no soft pause) or
+   * {state: "draining" | "held", in_flight: n}.  `draining`: the model calls in flight are still being finished;
+   * `held`: every agent waits in front of the gate (`in_flight` is 0).  Anything else is "no soft pause".
+   */
+  function normalizeSoftPause(raw) {
+    if (!isObject(raw) || !SOFT_PAUSE_STATES.includes(raw.state)) return null;
+    return { state: raw.state, in_flight: raw.state === "held" ? 0 : Math.max(0, Math.round(num(raw.in_flight, 0))) };
+  }
+
   /** Coerce the scalar / small-object top-level fields (used after a merge too). */
   function normalizeScalars(s) {
     s.session_id = str(s.session_id);
@@ -486,6 +560,11 @@
     s.budget = normalizeBudget(s.budget);
     s.review = normalizeReview(s.review, s.review);
     s.takeover = normalizeTakeover(s.takeover);
+    // v0.13.1 (G6): a soft pause only exists while the game runs (a hard pause, the end ... clear it on the server);
+    // `clock_running`: does the game clock run?  The page counts down locally only while it does (`status` stays
+    // "running" during a soft pause).  A server that does not send it (older ones) is judged by the status.
+    s.soft_pause = s.status === "running" ? normalizeSoftPause(s.soft_pause) : null;
+    s.clock_running = typeof s.clock_running === "boolean" ? s.clock_running : s.status === "running" && s.soft_pause === null;
     return s;
   }
 
@@ -715,6 +794,10 @@
         s.pause_reason = "";
         s.hold_reason = "";
       }
+      // v0.13.1 (G6): whatever stops the game for good (a hard pause, the end, the budget ...) clears the soft pause,
+      // and the game clock only runs while the game does and no soft pause holds it
+      if (status !== "running") s.soft_pause = null;
+      s.clock_running = status === "running" && !s.soft_pause;
       res.dirty.topbar = res.dirty.board = res.dirty.popover = res.dirty.feed = true;
     },
 
@@ -820,10 +903,14 @@
       if (!id) return;
       const r = res.session.review;
       const state = ["running", "done", "error"].includes(d.state) ? d.state : "running";
-      r.progress[id] = { state, message: str(d.message) };
+      const entry = { state, message: str(d.message) };
+      // v0.13.1 (contract §12.5): a finished review says what it changed in the memory (old impression -> new one)
+      if (state === "done") entry.changes = normalizeReviewChanges(d.changes);
+      r.progress[id] = entry;
       if (state === "done" && !r.done.includes(id)) r.done.push(id);
       r.running = Object.values(r.progress).some((p) => p.state === "running");
       res.reviewEvent = { id, state, message: str(d.message) };
+      if (state === "done") res.reviewEvent.changes = entry.changes;
       // the 复盘全部 button (progress text) is part of the top-bar controls
       res.dirty.board = res.dirty.popover = res.dirty.topbar = true;
     },
@@ -859,6 +946,9 @@
           s[key] = d[key];
         }
       }
+      // v0.13.1: `soft_pause` / `clock_running` travel in every session.updated (§12.2); a server that sends none of
+      // them (older ones) must not leave the old `clock_running` standing when the status changed: it is judged anew
+      if (!Object.prototype.hasOwnProperty.call(d, "clock_running")) delete s.clock_running;
       normalizeScalars(s);
       res.dirty.topbar = res.dirty.board = res.dirty.popover = res.dirty.feed = true;
     },
@@ -866,6 +956,15 @@
     /** v0.13: progress of an archive export / import (docs/archive.md); it is not part of the game's state. */
     "archive.progress"(res, d) {
       res.archiveEvent = normalizeArchiveEvent(d);
+    },
+
+    /**
+     * v0.13.1 (G35, §12.3): one line of the error log - an ordinary, droppable event.  The log itself lives in
+     * calllog.js (it is not part of the game's state): the store only hands the normalized line to the page.
+     */
+    "llm.call"(res, d) {
+      const call = normalizeCall(d.call);
+      if (call) res.llmCall = { call, errors: Math.max(0, Math.floor(num(d.errors, 0))) };
     },
 
     error(res, d) {
@@ -889,6 +988,7 @@
       rosterChanged: false,
       reviewEvent: null,
       archiveEvent: null,
+      llmCall: null,
       replaced: false,
       takeoverChanged: false,
     };
@@ -952,7 +1052,10 @@
     normalizeBudget,
     normalizeReview,
     normalizeArchiveEvent,
+    normalizeReviewChanges,
+    normalizeCall,
     normalizeTakeover,
+    normalizeSoftPause,
     seatOf,
     insertMessage,
     isTruncated,

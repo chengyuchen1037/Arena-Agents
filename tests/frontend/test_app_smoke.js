@@ -147,6 +147,7 @@ test("no token needed: no modal, no header, sub-path prefix, first SSE connect c
   assert.deepEqual(
     calls.map((c) => c.url).sort(),
     [
+      "/arena/api/llm/calls?errors_only=true&limit=2000", // v0.13.1 (G32): the failed lines of the error log - the red badge needs them after a reload
       "/arena/api/providers",
       "/arena/api/roster",
       "/arena/api/settings/bindings",
@@ -160,7 +161,7 @@ test("no token needed: no modal, no header, sub-path prefix, first SSE connect c
   // moderator binding shown in the status pill; no legacy config endpoint used
   assert.match(env.el("api-status-label").textContent, /DeepSeek \/ model-x/);
   assert.ok(calls.every((c) => !c.url.endsWith("/api/config/llm")));
-  assert.equal(env.el("app-version").textContent, "v0.13.0-test"); // the application version, not the session's
+  assert.equal(env.el("app-version").textContent, "v0.13.1-test"); // the application version, not the session's
 
   // SSE is delayed 300ms and uses the prefixed URL without a token; the first stream always starts
   // with a snapshot (no last_event_id even though /api/state reported event_id=100)

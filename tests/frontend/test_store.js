@@ -70,7 +70,8 @@ test("normalizeSession drops malformed list items, repairs types and sorts messa
 test("legacy agent states (idle / stopped) are not special any more: they count as sleeping", () => {
   const s = Store.normalizeSession({ participants: [{ id: "N1", state: "idle" }, { id: "N2", state: "stopped" }, { id: "N3", state: "thinking" }, { id: "N4", state: "acting" }] });
   assert.deepEqual(s.participants.map((p) => p.state), ["sleeping", "sleeping", "thinking", "acting"]);
-  assert.deepEqual(Store.AGENT_STATES, ["thinking", "acting", "sleeping", "human"]); // (v0.13: a seat a person plays)
+  // (v0.13: a seat a person plays; v0.13.1: an agent held in front of the soft-pause gate)
+  assert.deepEqual(Store.AGENT_STATES, ["thinking", "acting", "sleeping", "human", "held"]);
 });
 
 test("normalizeRequest keeps the fields of RequestView and turns seconds_left into an absolute game-clock deadline", () => {

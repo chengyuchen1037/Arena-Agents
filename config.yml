@@ -6,7 +6,7 @@
 
 app:
   title: "Arena-Agents"
-  version: "v0.13.0"
+  version: "v0.13.1"
 
 scenario:
   path: "scenarios/werewolf_12p.md"

@@ -8,8 +8,15 @@
      The send button says 发送 / 禁言中 (hover: why) / 已暂停 / 未开始 / 已结束 - the text box itself can always be
      typed in.  结束发言 only while the seat holds the floor of that channel; 技能 opens the list of the abilities
      that are enabled for the seat -> a form generated from the scenario's `params` -> a second confirmation.
-   Request cards: a recipient seat answers by clicking an option (choice) or typing (text); an answered open
-   request can be answered again.
+   Request cards: a recipient seat answers by picking an option (choice) and pressing 「提交」, or by typing
+   (text) and pressing 「提交」; an answered open request can be answered again (「修改回答」).  v0.13.1 (G45): a click
+   on an option only PICKS it - nothing is sent until the card's own button is pressed, so a stray click can
+   never cast a vote.  The pick lives on the page only (per request) and is dropped when the request closes;
+   when the deadline comes the engine's default answer counts, never the pick.
+   An answer on its way is a token (st.ops: one per game + seat + request): it greys the card's button (「提交中…」),
+   and when it comes back it drops only the pick / text it SENT - what was picked or typed after the press is a newer
+   wish and stays (the card then offers it as the change), a refusal changes nothing, and an answer that comes back
+   after the game on screen changed (request ids repeat: "r1" again) touches nothing of the new page.
    Every rule (whose turn, how long, how many) is the server's: this file sends the seat's words to
 
      POST api/seat/speak {channel_id, content, based_on_seq}   POST api/seat/pass {channel_id}
@@ -39,6 +46,12 @@
     side: "选项",
     count: "数量",
   };
+
+  // v0.13.1 (G45): this many game seconds before a request's deadline a pick that was not submitted is flagged
+  const PICK_WARN_SECONDS = 15;
+  // ... and the card's button while the answer it sent has not come back (one answer at a time per request)
+  const SENDING_LABEL = "提交中…";
+  const SENDING_TITLE = "上一次提交还没有完成，完成后可以再提交新的选择";
 
   function create(ctx) {
     const opts = ctx || {};
@@ -80,7 +93,9 @@
       notice: "",
       noticeKey: null,
       reqDrafts: new Map(), // request id -> text typed into a text request's input
-      busy: new Set(), // request ids with a request in flight
+      picked: new Map(), // request id -> the option id picked on a choice card and not submitted yet (G45); belongs to `scope`
+      ops: new Map(), // "<game>|<seat>|<request id>" -> {n, value}: the answer of that request on its way (G45, see respond)
+      opSeq: 0, // the generation counter of those answers (`n` of the latest one)
       keyboard: false,
       grownFor: null, // the text the box was last sized for
     };
@@ -135,15 +150,55 @@
       return d;
     }
 
+    /** "<game>|<seat>": what drafts, picks and the answers on their way belong to (one game, one seat). */
+    const scopeOf = (s, seat) => `${s.session_id || ""}|${seat}`;
+
+    /** The scope that is on screen right now ("" while nobody is played). */
+    function liveScope() {
+      const s = session();
+      const seat = View.takeoverSeat(s);
+      return seat ? scopeOf(s, seat) : "";
+    }
+
+    /**
+     * The answer of a request of the game and seat on screen that has not come back yet ({n, value}), else null.
+     * (An answer of another game is on its way too, perhaps - under a key of its own: it is not this card's.)
+     */
+    function answerOnItsWay(requestId) {
+      const scope = liveScope();
+      return scope ? st.ops.get(`${scope}|${requestId}`) || null : null;
+    }
+
     /** Drafts belong to one (game, seat): another game or another seat starts with empty boxes. */
     function ensureScope(s, seat) {
-      const scope = `${s.session_id || ""}|${seat}`;
+      const scope = scopeOf(s, seat);
       if (scope === st.scope) return;
       st.scope = scope;
       st.drafts.clear();
       st.reqDrafts.clear();
+      st.picked.clear();
       st.key = null;
       st.notice = "";
+    }
+
+    /**
+     * Make the page's drafts and picks those of the game and seat on screen NOW.  `render()` does it with the next paint,
+     * but a click on a card, the restore of a typed text or the markup of a request card can come in between (the feed is
+     * drawn before the box): what was picked or typed in the game before must not be read as this game's "r1".
+     */
+    function syncScope() {
+      const s = session();
+      const seat = View.takeoverSeat(s);
+      if (seat) ensureScope(s, seat);
+    }
+
+    /** A pick belongs to an open request of this seat: once the request closes (or is gone) the pick goes too. */
+    function prunePicks() {
+      if (!st.picked.size) return;
+      for (const id of Array.from(st.picked.keys())) {
+        const request = findRequest(id);
+        if (!request || request.status !== "open") st.picked.delete(id);
+      }
     }
 
     function currentModel() {
@@ -167,6 +222,7 @@
         return;
       }
       ensureScope(s, seat);
+      prunePicks();
       const key = `${st.scope}|${channelId}`;
       if (st.key !== key) {
         saveCurrent();
@@ -339,8 +395,12 @@
     function requestActionHtml(card) {
       const a = card && card.action;
       if (!a) return "";
+      syncScope(); // (the feed is drawn before the box: another game's pick must not show on this game's card)
       const id = esc(card.id);
       const disabled = a.enabled ? "" : " disabled";
+      // the answer of this card that has not come back yet: the button is grey meanwhile, the options and the text box
+      // stay usable (what is picked / typed now is a newer wish that survives that answer, see respond)
+      const flight = answerOnItsWay(card.id);
       const mine = a.answered
         ? `<div class="req-mine">你的${card.kind === "text" ? "回答" : "选择"}：<strong>${esc(
             a.myAnswer.label
@@ -354,19 +414,49 @@
           ` data-initial="${esc(a.myAnswer ? a.myAnswer.value : "")}" aria-label="你的回答"` +
           ` placeholder="写下你的回答${limit}"${disabled}></textarea>` +
           `<div class="req-text-row"><button type="button" class="btn btn-xs btn-primary-outline req-submit"` +
-          ` data-req-submit="${id}"${disabled}>${a.answered ? "修改回答" : "提交"}</button></div>`;
+          ` data-req-submit="${id}"${flight ? ` title="${esc(SENDING_TITLE)}"` : ""}${a.enabled && !flight ? "" : " disabled"}>` +
+          `${flight ? SENDING_LABEL : a.answered ? "修改回答" : "提交"}</button></div>`;
       } else {
+        // G45: a click only picks; the pick is sent by the card's own 「提交」 button
+        const pick = View.requestPick(a, st.picked.get(card.id));
+        const pressedId = pick.picked !== null ? pick.picked : null;
+        let note = "";
+        // (a pick that is the very answer being sent is not "unsubmitted": the button says 提交中…)
+        if ((pick.kind === "new" || pick.kind === "change") && !(flight && flight.value === pick.picked)) {
+          // (the 1 Hz countdown tick adds `urgent` to the note when the deadline is closer than PICK_WARN_SECONDS)
+          const warnAt =
+            card.deadlineClock !== null && card.deadlineClock !== undefined
+              ? ` data-warn-at="${esc(String(Number(card.deadlineClock) - PICK_WARN_SECONDS))}"`
+              : "";
+          const text =
+            pick.kind === "new"
+              ? `已选：<strong>${esc(pick.pickedLabel)}</strong> · 未提交`
+              : `已提交：${esc(pick.currentLabel)} · 改选：<strong>${esc(pick.pickedLabel)}</strong>（未提交）`;
+          note =
+            `<div class="req-pick" data-req-pick="${id}"${warnAt}>${text}` +
+            `<span class="req-pick-warn">⚠ 快到时间了，点「${esc(pick.submitLabel)}」才算数；到点按默认答案处理</span></div>`;
+        }
+        const canSubmit = pick.canSubmit && !flight;
+        const submitTitle = !a.enabled ? a.disabledReason : flight ? SENDING_TITLE : pick.canSubmit ? "" : "先选一个选项，再提交";
         body =
           `<div class="req-options" role="group" aria-label="选项">` +
           a.options
-            .map(
-              (o) =>
-                `<button type="button" class="req-opt${o.selected ? " selected" : ""}" data-req-answer="${id}"` +
-                ` data-value="${esc(o.id)}" aria-pressed="${o.selected ? "true" : "false"}"${disabled}>` +
+            .map((o) => {
+              const isPicked = pressedId !== null && String(o.id) === pressedId;
+              const pressed = pressedId !== null ? isPicked : o.selected;
+              const cls = `req-opt${o.selected ? " selected" : ""}${isPicked && pick.dirty ? " picked" : ""}`;
+              return (
+                `<button type="button" class="${cls}" data-req-answer="${id}"` +
+                ` data-value="${esc(o.id)}" aria-pressed="${pressed ? "true" : "false"}"${disabled}>` +
                 `${o.selected ? "✓ " : ""}${esc(o.label)}</button>`
-            )
+              );
+            })
             .join("") +
-          `</div>`;
+          `</div>` +
+          note +
+          `<div class="req-text-row"><button type="button" class="btn btn-xs btn-primary-outline req-submit"` +
+          ` data-req-confirm="${id}" title="${esc(submitTitle)}"${canSubmit ? "" : " disabled"}>` +
+          `${flight ? SENDING_LABEL : esc(pick.submitLabel)}</button></div>`;
       }
       const why = a.enabled ? "" : `<div class="req-action-hint">${esc(a.disabledReason)}</div>`;
       return `<div class="req-action" data-req-action="${id}">${mine}${body}${why}</div>`;
@@ -375,13 +465,29 @@
     /** Put the typed text back into the text-request inputs of freshly drawn cards. */
     function restoreRequestDrafts(container) {
       if (!container || typeof container.querySelectorAll !== "function") return;
+      syncScope(); // (a text typed in the game before is not this game's draft of the same request id)
       for (const box of Array.from(container.querySelectorAll("textarea[data-req-text]"))) {
         const id = box.getAttribute("data-req-text");
         box.value = st.reqDrafts.has(id) ? st.reqDrafts.get(id) : box.getAttribute("data-initial") || "";
       }
     }
 
+    /**
+     * Send the answer of a request: a choice's picked option, a text request's text (G45).
+     *
+     * One answer at a time per request of the game and seat on screen: while it is on its way a second press sends
+     * nothing and the card's button says 「提交中…」; what is picked or typed meanwhile is a newer wish of its own.  Every
+     * answer is a token in `st.ops` ({n, value}), keyed by game + seat + request id - the same id of another game is
+     * another slot ("r1" comes back in every game).  When the answer comes back
+     *   - it releases only its own slot (a slot that holds another token is left alone),
+     *   - it touches the page only while the game and seat it was sent for are still on screen: what the page holds under
+     *     that request id now belongs to the game that is there now,
+     *   - and then it drops only what it SENT: the pick / the text, if that is still what was sent.  A pick or a text
+     *     made after the press stays (the card then offers it as the change); a refusal - or a request that failed -
+     *     changes nothing: the pick stays and the person may press again.
+     */
     async function respond(requestId, value) {
+      syncScope();
       const s = session();
       const seat = played();
       const request = findRequest(requestId);
@@ -394,26 +500,92 @@
         showToast(action.disabledReason);
         return false;
       }
-      if (st.busy.has(requestId)) return false;
-      st.busy.add(requestId);
+      const scope = scopeOf(s, seat);
+      const slot = `${scope}|${requestId}`;
+      if (st.ops.has(slot)) return false; // a double press (or another tab's click): one answer at a time
+      const sent = String(value);
+      const op = { n: ++st.opSeq, value: sent };
+      st.ops.set(slot, op);
       let res = null;
       try {
-        res = await act("api/seat/respond", { request_id: requestId, value: String(value) });
+        onChange(); // the card greys its button while the answer is on its way
+        res = await act("api/seat/respond", { request_id: requestId, value: sent });
       } finally {
-        st.busy.delete(requestId);
+        // (every way out of here frees the slot - but only the slot this answer took)
+        if (st.ops.get(slot) === op) st.ops.delete(slot);
       }
-      if (res && res.accepted) {
-        st.reqDrafts.delete(requestId);
-        const option = action.options.find((o) => String(o.id) === String(value));
-        showToast(`已提交：${option ? option.label : String(value)}`);
-      } else if (res) {
-        showToast(res.message || "提交失败");
+      const accepted = Boolean(res && res.accepted);
+      if (liveScope() === scope) {
+        if (accepted) {
+          if (st.picked.get(requestId) === sent) st.picked.delete(requestId);
+          const typed = st.reqDrafts.get(requestId);
+          if (typed !== undefined && String(typed).trim() === sent) st.reqDrafts.delete(requestId);
+          const option = action.options.find((o) => String(o.id) === sent);
+          showToast(`已提交：${option ? option.label : sent}`);
+        } else if (res) {
+          showToast(res.message || "提交失败");
+        }
       }
       onChange();
-      return Boolean(res && res.accepted);
+      return accepted;
+    }
+
+    /**
+     * G45: a click on an option of a choice card.  It only PICKS the option (nothing is sent): another option
+     * changes the pick, the picked option again takes it back.  The conditions are checked here as well - the
+     * page may lag one beat behind the server.
+     */
+    function pickOption(requestId, value) {
+      syncScope();
+      const seat = played();
+      const request = findRequest(requestId);
+      const action = seat && request ? View.requestAction(session(), seat, request) : null;
+      if (!action || action.kind === "text") {
+        showToast("这个请求现在不能作答");
+        return false;
+      }
+      if (!action.enabled) {
+        showToast(action.disabledReason);
+        return false;
+      }
+      // (an answer on its way does not stop the person from picking again: the new pick is its own wish, see respond)
+      const option = action.options.find((o) => String(o.id) === String(value));
+      if (!option) return false;
+      const id = String(option.id);
+      if (st.picked.get(requestId) === id) st.picked.delete(requestId);
+      else st.picked.set(requestId, id);
+      onChange();
+      return true;
+    }
+
+    /** G45: the card's 「提交」 / 「修改回答」 button of a choice card: sends the pick (and only the pick). */
+    async function confirmPick(requestId) {
+      syncScope();
+      const seat = played();
+      const request = findRequest(requestId);
+      const action = seat && request ? View.requestAction(session(), seat, request) : null;
+      if (!action || action.kind === "text") {
+        showToast("这个请求现在不能作答");
+        return false;
+      }
+      if (!action.enabled) {
+        showToast(action.disabledReason);
+        return false;
+      }
+      const pick = View.requestPick(action, st.picked.get(requestId));
+      if (pick.picked === null) {
+        showToast("先选一个选项，再提交");
+        return false;
+      }
+      if (!pick.dirty) {
+        showToast("你已经提交了这个选择；要改的话，先选另一个选项");
+        return false;
+      }
+      return respond(requestId, pick.picked);
     }
 
     function submitText(requestId) {
+      syncScope();
       const text = String(st.reqDrafts.get(requestId) || "").trim();
       if (!text) {
         showToast("先写下你的回答");
@@ -688,7 +860,12 @@
     on(feed, "click", (evt) => {
       const opt = closestFrom(evt && evt.target, "[data-req-answer]");
       if (opt) {
-        respond(opt.getAttribute("data-req-answer"), opt.getAttribute("data-value"));
+        pickOption(opt.getAttribute("data-req-answer"), opt.getAttribute("data-value")); // G45: picks, sends nothing
+        return;
+      }
+      const confirm = closestFrom(evt && evt.target, "[data-req-confirm]");
+      if (confirm) {
+        confirmPick(confirm.getAttribute("data-req-confirm"));
         return;
       }
       const sub = closestFrom(evt && evt.target, "[data-req-submit]");
@@ -708,6 +885,8 @@
       send,
       pass,
       respond,
+      pickOption,
+      confirmPick,
       submitText,
       useAbility,
       requestActionHtml,

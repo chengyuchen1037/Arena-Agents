@@ -101,7 +101,7 @@ class _Source:
 
 
 def app_version_label() -> str:
-    """``v0.13.0`` (the application's version, always with the leading ``v``)."""
+    """``v0.13.1`` (the application's version, always with the leading ``v``)."""
     from app.config import APP_VERSION
 
     return APP_VERSION if APP_VERSION.startswith("v") else f"v{APP_VERSION}"

@@ -1067,9 +1067,9 @@ test("a stall notice is a warning banner (the game keeps running); it goes away 
 
 test("the demo badge stays: '演示模式' next to the version", async () => {
   const demo = await live({ demo: true });
-  assert.match(demo.env.el("app-version").textContent, /v0\.13\.0-test · 演示模式/);
+  assert.match(demo.env.el("app-version").textContent, /v0\.13\.1-test · 演示模式/);
   const normal = await live({ demo: false });
-  assert.equal(normal.env.el("app-version").textContent, "v0.13.0-test");
+  assert.equal(normal.env.el("app-version").textContent, "v0.13.1-test");
 });
 
 test("usage: the stats bar turns yellow at 80 % and red at 100 % of the limit; a budget pause says so in the top bar", async () => {

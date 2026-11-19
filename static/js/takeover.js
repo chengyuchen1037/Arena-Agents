@@ -6,14 +6,20 @@
      - the viewpoint bar  [👁 视角 ▾] [切换] [接管]: the drop-down only chooses what to look at, "切换" applies
        it, "接管" (only while the game has not started or is paused, never for "上帝视角") plays the chosen
        seat after a confirmation:                         POST api/takeover {seat}
-     - the takeover bar   🎮 正在扮演 3 · Carol [退出接管]: it replaces the viewpoint bar while a seat is
-       played (the viewpoint is locked to it); leaving needs a paused / unstarted / finished game and a
+     - the takeover bar   🎮 正在扮演 3 · Carol [⏸ 暂停 agent] [退出接管]: it replaces the viewpoint bar while a
+       seat is played (the viewpoint is locked to it); leaving needs a paused / unstarted / finished game and a
        confirmation:                                       POST api/takeover/release
+     - the soft pause (v0.13.1, docs/v0.13.1-plan.md G1-G7, contract §12.2), also part of the takeover bar:
+         [⏸ 暂停 agent]   POST api/control/soft-pause   the calls in flight finish, then every agent holds, the
+                          game clock stops - the person can still read, write and answer.  Only while the game runs.
+         ⏳ 收尾中（还有 N 个回答） → ⏸ agent 已暂停      the two phases (session.soft_pause)
+         [▶ 继续]         POST api/control/soft-resume  (also while it is still draining: that cancels it)
+         立即暂停          POST api/control/pause         = the top bar's hard pause: cancels the calls in flight
      - the reminder of a seat taken over before the game started: "你已经知道自己的身份，建议点击「重新发牌」"
        + 「重新发牌」 (POST api/control/shuffle-identities). It disappears once the game started, and the
        click handler checks that again (a double click / a second tab must not re-deal a running game).
 
-   Everything it decides comes from the pure functions of view.js (viewpointBar, takeoverBar,
+   Everything it decides comes from the pure functions of view.js (viewpointBar, takeoverBar (+ softPause),
    reshuffleReminder, takeoverAvailability); this file only wires them to the DOM and the API.
 
    ctx: { api, Core, View, showToast, getSession, getViewpoint, setViewpoint(id), openDialog(options),
@@ -50,6 +56,9 @@
       takeoverBar: $("takeover-bar"),
       seat: $("takeover-seat"),
       btnRelease: $("btn-release-takeover"),
+      softStatus: $("softpause-status"),
+      btnSoft: $("btn-softpause"),
+      btnSoftNow: $("btn-softpause-now"),
       reminder: $("takeover-reminder"),
       reminderText: $("takeover-reminder-text"),
       btnReshuffle: $("btn-shuffle-identities"),
@@ -75,6 +84,27 @@
     // -----------------------------------------------------------------------
     // rendering
     // -----------------------------------------------------------------------
+
+    /** The soft-pause part of the takeover bar: the state text, the one button (pause / resume), 立即暂停. */
+    function renderSoftPause(sp) {
+      if (el.softStatus) {
+        setHidden(el.softStatus, !sp.text);
+        if (el.softStatus.textContent !== sp.text) el.softStatus.textContent = sp.text;
+        setTitle(el.softStatus, sp.statusTitle);
+        if (typeof el.softStatus.setAttribute === "function") el.softStatus.setAttribute("data-phase", sp.phase || "");
+      }
+      if (el.btnSoft) {
+        if (el.btnSoft.textContent !== sp.label) el.btnSoft.textContent = sp.label;
+        el.btnSoft.disabled = !sp.enabled || st.busy;
+        setTitle(el.btnSoft, sp.title);
+        if (typeof el.btnSoft.setAttribute === "function") el.btnSoft.setAttribute("data-action", sp.action);
+      }
+      if (el.btnSoftNow) {
+        setHidden(el.btnSoftNow, !sp.showNow);
+        el.btnSoftNow.disabled = st.busy;
+        setTitle(el.btnSoftNow, sp.nowTitle);
+      }
+    }
 
     function render() {
       const s = session();
@@ -120,6 +150,10 @@
           el.btnRelease.disabled = !tb.canRelease || st.busy;
           setTitle(el.btnRelease, tb.releaseTitle);
         }
+        renderSoftPause(tb.softPause);
+      }
+      if (el.takeoverBar && el.takeoverBar.classList && typeof el.takeoverBar.classList.toggle === "function") {
+        el.takeoverBar.classList.toggle("is-soft-paused", Boolean(tb && tb.softPause.phase));
       }
 
       const reminder = View.reshuffleReminder(s);
@@ -269,6 +303,83 @@
     }
 
     // -----------------------------------------------------------------------
+    // the soft pause (v0.13.1)
+    // -----------------------------------------------------------------------
+
+    /** The soft-pause endpoints answer with the whole session: the page adopts it (the stream may be ahead: it decides). */
+    function adopt(res) {
+      if (res && res.session) adoptSession(res.session, { force: false });
+    }
+
+    /**
+     * 「⏸ 暂停 agent」: let the model calls in flight finish, then hold every agent (the moderator too); the game clock
+     * stops now.  Only while a seat is played and the game runs - checked again here, not only when the button was drawn.
+     * The server's refusal (409, a sentence with its full stop) is shown as it is.
+     */
+    function softPause() {
+      return exclusive(async () => {
+        const s = session();
+        if (!View.takeoverSeat(s)) return false;
+        const sp = View.softPauseControl(s);
+        if (sp.action !== "pause") return false; // (it is soft-paused already)
+        if (!sp.enabled) {
+          showToast(sp.title);
+          return false;
+        }
+        try {
+          adopt(await api.post("api/control/soft-pause"));
+          showToast("已发起软暂停：已发出的回答会照常做完，计时已冻结，你仍可阅读、发言和作答");
+          return true;
+        } catch (err) {
+          showToast(err.message);
+          await refreshState();
+          return false;
+        }
+      });
+    }
+
+    /** 「▶ 继续」: the agents go on (they first merge what arrived meanwhile into one message); also cancels a draining pause. */
+    function softResume() {
+      return exclusive(async () => {
+        const s = session();
+        if (!View.takeoverSeat(s)) return false;
+        if (!View.softPauseOf(s).active) {
+          showToast("现在没有处于软暂停");
+          return false;
+        }
+        try {
+          adopt(await api.post("api/control/soft-resume"));
+          showToast("agent 已继续：先合并你这段时间的发言和作答，再接着行动");
+          return true;
+        } catch (err) {
+          showToast(err.message);
+          await refreshState();
+          return false;
+        }
+      });
+    }
+
+    /** 「立即暂停」: the top bar's hard pause (it cancels the calls that are still in flight, their tokens are wasted). */
+    function hardPause() {
+      return exclusive(async () => {
+        const s = session();
+        if (s.status !== "running") {
+          showToast(`${View.notRunningText(s.status)}，不需要再暂停`);
+          return false;
+        }
+        try {
+          adopt(await api.post("api/control/pause"));
+          showToast("已立即暂停：在途的模型调用已取消，所有 agent 休眠，计时冻结");
+          return true;
+        } catch (err) {
+          showToast(err.message);
+          await refreshState();
+          return false;
+        }
+      });
+    }
+
+    // -----------------------------------------------------------------------
     // events
     // -----------------------------------------------------------------------
 
@@ -293,6 +404,14 @@
     on(el.btnReshuffle, "click", () => {
       reshuffle();
     });
+    on(el.btnSoft, "click", () => {
+      // one button, two meanings: it says 「⏸ 暂停 agent」 until a soft pause exists, then 「▶ 继续」
+      if (View.softPauseOf(session()).active) softResume();
+      else softPause();
+    });
+    on(el.btnSoftNow, "click", () => {
+      hardPause();
+    });
 
     return {
       render,
@@ -300,6 +419,9 @@
       takeover,
       release,
       reshuffle,
+      softPause,
+      softResume,
+      hardPause,
       draft: () => st.draft,
       _state: st,
     };

@@ -1,4 +1,4 @@
-"""Contract tests for tools/mock_ui_server.py (the v0.13.0 UI mock) and, through it, for the SSE v2 client store.
+"""Contract tests for tools/mock_ui_server.py (the v0.13.1 UI mock) and, through it, for the SSE v2 client store.
 
 * every event the mock script publishes must match docs/v0.12-contracts.md §8.2 + §10.6 (``validate_event``);
 * the REAL client store (static/js/store.js, run with node) must reduce the whole event log to exactly
@@ -290,7 +290,8 @@ def test_validator_rejects_broken_events() -> None:
     good = [
         {"id": 2, "type": "agent.status", "data": {"id": "N1", "state": "sleeping", "until": 42.5}},
         {"id": 3, "type": "agent.status", "data": {"id": "N1", "state": "acting", "until": None}},
-        {"id": 4, "type": "review.progress", "data": {"id": "N1", "state": "done", "message": "ok"}},
+        # (v0.13.1) a finished review always says what it changed in the memory
+        {"id": 4, "type": "review.progress", "data": {"id": "N1", "state": "done", "message": "ok", "changes": {"impressions": [], "experience": None}}},
         {"id": 5, "type": "archive.progress", "data": {"job_id": "j1", "kind": "export", "phase": "pack", "done": 3, "total": 12, "status": "running"}},
     ]
     for ev in good:
@@ -540,8 +541,10 @@ def test_the_review_only_works_after_the_end_and_never_twice() -> None:
         assert game.start_review(None) == [p for p in IDS if p not in ("N3", "N4")]
         await game.review_task
         assert game.session["review"] == {"available": True, "done": IDS, "running": False}
-        # the memory text of a reviewed player got the stats
-        assert "战绩" in game.roster.seats["N3"]["memory"]
+        # the memory of a reviewed player got the stats and REVISED impressions of the other seats (v0.13.1: overwritten, never appended to)
+        text = game.roster.memory_text("N3")
+        assert "## 战绩" in text and "## 印象" in text and "## 经验" in text and "## 对局记忆" not in text
+        assert all(game.roster.seats["N3"]["memory_parts"]["impressions"].values())
 
     asyncio.run(scenario())
 
@@ -574,7 +577,7 @@ def test_http_state_pages_and_static_files() -> None:
     app, c = _client()
     with c as client:
         state = client.get("/api/state").json()
-        assert state["app_version"].startswith("v0.13.0")
+        assert state["app_version"].startswith("v0.13.1")
         assert mock.validate_session(state["session"]) == []
         assert state["session"]["status"] == "idle"
         assert [p["id"] for p in state["session"]["participants"]] == IDS
@@ -582,7 +585,7 @@ def test_http_state_pages_and_static_files() -> None:
         assert state["session"]["memory_enabled"] is True
         assert "workspace" not in state, "v0.13: there is no workspace any more"
         assert state["legacy_data"] == {"found": False, "dismissed": False}
-        assert client.get("/api/health").json()["version"].startswith("v0.13.0")
+        assert client.get("/api/health").json()["version"].startswith("v0.13.1")
 
         index = client.get("/")
         assert index.status_code == 200 and 'data-platform' in index.text
@@ -747,14 +750,49 @@ def test_http_roster_names_and_avatars_are_idle_only_and_publish_roster_updated(
         assert client.put("/api/roster/memory-enabled", json={"enabled": False}).status_code == 409
 
 
+def test_http_a_new_name_with_a_colon_is_refused_like_the_real_server() -> None:
+    """app/storage/roster.py ``clean_name``: a NEW name may not hold ``:`` or ``：`` (U+FF1A) - the name is the label in front of an
+    impression (``- N5 Eve：…``) - and the real API answers with HTTP 400 and exactly these words.  Nothing else counts as a colon (no
+    normalizing).  The refusal comes after 'empty' and 'too long' and before 'taken'; a refused write changes nothing."""
+    app, c = _client()
+    with c as client:
+        colon = "名字不能包含冒号（: 或 ：）。"
+        before = client.get("/api/state").json()["session"]["participants"]
+        events = len(_bus(app).ring)
+        for bad in ("A:B", "A：B", ":", "：", " Eve:2 ", "名字:", "a" * 19 + ":", "😀：😀"):
+            r = client.put("/api/roster/N3", json={"name": bad})
+            assert r.status_code == 400 and r.json()["detail"] == colon, (bad, r.status_code, r.text)
+        assert client.get("/api/state").json()["session"]["participants"] == before, "a refused write changes nothing"
+        assert next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N3")["name"] == "Carol"
+        assert len(_bus(app).ring) == events, "and publishes nothing"
+        # the order of the server's checks: empty, too long, THEN the colon, then 'taken' (Bob is another seat's name)
+        assert client.put("/api/roster/N3", json={"name": " "}).status_code == 422
+        too_long = client.put("/api/roster/N3", json={"name": ":" * 21})
+        assert too_long.status_code == 422 and "最多 20" in too_long.json()["detail"], "too long is said before the colon"
+        assert client.put("/api/roster/N3", json={"name": "Bob:"}).json()["detail"] == colon, "'Bob:' is not Bob: the colon is what is wrong"
+        taken = client.put("/api/roster/N3", json={"name": "Bob"})
+        assert taken.status_code == 422 and "已被其他玩家使用" in taken.json()["detail"]
+        # look-alikes are no colons for the server (no normalizing): modifier letter colon, small colon, ratio, the lot
+        for fine in ("A\ua789B", "A\ufe55B", "A\u2236B", "A\u02d0B"):
+            r = client.put("/api/roster/N3", json={"name": fine})
+            assert r.status_code == 200 and r.json()["name"] == fine, (fine, r.text)
+        # an old name is not run through the rule: the roster holds it, sends it, and keeps it when something else is written
+        app.state.mock_roster.seats["N4"]["name"] = "Dave:2"  # (as if it came from an older version)
+        assert next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N4")["name"] == "Dave:2"
+        assert client.put("/api/roster/N4", json={"persona": "冷静"}).status_code == 200
+        assert next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N4")["name"] == "Dave:2"
+
+
 def test_http_roster_persona_memory_and_refine() -> None:
     app, c = _client()
     with c as client:
+        # (v0.13.1) a whole memory TEXT is parsed: free text (no "## 印象") becomes the legacy section; the persona has a limit
         r = client.put("/api/roster/N3", json={"persona": "说话简短", "memory": "Bob 总是附和"})
-        assert r.status_code == 200 and (r.json()["persona"], r.json()["memory"]) == ("说话简短", "Bob 总是附和")
+        assert r.status_code == 200 and r.json()["persona"] == "说话简短"
+        assert r.json()["memory_parts"]["legacy"] == "Bob 总是附和" and r.json()["memory"].endswith("## 旧记忆（待整理）\nBob 总是附和")
         seat = next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N3")
-        assert (seat["persona"], seat["memory"]) == ("说话简短", "Bob 总是附和")
-        assert client.put("/api/roster/N3", json={"persona": "x" * 20001}).status_code == 422
+        assert (seat["persona"], seat["memory"], seat["memory_parts"]) == ("说话简短", r.json()["memory"], r.json()["memory_parts"])
+        assert client.put("/api/roster/N3", json={"persona": "x" * 501}).status_code == 400
         assert client.put("/api/roster/N3", json={"memory": 5}).status_code == 422
         # a text edit does not rename: no roster.updated for it
         assert not [e for e in _bus(app).ring if e["type"] == "roster.updated"]
@@ -1017,7 +1055,13 @@ def test_selfcheck_cli_passes_and_the_replay_is_deterministic() -> None:
     # the replay is deterministic for a given seed
     a = mock.replay_fast(seed=3)
     b = mock.replay_fast(seed=3)
-    strip = lambda run: [(e["type"], {k: v for k, v in e["data"].items() if k != "ts"}) for e in run["events"]]  # noqa: E731
+    def drop_ts(data: dict) -> dict:  # (wall-clock stamps: a message's ts, and the ts of a line of the error log, v0.13.1)
+        out = {k: v for k, v in data.items() if k != "ts"}
+        if isinstance(out.get("call"), dict):
+            out["call"] = {k: v for k, v in out["call"].items() if k != "ts"}
+        return out
+
+    strip = lambda run: [(e["type"], drop_ts(e["data"])) for e in run["events"]]  # noqa: E731
     assert strip(a) == strip(b)
     c = copy.deepcopy(a["final"]["usage_stats"])
     assert c["total_tokens"] > 0 and c["total_cost_usd"] > 0

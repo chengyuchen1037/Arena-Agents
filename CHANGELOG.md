@@ -1,5 +1,83 @@
 # Release Notes
 
+## 0.13.1
+
+0.13.1 makes taking over a seat practical for a whole game: **soft-pause only the agents**, **take your time on
+public floors**, **mark seats privately**, **confirm choice requests before submitting**, inspect **thinking
+records** and **LLM errors**, recreate avatars from a **deterministic code**, and keep bounded **impressions and
+behaviour guidance** instead of an ever-growing per-game diary. Plan and decisions (G1–G45):
+[docs/v0.13.1-plan.md](docs/v0.13.1-plan.md); contract: [docs/v0.12-contracts.md](docs/v0.12-contracts.md)
+section 12.
+
+### Soft pause, untimed public floors and safe answers
+
+- The take-over bar has *⏸ Pause agents*. It is available only while playing a seat in a running game. The clock
+  freezes at the click; calls already on the wire and tool batches already started finish, no new model call
+  starts, and the UI moves through *finishing N answers* to *agents paused*. Calls still waiting for a concurrency
+  slot return the slot and wait at the agent gate. *▶ Continue* opens the gate and merges everything that arrived
+  meanwhile into the next activation. *Pause now* is still available as the existing hard pause.
+- Soft pause is not a world event: it writes no ledger entry, sends no envelope to an agent and enters no save.
+  Hard pause, finish, new/load/import and close clear it. While draining or held, an interrupt becomes a pending
+  message rather than cancelling an answer that is already on the wire; the watchdog stays quiet.
+- The person can still read, speak, pass, answer and use abilities. While the person holds a floor in a
+  `type=public` channel, that floor is **untimed** (`deadline=null`); other channels and agent-held floors keep
+  their timing. Requests such as votes keep their deadlines, and the moderator can still close a floor.
+- Choice requests are **pick, then submit**. Clicking an option only selects it in the browser; *Submit / Change
+  answer* calls the existing seat-response endpoint. A refused submission keeps the pick, a submitted answer can
+  be changed while the request is open, and an unsubmitted pick is never sent automatically at the deadline. The
+  last 15 game seconds show an explicit unsubmitted warning.
+
+### Private seat marks
+
+- While playing a seat, every other player has an eight-colour palette; every colour also has a different shape.
+  The mark appears on the player card, before names in the feed and private chats, on request recipients and in
+  the detail panel. No textual or game meaning is assigned to a colour.
+- Marks are per-game browser state (`localStorage`, latest 50 games), synchronised between tabs and removed with
+  the game. They are not in the save, archive, replay, `PublicSession` or any agent prompt. After leaving the
+  take-over they remain visible read-only in the same browser; a replay shows none.
+
+### Thinking record and LLM call log
+
+- Player and moderator details have *🧠 Thinking record*: a large chat-like window with wake-up dividers, game
+  time, round and model, newest at the bottom. It pages backwards through the current game's plaintext trace,
+  polls for new rows every three seconds while open, and contains only `thought` / `content` — **no tool calls**.
+  During an unfinished take-over, other players' records answer 409; the played seat, finished games and ordinary
+  spectating remain available. Thoughts do not enter SSE, replay or `PublicSession`.
+- The top-right *📋 Log* lists every LLM attempt and runtime error of the current game: actor, provider / model,
+  purpose, attempt, elapsed time, status, token counts and a redacted error. It has actor / error-only filters,
+  expandable rows, an unread-error badge and read marks. The ring holds 2000 entries and is rebuilt from the trace
+  after a restart; renumbered ids are re-based by timestamp so a rebuild cannot hide a new unread error.
+- Call metadata is trusted-client only in both REST and SSE (including `Last-Event-ID` replay); prompts, model
+  answers and API keys never enter it. Trace readers release file handles as soon as a page is complete, including
+  on Windows, and logging / error introspection can never replace the original model result or exception.
+
+### Deterministic avatars, structured memory and persona guidance
+
+- Every avatar has a compact code made from its eight part ids. Copy it and enter it for another seat to recreate
+  exactly the same avatar; random regeneration and by-code generation are available before a game starts.
+  Python and JavaScript share format vectors, validation reasons and an explicit ignored-character list.
+- `N*.memory.md` now has `## 战绩 / ## 印象 / ## 经验`, plus `## 旧记忆（待整理）` only for migrated text. Each of
+  the other 11 fixed seats has one updatable impression (80 characters), rather than a new note appended after
+  every game. A seat's own experience has at most 3 items / 300 characters; editable memory is capped at 1500 and
+  legacy text at 600. Unknown seats and placeholder answers are not stored.
+- A manual post-game review updates impressions and experience and still computes the record in the engine. It
+  merges against the exact memory shown to the model: an edit or clear made while the review is running is not
+  overwritten. Empty / no-change answers do not discard legacy notes. Old headings and free text migrate in memory
+  without an LLM; UTF-8 BOM is accepted, and the file is rewritten only on the next save or review.
+- The moderator-model *complete my persona* action returns a bounded behavioural template — positioning, speech
+  style, thinking, decisions, under pressure and catchphrase — rather than an unconstrained biography. Manual
+  persona text is limited to 500 characters (40 per generated item). Template substitution is single-pass, so
+  persona / memory text cannot inject the moderator manual into a player's prompt.
+- Roster updates are atomic: a bad name, avatar, persona or memory field changes nothing. New nicknames reject
+  colons (which would corrupt impression labels), invalid Unicode and duplicates with a clear Chinese error.
+
+### Compatibility
+
+The **save format remains v5** and the **archive format remains 1**. No conversion is needed from 0.13.0. Soft
+pause, untimed-holder state, colour marks and read marks are deliberately not saved; existing saves and archives
+remain readable. v0.13 still cannot open v0.12.1 data directly: use the existing conversion script described in
+[docs/storage.md](docs/storage.md#upgrading-from-v0121).
+
 ## 0.13.0
 
 0.13.0 does four things: **a person can play a seat**, **the storage was redone** (one data directory in the

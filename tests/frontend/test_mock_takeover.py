@@ -241,7 +241,7 @@ def test_the_seat_state_says_what_the_gate_says() -> None:
         free = game.compute_takeover()["channels"]["public"]
         assert free["can_write"] and free["floor"] == {
             "kind": "free", "mine": False, "paused": False, "messages_left": mock.FREE_MAX_MESSAGES,
-            "chars_left": None, "seconds_left": None, "deadline_clock": None,
+            "chars_left": None, "seconds_left": None, "deadline_clock": None, "untimed": False,
         }
         game.channel("public")["floor"]["free"]["message_counts"]["N4"] = mock.FREE_MAX_MESSAGES
         used = game.compute_takeover()["channels"]["public"]
@@ -334,7 +334,20 @@ def test_a_person_who_does_not_answer_lets_the_request_run_into_its_deadline() -
         game.take_over("N9")
         game.gate.set()
         game.set_status("running", reason="started")
-        await game.play()  # nobody acts for N9
+
+        async def ends_the_turn() -> None:
+            # (v0.13.1, G10) a turn in the PUBLIC channel has no deadline - the game would wait for it for ever (see
+            # test_mock_softpause.py).  This person ends that turn without a word and then answers nothing: the
+            # requests do have deadlines.
+            while game.session["status"] != "finished":
+                await game.wait(0.2)
+                state = game.compute_takeover()["channels"].get("public")
+                if state and state["floor"] and state["floor"]["mine"]:
+                    assert game.seat_pass("public")["accepted"]
+
+        passing = asyncio.ensure_future(ends_the_turn())
+        await game.play()  # nobody speaks or answers for N9
+        passing.cancel()
         return {"final": game.snapshot_payload(), "events": list(bus.ring), "initial": initial}
 
     out = run(scenario)

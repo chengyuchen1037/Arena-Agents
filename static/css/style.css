@@ -5367,6 +5367,43 @@ html[data-layout="phone"] .takeover-reminder {
   box-shadow: inset 0 0 0 1px var(--blue-border);
 }
 
+/* v0.13.1 (G45): a click only PICKS an option (dashed amber); the card's 「提交」 button sends it */
+.req-opt.picked {
+  border-style: dashed;
+  border-color: var(--amber-border);
+  background: var(--amber-bg-tint);
+  color: var(--amber-text);
+  box-shadow: inset 0 0 0 1px var(--amber-border);
+}
+
+.req-pick {
+  color: var(--amber-text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.req-pick strong {
+  color: var(--amber-text);
+}
+
+.req-pick .req-pick-warn {
+  display: none;
+}
+
+/* the deadline is close and the pick is still not submitted (toggled by the 1 Hz countdown tick) */
+.req-pick.urgent {
+  color: var(--danger-text);
+}
+
+.req-pick.urgent strong {
+  color: var(--danger-text);
+}
+
+.req-pick.urgent .req-pick-warn {
+  display: inline;
+  margin-left: 6px;
+}
+
 .req-opt:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -5747,4 +5784,1491 @@ html[data-layout="phone"] .legacy-notice {
 
 .more-menu-list .btn-settings .settings-label {
   display: inline;
+}
+
+
+/* ==========================================================================
+   Arena-Agents v0.13.1 — playing a seat, part 2: the soft pause, the "held" card state, the colour marks
+   (docs/v0.13.1-plan.md G1-G9, G16-G20; contract §12.2, §12.7; static/js/takeover.js, marks.js)
+   Appended after the base rules so its overrides keep the original cascade.
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   Colours of the marks.  Eight colours, each with a dot of its own FORM (circle, square, triangle ...), so that
+   they stay apart for a person who cannot tell two of the colours apart.  Two sets: they have to read on the
+   white cards of the light theme and on the dark one.
+   -------------------------------------------------------------------------- */
+:root,
+[data-theme="light"] {
+  --mark-0: #dc2626; /* red      ● circle */
+  --mark-1: #ea580c; /* orange   ■ square */
+  --mark-2: #eab308; /* yellow   ▲ triangle */
+  --mark-3: #16a34a; /* green    ◆ diamond */
+  --mark-4: #0891b2; /* cyan     ▼ inverted triangle */
+  --mark-5: #2563eb; /* blue     ⬢ hexagon */
+  --mark-6: #9333ea; /* purple   ★ star */
+  --mark-7: #64748b; /* grey     ✚ cross */
+  --mark-outline: rgba(15, 23, 42, 0.55);
+}
+
+[data-theme="dark"] {
+  --mark-0: #f87171;
+  --mark-1: #fb923c;
+  --mark-2: #facc15;
+  --mark-3: #4ade80;
+  --mark-4: #22d3ee;
+  --mark-5: #60a5fa;
+  --mark-6: #c084fc;
+  --mark-7: #94a3b8;
+  --mark-outline: rgba(241, 245, 249, 0.6);
+}
+
+.mark-c0 {
+  --mark-color: var(--mark-0);
+}
+
+.mark-c1 {
+  --mark-color: var(--mark-1);
+}
+
+.mark-c2 {
+  --mark-color: var(--mark-2);
+}
+
+.mark-c3 {
+  --mark-color: var(--mark-3);
+}
+
+.mark-c4 {
+  --mark-color: var(--mark-4);
+}
+
+.mark-c5 {
+  --mark-color: var(--mark-5);
+}
+
+.mark-c6 {
+  --mark-color: var(--mark-6);
+}
+
+.mark-c7 {
+  --mark-color: var(--mark-7);
+}
+
+/* the dot: a wrapper that draws the outline (a drop-shadow follows the clipped form) around ::before, the form */
+.mark-dot {
+  display: inline-block;
+  flex: none;
+  width: 11px;
+  height: 11px;
+  vertical-align: -1px;
+  filter: drop-shadow(0 0 0.6px var(--mark-outline)) drop-shadow(0 0 0.6px var(--mark-outline));
+}
+
+.mark-dot::before {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--mark-color);
+}
+
+.mark-dot.mark-c0::before {
+  border-radius: 50%;
+}
+
+.mark-dot.mark-c1::before {
+  border-radius: 2px;
+}
+
+.mark-dot.mark-c2::before {
+  clip-path: polygon(50% 4%, 98% 94%, 2% 94%);
+}
+
+.mark-dot.mark-c3::before {
+  clip-path: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+}
+
+.mark-dot.mark-c4::before {
+  clip-path: polygon(2% 6%, 98% 6%, 50% 96%);
+}
+
+.mark-dot.mark-c5::before {
+  clip-path: polygon(25% 4%, 75% 4%, 100% 50%, 75% 96%, 25% 96%, 0 50%);
+}
+
+.mark-dot.mark-c6::before {
+  clip-path: polygon(50% 0, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+}
+
+.mark-dot.mark-c7::before {
+  clip-path: polygon(35% 0, 65% 0, 65% 35%, 100% 35%, 100% 65%, 65% 65%, 65% 100%, 35% 100%, 35% 65%, 0 65%, 0 35%, 35% 35%);
+}
+
+/* before a name: the feed, the request card's rows, the private-chat list */
+.msg-head > .mark-dot {
+  width: 12px;
+  height: 12px;
+  margin-right: -2px;
+}
+
+.req-who > .mark-dot {
+  width: 12px;
+  height: 12px;
+}
+
+.channel-name .mark-dot {
+  width: 12px;
+  height: 12px;
+  margin-right: 6px;
+}
+
+/* a marked card: a stripe along its top edge ... */
+.pcard.has-mark::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 12px;
+  right: 12px;
+  height: 4px;
+  border-radius: 0 0 4px 4px;
+  background: var(--mark-color);
+  pointer-events: none;
+}
+
+/* A player who is out is greyed out as a whole (style.css: opacity + grayscale on the card), which would take the colour
+   out of its mark, too - and after the game, when most of them are out, the marks are what one reads (G20).  On a MARKED
+   card the grey-out moves to its content: the stripe and the dot keep their colour. */
+.pcard.out.has-mark {
+  opacity: 1;
+  filter: none;
+}
+
+.pcard.out.has-mark > :not(.pcard-mark) {
+  opacity: 0.55;
+  filter: grayscale(1);
+}
+
+/* ... and a dot in its top-right corner: the button of the palette while a seat is played, a plain dot afterwards */
+.pcard-mark {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+}
+
+.pcard-mark .mark-dot {
+  width: 13px;
+  height: 13px;
+  vertical-align: baseline;
+}
+
+.pcard-mark[data-mark-toggle] {
+  cursor: pointer;
+}
+
+/* (the target is bigger than the dot) */
+.pcard-mark[data-mark-toggle]::after {
+  content: "";
+  position: absolute;
+  inset: -5px;
+}
+
+html[data-input="touch"] .pcard-mark[data-mark-toggle]::after {
+  inset: -7px;
+}
+
+/* the 6x2 mini cards of a phone's feed tab are small and close together: a smaller extra target, so that a tap
+   next to the dot still opens the card */
+html[data-layout="phone"] .main-container[data-phone-tab="feed"] .pcard-mark[data-mark-toggle]::after {
+  inset: -3px;
+}
+
+.mark-ring {
+  display: block;
+  width: 11px;
+  height: 11px;
+  border: 1.5px dashed var(--text-muted);
+  border-radius: 50%;
+  opacity: 0.55;
+}
+
+.pcard-mark[data-mark-toggle]:hover .mark-ring,
+.pcard-mark[data-mark-toggle]:focus-visible .mark-ring {
+  border-color: var(--blue-border);
+  opacity: 1;
+}
+
+.pcard-mark[data-mark-toggle]:focus-visible {
+  outline: 2px solid var(--blue-border);
+  outline-offset: 1px;
+}
+
+/* the sheriff's badge (top-right) makes room for it */
+.pcard.mark-slot .pcard-badges {
+  right: 25px;
+}
+
+/* the palette: eight colours and 清除, nothing else.  It floats at a card's dot; the detail panel has the same one inline */
+.mark-pop {
+  position: fixed;
+  z-index: 8100;
+  padding: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-card);
+  border-radius: 12px;
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.26);
+}
+
+.mark-palette {
+  display: grid;
+  grid-template-columns: repeat(5, 30px);
+  gap: 6px;
+}
+
+.mark-swatch,
+.mark-clear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border-card-subtle);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.mark-swatch .mark-dot {
+  width: 16px;
+  height: 16px;
+  vertical-align: baseline;
+}
+
+.mark-swatch:hover,
+.mark-clear:hover:not(:disabled) {
+  border-color: var(--blue-border);
+  background: var(--blue-bg-tint);
+}
+
+.mark-swatch.selected {
+  border-color: var(--blue-primary);
+  background: var(--blue-bg-tint);
+  box-shadow: inset 0 0 0 1px var(--blue-border);
+}
+
+.mark-swatch:focus-visible,
+.mark-clear:focus-visible {
+  outline: 2px solid var(--blue-border);
+  outline-offset: 1px;
+}
+
+.mark-clear:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+html[data-input="touch"] .mark-palette {
+  grid-template-columns: repeat(5, 40px);
+}
+
+html[data-input="touch"] .mark-swatch,
+html[data-input="touch"] .mark-clear {
+  width: 40px;
+  height: 40px;
+}
+
+/* in the detail panel's head: a row of its own, wrapping on a narrow drawer */
+.detail-marks {
+  display: flex;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.detail-marks .mark-palette {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+.detail-marks.readonly .mark-dot {
+  width: 16px;
+  height: 16px;
+  vertical-align: baseline;
+}
+
+/* the private-chat list on the avatar rail (names are hidden there): the dot sits on the avatar's lower-left corner */
+.workspace-grid.left-collapsed .ov-mark,
+.workspace-grid.narrow-layout .ov-mark {
+  left: -8px;
+  bottom: -8px;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border-card-subtle);
+  border-radius: 50%;
+  background: var(--bg-surface);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.2);
+}
+
+.workspace-grid.left-collapsed .ov-mark .mark-dot,
+.workspace-grid.narrow-layout .ov-mark .mark-dot {
+  width: 11px;
+  height: 11px;
+  vertical-align: baseline;
+}
+
+/* --------------------------------------------------------------------------
+   "held": an agent that waits in front of the soft-pause gate (G3), "⏸ 暂停中"
+   -------------------------------------------------------------------------- */
+.pcard-state.st-held,
+.mod-chip-state.st-held {
+  border-color: var(--amber-border);
+  background: var(--amber-bg-tint);
+}
+
+.pcard.st-held {
+  border-color: color-mix(in srgb, var(--amber-border) 60%, var(--border-card-subtle));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--amber-border) 20%, transparent), var(--card-shadow);
+}
+
+.detail-state.st-held {
+  border-color: color-mix(in srgb, var(--amber-border) 55%, transparent);
+  color: var(--amber-text);
+}
+
+/* --------------------------------------------------------------------------
+   The soft pause in the takeover bar (G1, G3, G5):
+   🎮 正在扮演 3 · Carol   [⏸ 暂停 agent]   [退出接管]
+   🎮 正在扮演 3 · Carol   ⏳ 收尾中（还有 2 个回答）  [▶ 继续]  立即暂停   [退出接管]
+   🎮 正在扮演 3 · Carol   ⏸ agent 已暂停              [▶ 继续]           [退出接管]
+   -------------------------------------------------------------------------- */
+.softpause {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.softpause-status {
+  padding: 0 9px;
+  border: 1px solid var(--amber-border);
+  border-radius: 999px;
+  background: var(--amber-bg-tint);
+  color: var(--amber-text);
+  font-size: 12.5px;
+  font-weight: 800;
+  line-height: 20px;
+  white-space: nowrap;
+}
+
+.softpause-status[data-phase="draining"] {
+  animation: softDrain 1.6s ease-in-out infinite;
+}
+
+@keyframes softDrain {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* 「⏸ 暂停 agent」 is amber, 「▶ 继续」 (a soft pause exists) green */
+.btn-softpause {
+  white-space: nowrap;
+}
+
+.btn-softpause:not(:disabled) {
+  border-color: var(--amber-border);
+  color: var(--amber-text);
+}
+
+.btn-softpause:hover:not(:disabled) {
+  background: var(--amber-bg-tint);
+}
+
+.takeover-bar.is-soft-paused {
+  border-color: var(--amber-border);
+  background: var(--amber-bg-tint);
+  color: var(--amber-text);
+}
+
+.takeover-bar.is-soft-paused .btn-softpause:not(:disabled) {
+  border-color: var(--success-tag-border);
+  background: var(--bg-surface);
+  color: var(--success-text);
+}
+
+.takeover-bar.is-soft-paused .btn-softpause:hover:not(:disabled) {
+  background: var(--success-bg);
+}
+
+/* 立即暂停: a link (the top bar's hard pause) */
+.softpause-now {
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--danger-text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  text-decoration: underline;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.softpause-now:hover:not(:disabled) {
+  color: var(--danger-border);
+}
+
+.softpause-now:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.softpause-now:focus-visible {
+  outline: 2px solid var(--blue-border);
+  outline-offset: 1px;
+  border-radius: 3px;
+}
+
+/* a phone: the bar wraps - the name and 退出接管 in the first line, the soft pause (state + button + link) below */
+html[data-layout="phone"] .takeover-bar {
+  flex-wrap: wrap;
+  row-gap: 4px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  border-radius: 16px;
+}
+
+html[data-layout="phone"] .takeover-bar .softpause {
+  order: 3;
+  flex: 1 0 100%;
+  padding-right: 3px;
+}
+
+html[data-layout="phone"] .takeover-bar .softpause-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* (no state text yet: the button is the whole line - easy to hit) */
+html[data-layout="phone"] .takeover-bar:not(.is-soft-paused) .btn-softpause {
+  flex: 1 1 auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .softpause-status[data-phase="draining"] {
+    animation: none !important;
+  }
+}
+
+
+/* ==========================================================================
+   Arena-Agents v0.13.1 — panels: the thinking record, the avatar code, the error log, the memory / persona editors
+   (docs/v0.13.1-plan.md G21–G36, G40, G42, G44). Appended after the play rules, preserving the release cascade.
+   Only the variables of style.css are used, so both themes work; phone rules hang on <html data-layout="phone">.
+   ========================================================================== */
+
+/* ---- top bar: the 📋 日志 button and its unread-error badge (G32) ---------------------------------------------------- */
+.btn-calllog {
+  position: relative;
+  gap: 4px;
+  padding: 4px 11px;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.calllog-badge,
+.more-badge {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger-border);
+  color: #ffffff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 17px;
+  text-align: center;
+  letter-spacing: 0;
+}
+
+.calllog-badge {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  box-shadow: 0 0 0 2px var(--bg-surface);
+}
+
+/* on a phone the button lives in the ⋯ menu (a row of its own) and the badge sits on the ⋯ button as well */
+.btn-more {
+  position: relative;
+}
+
+.more-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  font-size: 10.5px;
+  box-shadow: 0 0 0 2px var(--bg-surface);
+}
+
+.more-menu-list .calllog-badge {
+  position: static;
+  margin-left: 6px;
+  box-shadow: none;
+}
+
+/* The first row of the top bar is exactly full on a 1280 px laptop: the 74 px of "📋 日志" would push the whole right-hand
+   group onto a second row.  Below 1320 px the button is the icon alone (the title says what it is, the badge still counts);
+   the ⋯ menu of a phone always has the label. */
+@media (max-width: 1319px) {
+  html:not([data-layout="phone"]) .btn-calllog {
+    padding: 4px 8px;
+  }
+
+  html:not([data-layout="phone"]) .calllog-label {
+    display: none;
+  }
+}
+
+/* ---- windows of the page (the thinking record, the error log): G22 / G33 ------------------------------------------- */
+.vw-window {
+  position: fixed;
+  z-index: 8100; /* above the detail panel (8000) it was opened from, below dialogs (9000) and toasts */
+  top: 56px;
+  right: 14px;
+  bottom: 14px;
+  display: flex;
+  width: min(640px, calc(100vw - 28px));
+}
+
+.vw-window[hidden] {
+  display: none !important;
+}
+
+.calllog-window {
+  width: min(1020px, calc(100vw - 28px));
+}
+
+.vw-card {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-card);
+  border-radius: 14px;
+  box-shadow: 0 16px 44px rgba(15, 23, 42, 0.35);
+}
+
+/* header, toolbar and foot keep their own height: in a column of flex items they would otherwise be squeezed to their
+   min-height when the body is long, and a subtitle that wraps would run over the first bubble (seen on a phone) */
+.vw-header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.vw-head-main {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.vw-avatar {
+  flex: none;
+  padding: 2px;
+  border: 1px solid var(--border-card-subtle);
+  border-radius: 9px;
+  background: var(--bg-muted);
+}
+
+.vw-avatar .avatar-img,
+.vw-avatar .vw-avatar-img {
+  --av: 40px;
+}
+
+.vw-heading {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.vw-title {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vw-sub {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.vw-toolbar {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-muted);
+}
+
+.vw-toolbar:empty {
+  display: none;
+}
+
+.vw-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 10px 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.vw-foot {
+  flex: none;
+  padding: 6px 12px;
+  border-top: 1px solid var(--border-color);
+  background: var(--bg-muted);
+  line-height: 1.4;
+}
+
+.vw-foot:empty {
+  display: none;
+}
+
+/* ---- the thinking record: a chat log (G22, G23) ----------------------------------------------------------------- */
+.th-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.th-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.th-divider::before,
+.th-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-card-subtle);
+}
+
+.th-bubble {
+  align-self: flex-start;
+  max-width: 94%;
+  padding: 8px 11px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 4px 14px 14px 14px;
+}
+
+.th-bubble.th-content {
+  background: var(--blue-bg-tint);
+  border-color: color-mix(in srgb, var(--blue-border) 45%, transparent);
+}
+
+.th-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  margin-bottom: 3px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+}
+
+.th-kind {
+  color: var(--text-secondary);
+  font-weight: 800;
+}
+
+.th-model {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.th-text {
+  color: var(--text-primary);
+  font-size: 14px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.th-fold {
+  margin-top: 4px;
+}
+
+.th-more,
+.th-start {
+  align-self: center;
+}
+
+.th-start {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.th-state {
+  padding: 22px 14px;
+  background: var(--bg-muted);
+  border: 1px dashed var(--border-card-subtle);
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.th-state.th-error {
+  background: var(--danger-bg);
+  border-color: var(--danger-tag-border);
+  color: var(--danger-text);
+}
+
+.th-state.th-blocked {
+  background: var(--amber-bg-tint);
+  border-color: color-mix(in srgb, var(--amber-border) 45%, transparent);
+  color: var(--amber-text);
+  font-weight: 600;
+}
+
+.th-latest {
+  position: absolute;
+  right: 18px;
+  bottom: 46px;
+  z-index: 2;
+  padding: 5px 14px;
+  background: var(--blue-primary);
+  border: none;
+  border-radius: 999px;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.3);
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.th-latest:hover:not(:disabled) {
+  background: var(--blue-text);
+}
+
+/* the reason under the buttons of the detail panel when the record is closed (G25) */
+.detail-thoughts-note {
+  margin-top: 6px;
+  line-height: 1.45;
+}
+
+/* ---- the avatar code, 复制, and the 🎲 panel (G28–G31) ----------------------------------------------------------- */
+.detail-code-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.avatar-code-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.avatar-code {
+  padding: 2px 8px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.avatar-dice {
+  margin-left: auto;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.avatar-dice.active {
+  background: var(--blue-bg-tint);
+  border-color: var(--blue-border);
+}
+
+.avatar-pop {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px;
+  background: var(--blue-bg-tint);
+  border: 1px dashed var(--blue-border);
+  border-radius: 10px;
+}
+
+.avatar-pop-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.avatar-code-input {
+  flex: 1 1 190px;
+  min-width: 0;
+  min-height: var(--tap);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+
+.avatar-pop-note {
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.avatar-pop-note:empty {
+  display: none;
+}
+
+.avatar-pop-note.error {
+  color: var(--danger-text);
+}
+
+.avatar-pop-note.hint {
+  color: var(--amber-text);
+}
+
+.avatar-pop-note.ok {
+  color: var(--success-text);
+}
+
+/* ---- the persona (G43, G44) and the memory (G37–G42) editors ---------------------------------------------------- */
+.detail-count-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+}
+
+.detail-count {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.detail-count.over,
+.mem-count.over,
+.mem-total.over,
+.mem-counts .over {
+  color: var(--danger-text);
+}
+
+.detail-count-row .form-hint {
+  order: -1;
+}
+
+#ta-detail-persona {
+  min-height: 150px;
+}
+
+#ta-detail-persona::placeholder {
+  color: var(--text-muted);
+  opacity: 0.75;
+}
+
+.mem-section-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 1px 8px;
+  margin-top: 4px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.mem-section-title .form-hint {
+  font-weight: 500;
+}
+
+.mem-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* one seat = two lines: who + the counter, then the box across the whole width (an impression can be 80 characters, the
+   panel is 428 px wide: a single-line box showed about 13 of them) */
+.mem-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.mem-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mem-who {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.mem-avatar {
+  --av: 22px;
+  border-radius: 4px;
+}
+
+.mem-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mem-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 3.3em;
+  max-height: 9em;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.45;
+  resize: vertical;
+  field-sizing: content; /* (Chrome: grows with the text; elsewhere the two rows of `rows` stay) */
+}
+
+.mem-count {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.mem-exp,
+.mem-notes {
+  min-height: 62px;
+}
+
+.mem-counts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 2px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.mem-record {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 9px;
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+
+.mem-record-label {
+  flex: none;
+  color: var(--text-secondary);
+  font-weight: 800;
+}
+
+.mem-record-text {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.mem-legacy {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--amber-bg-tint);
+  border: 1px solid color-mix(in srgb, var(--amber-border) 45%, transparent);
+  border-radius: 9px;
+}
+
+.mem-legacy-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  color: var(--amber-text);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.mem-legacy-text {
+  max-height: 130px;
+  overflow-y: auto;
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.mem-refine {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-card-subtle);
+}
+
+/* ---- what a finished review changed: old impression → new one (G40) ------------------------------------------------- */
+.review-changes {
+  margin-top: 6px;
+}
+
+.review-changes-head {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.review-changes-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 30px;
+  padding: 2px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  text-align: left;
+  cursor: pointer;
+}
+
+.review-changes-toggle .caret {
+  width: 12px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.review-changes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 280px;
+  margin: 4px 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.rc-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 9px;
+  background: var(--bg-muted);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.rc-who {
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.rc-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.rc-before {
+  color: var(--text-muted);
+}
+
+.rc-after {
+  color: var(--text-primary);
+}
+
+.rc-tag {
+  flex: none;
+  padding: 0 6px;
+  background: var(--neutral-bg);
+  border-radius: 4px;
+  color: var(--neutral-text);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.rc-tag.new {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+/* ---- the error log (G33) --------------------------------------------------------------------------------------- */
+.cl-seg {
+  display: inline-flex;
+}
+
+.cl-seg .btn {
+  border-radius: 0;
+}
+
+.cl-seg .btn:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.cl-seg .btn:last-child {
+  border-radius: 0 6px 6px 0;
+  border-left-width: 0;
+}
+
+.cl-seg .btn.active {
+  background: var(--blue-bg-tint);
+  border-color: var(--blue-border);
+  color: var(--blue-text);
+  font-weight: 700;
+}
+
+.cl-seg-count {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 4px;
+  background: var(--danger-bg);
+  border-radius: 999px;
+  color: var(--danger-text);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 16px;
+  text-align: center;
+}
+
+.cl-actor {
+  min-width: 120px;
+  max-width: 220px;
+  padding: 3px 8px;
+  font-size: 13px;
+}
+
+.cl-spacer {
+  flex: 1;
+}
+
+.cl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+}
+
+.cl-row {
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-left: 4px solid var(--success-tag-border);
+  border-radius: 8px;
+}
+
+.cl-row.cl-retry {
+  border-left-color: #f59e0b;
+}
+
+.cl-row.cl-timeout,
+.cl-row.cl-error {
+  border-left-color: var(--danger-border);
+}
+
+.cl-row.cl-cancelled {
+  border-left-color: var(--neutral-tag-border);
+}
+
+.cl-row.cl-event {
+  background: var(--bg-muted);
+}
+
+.cl-row.unread {
+  background: var(--danger-bg);
+}
+
+.cl-row.open {
+  border-color: var(--border-card);
+  border-left-width: 4px;
+}
+
+.cl-main {
+  display: grid;
+  grid-template-columns: 14px 84px minmax(90px, 1.1fr) minmax(100px, 1.3fr) 62px 66px 92px minmax(54px, 0.7fr);
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 8px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cl-main > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cl-caret {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.cl-time {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.cl-time small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.15;
+}
+
+.cl-role {
+  font-weight: 700;
+}
+
+.cl-model,
+.cl-reason {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.cl-num {
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  text-align: right;
+}
+
+.cl-status {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--success-bg);
+  color: var(--success-text);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.cl-status.st-retry {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+
+.cl-status.st-timeout,
+.cl-status.st-error {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.cl-status.st-cancelled {
+  background: var(--neutral-bg);
+  color: var(--neutral-text);
+}
+
+.cl-row.unread .cl-time::before {
+  content: "● ";
+  color: var(--danger-border);
+}
+
+.cl-detail {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 4px 16px;
+  margin: 0;
+  padding: 6px 12px 10px 30px;
+  border-top: 1px dashed var(--border-color);
+  font-size: 12.5px;
+}
+
+.cl-detail > div {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.cl-detail > .cl-wide {
+  grid-column: 1 / -1;
+}
+
+.cl-detail dt {
+  flex: none;
+  min-width: 5.6em;
+  color: var(--text-muted);
+}
+
+.cl-detail dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.cl-detail dd.cl-message {
+  color: var(--danger-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+}
+
+.cl-more {
+  align-self: center;
+  margin: 6px 0;
+}
+
+.cl-empty {
+  margin: 8px 4px;
+}
+
+.cl-error {
+  color: var(--danger-text);
+}
+
+/* ---- touch: bigger targets ---------------------------------------------------------------------------------------- */
+html[data-input="touch"] .avatar-dice,
+html[data-input="touch"] .cl-seg .btn,
+html[data-input="touch"] .th-fold,
+html[data-input="touch"] .th-more,
+html[data-input="touch"] .cl-more {
+  min-height: var(--tap);
+}
+
+html[data-input="touch"] .mem-input {
+  min-height: var(--tap);
+}
+
+/* ---- phone: the windows are full screen, the log rows wrap onto two lines ----------------------------------------------- */
+html[data-layout="phone"] .vw-window,
+html[data-layout="phone"] .calllog-window {
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: auto;
+}
+
+html[data-layout="phone"] .vw-card {
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+html[data-layout="phone"] .vw-header {
+  min-height: 56px;
+  padding: calc(8px + env(safe-area-inset-top)) 6px 8px 12px;
+}
+
+html[data-layout="phone"] .vw-foot {
+  padding-bottom: calc(6px + env(safe-area-inset-bottom));
+}
+
+html[data-layout="phone"] .th-bubble {
+  max-width: 100%;
+}
+
+html[data-layout="phone"] .th-latest {
+  bottom: calc(52px + env(safe-area-inset-bottom));
+}
+
+html[data-layout="phone"] .cl-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  padding: 6px 8px;
+}
+
+html[data-layout="phone"] .cl-main > span {
+  overflow: visible;
+  white-space: normal;
+}
+
+html[data-layout="phone"] .cl-model {
+  flex-basis: 100%;
+  order: 9;
+}
+
+html[data-layout="phone"] .cl-time small {
+  display: inline;
+  margin-left: 4px;
+}
+
+html[data-layout="phone"] .cl-detail {
+  grid-template-columns: 1fr;
+  padding-left: 14px;
+}
+
+html[data-layout="phone"] .avatar-pop-row .btn {
+  min-height: 42px;
 }

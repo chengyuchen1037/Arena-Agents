@@ -24,7 +24,7 @@ from app.providers.models import ModelBinding
 from app.world.types import MODERATOR_ID
 
 SESSION_SCHEMA_VERSION = 5
-APP_ENGINE_VERSION = "v0.13.0"
+APP_ENGINE_VERSION = "v0.13.1"
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 __all__ = [

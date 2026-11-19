@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Arena-Agents v0.13.0 Frontend Controller
+   Arena-Agents v0.13.1 Frontend Controller
    (async agents · SSE v2 · player cards with pixel avatars · request cards · responsive)
 
    Pure logic lives in
@@ -56,6 +56,9 @@
   let replayUI = null; // v0.13 replay player: plays a saved game back in a session of its own (replay.js)
   let takeoverUI = null; // v0.13 viewpoint bar / takeover bar / reshuffle reminder (takeover.js)
   let composerUI = null; // v0.13 input box, abilities, request answers of the played seat (composer.js)
+  let marksUI = null; // v0.13.1 colour marks on the players: dots, palette, localStorage (marks.js)
+  let thoughtsUI = null; // v0.13.1 the thinking record window of an agent (thoughts.js)
+  let calllogUI = null; // v0.13.1 the error log window + the unread badge of the top bar (calllog.js)
   let platformCtl = null; // platform.js controller
 
   const state = {
@@ -234,9 +237,13 @@
     return Core.gameClockNow(state.clockSync, Date.now());
   }
 
-  /** The server told us the clock (snapshot / session.updated): trust it and run from now on. */
+  /**
+   * The server told us the clock (snapshot / session.updated): trust it and run from now on - but only while the clock
+   * runs.  v0.13.1 (G2, §12.2): `status` stays "running" during a soft pause while the clock stands still, so the
+   * session's `clock_running` decides (judged by `status` when a server does not send it).
+   */
   function syncClock(session) {
-    state.clockSync = { clock: Number(session.clock) || 0, at: Date.now(), running: session.status === "running" };
+    state.clockSync = { clock: Number(session.clock) || 0, at: Date.now(), running: View.clockRunning(session) };
   }
 
   // ---------------------------------------------------------------------------
@@ -299,14 +306,21 @@
     }, FLASH_MS);
   }
 
-  /** Names + avatars: every cached HTML that contains them is keyed by this. */
+  /**
+   * Names + avatars (+ the colour marks, v0.13.1): every cached HTML that contains them is keyed by this - a mark
+   * that changes must repaint the messages that were drawn with the old one.
+   */
   function computeRosterSig(s) {
     return (
       `${state.avatarEpoch}|` +
       s.participants.map((p) => `${p.id}:${p.name}:${Avatar.descriptionKey(p.avatar)}`).join("|") +
-      `|${s.moderator.name}:${Avatar.descriptionKey(s.moderator.avatar)}`
+      `|${s.moderator.name}:${Avatar.descriptionKey(s.moderator.avatar)}` +
+      `|${marksUI ? marksUI.signature() : ""}`
     );
   }
+
+  /** The coloured dot of a marked player (before a name); "" for an unmarked one, for the moderator and without marks. */
+  const markDot = (id) => (marksUI ? marksUI.nameDotHtml(id) : "");
 
   /** An <img> for any actor (moderator / engine / player). */
   function avatarImg(id, size, className) {
@@ -417,6 +431,15 @@
     elBtnStart.disabled = !ctl.start;
     elBtnPause.disabled = !ctl.pause;
     elBtnResume.disabled = !ctl.resume;
+    // v0.13.1 (G7): during a soft pause the top bar's 暂停 is the hard pause (it ends the soft pause), and the soft
+    // pause is continued from the takeover bar - the top bar's 继续 stays grey
+    const softPaused = View.softPauseOf(s).active;
+    if (elBtnPause.setAttribute) {
+      elBtnPause.setAttribute("title", softPaused ? "硬暂停：立即停下所有 agent，取消仍在途的模型调用（同时结束软暂停）" : "");
+    }
+    if (elBtnResume.setAttribute) {
+      elBtnResume.setAttribute("title", softPaused ? "现在是软暂停：请用接管栏里的「▶ 继续」" : "继续对局；对局结束后也可以继续");
+    }
     elBtnNew.disabled = Boolean(s.replay); // a replay is not the live game: nothing of the live controls applies
     if (historyUI) historyUI.onSession();
 
@@ -445,6 +468,12 @@
     if (t.state) classes.push(`st-${t.state}`);
     if (state.flash.has(t.id)) classes.push("flash");
     if (rosterUI && rosterUI.openId() === t.id) classes.push("popover-open");
+    // v0.13.1 (G16, G18): the colour mark - a stripe along the card's top edge and a dot in the top-right corner (the
+    // button of the palette while a seat is played); the sheriff's badge makes room for it
+    const markEl = marksUI ? marksUI.cardMarkHtml(t.id) : "";
+    const markClass = marksUI ? marksUI.cardClass(t.id) : "";
+    if (markClass) classes.push(markClass);
+    if (markEl) classes.push("mark-slot");
 
     const badges = t.badges
       .map(
@@ -468,7 +497,7 @@
       ` data-until="${until}" role="button" tabindex="0" title="${escapeHtml(t.title)}"` +
       ` aria-label="${escapeHtml(t.name)}，${numText(t.seat)} 号">` +
       `<span class="pcard-num">${numText(t.seat)}</span>` +
-      `<span class="pcard-badges">${badges}</span>` +
+      `<span class="pcard-badges">${badges}</span>${markEl}` +
       `<span class="pcard-avatar">${avatarImg(t.id, 40)}</span>` +
       `<span class="pcard-text"><span class="pcard-name">${escapeHtml(t.name)}</span>${tag}</span>` +
       `${stateEl}</div>`
@@ -552,6 +581,9 @@
     const attn = attention
       ? `<span class="attn-chip" title="轮到你发言，或有一个请求等你作答">待你操作</span>`
       : "";
+    // v0.13.1 (G18): the colour mark of the player a private chat is with - before its name (and, on the avatar rail
+    // where names are hidden, on the avatar's corner)
+    const mark = isDm ? markDot(m.avatarId) : "";
     return (
       `<div class="channel-item${isDm ? " is-dm" : " is-group"}${active ? " active" : ""}${n ? " has-unread" : ""}${
         attention ? " needs-action" : ""
@@ -559,8 +591,9 @@
       ` data-channel="${escapeHtml(ch.id)}" data-title="${escapeHtml(tipText)}" title="${escapeHtml(tipText)}" role="button" tabindex="0">` +
       `<span class="chan-avatar">${avatar}` +
       `${showChip ? `<span class="chan-ov ov-state">${sum.icon}</span>` : ""}${unreadBadge(n, "chan-ov ov-unread")}` +
-      `${attention ? `<span class="chan-ov ov-attn" title="待你操作">✋</span>` : ""}</span>` +
-      `<span class="chan-body"><span class="chan-row"><span class="channel-name">${escapeHtml(m.title)}</span>${unreadBadge(n)}</span>` +
+      `${attention ? `<span class="chan-ov ov-attn" title="待你操作">✋</span>` : ""}` +
+      `${mark ? `<span class="chan-ov ov-mark">${mark}</span>` : ""}</span>` +
+      `<span class="chan-body"><span class="chan-row"><span class="channel-name">${mark}${escapeHtml(m.title)}</span>${unreadBadge(n)}</span>` +
       `<span class="channel-meta">${chip}${attn}${members}</span>${detail}</span></div>`
     );
   }
@@ -737,7 +770,8 @@
       `<article class="${classes.join(" ")}" data-seq="${numText(m.seq)}"` +
       ` data-from="${escapeHtml(m.from)}"${m.ticket_id ? ` data-ticket-msg="${escapeHtml(m.ticket_id)}"` : ""}>` +
       `<div class="msg-avatar">${avatarImg(m.from, 40, "msg-avatar-img")}</div>` +
-      `<div class="msg-main"><div class="msg-head"><span class="msg-name">${escapeHtml(name)}</span>` +
+      // (v0.13.1, G18: the speaker's colour mark sits before the name; it is part of rosterSig, so a changed mark repaints)
+      `<div class="msg-main"><div class="msg-head">${markDot(m.from)}<span class="msg-name">${escapeHtml(name)}</span>` +
       `${label}${ticket}<span class="msg-time">${escapeHtml(time)}</span></div>` +
       `<div class="msg-body formatted-text">${body}</div></div></article>`;
     Core.boundedSet(state.msgHtml, cacheKey, html, MESSAGE_HTML_CACHE_MAX);
@@ -776,7 +810,8 @@
           ans = `<span class="req-ans pending">…</span>`;
         }
         return (
-          `<li class="req-row${r.answered ? " answered" : ""}"><span class="req-who">${avatarImg(r.id, 20, "req-avatar")}` +
+          // (v0.13.1, G18: a recipient's colour mark sits before its name)
+          `<li class="req-row${r.answered ? " answered" : ""}"><span class="req-who">${avatarImg(r.id, 20, "req-avatar")}${markDot(r.id)}` +
           `<span class="req-name">${escapeHtml(r.name)}</span></span>${ans}</li>`
         );
       })
@@ -879,7 +914,8 @@
         View.viewpointLabel(s, state.viewpoint)
       )} 在这个频道里还没有看到任何内容</div>`;
     }
-    return `<div class="empty-placeholder">这个频道里还没有发言 — 这里显示发言与请求卡片；思维链与工具调用只写入日志</div>`;
+    // (v0.13.1, G26: the thoughts are no longer "only in the log": the detail panel of a player opens them)
+    return `<div class="empty-placeholder">这个频道里还没有发言 — 这里显示发言与请求卡片；玩家的思考内容在详情面板的「🧠 思考记录」里查看，工具调用只写入日志</div>`;
   }
 
   function tickCountdowns() {
@@ -888,6 +924,11 @@
       for (const n of Array.from(elFeedRecords.querySelectorAll("[data-deadline]"))) {
         const d = Number(n.getAttribute("data-deadline"));
         n.textContent = Core.formatCountdown(d - now);
+      }
+      // v0.13.1 (G45): a vote that was picked but not submitted is flagged when the deadline is close
+      for (const n of Array.from(elFeedRecords.querySelectorAll("[data-warn-at]"))) {
+        const at = Number(n.getAttribute("data-warn-at"));
+        if (n.classList && typeof n.classList.toggle === "function") n.classList.toggle("urgent", Number.isFinite(at) && now >= at);
       }
     }
   }
@@ -991,6 +1032,8 @@
     if (d.popover) renderPopover();
     // v0.13: the input box follows the selected channel and the seat's state (it only touches what changed)
     if (composerUI) composerUI.render();
+    // v0.13.1: an open colour palette follows the marks - and goes when the seat was given back / a replay began
+    if (marksUI) marksUI.sync();
   }
 
   function renderAll(force = false) {
@@ -1147,6 +1190,11 @@
     if (historyUI) historyUI.onSession();
     // the settings dialog: archive import needs the LIVE game paused, whatever replay is on screen
     if (archiveUI && (result.replaced || payload.type === "game.status" || payload.type === "session.updated")) archiveUI.onSession(state.replay.live);
+    // v0.13.1: the error log belongs to the LIVE game: its lines keep coming (and its badge keeps counting) during a replay
+    if (calllogUI) {
+      if (result.llmCall) calllogUI.onEvent(result.llmCall);
+      if (result.replaced) calllogUI.onSession(state.replay.live);
+    }
   }
 
   /** Replace the whole session (snapshot, state fetch, control / import / load response). */
@@ -1183,7 +1231,9 @@
     // replayed one); the roster shows what is on screen
     if (providerUI) providerUI.onSession(liveSession());
     if (archiveUI) archiveUI.onSession(liveSession());
+    if (calllogUI) calllogUI.onSession(liveSession()); // v0.13.1: the error log is the live game's, also while a replay is on screen
     if (rosterUI) rosterUI.onSession(next);
+    if (thoughtsUI) thoughtsUI.onSession(next); // v0.13.1: the open thinking record re-checks "may I look" (a seat taken over, a replay) and follows a new game
     // The feed compares what it already shows (view key + blocks), so an identical
     // snapshot after a reconnect does not rebuild the list or move the scroll position.
     scheduleRender(Store.newDirty(true));
@@ -1236,7 +1286,6 @@
       return;
     }
     const id = Store.eventIdOf(payload, NaN);
-    const prevStatus = state.session.status;
     const before = clockNow();
     const result = Store.applyEvent(state.session, payload, { clockNow: before });
 
@@ -1251,14 +1300,19 @@
       if (id > state.sseResumeId) state.sseResumeId = id;
       if (id > state.session.event_id) state.session.event_id = id;
     }
-    // the game clock stops while the game is not running (D18): freeze / resume our estimate
+    // the game clock stops while the game is not running (D18), and - v0.13.1 (G2) - while a soft pause holds it
+    // although the status stays "running": freeze / resume our estimate (`clock_running`, judged by the status
+    // when a server does not send it)
     const s = state.session;
     if (payload.type === "session.updated" && payload.data && payload.data.clock !== undefined) {
       syncClock(s);
-    } else if (s.status !== prevStatus) {
-      state.clockSync = { clock: before, at: Date.now(), running: s.status === "running" };
+    } else if (View.clockRunning(s) !== state.clockSync.running) {
+      state.clockSync = { clock: before, at: Date.now(), running: View.clockRunning(s) };
     }
     if (result.takeoverChanged) syncViewpointLock();
+    // v0.13.1: whether the thoughts of another agent may be read depends on the played seat and on the game being over
+    if (thoughtsUI && (result.takeoverChanged || payload.type === "game.status")) thoughtsUI.onSession(state.session);
+    if (result.llmCall && calllogUI) calllogUI.onEvent(result.llmCall); // one more line of the error log (and maybe a red badge)
     if (result.toast) showToast(result.toast);
     if (result.message) onMessageSeen(result.message);
     if (result.flash) flashActor(result.flash);
@@ -1266,7 +1320,7 @@
     if (result.budgetEvent === "reached") showToast("⛔ 已达到预算上限");
     if (result.reviewEvent) {
       const ev = result.reviewEvent;
-      if (ev.state === "done" && rosterUI) rosterUI.onReviewDone();
+      if (ev.state === "done" && rosterUI) rosterUI.onReviewDone(ev.id);
       if (ev.state === "error") showToast(`复盘失败（${View.displayName(s, ev.id)}）：${ev.message || "未知错误"}`);
     }
     if (PROVIDER_RELEVANT.has(payload.type)) {
@@ -1361,16 +1415,27 @@
     });
   }
 
+  // v0.13.1 (G16): the colour dot in a card's corner (only while a seat is played) opens the palette - never the panel
+  bindPress(elParticipantsGrid, "[data-mark-toggle]", "data-mark-toggle", (node) => {
+    if (marksUI) marksUI.togglePalette(node.getAttribute("data-mark-toggle"), node);
+  });
   // a player card (or the moderator chip) opens the detail panel / drawer
-  bindPress(elParticipantsGrid, ".pcard[data-actor]", "data-actor", (node) =>
-    togglePopover(node.getAttribute("data-actor"))
-  );
+  bindPress(elParticipantsGrid, ".pcard[data-actor]", "data-actor", (node, evt) => {
+    if (closestFrom(evt && evt.target, "[data-mark-toggle]")) return; // (the dot is handled above)
+    togglePopover(node.getAttribute("data-actor"));
+  });
   bindPress(elTopbarStatus, "#mod-chip", "data-actor", (node) =>
     togglePopover(node.getAttribute("data-actor") || MOD)
   );
   if (elParticipantsGrid) {
     elParticipantsGrid.addEventListener("keydown", (evt) => {
       if (!evt || (evt.key !== "Enter" && evt.key !== " ")) return;
+      const dot = closestFrom(evt.target, "[data-mark-toggle]");
+      if (dot) {
+        if (typeof evt.preventDefault === "function") evt.preventDefault();
+        if (marksUI) marksUI.togglePalette(dot.getAttribute("data-mark-toggle"), dot);
+        return;
+      }
       const card = closestFrom(evt.target, ".pcard[data-actor]");
       if (!card) return;
       if (typeof evt.preventDefault === "function") evt.preventDefault();
@@ -1478,6 +1543,8 @@
     // v0.13: the whole bar [视角▾][切换][接管] moves; the takeover bar (#takeover-bar) stays in the first row
     { id: "viewpoint-bar", slot: "menu" },
     { id: "btn-open-budget-modal", slot: "menu" },
+    // v0.13.1 (G32): the error log button moves too; its unread badge then shows on the ⋯ button (calllog.js)
+    { id: "btn-open-calllog", slot: "menu" },
     { id: "btn-new", slot: "menu" },
     { id: "btn-open-history-modal", slot: "menu" },
     { id: "btn-open-bindings-modal", slot: "menu" },
@@ -1628,6 +1695,21 @@
     return Core.bindingSummary(b, providers);
   }
 
+  // v0.13.1 (G16-G20): the colour marks on the players (marks.js).  Created before the detail panel: the palette of
+  // the panel's head comes from here (ctx.markHeadHtml below), and this module's document listeners (Escape, a click
+  // outside the palette) must answer first.
+  if (window.ArenaMarks) {
+    marksUI = window.ArenaMarks.create({
+      View,
+      getSession: () => state.session,
+      getViewpoint: () => state.viewpoint,
+      isReplaying: () => Boolean(state.replay),
+      // a mark was set / cleared here, or in another tab: every place that shows one is drawn again (the feed's cache
+      // key holds the marks, see computeRosterSig)
+      onChange: () => scheduleRender({ ...Store.newDirty(false), board: true, channels: true, feed: true, popover: true }),
+    });
+  }
+
   if (window.ArenaRosterUI) {
     rosterUI = window.ArenaRosterUI.create({
       api,
@@ -1645,8 +1727,49 @@
       setViewpoint: (id) => setViewpoint(id),
       // v0.13 (F3): while a seat is played the viewpoint is locked: "以 X 的视角观看" is disabled
       lockedSeat: () => View.takeoverSeat(state.session),
+      // v0.13.1 (G16, G18): the colour palette (or the read-only dot) in the head of the detail panel
+      markHeadHtml: (id) => (marksUI ? marksUI.headHtml(id) : ""),
+      // v0.13.1 (G21, G25): "🧠 思考记录" opens the window of an agent; while a seat is played the others' records are closed
+      // (the reason is the button's tooltip and a line of text)
+      openThoughts: (id) => {
+        if (thoughtsUI) thoughtsUI.open(id);
+      },
+      thoughtsBlocked: (id) => (window.ArenaThoughtsUI ? window.ArenaThoughtsUI.blockedReason(state.session, id, { replaying: Boolean(state.replay) }) : ""),
+      // Escape closes a window that is open before it closes the panel behind it
+      isWindowOpen: () => Boolean((thoughtsUI && thoughtsUI.isOpen()) || (calllogUI && calllogUI.isOpen())),
       patchParticipants,
       onChange: () => scheduleRender({ ...Store.newDirty(false), board: true, topbar: true, channels: true, feed: true }),
+    });
+  }
+
+  // v0.13.1: the two floating windows below share one stack: the one opened last is on top (on the screen, and for the Escape key, which
+  // closes that one only - the other, and the detail panel behind them, stay)
+  const windowStack = typeof Core.createWindowStack === "function" ? Core.createWindowStack() : null; // (null: each window keeps a stack of its own)
+
+  // v0.13.1 (G21-G26): the thinking record window (thoughts.js) - read on demand from GET /api/agents/{id}/thoughts
+  if (window.ArenaThoughtsUI) {
+    thoughtsUI = window.ArenaThoughtsUI.create({
+      api,
+      Core,
+      Avatar,
+      View,
+      showToast,
+      windows: windowStack,
+      getSession: () => state.session,
+      isReplaying: () => Boolean(state.replay), // (the record is the live game's: while a replay is shown it is closed)
+    });
+  }
+
+  // v0.13.1 (G32-G36): the error log window and the unread badge of the top bar (calllog.js).  The log is the LIVE game's.
+  if (window.ArenaCallLogUI) {
+    calllogUI = window.ArenaCallLogUI.create({
+      api,
+      Core,
+      Store,
+      View,
+      showToast,
+      windows: windowStack,
+      getSession: () => liveSession(),
     });
   }
 
@@ -1697,7 +1820,18 @@
   // v0.13 (F34, F35): the history of games - list, delete, continue, replay
   if (window.ArenaHistoryUI) {
     historyUI = window.ArenaHistoryUI.create({
-      api,
+      // v0.13.1 (G19): a deleted game takes the colour marks (they live in this browser) along
+      api: marksUI
+        ? {
+            ...api,
+            del: async (path, ...rest) => {
+              const out = await api.del(path, ...rest);
+              const gone = /^\/?(?:[^?#]*\/)?api\/games\/([^/?#]+)$/.exec(String(path));
+              if (gone) marksUI.forget(decodeURIComponent(gone[1]));
+              return out;
+            },
+          }
+        : api,
       Core,
       showToast,
       getSession: () => liveSession(),
@@ -2041,10 +2175,13 @@
     patchParticipants,
     platform: () => (platformCtl ? platformCtl.info() : null),
     roster: () => rosterUI,
+    thoughts: () => thoughtsUI,
+    calllog: () => calllogUI,
     budget: () => budgetUI,
     archive: () => archiveUI,
     takeover: () => takeoverUI,
     composer: () => composerUI,
+    marks: () => marksUI,
     history: () => historyUI,
     replay: () => replayUI,
     liveSession,

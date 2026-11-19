@@ -221,6 +221,194 @@
   }
 
   // -------------------------------------------------------------------------
+  // v0.13.1 (G27, contract §12.6): the avatar CODE
+  //   f03s05h12c07e04m02a09k03 = face, skin, hair, hair colour, eyes, mouth, accessory, accessory colour
+  // Not a random seed (the random pick depends on the other avatars): it is the eight part ids written one
+  // after the other, so the same code always draws the same picture.  The rules are those of app/avatars.py
+  // (encode_description / decode_code); tests/avatar_code_cases.json holds the vectors BOTH sides are tested with.
+  // -------------------------------------------------------------------------
+
+  /** description field -> first letter of its part ids (decoding finds a field by the letter, so the order is free) */
+  const FIELD_LETTERS = {
+    face: "f",
+    skin: "s",
+    hair: "h",
+    hair_color: "c",
+    eyes: "e",
+    mouth: "m",
+    accessory: "a",
+    accessory_color: "k",
+  };
+  const LETTER_FIELDS = Object.fromEntries(Object.entries(FIELD_LETTERS).map(([field, letter]) => [letter, field]));
+  const FIELD_LABELS = {
+    face: "脸型",
+    skin: "肤色",
+    hair: "发型",
+    hair_color: "发色",
+    eyes: "眼睛",
+    mouth: "嘴",
+    accessory: "配饰",
+    accessory_color: "配饰颜色",
+  };
+  /** why a code can be refused (machine readable); the priority is fixed: empty > bad_format > duplicate_field > missing_field > unknown_part */
+  const CODE_REASONS = ["empty", "bad_format", "missing_field", "duplicate_field", "unknown_part"];
+  const NO_ACCESSORY = "a00";
+  const EMPTY_ACCESSORY_COLOR = "k00"; // the colour of no accessory: it has no meaning, the code still has a segment for it
+  const CODE_EXAMPLE = "f03s05h12c07e04m02a09k03";
+  const CODE_ID_RE = /^[a-z][0-9]{2,3}$/; // (JS `$` without the m flag is the very end: a trailing newline does not match)
+  const CODE_BODY_RE = /^(?:[a-z][0-9]*)+$/;
+  // What is dropped from a typed code, spelled out: JS `\s` and Python's `\s` are not the same set (Python: U+001C-U+001F; JS: U+FEFF), so
+  // the two sides must not use it - app.avatars.CODE_IGNORED_CHARS is this list, and tests/avatar_code_cases.json has the cases that differ.
+  // (NFKC has turned NBSP, U+2000-U+200A, U+202F, U+205F and U+3000 into a plain space by now, so those are ignored as well.)
+  const CODE_IGNORED_RE = /[ \t\n\v\f\r\u0085\u2028\u2029\ufeff\-_:]+/g;
+
+  /** Encoding / decoding failed. `reason` is one of CODE_REASONS; `field` / `part` say where; the message is Chinese. */
+  class AvatarCodeError extends Error {
+    constructor(reason, message, extra) {
+      super(message);
+      this.name = "AvatarCodeError";
+      this.reason = reason;
+      this.field = (extra && extra.field) || null;
+      this.part = (extra && extra.part) || null;
+    }
+  }
+
+  /** "以 f 开头，如 f03": what a segment of this field looks like */
+  const fieldHint = (field) => `以 ${FIELD_LETTERS[field]} 开头，如 ${FIELD_LETTERS[field]}03`;
+
+  function codeFailure(reason, message, extra) {
+    return { ok: false, reason, message, ...(extra || {}) };
+  }
+
+  /** What the user typed, made comparable: NFKC (full-width letters / digits / colons count), lower case, no listed white space, `-`, `_`, `:`. */
+  function normalizeCodeText(text) {
+    return String(text).normalize("NFKC").toLowerCase().replace(CODE_IGNORED_RE, "");
+  }
+
+  /**
+   * code text -> description.  Lenient about case, separators and order, strict about the segments (a letter and
+   * 2-3 digits, every field exactly once).  With `library` (the sprite library) every part must exist too.
+   * Returns {ok: true, description: {v: 1, face, ...}} or {ok: false, reason, field?, part?, message}.
+   */
+  function decode(text, library) {
+    if (text === undefined || text === null) return codeFailure("empty", `请输入头像编号（形如 ${CODE_EXAMPLE}）`);
+    if (typeof text !== "string") return codeFailure("bad_format", `头像编号必须是文字，收到 ${typeof text}`);
+    const body = normalizeCodeText(text);
+    if (!body) return codeFailure("empty", `请输入头像编号（形如 ${CODE_EXAMPLE}）`);
+    if (!CODE_BODY_RE.test(body)) {
+      let stray = null;
+      for (const ch of body) {
+        if (!((ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9"))) {
+          stray = ch;
+          break;
+        }
+      }
+      const why = stray !== null ? `含有无法识别的字符 '${stray}'` : "开头应是字母";
+      return codeFailure("bad_format", `头像编号格式不对：${why}（应由 8 段组成，每段是一个字母加 2–3 位数字，如 ${CODE_EXAMPLE}）`);
+    }
+    const tokens = body.match(/[a-z][0-9]*/g) || [];
+    for (const token of tokens) {
+      if (!CODE_ID_RE.test(token) || !(token[0] in LETTER_FIELDS)) {
+        return codeFailure(
+          "bad_format",
+          `头像编号格式不对：'${token}' 不是部件 id（每段是 f s h c e m a k 之一加 2–3 位数字，如 ${CODE_EXAMPLE}）`
+        );
+      }
+    }
+    const found = {};
+    for (const token of tokens) {
+      const field = LETTER_FIELDS[token[0]];
+      if (field in found) {
+        return codeFailure(
+          "duplicate_field",
+          `头像编号里「${FIELD_LABELS[field]}」（${fieldHint(field)}）出现了不止一次，每种部件只能有一个`,
+          { field }
+        );
+      }
+      found[field] = token;
+    }
+    for (const field of FIELDS) {
+      if (!(field in found)) {
+        return codeFailure("missing_field", `头像编号缺少「${FIELD_LABELS[field]}」一段（${fieldHint(field)}）`, { field });
+      }
+    }
+    const lib = library || null;
+    if (lib && validateParts(lib).ok) {
+      for (const field of FIELDS) {
+        if (!idsOf(lib, field).includes(found[field])) {
+          return codeFailure("unknown_part", `素材库里没有${FIELD_LABELS[field]} ${found[field]}（头像编号里的这一段不存在）`, {
+            field,
+            part: found[field],
+          });
+        }
+      }
+    }
+    const description = { v: DESC_VERSION };
+    for (const field of FIELDS) description[field] = found[field];
+    return { ok: true, description };
+  }
+
+  /**
+   * description -> code (the eight ids written one after the other, lower case).  `accessory: "none"` is `a00`; no
+   * accessory and no accessory colour is `k00`.  Only the format is checked (not the library): an id that does not
+   * start with its field's letter would be read back as another field, so it is refused.  Throws AvatarCodeError
+   * (`missing_field` / `bad_format`) like app.avatars.encode_description; codeOf() is the quiet variant.
+   */
+  function encode(desc) {
+    if (!isObject(desc)) throw new AvatarCodeError("bad_format", "头像描述必须是对象");
+    const noAccessory = desc.accessory === "none" || desc.accessory === NO_ACCESSORY;
+    let code = "";
+    for (const field of FIELDS) {
+      let value = desc[field];
+      if (field === "accessory" && value === "none") value = NO_ACCESSORY;
+      if (field === "accessory_color" && noAccessory && (value === undefined || value === null || value === "")) {
+        value = EMPTY_ACCESSORY_COLOR;
+      }
+      if (value === undefined || value === null) {
+        throw new AvatarCodeError("missing_field", `头像描述缺少 ${field}（${FIELD_LABELS[field]}）`, { field });
+      }
+      if (typeof value !== "string" || !CODE_ID_RE.test(value) || value[0] !== FIELD_LETTERS[field]) {
+        throw new AvatarCodeError(
+          "bad_format",
+          `头像描述的 ${field}（${FIELD_LABELS[field]}）不是合法的部件 id：${JSON.stringify(value)}（${fieldHint(field)}）`,
+          { field }
+        );
+      }
+      code += value;
+    }
+    return code;
+  }
+
+  /** The code of a description the page shows ("" when it has none: no description, an unusual id ...). Never throws. */
+  function codeOf(desc) {
+    const d = normalizeDescription(desc);
+    if (!d) return "";
+    try {
+      return encode(d);
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * What makes two avatars look the same: the eight parts, where "none" is a00 and the colour of no accessory does not
+   * count.  "" for something that is no description.
+   */
+  function lookKey(desc) {
+    const d = normalizeDescription(desc);
+    if (!d) return "";
+    const accessory = d.accessory === "none" ? NO_ACCESSORY : d.accessory;
+    const color = accessory === NO_ACCESSORY ? "" : d.accessory_color;
+    return [d.face, d.skin, d.hair, d.hair_color, d.eyes, d.mouth, accessory, color].join("|");
+  }
+
+  /** Do two descriptions draw exactly the same avatar? (a "twin": allowed on purpose, but the page says so) */
+  function sameLook(a, b) {
+    const key = lookKey(a);
+    return key !== "" && key === lookKey(b);
+  }
+
+  // -------------------------------------------------------------------------
   // pixels
   // -------------------------------------------------------------------------
 
@@ -637,6 +825,17 @@
     normalizeDescription,
     descriptionKey,
     defaultDescription,
+    // v0.13.1: the avatar code (G27)
+    FIELD_LETTERS,
+    FIELD_LABELS,
+    CODE_REASONS,
+    AvatarCodeError,
+    normalizeCodeText,
+    encode,
+    decode,
+    codeOf,
+    lookKey,
+    sameLook,
     renderPixels,
     scalePixels,
     pixelHash,

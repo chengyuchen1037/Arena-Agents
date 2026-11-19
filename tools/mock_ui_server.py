@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Mock UI server for the v0.13.0 front end (docs/v0.12-contracts.md §8 + §10.3 / §10.4 / §10.6:
+"""Mock UI server for the v0.13.1 front end (docs/v0.12-contracts.md §8 + §10.3 / §10.4 / §10.6:
 SSE v2 events, PublicSession v3, roster / budget / price-source APIs).
 
 It serves ``static/`` and replays one scripted 12-player game (about 60 s) over the SAME wire format
@@ -56,7 +56,7 @@ import unicodedata
 import uuid
 import zipfile
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -65,7 +65,7 @@ STATIC_DIR = ROOT / "static"
 PARTS_REAL = STATIC_DIR / "avatar" / "parts.json"
 PARTS_FIXTURE = ROOT / "tests" / "frontend" / "fixtures" / "parts.min.json"
 DEFAULT_PORT = 8731
-APP_VERSION = "v0.13.0-mock"
+APP_VERSION = "v0.13.1-mock"
 PACE = 1.0  # plot seconds -> game seconds at speed=1 (the whole script is about 60 s)
 MODERATOR = "moderator"
 ENGINE = "engine"
@@ -308,8 +308,240 @@ def roster_avatars(rng: random.Random, parts: dict[str, Any] | None, n: int = 12
     return out  # type: ignore[return-value]
 
 
+# --------------------------------------------------------------------------------------------------
+# v0.13.1 (G37-G44, contract §12.5): memory = the impressions of the other seats + a few lessons (no more recaps that
+# are appended), persona = a fixed format.  A small mirror of app/storage/roster.py: the same limits, the same canonical
+# text, the same refusals (400 = something is over its limit, 422 = the request makes no sense).
+# --------------------------------------------------------------------------------------------------
+
+LIMITS = {
+    "impression_chars": 80,
+    "experience_items": 3,
+    "experience_chars": 300,
+    "memory_chars": 1500,
+    "legacy_chars": 600,
+    "persona_chars": 500,
+    "persona_item_chars": 40,
+}
+NO_IMPRESSION = "（暂无）"
+LEGACY_TITLE = "旧记忆（待整理）"
+_PLACEHOLDERS = (NO_IMPRESSION, "(暂无)", "暂无")
+_HEADING_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*$")
+_IMPRESSION_LINE_RE = re.compile(r"^\s*(?:[-*•·]+\s*|\d{1,2}[.)、．]\s*)?[Nn]([1-9][0-9]?)(?![0-9])(.*)$")
+_BULLET_RE = re.compile(r"^\s*(?:[-*•·]+|\d{1,2}[.)、．]|[（(]\d{1,2}[）)])\s*")
+
+
+class RosterRefusal(Exception):
+    """A roster write the server refuses: ``status`` 400 (over a limit) or 422 (makes no sense); ``detail`` is Chinese."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+def _one_line(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value if value is not None else "")).strip()
+
+
+def _clip(text: str, limit: int) -> str:
+    """At most ``limit`` characters; a text that had to be cut ends with an ellipsis."""
+    return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
+
+
+def clean_impression(value: Any) -> str:
+    text = _one_line(value)
+    return "" if text in _PLACEHOLDERS else text
+
+
+def clean_experience(items: Any) -> list[str]:
+    if isinstance(items, str):
+        items = items.splitlines()
+    out: list[str] = []
+    for item in items or []:
+        text = _one_line(_BULLET_RE.sub("", str(item if item is not None else ""), count=1))
+        if text and text not in _PLACEHOLDERS:
+            out.append(text)
+    return out
+
+
+def clean_text(value: Any, what: str, limit: int) -> str:
+    """Text for a file: line ends normalized, surrounding blank lines dropped; longer than ``limit`` is refused (400)."""
+    text = str(value if value is not None else "").replace("\r\n", "\n").replace("\r", "\n")
+    if "\x00" in text:
+        raise RosterRefusal(400, f"{what}不能包含空字符。")
+    text = text.strip("\n") if text.strip() else ""
+    if len(text) > limit:
+        raise RosterRefusal(400, f"{what}最多 {limit} 个字符（现在 {len(text)} 个），请精简。")
+    return text
+
+
+def empty_parts(owner: str) -> dict[str, Any]:
+    """The structured memory of seat ``owner``: the record, an impression per OTHER seat, lessons, the legacy text."""
+    return {"record": "", "impressions": {pid: "" for pid in PLAYER_IDS if pid != owner}, "experience": [], "legacy": ""}
+
+
+def _label(pid: str, names: dict[str, str]) -> str:
+    return f"{pid} {names[pid]}" if names.get(pid) else pid
+
+
+def memory_body(parts: dict[str, Any], owner: str, names: dict[str, str]) -> str:
+    """The ``## 印象`` and ``## 经验`` sections as they are written: this is what ``memory_chars`` counts."""
+    lines = "\n".join(f"- {_label(pid, names)}：{parts['impressions'].get(pid) or NO_IMPRESSION}" for pid in PLAYER_IDS if pid != owner)
+    lessons = "\n".join(f"- {item}" for item in parts["experience"])
+    return f"## 印象\n{lines}\n\n## 经验" + (f"\n{lessons}" if lessons else "")
+
+
+def render_memory(parts: dict[str, Any], owner: str, names: dict[str, str]) -> str:
+    """The canonical text of a memory file ("" when there is nothing to remember)."""
+    if not (parts["record"].strip() or any(parts["impressions"].values()) or parts["experience"] or parts["legacy"].strip()):
+        return ""
+    blocks = []
+    if parts["record"].strip():
+        blocks.append("## 战绩\n" + parts["record"].strip("\n"))
+    blocks.append(memory_body(parts, owner, names))
+    if parts["legacy"].strip():
+        blocks.append(f"## {LEGACY_TITLE}\n" + parts["legacy"].strip("\n"))
+    return "\n\n".join(blocks)
+
+
+def split_memory(text: str) -> dict[str, str]:
+    chunks: dict[str, list[str]] = {}
+    current = ""
+    for line in (text or "").splitlines():
+        match = _HEADING_RE.match(line)
+        if match:
+            current = match.group(1)
+            chunks.setdefault(current, [])
+        else:
+            chunks.setdefault(current, []).append(line)
+    bodies = {title: "\n".join(lines).strip("\n") for title, lines in chunks.items()}
+    return {title: body for title, body in bodies.items() if title or body.strip()}
+
+
+def parse_memory(text: str, owner: str) -> dict[str, Any]:
+    """A memory text -> its parts.  An old-format or free text (no ``## 印象``) becomes the legacy text, nothing is lost."""
+    sections = split_memory(text)
+    parts = empty_parts(owner)
+    parts["record"] = sections.get("战绩", "")
+    for line in sections.get("印象", "").splitlines():
+        match = _IMPRESSION_LINE_RE.match(line)
+        if not match:
+            continue
+        sid = f"N{int(match.group(1))}"
+        labelled = re.match(r"\s*[^：:\n]{0,24}[：:]\s*(.*)$", match.group(2))
+        if sid in parts["impressions"] and labelled:
+            parts["impressions"][sid] = clean_impression(labelled.group(1))
+    parts["experience"] = clean_experience(sections.get("经验", ""))
+    pieces = []
+    for title, body in sections.items():
+        if title in ("战绩", "印象", "经验") or not body.strip():
+            continue
+        plain = title in ("", "对局记忆", "经验与印象", LEGACY_TITLE)
+        pieces.append(body.strip("\n") if plain else f"【{title}】\n{body.strip(chr(10))}")
+    parts["legacy"] = "\n\n".join(pieces)
+    return parts
+
+
+def check_memory(parts: dict[str, Any], owner: str, names: dict[str, str]) -> None:
+    """A SAVE does not cut anything: refuse (400) the first part that is too long, saying which, how long and the limit."""
+    for pid in PLAYER_IDS:
+        n = len(parts["impressions"].get(pid, ""))
+        if pid != owner and n > LIMITS["impression_chars"]:
+            raise RosterRefusal(400, f"{_label(pid, names)} 的印象最多 {LIMITS['impression_chars']} 字（现在 {n} 字），请精简。")
+    if len(parts["experience"]) > LIMITS["experience_items"]:
+        raise RosterRefusal(400, f"经验最多 {LIMITS['experience_items']} 条（现在 {len(parts['experience'])} 条），请精简。")
+    n = sum(len(item) for item in parts["experience"])
+    if n > LIMITS["experience_chars"]:
+        raise RosterRefusal(400, f"经验合计最多 {LIMITS['experience_chars']} 字（现在 {n} 字），请精简。")
+    n = len(parts["legacy"].strip())
+    if n > LIMITS["legacy_chars"]:
+        raise RosterRefusal(400, f"旧记忆最多 {LIMITS['legacy_chars']} 字（现在 {n} 字），请精简，或交给主持人模型整理。")
+    n = len(memory_body(parts, owner, names))
+    if n > LIMITS["memory_chars"]:
+        raise RosterRefusal(400, f"整份记忆（印象和经验两段，含序号与符号）最多 {LIMITS['memory_chars']} 字（现在 {n} 字），请精简。")
+
+
+def memory_after_parts(owner: str, names: dict[str, str], current: dict[str, Any], spec: Any) -> dict[str, Any]:
+    """The memory after a ``PUT`` with ``memory_parts``: only the parts given change (the record is the engine's: ignored)."""
+    if not isinstance(spec, dict) or set(spec) - {"impressions", "experience", "legacy", "record"}:
+        raise RosterRefusal(422, "memory_parts 只能有 impressions、experience、legacy（record 会被忽略）。")
+    parts = copy.deepcopy(current)
+    imps = spec.get("impressions")
+    if imps is not None:
+        if not isinstance(imps, dict) or not all(isinstance(v, str) for v in imps.values()):
+            raise RosterRefusal(422, "impressions 必须是 {座位 id: 文字}。")
+        for sid, text in imps.items():
+            if sid == owner:
+                raise RosterRefusal(422, f"不能给自己（{sid}）写印象。")
+            if sid not in PLAYER_IDS:
+                raise RosterRefusal(422, f"没有这个座位：{sid}")
+            parts["impressions"][sid] = clean_impression(text)
+    exp = spec.get("experience")
+    if exp is not None:
+        if not isinstance(exp, list) or not all(isinstance(v, str) for v in exp):
+            raise RosterRefusal(422, "experience 必须是文字列表。")
+        parts["experience"] = clean_experience(exp)
+    legacy = spec.get("legacy")
+    if legacy is not None:
+        if not isinstance(legacy, str):
+            raise RosterRefusal(422, "legacy 必须是文字。")
+        parts["legacy"] = clean_text(legacy, "旧记忆", 20000).strip()
+    check_memory(parts, owner, names)
+    return parts
+
+
+def memory_changes(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    """What changed between two states of one memory: the impressions that differ, the lessons (None when the same)."""
+    impressions = [
+        {"id": sid, "before": before["impressions"].get(sid, ""), "after": text}
+        for sid, text in after["impressions"].items()
+        if before["impressions"].get(sid, "") != text
+    ]
+    experience = {"before": list(before["experience"]), "after": list(after["experience"])} if before["experience"] != after["experience"] else None
+    return {"impressions": impressions, "experience": experience}
+
+
+IMPRESSION_BANK = [
+    "发言短，站边快，可信度中。",
+    "逻辑细，抓细节准，值得多听他的。",
+    "爱带节奏，票型和发言常对不上，要留意。",
+    "话少，关键时才开口，看不透。",
+    "容易被带着走，附和多于判断。",
+    "喜欢强攻，风险偏好高，拿到好牌时更爱悍跳。",
+]
+LESSON_BANK = ["第一天先听完警上发言再站边。", "女巫第一晚救人收益高。", "票型比发言可靠，记票型。"]
+
+
+def bump_record(record: str, won: bool) -> str:
+    """The engine-kept ``## 战绩`` line: games, wins, win rate."""
+    m = re.search(r"场次\s*(\d+)\s*·\s*胜\s*(\d+)", record or "")
+    games, wins = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    games += 1
+    wins += 1 if won else 0
+    return f"场次 {games} · 胜 {wins} · 胜率 {round(100 * wins / games)}%"
+
+
+PERSONA_HEADS = ("定位", "说话风格", "思考方式", "决策偏好", "压力下", "口头禅")
+
+
+def persona_draft(notes: str) -> str:
+    """The fixed format of G43: one-line position, then bullets (every line <= 40 characters, the whole <= 500)."""
+    lines = [_one_line(ln) for ln in notes.splitlines() if _one_line(ln)] or ["冷静的观察者"]
+    position = _clip(lines[0], LIMITS["persona_item_chars"])
+    style = [_clip(ln, LIMITS["persona_item_chars"]) for ln in lines[1:3]] or ["句子短，先结论后理由。"]
+    text = (
+        f"【定位】{position}\n【说话风格】\n" + "\n".join(f"- {s}" for s in style) + "\n"
+        "【思考方式】\n- 每轮复盘票型，找出跟票异常的人。\n"
+        "【决策偏好】\n- 证据不足时宁可弃票，也不乱投。\n"
+        "【压力下】\n- 被怀疑时摆出完整时间线，不情绪化。\n"
+        "【口头禅】我们看票。"
+    )
+    return text
+
+
 class MockRoster:
-    """The 12 seats: nickname, avatar description, persona and memory text; plus the "load memory" switch."""
+    """The 12 seats: nickname, avatar description, persona and memory (structured, v0.13.1); plus the "load memory" switch."""
 
     def __init__(self, rng: random.Random, parts: dict[str, Any] | None) -> None:
         self.rng = rng
@@ -326,7 +558,7 @@ class MockRoster:
                 "default_name": DEFAULT_NAMES[i],
                 "avatar": avatars[i],
                 "persona": "",
-                "memory": "",
+                "memory_parts": empty_parts(pid),  # (the canonical text is computed: memory_text / entry)
             }
             for i, pid in enumerate(PLAYER_IDS)
         }
@@ -338,14 +570,33 @@ class MockRoster:
         """What the models (and the moderator's messages) call a player: "N3 Carol"."""
         return f"{pid} {self.name(pid)}" if pid in self.seats else pid
 
+    def names(self) -> dict[str, str]:
+        return {pid: s["name"] for pid, s in self.seats.items()}
+
+    def memory_text(self, pid: str) -> str:
+        """The memory file of a seat in its canonical form (names are labels: a rename shows in every file)."""
+        return render_memory(self.seats[pid]["memory_parts"], pid, self.names())
+
+    def entry(self, pid: str) -> dict[str, Any]:
+        """One seat as GET /api/roster / PUT answer: ``memory`` (the text) and ``memory_parts`` (the same, structured)."""
+        s = self.seats[pid]
+        out = {k: copy.deepcopy(v) for k, v in s.items() if k != "memory_parts"}
+        out["memory"] = self.memory_text(pid)
+        out["memory_parts"] = copy.deepcopy(s["memory_parts"])
+        return out
+
     def entries(self) -> list[dict[str, Any]]:
-        return [copy.deepcopy(self.seats[pid]) for pid in PLAYER_IDS]
+        return [self.entry(pid) for pid in PLAYER_IDS]
 
     def public(self, pid: str) -> dict[str, Any]:
         s = self.seats[pid]
         return {"id": pid, "name": s["name"], "avatar": copy.deepcopy(s["avatar"])}
 
     def validate_name(self, pid: str, name: Any) -> str | None:
+        """Why a NEW name is refused (a message: the write answers 422), or ``None``; a colon raises :class:`RosterRefusal` instead -
+        the real server answers that one with 400 and exactly these words (app/storage/roster.py ``clean_name``: ``:`` and ``：``,
+        nothing else - no normalizing - after the length check and before uniqueness).  The names the roster already holds are
+        never run through this: an old name with a colon still loads and shows."""
         if not isinstance(name, str):
             return "名字必须是文字"
         n = name.strip()
@@ -353,6 +604,8 @@ class MockRoster:
             return "名字不能为空"
         if len(n) > 20:
             return "名字最多 20 个字符"
+        if re.search("[:\uff1a]", n):
+            raise RosterRefusal(400, "名字不能包含冒号（: 或 ：）。")
         if any(s["name"] == n and p != pid for p, s in self.seats.items()):
             return f"名字「{n}」已被其他玩家使用"
         return None
@@ -384,8 +637,8 @@ class MockRoster:
         return [pid]
 
     def clear(self, include_persona: bool) -> None:
-        for s in self.seats.values():
-            s["memory"] = ""
+        for pid, s in self.seats.items():
+            s["memory_parts"] = empty_parts(pid)
             if include_persona:
                 s["persona"] = ""
 
@@ -399,7 +652,7 @@ MOCK_DATA_DIR = "D:\\Arena-Agents\\data"
 MOCK_LEGACY_WORKSPACE = "C:\\Users\\you\\Arena-Agents\\Default"
 MOCK_PASSWORD = "Correct-Horse-9"  # opens every mock archive that holds API keys (a file name with "keys")
 MOCK_MAX_ARCHIVE_BYTES = 2 * 1024**3
-MOCK_APP_VERSION = "v0.13.0"
+MOCK_APP_VERSION = "v0.13.1"
 MAX_PASSWORD_ATTEMPTS = 10
 EXPORT_NAME_RE = re.compile(r"^arena-[0-9]{8}-[0-9]{6}\.arenaagents$")
 WRONG_PASSWORD = "密码错误或 API Key 部分已损坏"
@@ -705,7 +958,9 @@ class MockArchive:
 # --------------------------------------------------------------------------------------------------
 
 MSG_KINDS = {"speech", "announce", "template", "challenge", "reply", "ability", "system"}
-AGENT_STATES = {"thinking", "acting", "sleeping", "human"}  # v0.13: "human" = a person plays the seat (F6)
+#: v0.13: "human" = a person plays the seat (F6); v0.13.1: "held" = woken up, waiting in front of the soft-pause gate (§12.2)
+AGENT_STATES = {"thinking", "acting", "sleeping", "human", "held"}
+SOFT_PAUSE_STATES = {"draining", "held"}  # v0.13.1 (§12.2): PublicSession.soft_pause = null | {"state", "in_flight"}
 GAME_STATUSES = {"idle", "running", "paused", "finished"}
 PAUSE_REASONS = {"user", "hold", "error", "stall", "budget", ""}
 FLOOR_KINDS = {"turn", "queue", "free", "none"}
@@ -733,6 +988,8 @@ SESSION_UPDATED_KEYS = {
     "review",
     "stall_notice",
     "clock",  # the real backend adds the game clock (seconds) to every session.updated (contracts §10.8)
+    "soft_pause",  # v0.13.1 (§12.2): null | {"state": "draining" | "held", "in_flight": n} - in every session.updated
+    "clock_running",  # v0.13.1 (§12.2): does the game clock run? (status stays "running" in a soft pause)
 }
 METRIC_FIELDS = (
     "activations",
@@ -781,6 +1038,13 @@ def validate_floor(floor: Any, where: str = "floor") -> list[str]:
         errs.append(f"{where}.paused")
     if floor.get("seconds_left") is not None and not _is_num(floor.get("seconds_left")):
         errs.append(f"{where}.seconds_left")
+    # v0.13.1 (§12.2): `untimed` = there are active tokens and none of them has a deadline (a person holds a public
+    # floor); then there is no countdown to show.  Optional for an older server, a bool whenever it is there.
+    if "untimed" in floor:
+        if not isinstance(floor["untimed"], bool):
+            errs.append(f"{where}.untimed")
+        elif floor["untimed"] and floor.get("seconds_left") is not None:
+            errs.append(f"{where}.untimed: an untimed floor has no seconds_left")
     queue = floor.get("queue")
     if not isinstance(queue, list):
         errs.append(f"{where}.queue")
@@ -948,6 +1212,64 @@ def validate_avatar(a: Any, where: str = "avatar") -> list[str]:
     return []
 
 
+CALL_KINDS = {"call", "event"}
+CALL_STATUSES = {"ok", "retry", "timeout", "error", "cancelled"}
+CALL_PURPOSES = {"turn", "review", "refine", "runtime"}
+CALL_INT_FIELDS = ("attempt", "elapsed_ms", "prompt_tokens", "completion_tokens", "cache_read_tokens", "cache_write_tokens", "http_status")
+CALL_STR_FIELDS = ("provider_id", "model_id", "finish_reason", "error_class", "message")
+CALL_KEYS = {"id", "ts", "gt", "kind", "status", "actor_id", "actor_name", "purpose", *CALL_INT_FIELDS, *CALL_STR_FIELDS}
+CALL_RING = 2000  # the error log keeps the last 2000 lines of the game (contract §12.3)
+
+
+def validate_call(c: Any, where: str = "call") -> list[str]:
+    """One ``CallEntry`` of the error log (contract §12.3).  It never carries a prompt, an answer, a header or a key."""
+    errs: list[str] = []
+    if not isinstance(c, dict):
+        return [f"{where}: not an object"]
+    if set(c) - CALL_KEYS:
+        errs.append(f"{where}: keys {sorted(set(c) - CALL_KEYS)}")  # (a prompt / answer / header / key has no field here)
+    if not _is_int(c.get("id")) or c["id"] <= 0:
+        errs.append(f"{where}.id")
+    if not isinstance(c.get("ts"), str) or not c["ts"]:
+        errs.append(f"{where}.ts")
+    if not _opt_num(c.get("gt")):
+        errs.append(f"{where}.gt")
+    if c.get("kind") not in CALL_KINDS:
+        errs.append(f"{where}.kind")
+    if c.get("status") not in CALL_STATUSES:
+        errs.append(f"{where}.status")
+    for k in ("actor_id", "actor_name"):
+        if not isinstance(c.get(k), str) or not c[k]:
+            errs.append(f"{where}.{k}")
+    if c.get("purpose") not in CALL_PURPOSES:
+        errs.append(f"{where}.purpose")
+    for k in CALL_INT_FIELDS:
+        if c.get(k) is not None and not _is_int(c[k]):
+            errs.append(f"{where}.{k}")
+    for k in CALL_STR_FIELDS:
+        if not _opt_str(c.get(k)):
+            errs.append(f"{where}.{k}")
+    if isinstance(c.get("message"), str) and len(c["message"]) > 500:
+        errs.append(f"{where}.message: more than 500 characters")
+    if c.get("kind") == "event" and (c.get("attempt") is not None or c.get("purpose") != "runtime"):
+        errs.append(f"{where}: an event has no attempt and the purpose runtime")
+    return errs
+
+
+def validate_review_changes(ch: Any, where: str = "changes") -> list[str]:
+    """``review.progress.changes`` of a finished review (contract §12.5): only what changed."""
+    if not isinstance(ch, dict) or set(ch) != {"impressions", "experience"}:
+        return [where]
+    errs: list[str] = []
+    imps = ch["impressions"]
+    if not (isinstance(imps, list) and all(isinstance(i, dict) and set(i) == {"id", "before", "after"} and all(isinstance(v, str) for v in i.values()) for i in imps)):
+        errs.append(f"{where}.impressions")
+    exp = ch["experience"]
+    if exp is not None and not (isinstance(exp, dict) and set(exp) == {"before", "after"} and _str_list(exp["before"]) and _str_list(exp["after"])):
+        errs.append(f"{where}.experience")
+    return errs
+
+
 def validate_takeover(t: Any, where: str = "takeover") -> list[str]:
     """``PublicSession.takeover`` / the ``takeover.updated`` payload (contract §11.7)."""
     errs: list[str] = []
@@ -976,6 +1298,11 @@ def validate_takeover(t: Any, where: str = "takeover") -> list[str]:
                 and isinstance(floor.get("paused"), bool) and all(_opt_num(floor.get(k)) for k in ("messages_left", "chars_left", "seconds_left", "deadline_clock"))
             ):
                 errs.append(f"{where}.channels.{cid}.floor")
+            elif floor is not None and "untimed" in floor and (
+                # v0.13.1 (§12.2): an untimed token has neither a countdown nor a deadline (both null)
+                not isinstance(floor["untimed"], bool) or (floor["untimed"] and (floor.get("seconds_left") is not None or floor.get("deadline_clock") is not None))
+            ):
+                errs.append(f"{where}.channels.{cid}.floor.untimed")
     reqs = t.get("requests")
     if not isinstance(reqs, list):
         errs.append(f"{where}.requests")
@@ -1058,7 +1385,32 @@ def validate_session(s: Any) -> list[str]:
     if not isinstance(s.get("memory_enabled"), bool):
         errs.append("session.memory_enabled")
     errs += validate_review(s.get("review"), "session.review")
+    # v0.13.1 (§12.2): the soft pause and whether the game clock runs.  Optional (an older server sends neither); when they
+    # are there they agree with the status: a soft pause only exists while the game "runs" - with the clock stopped.
+    if "soft_pause" in s:
+        errs += validate_soft_pause(s["soft_pause"], "session.soft_pause")
+    if "clock_running" in s:
+        if not isinstance(s["clock_running"], bool):
+            errs.append("session.clock_running")
+        elif s["clock_running"] and (s.get("status") != "running" or s.get("soft_pause")):
+            errs.append("session.clock_running: true only while the game runs and nothing holds the clock")
+        elif not s["clock_running"] and s.get("status") == "running" and not s.get("soft_pause") and "soft_pause" in s:
+            errs.append("session.clock_running: a running game without a soft pause has a running clock")
+    if s.get("soft_pause") and s.get("status") != "running":
+        errs.append("session.soft_pause: only a running game can be soft-paused")
     return errs
+
+
+def validate_soft_pause(sp: Any, where: str = "soft_pause") -> list[str]:
+    """``PublicSession.soft_pause`` (contract §12.2): null, or {"state": "draining" | "held", "in_flight": n} - held has none."""
+    if sp is None:
+        return []
+    if not (isinstance(sp, dict) and set(sp) == {"state", "in_flight"} and sp.get("state") in SOFT_PAUSE_STATES
+            and _is_int(sp.get("in_flight")) and sp["in_flight"] >= 0):
+        return [where]
+    if sp["state"] == "held" and sp["in_flight"] != 0:
+        return [f"{where}: held has nothing in flight"]
+    return []
 
 
 ARCHIVE_EVENT_KEYS = {"job_id", "kind", "phase", "done", "total", "status", "message", "code", "result"}
@@ -1184,6 +1536,20 @@ def validate_event(ev: Any) -> list[str]:
     elif etype == "review.progress":
         if not (isinstance(data.get("id"), str) and data.get("state") in REVIEW_STATES and isinstance(data.get("message"), str)):
             errs.append(w)
+        # v0.13.1 (contract §12.5): a finished review always says what it changed in the memory; the others carry nothing of the kind
+        if data.get("state") == "done":
+            errs += validate_review_changes(data.get("changes"), f"{w}.changes")
+        elif "changes" in data:
+            errs.append(f"{w}.changes: only a finished review has them")
+        if set(data) - {"id", "state", "message", "changes"}:
+            errs.append(f"{w}: keys {sorted(set(data) - {'id', 'state', 'message', 'changes'})}")
+    elif etype == "llm.call":
+        # v0.13.1 (G35, contract §12.3): one line of the error log; an ordinary event that only carries the summary
+        errs += validate_call(data.get("call"), f"{w}.call")
+        if not _is_int(data.get("errors")) or data["errors"] < 0:
+            errs.append(f"{w}.errors")
+        if set(data) - {"call", "errors"}:
+            errs.append(f"{w}: keys {sorted(set(data) - {'call', 'errors'})}")
     elif etype == "session.updated":
         if not data or set(data) - SESSION_UPDATED_KEYS:
             errs.append(f"{w}: keys {sorted(set(data) - SESSION_UPDATED_KEYS)}")
@@ -1191,6 +1557,13 @@ def validate_event(ev: Any) -> list[str]:
             errs += validate_budget(data["budget"], f"{w}.budget")
         if "review" in data:
             errs += validate_review(data["review"], f"{w}.review")
+        # v0.13.1 (§12.2): both travel in every session.updated (the soft pause freezes the clock: it comes along)
+        if "soft_pause" in data:
+            errs += validate_soft_pause(data["soft_pause"], f"{w}.soft_pause")
+        if "clock_running" in data and not isinstance(data["clock_running"], bool):
+            errs.append(f"{w}.clock_running")
+        if ("soft_pause" in data) != ("clock_running" in data):
+            errs.append(f"{w}: soft_pause and clock_running travel together")
     elif etype == "takeover.updated":
         errs += validate_takeover(data.get("takeover"), f"{w}.takeover")
     elif etype == "archive.progress":
@@ -1281,7 +1654,7 @@ class VirtualLoop(asyncio.SelectorEventLoop):
 
 
 def floor_none() -> dict[str, Any]:
-    return {"kind": "none", "active": None, "paused": False, "seconds_left": None, "queue": [], "free": None}
+    return {"kind": "none", "active": None, "paused": False, "seconds_left": None, "untimed": False, "queue": [], "free": None}
 
 
 def make_channel(cid: str, name: str, members: list[str], *, mode: str = "closed", system: bool = False, owner: str | None = None, ctype: str = "group") -> dict[str, Any]:
@@ -1357,7 +1730,7 @@ def build_session(session_id: str, bindings: dict[str, Any], roster: MockRoster,
     return {
         "session_id": session_id,
         "schema_version": 5,
-        "version": "v0.13.0",
+        "version": "v0.13.1",
         "title": "Arena-Agents",
         "scenario_name": "werewolf_12p",
         "scenario_title": "狼人杀 12 人局（模拟数据）",
@@ -1400,6 +1773,9 @@ def build_session(session_id: str, bindings: dict[str, Any], roster: MockRoster,
         "demo": demo,
         # v0.13 (F2, F10): nobody plays a seat yet; "reshuffle_available": the game has not started (F5)
         "takeover": {"seat": None, "reshuffle_available": True},
+        # v0.13.1 (§12.2): no soft pause; the game clock does not run before the start
+        "soft_pause": None,
+        "clock_running": False,
     }
 
 
@@ -1462,6 +1838,26 @@ class MockGame:
         self.deadlines: dict[str, float] = {}  # request id -> game-clock second it closes at
         self.reviewed: dict[str, bool] = {}
         self._reset_human()
+        self._reset_observe()
+        self._reset_soft()
+
+    def _reset_soft(self) -> None:
+        """v0.13.1: the soft pause (G1-G9, contract §12.2) is a volatile flag of ONE running game: a new game has none.
+        (Its dice are its own: the script of the game itself is exactly what it was.)"""
+        self.soft: dict[str, Any] | None = None  # None | {"state": "draining" | "held", "in_flight": n}
+        self.soft_task: asyncio.Task[None] | None = None  # the calls in flight finishing (real time: the clock is frozen)
+        self.soft_rng = random.Random(self.seed + 31337)
+
+    def _reset_observe(self) -> None:
+        """v0.13.1: the error log (G32-G36) and the thinking record (G21-G26) belong to ONE game: a new game starts empty.
+        (Their dice are their own, so the script of the game itself is exactly what it was.)"""
+        self.calls: list[dict[str, Any]] = []  # CallEntry, oldest first, at most CALL_RING
+        self.call_seq = 0
+        self.call_rng = random.Random(self.seed + 4242)
+        self.thoughts: dict[str, list[dict[str, Any]]] = {}  # agent id -> ThoughtItem, oldest first
+        self.thought_gen: dict[str, int] = {}
+        self.thought_pos = 0
+        self.thought_rng = random.Random(self.seed + 777)
 
     def _reset_human(self) -> None:
         """v0.13: a person may play one seat (F2).  The script waits for them where their seat would act."""
@@ -1476,7 +1872,7 @@ class MockGame:
 
     # ----------------------------------------------------------------------------- plumbing
     #: events that cannot change what the played seat may do (no ``takeover.updated`` after them)
-    _SEAT_QUIET = frozenset({"agent.status", "agent.metrics", "budget.updated", "budget.warning", "budget.reached", "takeover.updated"})
+    _SEAT_QUIET = frozenset({"agent.status", "agent.metrics", "budget.updated", "budget.warning", "budget.reached", "takeover.updated", "llm.call"})
 
     def emit(self, etype: str, **data: Any) -> None:
         ev = self.bus.publish(etype, data)
@@ -1490,6 +1886,9 @@ class MockGame:
             if r["status"] == "open" and r["id"] in self.deadlines:
                 r["seconds_left"] = round(max(0.0, self.deadlines[r["id"]] - self.session["clock"]), 2)
         self.session["takeover"] = self.compute_takeover()
+        # v0.13.1 (§12.2): a snapshot always says whether a soft pause holds the game and whether the clock runs
+        self.session["soft_pause"] = None if self.soft is None else dict(self.soft)
+        self.session["clock_running"] = self.clock_running()
         return copy.deepcopy(self.session)
 
     @property
@@ -1566,7 +1965,14 @@ class MockGame:
             "memory_enabled": s["memory_enabled"],
             "review": copy.deepcopy(s["review"]),
             "stall_notice": s["stall_notice"],
+            # v0.13.1 (§12.2): like the real backend, every session.updated carries the game clock (frozen the moment a
+            # soft pause begins), the soft pause itself and whether the clock runs - the page's countdown follows them
+            "clock": round(self.clock, 3),
+            "soft_pause": None if self.soft is None else dict(self.soft),
+            "clock_running": self.clock_running(),
         }
+        s["soft_pause"] = None if self.soft is None else dict(self.soft)  # (the session the snapshots hold says the same)
+        s["clock_running"] = data["clock_running"]
         self.emit("session.updated", **data)
 
     def status_text(self, text: str) -> None:
@@ -1597,7 +2003,7 @@ class MockGame:
         self.publish_session_updated()
 
     def set_agent(self, aid: str, state: str, until: float | None = None) -> None:
-        """thinking / acting / sleeping (``until``: game-clock second a timed sleep ends)."""
+        """thinking / acting / sleeping (``until``: game-clock second a timed sleep ends); "held" is set by the soft pause."""
         until = until if state == "sleeping" else None
         if aid == self.takeover_seat:
             return  # a person plays this seat: it has no agent that thinks, acts or sleeps (F6)
@@ -1605,6 +2011,10 @@ class MockGame:
         self.intent[aid] = (state, until)
         if self.session["status"] == "paused":
             return  # a paused game keeps everybody asleep; the intent is restored on resume
+        if self.soft is not None and state in ("thinking", "acting"):
+            # v0.13.1 (G3): in a soft pause an agent that is woken up waits in front of the gate - "held" - and goes
+            # on (with this intent) when the pause ends
+            state, until = "held", None
         if node["state"] == state and node.get("sleep_until") == until:
             return
         node["state"] = state
@@ -1638,6 +2048,87 @@ class MockGame:
             self.set_agent(aid, "sleeping")
             raise
 
+    # ----------------------------------------------------------------------------- v0.13.1: the soft pause (G1-G9)
+    # The real backend (app/game/softpause_runtime.py) lets the model calls in flight finish, then holds every agent in
+    # front of the gate and stops the game clock; the mock's script is not an agent runtime, so it plays the same
+    # picture: at the click the clock and the script stop (``wait()`` blocks on ``gate``), the agents that were
+    # *thinking* reach the gate after a second or three each, in REAL time ("收尾中" with a falling count), the ones that
+    # were acting hold at once, and when all have stopped the pause is "held".  The person's own actions (``seat_*``)
+    # stay possible: they are plain method calls.  Continuing lets the script run on.
+    def clock_running(self) -> bool:
+        """Does the game clock run?  ``status`` stays "running" during a soft pause; the clock does not (G2)."""
+        return self.session["status"] == "running" and self.soft is None
+
+    def _hold(self, aid: str) -> None:
+        """One agent has reached the gate: its card says "held" (it keeps what it was doing in ``intent``)."""
+        node = self.session["moderator"] if aid == MODERATOR else self.player(aid)
+        if node["state"] != "held":
+            node["state"] = "held"
+            node["sleep_until"] = None
+            self.emit("agent.status", id=aid, state="held", until=None)
+
+    def soft_pause(self) -> None:
+        """「⏸ 暂停 agent」: only while the game runs and a seat is played (409 otherwise, a sentence with its full stop,
+        like the real backend); already soft-paused: nothing happens."""
+        s = self.session
+        if s["status"] != "running":
+            raise TakeoverError(409, "对局没有在运行。")
+        if self.takeover_seat is None:
+            raise TakeoverError(409, "只有接管座位时才能软暂停。")
+        if self.soft is not None:
+            return
+        agents = [a for a in [MODERATOR, *PLAYER_IDS] if a != self.takeover_seat]
+        state_of = lambda a: (s["moderator"] if a == MODERATOR else self.player(a))["state"]  # noqa: E731
+        in_flight = [a for a in agents if state_of(a) == "thinking"]  # their model call is still on its way
+        acting = [a for a in agents if state_of(a) == "acting"]  # tools run synchronously: already at the gate
+        self.gate.clear()  # the script and the game clock stop at the click
+        self.soft = {"state": "draining" if in_flight else "held", "in_flight": len(in_flight)}
+        for aid in acting:
+            self._hold(aid)
+        self.publish_session_updated()  # carries the frozen clock
+        if in_flight:
+            self.soft_task = asyncio.get_running_loop().create_task(self._drain(in_flight))
+
+    async def _drain(self, pending: list[str]) -> None:
+        """The calls that were in flight come back (real time - the game clock is frozen).  Like real model calls they run
+        in parallel and each takes a second or three of its own, so the count falls one by one (a person looking at the
+        page can see "收尾中（还有 N 个回答）" before "agent 已暂停")."""
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        due = sorted((self.soft_rng.uniform(1.0, 3.5) / self.speed, aid) for aid in pending)
+        for when, aid in due:
+            await asyncio.sleep(max(0.0, start + when - loop.time()))
+            if self.soft is None:
+                return
+            self._hold(aid)
+            left = self.soft["in_flight"] - 1
+            self.soft = {"state": "draining", "in_flight": left} if left > 0 else {"state": "held", "in_flight": 0}
+            self.publish_session_updated()
+
+    def _clear_soft(self) -> None:
+        """Forget the soft pause (a hard pause, the end of the game, a new game ...: G6)."""
+        task, self.soft_task = self.soft_task, None
+        if task is not None and not task.done():
+            task.cancel()
+        self.soft = None
+
+    def soft_resume(self) -> None:
+        """「▶ 继续」: the agents go on from where they were (also cancels a pause that is still draining)."""
+        if self.soft is None:
+            raise TakeoverError(409, "没有处于软暂停。")
+        self._clear_soft()
+        for aid in [MODERATOR, *PLAYER_IDS]:
+            if aid == self.takeover_seat:
+                continue
+            node = self.session["moderator"] if aid == MODERATOR else self.player(aid)
+            if node["state"] == "held":  # (the ones that were asleep never moved)
+                state, until = self.intent.get(aid, ("sleeping", None))
+                node["state"] = state
+                node["sleep_until"] = until if state == "sleeping" else None
+                self.emit("agent.status", id=aid, state=state, until=node["sleep_until"])
+        self.gate.set()
+        self.publish_session_updated()
+
     # ----------------------------------------------------------------------------- tokens & budget
     def meter(self, aid: str, *, tools: int | None = None, think: int | None = None, reject: float = 0.05) -> None:
         """Account one LLM call for ``aid`` (four token kinds, E11) and publish its absolute metrics."""
@@ -1666,7 +2157,8 @@ class MockGame:
         m["completion_tokens"] += ctok
         m["cost_usd"] = round(m["cost_usd"] + cost, 6)
         m["tool_calls"] += tools if tools is not None else r.randint(1, 3 if not big else 5)
-        m["thinking_rounds"] += think if think is not None else r.randint(1, 2)
+        rounds = think if think is not None else r.randint(1, 2)
+        m["thinking_rounds"] += rounds
         if r.random() < reject:
             m["rejections"] += 1
         side = m["prompt_tokens"] + m["cache_read_tokens"] + m["cache_write_tokens"]
@@ -1687,8 +2179,180 @@ class MockGame:
         bm["cache_write_tokens"] += cache_write
         bm["completion_tokens"] += ctok
         bm["cost_usd"] = round(bm["cost_usd"] + cost, 6)
+        self.record_turn(aid, model, miss, cache_read, cache_write, ctok, rounds)  # v0.13.1: the error log + the thinking record
         self.emit("agent.metrics", id=aid, **{k: m[k] for k in METRIC_FIELDS})
         self.refresh_budget()
+
+    # ----------------------------------------------------------------------------- v0.13.1: the error log (G32-G36)
+    def call_actor_name(self, actor_id: str, purpose: str = "turn") -> str:
+        if actor_id == MODERATOR:
+            return "主持人"
+        if actor_id == "roster":
+            return "名册"
+        if actor_id == ENGINE:
+            return "系统"
+        return self.roster.name(actor_id)
+
+    def call_counts(self) -> tuple[int, int]:
+        """(errors, retries) of the log: the red badge counts ``timeout`` + ``error``."""
+        errors = sum(1 for c in self.calls if c["status"] in ("timeout", "error"))
+        return errors, sum(1 for c in self.calls if c["status"] == "retry")
+
+    def log_call(self, actor_id: str, *, kind: str = "call", status: str = "ok", purpose: str = "turn", attempt: int | None = 1,
+                 **fields: Any) -> dict[str, Any]:
+        """Append one line to the error log and publish ``llm.call`` (an ordinary, droppable event)."""
+        self.call_seq += 1
+        binding = self.session["model_bindings"].get(MODERATOR if actor_id == "roster" else actor_id, {})  # ("完善" uses the moderator's model)
+        entry: dict[str, Any] = {
+            "id": self.call_seq,
+            "ts": now_iso().replace("+00:00", "Z"),
+            "gt": round(self.clock, 3),
+            "kind": kind,
+            "status": status,
+            "actor_id": actor_id,
+            "actor_name": self.call_actor_name(actor_id, purpose),
+            "purpose": "runtime" if kind == "event" else purpose,
+            "provider_id": binding.get("provider_id") if kind == "call" else None,
+            "model_id": binding.get("model_id") if kind == "call" else None,
+            "attempt": attempt if kind == "call" else None,
+            "elapsed_ms": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "cache_read_tokens": None,
+            "cache_write_tokens": None,
+            "finish_reason": None,
+            "http_status": None,
+            "error_class": None,
+            "message": None,
+        }
+        entry.update({k: v for k, v in fields.items() if k in entry})
+        if isinstance(entry["message"], str):
+            entry["message"] = entry["message"][:500]
+        self.calls.append(entry)
+        if len(self.calls) > CALL_RING:
+            del self.calls[0 : len(self.calls) - CALL_RING]
+        self.emit("llm.call", call=copy.deepcopy(entry), errors=self.call_counts()[0])
+        return entry
+
+    def calls_view(self, *, after: int = 0, limit: int = 500, errors_only: bool = False) -> dict[str, Any]:
+        """``GET /api/llm/calls``: the lines with an id above ``after`` (the NEWEST ``limit`` of them), oldest first."""
+        rows = [c for c in self.calls if c["id"] > after and (not errors_only or c["status"] in ("retry", "timeout", "error"))]
+        if len(rows) > limit:
+            rows = rows[-limit:]
+        errors, retries = self.call_counts()
+        return {"calls": copy.deepcopy(rows), "last_id": self.call_seq, "total": len(self.calls), "errors": errors, "retries": retries}
+
+    def rebuild_calls(self, *, drop_every: int = 4, jitter_ms: int = 3) -> dict[str, Any]:
+        """What the real backend does after a restart, a load or an import (contract §12.3): the log of the game is rebuilt from its
+        trace log, so its lines are numbered from 1 AGAIN.  The lines a trace does not hold are gone (here: every ``drop_every``-th
+        successful turn - a call an agent threw away; 0 keeps them all) and a failed line carries the time of its trace record,
+        ``jitter_ms`` off the time of the live line.  Nothing is announced: a client learns of it when it reads the log, or from the
+        next line - which now has a LOW id."""
+        kept = [c for c in self.calls if not (drop_every > 0 and c["status"] == "ok" and c["purpose"] == "turn" and c["id"] % drop_every == 0)]
+        for line in kept:
+            if line["status"] != "ok" and jitter_ms:
+                moved = datetime.fromisoformat(line["ts"]) + timedelta(milliseconds=jitter_ms)
+                line["ts"] = moved.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        for number, line in enumerate(kept, start=1):
+            line["id"] = number
+        self.calls = kept
+        self.call_seq = len(kept)
+        errors, retries = self.call_counts()
+        return {"ok": True, "total": len(kept), "last_id": self.call_seq, "errors": errors, "retries": retries}
+
+    def inject_failure(self, actor_id: str = "N3", *, status: str = "error", retries: int = 2, http_status: int | None = 429,
+                       error_class: str = "RateLimitError", message: str | None = None, give_up: bool = True,
+                       purpose: str = "turn") -> list[dict[str, Any]]:
+        """A model request that fails: ``retries`` attempts the client retries, then the request ends as ``status``
+        (``error`` / ``timeout`` / ``cancelled``).  With ``give_up`` the agent also gives its action up: a runtime line
+        and the ``error`` event (the "重试用尽" toast, which stays)."""
+        text = message or ("调用超过 120 秒仍未返回，已放弃。" if status == "timeout" else "Rate limit reached for requests（模拟的限流错误）")
+        out = [
+            self.log_call(actor_id, status="retry", purpose=purpose, attempt=i + 1, elapsed_ms=800 + 450 * i, http_status=http_status,
+                          error_class=error_class, message=text)
+            for i in range(max(0, retries))
+        ]
+        out.append(self.log_call(actor_id, status=status, purpose=purpose, attempt=max(0, retries) + 1, elapsed_ms=120000 if status == "timeout" else 900,
+                                 http_status=None if status in ("timeout", "cancelled") else http_status,
+                                 error_class="TimeoutError" if status == "timeout" else None if status == "cancelled" else error_class,
+                                 message=None if status == "cancelled" else text))
+        if give_up and status != "cancelled":
+            out.append(self.log_call(actor_id, kind="event", status="error", error_class=error_class, http_status=http_status,
+                                     message=f"{self.call_actor_name(actor_id)} 的这次行动失败，已放弃：{text}"))
+            self.emit("error", message=f"{self.call_actor_name(actor_id)} 的行动失败，已放弃（{text}）", agent_id=actor_id)
+        return out
+
+    def record_turn(self, aid: str, model: str, miss: int, cache_read: int, cache_write: int, ctok: int, rounds: int) -> None:
+        """One scripted model call of ``aid``: its line in the log (sometimes after a retry) and its thinking bubbles."""
+        dice = self.call_rng
+        if dice.random() < 0.08:  # a rate limit that the client retries: the log shows the retry, the call succeeds
+            self.log_call(aid, status="retry", attempt=1, elapsed_ms=dice.randint(300, 1500), http_status=429, error_class="RateLimitError",
+                          message="Rate limit reached for requests（模拟的限流错误，客户端稍后重试）")
+            attempt = 2
+        else:
+            attempt = 1
+        self.log_call(aid, status="ok", attempt=attempt, elapsed_ms=dice.randint(700, 9000), prompt_tokens=miss, completion_tokens=ctok,
+                      cache_read_tokens=cache_read, cache_write_tokens=cache_write, finish_reason=dice.choice(["stop", "stop", "stop", "tool_calls"]))
+        self.note_thoughts(aid, model, rounds)
+
+    # ----------------------------------------------------------------------------- v0.13.1: the thinking record (G21-G26)
+    THOUGHT_BANK = (
+        "现在是「{phase}」。先把场上的信息理一遍：谁发过言、谁还没表态，再决定这一轮要做什么。",
+        "{a} 刚才的说法和上一轮不太一致，先记下来，等投票时再看他的票型。",
+        "不急着表态。{a} 和 {b} 的立场有冲突，听完后面的发言再站边更稳妥。",
+        "如果我现在发言，应该先给结论，再用一两句话解释理由；别说得太满，给自己留余地。",
+        "这一轮的信息不多，先观察 {a} 的反应；没有把握的事不写进发言里。",
+    )
+    SELF_TALK_BANK = ("先等一等，看看其他人怎么说。", "（没有需要立刻做的事，继续观察。）", "这条信息和我之前的判断一致，保持不变。")
+
+    def note_thoughts(self, aid: str, model: str, rounds: int) -> None:
+        """What the model thought in one activation (G23): ``rounds`` bubbles of thinking, sometimes a line of self-talk.  Kept
+        in memory only (the real backend reads them from the trace log): they never travel in an event or in the session."""
+        dice = self.thought_rng
+        gen = self.thought_gen.get(aid, 0) + dice.choice([1, 1, 1, 2])  # (not always consecutive: a cancelled run counts too)
+        self.thought_gen[aid] = gen
+        others = [self.name(p) for p in self.alive() if p != aid] or ["对方"]
+        a, b = dice.choice(others), dice.choice(others)
+        items = self.thoughts.setdefault(aid, [])
+        kinds = ["thought"] * max(1, rounds) + (["content"] if dice.random() < 0.35 else [])
+        for round_no, kind in enumerate(kinds, start=1):
+            text = (dice.choice(self.THOUGHT_BANK).format(phase=self.session["phase_text"] or "未开始", a=a, b=b)
+                    if kind == "thought" else dice.choice(self.SELF_TALK_BANK))
+            self.thought_pos += 120 + len(text) * 3
+            items.append({
+                "id": f"1:{self.thought_pos}",
+                "ts": now_iso().replace("+00:00", "Z"),
+                "gt": round(self.clock, 3),
+                "gen": gen,
+                "round": min(round_no, rounds + 1),
+                "kind": kind,
+                "text": text,
+                "model": model,
+            })
+        del items[0 : max(0, len(items) - 400)]
+
+    def thought_page(self, agent_id: str, before: str | None, limit: int) -> dict[str, Any]:
+        """``GET /api/agents/{id}/thoughts``: the newest page first; ``before`` = the cursor of an earlier answer."""
+        if agent_id != MODERATOR and agent_id not in PLAYER_IDS:
+            raise TakeoverError(404, "没有这个玩家。")
+        if (self.takeover_seat is not None and self.session["status"] != "finished" and agent_id != self.takeover_seat):
+            raise TakeoverError(409, "接管期间不能查看其他玩家的思考记录，对局结束后开放。")
+        rows = self.thoughts.get(agent_id, [])
+        if before is not None:
+            m = re.fullmatch(r"(\d+):(\d+)", before)
+            if not m:
+                raise TakeoverError(400, "游标无效。")
+            limit_key = (int(m.group(1)), int(m.group(2)))
+            rows = [t for t in rows if tuple(int(x) for x in t["id"].split(":")) < limit_key]
+        page = rows[-limit:]
+        has_more = len(rows) > len(page)
+        return {
+            "agent_id": agent_id,
+            "name": self.name(agent_id),
+            "items": copy.deepcopy(page),
+            "next_before": page[0]["id"] if page and has_more else None,
+            "has_more": bool(page) and has_more,
+        }
 
     def budget_state(self) -> str:
         b = self.session["budget"]
@@ -1755,8 +2419,8 @@ class MockGame:
         self.commit(cid, MODERATOR, text, "announce", template_id=template_id)
         self.stir({MODERATOR}, 3)
 
-    def create_channel(self, cid: str, name: str, members: list[str], mode: str = "closed") -> None:
-        ch = make_channel(cid, name, members, mode=mode)
+    def create_channel(self, cid: str, name: str, members: list[str], mode: str = "closed", ctype: str = "group") -> None:
+        ch = make_channel(cid, name, members, mode=mode, ctype=ctype)
         self.session["channels"].append(ch)
         self.emit("channel.created", channel=copy.deepcopy(ch))
 
@@ -1811,7 +2475,16 @@ class MockGame:
         self.emit("player.updated", player_id=pid, tags=list(p["tags"]), out=p["out"])
 
     # --- floors
-    async def run_queue(self, cid: str, order: list[str], speeches: dict[str, tuple[Any, ...]], *, pass_delay: float = 0.35) -> None:
+    def queue_floor(self, ch: dict[str, Any], active: str | None, queue: list[dict[str, Any]], seconds: float = 90.0) -> dict[str, Any]:
+        """The FloorView of a speaking queue.  The holder of the token has ``seconds`` (90 s) - except the person who plays a
+        seat in a *public* channel (v0.13.1, G10, §12.2): that turn has no deadline, ``untimed`` is true and there is no
+        countdown."""
+        untimed = active is not None and active == self.takeover_seat and ch["type"] == "public"
+        return {"kind": "queue", "active": active, "paused": False, "seconds_left": None if untimed else seconds,
+                "untimed": untimed, "queue": queue, "free": None}
+
+    async def run_queue(self, cid: str, order: list[str], speeches: dict[str, tuple[Any, ...]], *, pass_delay: float = 0.35,
+                        token_seconds: float = 90.0) -> None:
         """``set_floor_queue``: one active token at a time; ``floor.changed`` advances after each speaker."""
         ch = self.channel(cid)
         total = len(order)
@@ -1819,10 +2492,10 @@ class MockGame:
         queue[0]["state"] = "active"
         ch["mode"] = "queue"
         self.emit("channel.updated", channel=copy.deepcopy(ch))
-        self.set_floor(cid, {"kind": "queue", "active": order[0], "paused": False, "seconds_left": 90.0, "queue": queue, "free": None})
+        self.set_floor(cid, self.queue_floor(ch, order[0], queue, token_seconds))
         for i, holder in enumerate(order):
             if holder == self.takeover_seat:
-                await self.human_turn(cid, queue, i)  # a person plays this seat: wait for their words (F7)
+                await self.human_turn(cid, queue, i, seconds=token_seconds)  # a person plays this seat: wait for their words (F7)
             elif holder in speeches:
                 spec = speeches[holder]
                 truncated = spec[2] if len(spec) > 2 else None
@@ -1835,14 +2508,7 @@ class MockGame:
             queue[i]["state"] = "done"
             if i + 1 < total:
                 queue[i + 1]["state"] = "active"
-            floor = {
-                "kind": "queue",
-                "active": order[i + 1] if i + 1 < total else None,
-                "paused": False,
-                "seconds_left": 90.0,
-                "queue": copy.deepcopy(queue),
-                "free": None,
-            }
+            floor = self.queue_floor(ch, order[i + 1] if i + 1 < total else None, copy.deepcopy(queue), token_seconds)
             if i + 1 < total:
                 self.set_floor(cid, floor)
         # every token is over: the engine closes the channel and wakes the moderator
@@ -1850,11 +2516,36 @@ class MockGame:
         ch["mode"] = "closed"
         self.emit("channel.updated", channel=copy.deepcopy(ch))
 
+    #: the id of the ordinary channel the mock helper ``timed_turn`` uses (a group channel: its turns are timed)
+    ROUNDTABLE = "roundtable"
+
+    def timed_turn_allowed(self) -> None:
+        """Mock helper (v0.13.1): the played seat gets a TIMED speaking turn in an ordinary channel - to see a countdown
+        next to the untimed turn of the public channel.  Needs a played seat and a running game; one turn at a time."""
+        if self.takeover_seat is None:
+            raise TakeoverError(409, "请先接管一个座位。")
+        if self.session["status"] != "running":
+            raise TakeoverError(409, "对局没有在运行。")
+        if self.token is not None:
+            raise TakeoverError(409, "你现在已经持有一个发言权。")
+
+    async def timed_turn(self, seconds: float = 60.0) -> None:
+        """One speaking turn of ``seconds`` game seconds for the played seat in the round-table channel (an ordinary group
+        channel, so the turn is timed: ``untimed`` false, ``seconds_left`` / ``deadline_clock`` count down on the game
+        clock - and stand still in a soft pause).  The channel is created on first use and closed again afterwards."""
+        seat = self.takeover_seat
+        if seat is None:
+            return
+        if self.ROUNDTABLE not in {c["id"] for c in self.session["channels"]}:
+            self.create_channel(self.ROUNDTABLE, "圆桌（计时发言）", EVERYONE)
+        self.announce(self.ROUNDTABLE, "timed_turn", f"【圆桌】请 {self.ref(seat)} 在 {int(seconds)} 秒内发言（计时的发言权，用来对照公共频道的“不限时”）。")
+        await self.run_queue(self.ROUNDTABLE, [seat], {}, token_seconds=float(seconds))
+
     def open_free(self, cid: str, *, max_chars: int = 2000, duration: float = 300.0) -> None:
         ch = self.channel(cid)
         ch["mode"] = "free"
         free = {"chars_used": 0, "max_chars_total": max_chars, "elapsed_s": 0.0, "duration_s": duration, "silent_s": 0.0, "message_counts": {}}
-        ch["floor"] = {"kind": "free", "active": None, "paused": False, "seconds_left": None, "queue": [], "free": free}
+        ch["floor"] = {"kind": "free", "active": None, "paused": False, "seconds_left": None, "untimed": False, "queue": [], "free": free}
         self.emit("channel.updated", channel=copy.deepcopy(ch))
         self.emit("floor.changed", channel_id=cid, floor=copy.deepcopy(ch["floor"]))
 
@@ -2051,7 +2742,7 @@ class MockGame:
         ref = self.ref
         # 1. set-up: channels, dashboard, announcements
         await self.moderator_step(1.0, "主持人：读取规则，建立频道")
-        self.create_channel("public", "公共频道", EVERYONE)
+        self.create_channel("public", "公共频道", EVERYONE, ctype="public")  # (v0.13.1: a person's turn here has no deadline)
         await self.wait(0.4)
         self.create_channel("wolves", "狼人阵营", [MODERATOR, *WOLVES])
         await self.wait(0.3)
@@ -2300,6 +2991,7 @@ class MockGame:
         self.finish("好人阵营", "狼人阵营全部出局，好人阵营获胜（模拟对局）。")
 
     def finish(self, winner: str, summary: str) -> None:
+        self._clear_soft()  # (v0.13.1, G6) the end of the game clears a soft pause
         s = self.session
         s["winner"] = winner
         s["summary"] = summary
@@ -2332,7 +3024,9 @@ class MockGame:
 
     # ----------------------------------------------------------------------------- review (E21)
     async def review(self, ids: list[str]) -> None:
-        """Manual review after the verdict: the stats go into the memory file, then the player's own recap."""
+        """Manual review after the verdict (v0.13.1, G39 / G40): the player REVISES his impressions of the other seats and
+        his lessons (a seat with nothing new keeps its impression, the old legacy text is tidied away), the record counts
+        the game; the file is overwritten, never appended to.  ``review.progress`` says what changed."""
         s = self.session
         s["review"]["running"] = True
         self.publish_session_updated()
@@ -2344,13 +3038,22 @@ class MockGame:
                 role = ROLES[pid]
                 wolfish = role in ("狼人", "白狼王")
                 won = (winner == "好人阵营") != wolfish
-                seat = self.roster.seats[pid]
-                record = f"## 战绩\n- 本局：{role}，{'胜' if won else '负'}（{winner}获胜）\n- 累计：1 场 · 胜率 {100 if won else 0}%\n"
-                recap = f"\n## 对局记忆\n- 第 1 局：我是{role}。{self.name('N4')} 的查验给了好人方向；{self.name('N12')} 的自爆很突然。\n"
-                seat["memory"] = (seat["memory"] or "") + record + recap
+                parts = self.roster.seats[pid]["memory_parts"]
+                before = copy.deepcopy(parts)
+                parts["record"] = bump_record(parts["record"], won)
+                for other in parts["impressions"]:
+                    # no identity conclusions (the identities are dealt anew every game): style, habits, how far to trust
+                    keep = bool(parts["impressions"][other]) and (int(other[1:]) + int(pid[1:])) % 3 == 0
+                    if not keep:
+                        parts["impressions"][other] = IMPRESSION_BANK[(int(other[1:]) * 7 + int(pid[1:]) * 3) % len(IMPRESSION_BANK)]
+                parts["experience"] = LESSON_BANK[: min(LIMITS["experience_items"], len(parts["experience"]) + 1)]
+                parts["legacy"] = ""
+                self.log_call(pid, purpose="review", status="ok", attempt=1, elapsed_ms=self.call_rng.randint(1500, 9000),
+                              prompt_tokens=self.call_rng.randint(1800, 3200), completion_tokens=self.call_rng.randint(250, 600),
+                              cache_read_tokens=0, cache_write_tokens=0, finish_reason="stop")
                 self.reviewed[pid] = True
                 s["review"]["done"] = [p for p in PLAYER_IDS if self.reviewed.get(p)]
-                self.emit("review.progress", id=pid, state="done", message="已写入战绩与复盘")
+                self.emit("review.progress", id=pid, state="done", message="已更新印象与战绩", changes=memory_changes(before, parts))
         finally:
             s["review"]["running"] = False
             self.publish_session_updated()
@@ -2412,6 +3115,7 @@ class MockGame:
     def pause(self, *, reason: str = "user", hold_reason: str = "") -> None:
         if self.session["status"] != "running":
             return
+        self._clear_soft()  # (v0.13.1, G6/G7) a hard pause - also the top bar's 暂停 in a soft pause - ends the soft pause
         self.gate.clear()
         self.set_status("paused", reason=("hold:" + hold_reason) if reason == "hold" else reason, pause_reason=reason, hold_reason=hold_reason)
         for aid in [MODERATOR, *PLAYER_IDS]:  # a paused game: everybody sleeps (E2)
@@ -2433,6 +3137,7 @@ class MockGame:
         self.gate.set()
 
     async def _cancel_task(self) -> None:
+        self._clear_soft()  # (v0.13.1) the calls a soft pause was waiting for are cancelled with everything else
         if self.review_task is not None and not self.review_task.done():
             self.review_task.cancel()
             await asyncio.gather(self.review_task, return_exceptions=True)
@@ -2461,6 +3166,8 @@ class MockGame:
         self.deadlines = {}
         self.reviewed = {}
         self._reset_human()
+        self._reset_observe()  # v0.13.1: a new game has an empty error log and no thinking record
+        self._reset_soft()  # ... and no soft pause
         self.session = build_session(uuid.uuid4().hex[:12], self.bindings, self.roster, self.budget_limits, demo=self.demo)
         self.session["event_id"] = self.bus.latest_id + 1  # the id the snapshot event is about to get
         self.bus.publish("snapshot", {"session": copy.deepcopy(self.session)})
@@ -2530,22 +3237,25 @@ class MockGame:
             used_chars = tok["chars_used"] if tok else 0
             out["floor"] = {
                 "kind": mode, "mine": mine is not None, "paused": bool(floor["paused"]),
-                "messages_left": None, "chars_left": None, "seconds_left": None, "deadline_clock": None,
+                "messages_left": None, "chars_left": None, "seconds_left": None, "deadline_clock": None, "untimed": False,
             }
             if mine is not None:
-                deadline = tok["deadline"] if tok else round(self.clock + 90.0, 3)
+                # v0.13.1 (G10, §12.2): the person's token in a public channel has no deadline: no countdown, no deadline
+                untimed = ch["type"] == "public" and seat == self.takeover_seat
+                deadline = tok["deadline"] if tok and tok["deadline"] is not None else round(self.clock + 90.0, 3)
                 out["floor"].update(
                     messages_left=max(0, mine["max_messages"] - mine["messages_used"]),
                     chars_left=max(0, TOKEN_MAX_CHARS - used_chars),
-                    seconds_left=round(max(0.0, deadline - self.clock), 1),
-                    deadline_clock=deadline,
+                    seconds_left=None if untimed else round(max(0.0, deadline - self.clock), 1),
+                    deadline_clock=None if untimed else deadline,
+                    untimed=untimed,
                 )
         elif mode == "free" and not ch["system"]:
             counts = (floor.get("free") or {}).get("message_counts", {})
             out["floor"] = {
                 "kind": "free", "mine": False, "paused": False,
                 "messages_left": max(0, FREE_MAX_MESSAGES - counts.get(seat, 0)),
-                "chars_left": None, "seconds_left": None, "deadline_clock": None,
+                "chars_left": None, "seconds_left": None, "deadline_clock": None, "untimed": False,
             }
         if mode in ("closed", "listen"):
             out["code"] = "CHANNEL_CLOSED"
@@ -2639,13 +3349,16 @@ class MockGame:
         return True
 
     async def human_turn(self, cid: str, queue: list[dict[str, Any]], index: int, *, seconds: float = 90.0) -> None:
-        """The played seat holds the token of a queue: wait for its speech / pass / the deadline (F7)."""
+        """The played seat holds the token of a queue: wait for its speech / pass / the deadline (F7).  In a public channel
+        (v0.13.1, G10) there is no deadline: the game waits for the person as long as it takes (the soft pause is for
+        thinking about votes; here the turn is theirs) - only handing the seat back (or the end of their turn) goes on."""
+        untimed = self.channel(cid)["type"] == "public"
         queue[index]["max_messages"] = TOKEN_MAX_MESSAGES
-        self.token = {"cid": cid, "index": index, "queue": queue, "deadline": round(self.clock + seconds, 3), "used": 0,
-                      "chars_used": 0, "done": False}
+        self.token = {"cid": cid, "index": index, "queue": queue, "deadline": None if untimed else round(self.clock + seconds, 3),
+                      "used": 0, "chars_used": 0, "done": False}
         tok = self.token
         self.schedule_takeover_flush()
-        await self.wait_human(lambda: tok["done"] or self.takeover_seat is None, seconds)
+        await self.wait_human(lambda: tok["done"] or self.takeover_seat is None, float("inf") if untimed else seconds)
         self.token = None
 
     # --- the actions of the person (the endpoints call these; every refusal is a receipt, like the engine's)
@@ -2920,7 +3633,7 @@ def mock_saved_games() -> list[dict[str, Any]]:
 
 
 def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None = DEMO_BUDGET_TOKENS, demo: bool = False, legacy: bool = False) -> Any:
-    from fastapi import FastAPI, HTTPException, Request
+    from fastapi import FastAPI, HTTPException, Query, Request
     from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
     from fastapi.staticfiles import StaticFiles
 
@@ -3065,6 +3778,23 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
     # ---- v0.13: a person plays a seat (contract §11.7)
     def refuse(exc: TakeoverError) -> HTTPException:
         return HTTPException(status_code=exc.status, detail=exc.detail)
+
+    # ---- v0.13.1: the soft pause (contract §12.2): 409 with a sentence (full stop) when it is not the time for it
+    @app.post("/api/control/soft-pause")
+    async def control_soft_pause() -> dict[str, Any]:
+        try:
+            game().soft_pause()
+        except TakeoverError as exc:
+            raise refuse(exc) from exc
+        return {"ok": True, "session": session_payload()}
+
+    @app.post("/api/control/soft-resume")
+    async def control_soft_resume() -> dict[str, Any]:
+        try:
+            game().soft_resume()
+        except TakeoverError as exc:
+            raise refuse(exc) from exc
+        return {"ok": True, "session": session_payload()}
 
     @app.post("/api/control/shuffle-identities")
     async def control_shuffle_identities() -> dict[str, Any]:
@@ -3220,6 +3950,7 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         return {
             "memory_enabled": roster.memory_enabled,
             "editable": game().session["status"] == "idle",
+            "limits": dict(LIMITS),  # v0.13.1 (contract §12.5): the limits of persona and memory
             "seats": roster.entries(),
             "moderator": copy.deepcopy(roster.moderator),
         }
@@ -3257,28 +3988,53 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             roster.moderator["avatar"] = body["avatar"]
             game().roster_changed([MODERATOR])
             return copy.deepcopy(roster.moderator)
+        if set(body) - {"name", "avatar", "persona", "memory", "memory_parts"}:
+            raise HTTPException(status_code=422, detail=f"不认识的字段：{'、'.join(sorted(set(body) - {'name', 'avatar', 'persona', 'memory', 'memory_parts'}))}")
+        if "memory" in body and "memory_parts" in body:
+            raise HTTPException(status_code=422, detail="memory 和 memory_parts 只能给一个。")
+        for kind in ("persona", "memory"):
+            if kind in body and not isinstance(body[kind], str):
+                raise HTTPException(status_code=422, detail=f"{kind} 必须是文字")
+        # v0.13.1: a request is applied as a whole or not at all - everything is checked (400 = over a limit, 422 = makes
+        # no sense) before the first thing changes
+        names = roster.names()
+        persona = None
+        new_parts = None
+        try:
+            if "persona" in body:
+                persona = clean_text(body["persona"], "性格设定", LIMITS["persona_chars"])
+            if "memory" in body:  # a whole memory text: parsed (an old-format or free text becomes the legacy text) and checked
+                new_parts = parse_memory(clean_text(body["memory"], "记忆", 20000), pid)
+                check_memory(new_parts, pid, names)
+            elif "memory_parts" in body:  # only the parts that are given change
+                new_parts = memory_after_parts(pid, names, roster.seats[pid]["memory_parts"], body["memory_parts"])
+        except RosterRefusal as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
         changed = False
         if "name" in body or "avatar" in body:
             require_idle("修改名字或头像")
         if "name" in body:
-            err = roster.validate_name(pid, body["name"])
+            try:
+                err = roster.validate_name(pid, body["name"])
+            except RosterRefusal as exc:  # (a colon: refused like the real server does - 400, its exact words)
+                raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
             if err:
                 raise HTTPException(status_code=422, detail=err)
+        if "avatar" in body and validate_avatar(body["avatar"]):
+            raise HTTPException(status_code=422, detail="头像描述不合法")
+        if "name" in body:
             roster.seats[pid]["name"] = body["name"].strip()
             changed = True
         if "avatar" in body:
-            if validate_avatar(body["avatar"]):
-                raise HTTPException(status_code=422, detail="头像描述不合法")
             roster.seats[pid]["avatar"] = body["avatar"]
             changed = True
-        for kind in ("persona", "memory"):
-            if kind in body:
-                if not isinstance(body[kind], str) or len(body[kind]) > 20000:
-                    raise HTTPException(status_code=422, detail=f"{kind} 必须是不超过 20000 字的文字")
-                roster.seats[pid][kind] = body[kind]
+        if persona is not None:
+            roster.seats[pid]["persona"] = persona
+        if new_parts is not None:
+            roster.seats[pid]["memory_parts"] = new_parts
         if changed:
             game().roster_changed([pid])
-        return copy.deepcopy(roster.seats[pid])
+        return roster.entry(pid)
 
     @app.post("/api/roster/{pid}/avatar:regenerate")
     async def regenerate_one(pid: str) -> dict[str, Any]:
@@ -3286,7 +4042,7 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         require_idle("重新生成头像")
         ids = roster.regenerate(pid)
         game().roster_changed(ids)
-        return copy.deepcopy(roster.moderator if pid == MODERATOR else roster.seats[pid])
+        return copy.deepcopy(roster.moderator) if pid == MODERATOR else roster.entry(pid)
 
     @app.post("/api/roster/{pid}/refine")
     async def refine(pid: str, body: dict[str, Any]) -> dict[str, Any]:
@@ -3299,19 +4055,47 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             raise HTTPException(status_code=422, detail="kind 必须是 persona 或 memory")
         if not text:
             raise HTTPException(status_code=422, detail="请先写几个要点")
-        name = roster.name(pid)
-        if kind == "persona":
-            draft = (
-                f"【{name} 的性格设定（模拟草稿）】\n"
-                f"- 核心：{text}\n- 说话方式：先抛结论，再用一两句话解释；被质疑时不急着反驳，而是复述对方的论点再回应。\n"
-                f"- 思维方式：记票型和发言顺序，把矛盾点逐条列出；信息不足时承认不确定。"
-            )
-        else:
-            draft = (
-                f"## 对局记忆（模拟草稿）\n- 对其他玩家的印象：{text}\n"
-                f"- 自己的经验：前几局常因过早表态被针对，现在更倾向先听后说；胜率中等，神职牌更稳。"
-            )
-        return {"draft": draft}
+        if len(text) > 6000:
+            raise HTTPException(status_code=400, detail="要点太长了（上限 6000 字）。")
+        g = game()
+        if kind == "persona":  # (G43) the fixed format: one-line position, a few bullets, every line cut to its limit
+            result: dict[str, Any] = {"draft": persona_draft(text)}
+        else:  # (G42) the notes are merged into what the seat remembers now: "N5 Eve：…" lines are impressions, the rest lessons
+            parts = copy.deepcopy(roster.seats[pid]["memory_parts"])
+            lessons: list[str] = []
+            for line in text.splitlines():
+                labelled = re.match(r"\s*[Nn]([1-9][0-9]?)(?![0-9])[^：:\n]{0,24}[：:]\s*(.+)$", line)
+                if labelled and f"N{int(labelled.group(1))}" in parts["impressions"]:
+                    parts["impressions"][f"N{int(labelled.group(1))}"] = _clip(clean_impression(labelled.group(2)), LIMITS["impression_chars"])
+                elif _one_line(line):
+                    lessons.append(_clip(_one_line(line), 90))
+            if lessons:
+                parts["experience"] = [*lessons, *parts["experience"]][: LIMITS["experience_items"]]
+            result = {
+                "draft": memory_body(parts, pid, roster.names()),
+                # what the answer is: the impressions of every other seat and the lessons (the legacy text is not touched)
+                "memory_parts": {"impressions": dict(parts["impressions"]), "experience": list(parts["experience"])},
+            }
+        g.log_call("roster", purpose="refine", status="ok", attempt=1, elapsed_ms=g.call_rng.randint(1200, 6000),
+                   prompt_tokens=g.call_rng.randint(900, 2400), completion_tokens=g.call_rng.randint(120, 500), cache_read_tokens=0,
+                   cache_write_tokens=0, finish_reason="stop")
+        return result
+
+    # ---- v0.13.1: the error log (G32-G36, contract §12.3) and the thinking record (G21-G26, §12.4)
+    @app.get("/api/llm/calls")
+    async def get_llm_calls(after: int = Query(0, ge=0), limit: int = Query(500, ge=1, le=2000), errors_only: bool = False) -> dict[str, Any]:
+        """Every model request and runtime error of the game: the lines with an id above ``after`` (the newest ``limit`` of
+        them), oldest first; ``errors_only`` keeps ``retry`` / ``timeout`` / ``error``.  Also while a seat is played."""
+        return game().calls_view(after=after, limit=limit, errors_only=errors_only)
+
+    @app.get("/api/agents/{agent_id}/thoughts")
+    async def get_agent_thoughts(agent_id: str, before: str | None = Query(None, max_length=64), limit: int = Query(50, ge=1, le=200)) -> dict[str, Any]:
+        """What an agent thought (never its tool calls), newest page first; 409 while ANOTHER seat is played and the game is
+        not over (G25), 404 for an id that is no agent, 400 for a cursor that is none."""
+        try:
+            return game().thought_page(agent_id, before, limit)
+        except TakeoverError as exc:
+            raise refuse(exc) from exc
 
     # ---- game review (E21)
     @app.post("/api/game/review")
@@ -3563,6 +4347,25 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         await game().jump_to_end()
         return {"ok": True, "session": session_payload()}
 
+    @app.post("/api/mock/timed-turn")
+    async def mock_timed_turn(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """v0.13.1: the played seat gets a TIMED speaking turn ({"seconds": 60}) in an ordinary channel (the round table) - to
+        see a countdown next to the public channel's "不限时" turn, and a soft pause stopping it.  409 without a played seat
+        or a running game."""
+        g = game()
+        try:
+            seconds = float((body or {}).get("seconds", 60.0))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="seconds must be a number") from exc
+        if not 5.0 <= seconds <= 600.0:
+            raise HTTPException(status_code=422, detail="seconds must be between 5 and 600")
+        try:
+            g.timed_turn_allowed()
+        except TakeoverError as exc:
+            raise refuse(exc) from exc
+        g.spawn_bg(g.timed_turn(seconds))
+        return {"ok": True, "channel_id": g.ROUNDTABLE, "seconds": seconds}
+
     @app.post("/api/mock/speed")
     async def mock_speed(body: dict[str, Any]) -> dict[str, Any]:
         """Change the replay speed on the fly (applies to the next wait): slow down to catch a moment."""
@@ -3589,6 +4392,59 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         if _is_num(body.get("tick")) and body["tick"] >= 0:
             archive.tick = float(body["tick"])
         return {"ok": True, "legacy": archive.legacy_state(), "max_bytes": archive.max_bytes, "tick": archive.tick}
+
+    @app.post("/api/mock/llm-fail")
+    async def mock_llm_fail(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Inject ONE failed model request (v0.13.1): ``retries`` attempts that the client retries (the ``retry`` lines),
+        then the request ends as ``status`` (``error`` / ``timeout`` / ``cancelled``); with ``give_up`` (the default) the agent
+        gives its action up as well: a runtime line and the ``error`` event (the "重试用尽" toast).  Body (all optional):
+        ``{"actor_id": "N3", "status": "error", "retries": 2, "http_status": 429, "error_class": "RateLimitError",
+        "message": "...", "give_up": true, "purpose": "turn"}``."""
+        b = body or {}
+        actor = str(b.get("actor_id") or "N3")
+        if actor not in (MODERATOR, "roster", ENGINE, *PLAYER_IDS):
+            raise HTTPException(status_code=404, detail="没有这个玩家。")
+        status = b.get("status", "error")
+        if status not in ("error", "timeout", "cancelled"):
+            raise HTTPException(status_code=422, detail="status 必须是 error / timeout / cancelled")
+        retries = b.get("retries", 2)
+        http_status = b.get("http_status", 429)
+        if not _is_int(retries) or not 0 <= retries <= 5 or (http_status is not None and not _is_int(http_status)):
+            raise HTTPException(status_code=422, detail="retries 必须是 0–5 的整数，http_status 必须是整数或 null")
+        purpose = b.get("purpose", "refine" if actor == "roster" else "turn")
+        if purpose not in ("turn", "review", "refine"):
+            raise HTTPException(status_code=422, detail="purpose 必须是 turn / review / refine")
+        g = game()
+        lines = g.inject_failure(actor, status=status, retries=retries, http_status=http_status, error_class=str(b.get("error_class") or "RateLimitError"),
+                                 message=str(b["message"]) if b.get("message") else None, give_up=bool(b.get("give_up", True)), purpose=purpose)
+        return {"ok": True, "ids": [c["id"] for c in lines], "errors": g.call_counts()[0]}
+
+    @app.post("/api/mock/llm-rebuild")
+    async def mock_llm_rebuild(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Rebuild the error log the way the real backend does after a restart, a load or an import (v0.13.1, contract §12.3):
+        numbered from 1 again, some lines gone, the failed ones a few ms off, nothing announced.  Body (optional):
+        ``{"drop_every": 4, "jitter_ms": 3}``.  To see why the page re-bases its "read" mark: press 全部标为已读 (the badge goes),
+        call this, reload the page (or just wait for the next reconnect), then ``POST /api/mock/llm-fail`` - the new error has a
+        LOW id and the badge must show it."""
+        b = body or {}
+        drop = b.get("drop_every", 4)
+        jitter = b.get("jitter_ms", 3)
+        if not _is_int(drop) or not 0 <= drop <= 1000 or not _is_int(jitter) or not 0 <= jitter <= 10_000:
+            raise HTTPException(status_code=422, detail="drop_every 必须是 0–1000 的整数，jitter_ms 必须是 0–10000 的整数")
+        return game().rebuild_calls(drop_every=int(drop), jitter_ms=int(jitter))
+
+    @app.post("/api/mock/legacy-memory")
+    async def mock_legacy_memory(body: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Put a v0.13.0-style memory text into a seat (default N3): it is migrated when it is READ - the old text lands in the
+        legacy section ``旧记忆（待整理）`` (the newest 600 characters), nothing else is touched."""
+        b = body or {}
+        pid = seat_or_404(str(b.get("id") or "N3"))
+        text = str(b.get("text") or "## 对局记忆\n- 第 1 局：我是狼人，悍跳失败。\n\n## 经验与印象\n- Bob 总是附和别人。")
+        parts = parse_memory(text, pid)
+        if len(parts["legacy"]) > LIMITS["legacy_chars"]:
+            parts["legacy"] = "…" + parts["legacy"][-(LIMITS["legacy_chars"] - 1):].lstrip()
+        roster.seats[pid]["memory_parts"] = parts
+        return {"ok": True, "seat": roster.entry(pid)}
 
     @app.post("/api/mock/emit")
     async def mock_emit(body: dict[str, Any]) -> dict[str, Any]:
@@ -3619,7 +4475,7 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
     async def mock_info() -> dict[str, Any]:
         g = game()
         return {"speed": g.speed, "latest_event_id": bus.latest_id, "subscribers": len(bus.subscribers), "status": g.session["status"],
-                "ring": len(bus.ring), "clock": g.session["clock"], "budget": g.session["budget"]}
+                "ring": len(bus.ring), "clock": g.session["clock"], "budget": g.session["budget"], "calls": len(g.calls)}
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     return app
@@ -3633,7 +4489,7 @@ REQUIRED_EVENTS = {
     "message.committed", "channel.created", "channel.updated", "floor.changed", "player.updated", "request.opened",
     "request.progress", "request.answer", "request.closed", "challenge.opened", "challenge.resolved", "ability.used",
     "phase.changed", "dashboard.updated", "game.status", "agent.status", "agent.metrics", "session.updated",
-    "budget.updated", "budget.warning", "budget.reached", "review.progress",
+    "budget.updated", "budget.warning", "budget.reached", "review.progress", "llm.call",
 }
 
 
@@ -3664,7 +4520,7 @@ def selfcheck() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Arena-Agents v0.13.0 UI mock server")
+    parser = argparse.ArgumentParser(description="Arena-Agents v0.13.1 UI mock server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--speed", type=float, default=1.0, help="replay speed multiplier (default 1.0 ≈ 60 s per game)")

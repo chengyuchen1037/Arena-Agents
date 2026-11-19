@@ -46,7 +46,7 @@ test("a played seat's state is read field by field (types, defaults, unknown fie
   assert.deepEqual(Object.keys(t).sort(), ["abilities", "attention", "channels", "requests", "reshuffle_available", "seat", "seq"]);
   const wolves = t.channels.wolves;
   assert.deepEqual([wolves.can_write, wolves.max_chars, wolves.can_pass, wolves.code, wolves.why_not], [true, 300, true, null, null]);
-  assert.deepEqual(wolves.floor, { kind: "queue", mine: true, paused: false, messages_left: 2, chars_left: 560, seconds_left: 12.5, deadline_clock: 130 });
+  assert.deepEqual(wolves.floor, { kind: "queue", mine: true, paused: false, messages_left: 2, chars_left: 560, seconds_left: 12.5, deadline_clock: 130, untimed: false });
   assert.equal(t.channels["dm-N3"].floor, null);
   assert.equal(t.channels.public.floor.kind, "free");
   assert.deepEqual(t.requests[0], {
@@ -342,6 +342,33 @@ test("request card action: my answer is marked and may be changed; a text reques
   const text = withRequests("running", [{ id: "r2", kind: "text", options: [], question: "留下遗言", to: ["N3"], share_answers: false, auto_close: "all_answered" }], [F.seatRequest("r2", { kind: "text", max_chars: 300 })]);
   const t = card(text, "r2").action;
   assert.deepEqual([t.kind, t.maxChars, t.options, t.enabled], ["text", 300, [], true]);
+});
+
+test("requestPick (G45): a pick is not an answer; what the card says about it, and whether 「提交」 can be pressed", () => {
+  const fresh = card(withRequests("running", [{ id: "r1", to: ["N3", "N6"] }], [F.seatRequest("r1")])).action;
+  const sum = (p) => [p.picked, p.pickedLabel, p.currentLabel, p.dirty, p.canSubmit, p.submitLabel, p.kind];
+  // nothing picked (or something that is not an option): nothing to say, the button is grey
+  assert.deepEqual(sum(View.requestPick(fresh, null)), [null, "", "", false, false, "提交", "none"]);
+  assert.deepEqual(sum(View.requestPick(fresh, undefined)), [null, "", "", false, false, "提交", "none"]);
+  assert.deepEqual(sum(View.requestPick(fresh, "N99")), [null, "", "", false, false, "提交", "none"]);
+  // picked and not answered yet: a new answer
+  assert.deepEqual(sum(View.requestPick(fresh, "N4")), ["N4", "4号 David", "", true, true, "提交", "new"]);
+  assert.equal(View.requestPick(fresh, 4).picked, null, "ids are compared as strings: 4 is not N4");
+
+  // answered: the button reads 修改回答; picking the submitted choice again is no change; another one is a change
+  const mine = F.seatRequest("r1", { answered: true, my_answer: { value: "N4", label: "4号 David", reason: "" } });
+  const answered = card(withRequests("running", [{ id: "r1", to: ["N3", "N6"], answers: [F.answer("N3", "N4", "4号 David")] }], [mine])).action;
+  assert.deepEqual(sum(View.requestPick(answered, null)), [null, "", "", false, false, "修改回答", "none"]);
+  assert.deepEqual(sum(View.requestPick(answered, "N4")), ["N4", "4号 David", "4号 David", false, false, "修改回答", "none"]);
+  assert.deepEqual(sum(View.requestPick(answered, "N5")), ["N5", "5号 Eve", "4号 David", true, true, "修改回答", "change"]);
+
+  // a frozen card (paused) can hold a pick but never be pressed; a text request and no action have no picks at all
+  const paused = card(withRequests("paused", [{ id: "r1", to: ["N3", "N6"] }], [F.seatRequest("r1")])).action;
+  const frozen = View.requestPick(paused, "N4");
+  assert.deepEqual([frozen.picked, frozen.dirty, frozen.canSubmit], ["N4", true, false]);
+  const text = card(withRequests("running", [{ id: "r2", kind: "text", options: [], question: "留下遗言", to: ["N3"], share_answers: false, auto_close: "all_answered" }], [F.seatRequest("r2", { kind: "text", max_chars: 300 })]), "r2").action;
+  assert.deepEqual(sum(View.requestPick(text, "N4")), [null, "", "", false, false, "提交", "none"]);
+  assert.deepEqual(sum(View.requestPick(null, "N4")), [null, "", "", false, false, "提交", "none"]);
 });
 
 test("request card: the countdown follows the client's game clock; a request the seat answered is no longer 'waiting' for it", () => {

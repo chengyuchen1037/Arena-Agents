@@ -14,7 +14,7 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.13.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.13.1-blue.svg)](CHANGELOG.md)
 
 ---
 
@@ -32,12 +32,16 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
   started reminds you that you already know your identity and offers **Re-deal** — which is **strictly refused
   once the game has started** (the button is hidden and the server answers 409). Every action of yours goes
   through the same commit gate as an agent's: turns, length, quotas and deadlines are unchanged.
+- **Soft-pause the agents, not yourself (v0.13.1)** — the take-over bar can hold every agent after its current
+  answer and freeze the clock at the same instant. You can still read, speak, answer and use abilities at your own
+  pace; your public-channel floor is **untimed**, while requests keep their deadlines. Eight colour/shape marks on
+  the other seats are private to this browser and carry no rule-defined meaning.
 - **One input box per channel (v0.13)** — like a group-chat app, switching the channel switches the input box
   (each keeps its own draft; the length limit comes from the server). When it is not your turn, your turn is
   over, or the channel is closed / frozen / listen-only you can still type, but the send button turns into a
   grey *禁言中* ("muted", hover for the reason). *End my turn* appears while you hold the floor; the *Ability*
-  button releases active abilities such as the white wolf's explosion; votes and other request cards are
-  clickable and show a countdown. Challenging the moderator is done in the private chat with the moderator.
+  button releases active abilities such as the white wolf's explosion; votes and other choice requests require
+  **pick, then Submit**, so a stray click cannot answer for you, and still show a countdown. Challenging the moderator is done in the private chat with the moderator.
 - **One file for everything (v0.13)** — the settings hold exactly two items, *Export archive* and *Import
   archive*, on a single `.arenaagents` file. Its contents (games, logs, roster, providers …) are not encrypted;
   only the API keys can optionally be exported, encrypted with a strong password of your choice. Export and
@@ -46,6 +50,10 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 - **History and replay (v0.13)** — every game is listed; continue it, delete it ("deleting a game does not
   touch an agent's memory") or **replay** it with pause, 0.5×–8× speed, a draggable seek bar, skip-idle and
   viewpoint switching.
+- **Thinking records and an error log (v0.13.1)** — the player / moderator details open a chat-like record of
+  thoughts and text for each wake-up, without tool calls. The top-right *Log* lists the current game's LLM calls,
+  retries, timeouts and errors, with actor and error-only filters. While a take-over is in progress and the game
+  is unfinished, other players' thoughts stay closed.
 - **Every agent is asynchronous (v0.12)** — each player and the moderator is an Actor + Worker. The
   actor is never blocked by thinking or tool execution; speech, votes, challenges and abilities can
   happen at any time and are validated by the engine *at commit time*.
@@ -61,10 +69,12 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 - **Price source** — the Provider dialog can fill a model's four prices and context window from a price
   table (default: LiteLLM's `model_prices_and_context_window.json`); you can still edit every number.
 - **Roster** — seats `N1`–`N12` with default names Alice…Leo that you can rename and keep; a **pixel
-  avatar** per seat (and one for the moderator) randomly assembled from a procedurally generated parts
-  library (regenerate one or all); persona and memory are plain text files in the data directory (`data/roster/`,
-  empty by default, editable / clearable in the UI, "complete it with the moderator's model" produces a draft you
-  confirm); a manual post-game review writes the record and a first-person note into each player's memory.
+  avatar** per seat (and one for the moderator) randomly assembled from a procedurally generated parts library
+  (regenerate one or all; v0.13.1 can copy a deterministic avatar code and recreate exactly that avatar from it).
+  Persona and memory are plain text files in `data/roster/`, editable / clearable in the UI, with an optional
+  moderator-model draft. The persona is a short fixed-format behaviour guideline; memory is capped and organised
+  as record / impressions of the other 11 seats / own lessons. A manual post-game review updates those impressions
+  and lessons instead of appending another long note after every game.
 - **Responsive UI** — from a 1920 px desktop to a phone in portrait (layout follows platform and width).
 - **An LLM moderator drives the flow** — taking turns = a moderator announcement + floor management
   (`set_floor_queue` and friends). The rules and the moderator manual live in the scenario; the
@@ -99,6 +109,10 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
   game without an API key.
 
 ## Screenshots
+
+| Take-over: soft pause, colour marks and pick-then-submit (v0.13.1) | Chat-like thinking record: thoughts / text only, no tool calls (v0.13.1) |
+|---|---|
+| <img src="docs/images/v0131-softpause.png" alt="v0.13.1 take-over: agents soft-paused, an untimed public floor, colour marks and a pick-then-submit request" width="100%"> | <img src="docs/images/v0131-thoughts.png" alt="v0.13.1 thinking-record window beside player details, divided by wake-up and showing game time and round" width="100%"> |
 
 | Player details (click a card: the four token kinds, cache hit rate, persona and memory, review) | A player's viewpoint |
 |---|---|
@@ -301,8 +315,8 @@ Full details: [docs/storage.md](docs/storage.md) (data directory, what is encryp
 
 - **Participant bar**: one card per player — pixel avatar + name + one role tag, with the state on the
   avatar's corner (💭 thinking / ⚡ acting / 💤 sleeping; the tooltip of a timed sleep shows the seconds
-  left). Click a card for that agent's tool calls, thinking rounds, LLM calls, the four token kinds, the
-  cache hit rate, cost, and its persona and memory. Players who are out are greyed.
+  left). Click a card for the thinking-record window, LLM call counts, the four token kinds, the cache hit rate,
+  cost, and its persona and memory; tool-call details stay out of that chat-like record. Players who are out are greyed.
 - **Feed**: spoken messages, announcements and **request cards** (votes, choices, questions; with
   progress and results), rendered whole; no chain of thought, no tool calls, no streaming.
 - **Viewpoint bar `[viewpoint ▾] [Switch] [Take over]`**: the drop-down only *chooses*; *Switch* applies it (the
@@ -311,8 +325,9 @@ Full details: [docs/storage.md](docs/storage.md) (data directory, what is encryp
   viewpoint is locked to it and the bar becomes "🎮 Playing 3 · Carol  [Leave]" (again with a confirmation, and
   only while the game is not running). The lock is front-end only: the server still sends the browser the full
   spectator data (a known limitation, see the plan).
-- **Input box and ability**: the bottom of the feed holds the input box of the current channel; *End my turn*,
-  *Ability* and clickable request cards are described above.
+- **Input box and ability**: the bottom of the feed holds the current channel's input box. On a vote or another
+  request card, pick an answer and then click *Submit*; you can change the pick before submitting, and a deadline
+  never auto-submits it. *End my turn* and *Ability* are described above.
 - **Channel list**: shows each channel's floor state (🎤 turn / 📋 queue / 💬 free discussion /
   ❄ frozen / 👁 listen-only / 🔇 muted); challenge tickets form their own group; private channels are
   named after the other person; a channel where it is your turn gets a "your move" mark while you play a seat.
@@ -414,24 +429,27 @@ docs/            architecture, contract, provider, storage, archive and UI guide
 
 ## Release
 
-The current version is **0.13.0**: a player can **take over a seat** and play it (a per-channel input box,
-abilities and clickable request cards); storage was redone — the data lives in `data/` in the program folder,
-only the API keys are encrypted, and the settings hold just export / import of a single `.arenaagents` archive,
-with a conversion script for v0.12.1 data; and there is a **history of games** with replay (pause and speed).
-**v0.13 cannot open v0.12.1 data directly** (the workspace concept is gone): convert it with
-`tools/migrate_v0121_to_archive.py` and import the archive in the settings, see
-[docs/storage.md](docs/storage.md#upgrading-from-v0121). Decisions and the test plan: [docs/v0.13-plan.md](docs/v0.13-plan.md)
-(in Chinese). The previous version, [0.12.1](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.12.1),
-removed every engine-side limit that saved money for the user (replaced by persistent conversations, caching,
-merging and compaction) and added a per-game spending limit, four-price billing with a price source, the
-roster and a responsive UI. Every version has a page under
+The current version is **0.13.1**: take-over adds **agent-only soft pause**, untimed public floors, eight private
+colour marks, thinking records and an LLM call log; votes and other choices now require **pick, then submit**.
+An avatar code recreates exactly the same avatar, reviews update bounded impressions / lessons instead of
+appending diaries, and model-completed personas use a fixed behavioural template. Decisions and the test plan:
+[docs/v0.13.1-plan.md](docs/v0.13.1-plan.md) (G1–G45, in Chinese).
+The previous version, [0.13.0](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.13.0), introduced
+seat take-over, per-channel composers, the data directory, single-file `.arenaagents` archives and replay. This
+release keeps **save format v5 and archive format 1**. **v0.13 cannot open v0.12.1 data directly** (the workspace
+concept is gone): convert it with `tools/migrate_v0121_to_archive.py` and import the archive in the settings, see
+[docs/storage.md](docs/storage.md#upgrading-from-v0121).
+The earlier [0.12.1](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.12.1) removed every
+engine-side limit that saved money for the user (replaced by persistent conversations, caching, merging and
+compaction) and added a per-game spending limit, four-price billing with a price source, the roster and a
+responsive UI. Every version has a page under
 [Releases](https://github.com/chengyuchen1037/Arena-Agents/releases), and [CHANGELOG.md](CHANGELOG.md) has the
 release notes.
 
 ## Documentation
 
 - [Architecture (Actor + Worker)](docs/architecture.en.md) · [中文](docs/architecture.md)
-- [Implementation contract](docs/v0.12-contracts.md) (current, Chinese; v0.13 additions are §11) · [v0.13 plan](docs/v0.13-plan.md) (decisions F1–F38) · [v0.12.1 plan](docs/v0.12.1-plan.md) (decisions E1–E26) · [v0.12 plan](docs/v0.12-async-agents-plan.md) (history; some decisions were superseded)
+- [Implementation contract](docs/v0.12-contracts.md) (current, Chinese; v0.13 additions are §11 and v0.13.1 is §12) · [v0.13.1 plan](docs/v0.13.1-plan.md) (G1–G45) · [acceptance record](docs/v0.13.1-acceptance.md) · [v0.13 plan](docs/v0.13-plan.md) (F1–F38) · [v0.12.1 plan](docs/v0.12.1-plan.md) (E1–E26) · [v0.12 plan](docs/v0.12-async-agents-plan.md) (history)
 - [Providers and models](docs/providers.md)
 - [Data, storage and encryption](docs/storage.md)
 - [Archives: export, import and conversion](docs/archive.md) (Chinese)

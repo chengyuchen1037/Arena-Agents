@@ -310,7 +310,71 @@ function messageEvent(id, seq, channelId, from, content, kind = "speech", visibl
   return { id, type: "message.committed", data: msg(seq, channelId, from, content, kind, visible, extra) };
 }
 
+// ---- v0.13.1: the error log and the thinking record (docs/v0.12-contracts.md §12.3 / §12.4) ----------------------------
+
+/** One line of the error log (CallEntry): a successful turn of N3 (Carol) unless `over` says otherwise. */
+function makeCall(id, over = {}) {
+  return {
+    id,
+    ts: `2026-11-18T16:00:${String(id % 60).padStart(2, "0")}.000Z`,
+    gt: 10 + id,
+    kind: "call",
+    status: "ok",
+    actor_id: "N3",
+    actor_name: "Carol",
+    purpose: "turn",
+    provider_id: "deepseek",
+    model_id: "deepseek-chat",
+    attempt: 1,
+    elapsed_ms: 1234,
+    prompt_tokens: 1000,
+    completion_tokens: 200,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    finish_reason: "stop",
+    http_status: null,
+    error_class: null,
+    message: null,
+    ...over,
+  };
+}
+
+/** A model request that went wrong (`status` "error" unless `over` says "timeout" / "retry"): HTTP 429, no numbers. */
+function makeFailedCall(id, over = {}) {
+  return makeCall(id, {
+    status: "error",
+    elapsed_ms: 900,
+    prompt_tokens: null,
+    completion_tokens: null,
+    cache_read_tokens: null,
+    cache_write_tokens: null,
+    finish_reason: null,
+    http_status: 429,
+    error_class: "RateLimitError",
+    message: "Rate limit reached for requests",
+    ...over,
+  });
+}
+
+/** One item of the thinking record (ThoughtItem); `n` makes the id (the position in the log) and the text. */
+function makeThought(n, over = {}) {
+  return {
+    id: `1:${n * 1000}`,
+    ts: `2026-11-18T16:00:${String(n % 60).padStart(2, "0")}.000Z`,
+    gt: 20 + n,
+    gen: 1,
+    round: 1,
+    kind: "thought",
+    text: `第 ${n} 条思考`,
+    model: "deepseek-reasoner",
+    ...over,
+  };
+}
+
 module.exports = {
+  makeCall,
+  makeFailedCall,
+  makeThought,
   NAMES,
   ROLE_BY_ID,
   PLAYER_IDS,

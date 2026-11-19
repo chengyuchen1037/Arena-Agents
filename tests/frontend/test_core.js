@@ -1106,6 +1106,75 @@ test("nicknames: 1-20 characters (an emoji counts once), no control characters, 
   assert.equal(Core.NICKNAME_MAX, 20);
 });
 
+test("nicknames: a colon (':' or '：') is refused like the server does - after the length, before uniqueness; look-alikes are no colons", () => {
+  const COLON = "名字不能包含冒号（: 或 ：）。";
+  assert.equal(Core.NICKNAME_COLON_ERROR, COLON, "the server's words, exactly (tests/frontend/test_roster_drift.py compares them with the backend)");
+  for (const bad of ["A:B", "A：B", "A\uff1aB", ":", "：", "名字:", "：名字", "  Eve:2  ", "a".repeat(19) + ":", "😀:😀", "😀：".repeat(10)]) {
+    assert.deepEqual(Core.validateNickname(bad, []), { ok: false, error: COLON }, JSON.stringify(bad));
+  }
+  // the order of the server's checks: empty, (control characters), too long - THEN the colon, then 'taken'
+  assert.equal(Core.validateNickname("   ", []).error, "名字不能为空", "white space is empty, not a colon");
+  assert.match(Core.validateNickname(":".repeat(21), []).error, /最多 20/, "too long is said before the colon");
+  assert.equal(Core.validateNickname("a\u0000:", []).error, "名字含有非法控制字符", "a control character is said first");
+  assert.equal(Core.validateNickname("A:B", ["A:B"]).error, COLON, "the colon comes before uniqueness");
+  assert.equal(Core.validateNickname("Bob:", ["Alice", "Bob"]).error, COLON, "'Bob:' is not Bob: what is wrong with it is the colon");
+  // exactly two characters are colons: no normalizing (the server takes a look-alike, so must the page)
+  for (const fine of ["A\ua789B", "A\ufe55B", "A\u2236B", "A\u02d0B", "A\u0589B", "A;B", "A,B", "A.B", "A-B"]) {
+    assert.deepEqual(Core.validateNickname(fine, []), { ok: true, value: fine }, JSON.stringify(fine));
+  }
+  assert.equal(Core.validateNickname("a".repeat(20), []).ok, true, "20 characters without a colon are fine");
+  // the rule is about what is typed: an old name is never run through it (roster.js does not validate a name that did not change)
+  assert.deepEqual(Core.validateNickname("Carol", ["Carol:2"]), { ok: true, value: "Carol" });
+});
+
+test("createWindowStack: the newest window is on top - its z-index and the Escape key; one Escape answers for one window only", () => {
+  const stack = Core.createWindowStack();
+  const z = { a: "-", b: "-", c: "-" };
+  const setter = (name) => (v) => {
+    z[name] = String(v);
+  };
+  const press = (key = "Escape") => ({ key, stopped: 0, stopImmediatePropagation() { this.stopped++; } });
+  assert.equal(stack.top(), null);
+  assert.equal(stack.opened("a", setter("a")), 8100);
+  assert.equal(stack.opened("b", setter("b")), 8101);
+  assert.deepEqual([stack.top(), stack.list(), z.a, z.b], ["b", ["a", "b"], "8100", "8101"]);
+  // only the window on top answers, and it consumes the key press; other keys and other windows do not
+  const first = press();
+  assert.equal(stack.escape(first, "a"), false);
+  assert.equal(first.stopped, 0, "(a window that is not on top leaves the key alone)");
+  const second = press();
+  assert.equal(stack.escape(second, "b"), true);
+  assert.equal(second.stopped, 1, "(the listeners behind it do not see this key press)");
+  const enter = press("Enter");
+  assert.equal(stack.escape(enter, "b"), false);
+  assert.equal(enter.stopped, 0);
+  assert.equal(stack.escape(null, "b"), false);
+  assert.equal(stack.escape({ key: "Escape" }, "b"), true, "(an event without stopImmediatePropagation is fine)");
+  assert.equal(stack.escape(press(), "nobody"), false);
+  // opened again = brought to the front: every window gets its z-index again
+  stack.opened("a", setter("a"));
+  assert.deepEqual([stack.top(), z.a, z.b], ["a", "8101", "8100"]);
+  assert.equal(stack.opened("c", setter("c")), 8102);
+  assert.deepEqual([stack.list(), z.a, z.b, z.c], [["b", "a", "c"], "8101", "8100", "8102"]);
+  // closing gives the place back: no z-index of its own, the others move down to fill it
+  stack.closed("a");
+  assert.deepEqual([stack.list(), z.a, z.b, z.c], [["b", "c"], "", "8100", "8101"]);
+  stack.closed("a"); // (twice, or a window that was never opened: nothing happens)
+  stack.closed("never");
+  assert.deepEqual(stack.list(), ["b", "c"]);
+  assert.equal(stack.escape(press(), "b"), false);
+  assert.equal(stack.escape(press(), "c"), true);
+  stack.closed("c");
+  stack.closed("b");
+  assert.deepEqual([stack.top(), stack.list(), z.b, z.c], [null, [], "", ""]);
+  assert.equal(stack.escape(press(), "b"), false, "nothing open: nobody answers");
+  // a stack without z-index setters still orders the windows (a window created on its own)
+  const plain = Core.createWindowStack();
+  plain.opened("x");
+  plain.opened("y");
+  assert.deepEqual([plain.top(), plain.escape(press(), "y")], ["y", true]);
+});
+
 test("normalizeRoster tolerates partial payloads", () => {
   const r = Core.normalizeRoster({
     memory_enabled: false,

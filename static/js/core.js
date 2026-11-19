@@ -1001,18 +1001,28 @@
   // -------------------------------------------------------------------------
 
   const NICKNAME_MAX = 20;
+  // The name is the label in front of an impression ("- N5 Eve：…"): a colon in it would end the label early when the line is read
+  // back, so the server refuses one in a NEW name (app/storage/roster.py clean_name: exactly ":" and "：" U+FF1A - no normalizing,
+  // look-alikes such as U+A789 are fine) and says it in these words.  A name that is already stored still loads and still shows.
+  const NICKNAME_COLON_RE = /[:\uff1a]/;
+  const NICKNAME_COLON_ERROR = "名字不能包含冒号（: 或 ：）。";
 
   /** Count characters the way the user sees them (an emoji / CJK character is one). */
   function charLength(s) {
     return Array.from(String(s === undefined || s === null ? "" : s)).length;
   }
 
-  /** A nickname: trimmed, 1..20 characters, no control characters, unique among `others` (their names). */
+  /**
+   * A NEW nickname: trimmed, 1..20 characters, no control characters, no colon (":" or "：" - like the server, after the length
+   * check and before uniqueness), unique among `others` (their names).  It is a check for what is about to be saved: the name a
+   * player already has is never run through it (an old one with a colon still shows as it is).
+   */
   function validateNickname(raw, others) {
     const name = String(raw === undefined || raw === null ? "" : raw).trim();
     if (!name) return { ok: false, error: "名字不能为空" };
     if (hasControlChars(name)) return { ok: false, error: "名字含有非法控制字符" };
     if (charLength(name) > NICKNAME_MAX) return { ok: false, error: `名字最多 ${NICKNAME_MAX} 个字符` };
+    if (NICKNAME_COLON_RE.test(name)) return { ok: false, error: NICKNAME_COLON_ERROR };
     if ((others || []).some((o) => String(o) === name)) return { ok: false, error: `名字「${name}」已被其他玩家使用` };
     return { ok: true, value: name };
   }
@@ -1033,6 +1043,58 @@
         memory: typeof s.memory === "string" ? s.memory : "",
       }));
     return { memory_enabled: r.memory_enabled !== false, editable: r.editable !== false, seats };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.13.1: the floating windows of the page (the thinking record, the error log)
+  // -------------------------------------------------------------------------
+
+  const WINDOW_Z_BASE = 8100; // .vw-window in style.css; the dialogs (z-index 9000) stay above every window
+
+  /**
+   * The floating windows in the order they were opened: the newest is on top - on the screen (the stack puts the z-index on every window
+   * again whenever the order changes) and for the keyboard: Escape closes only that one.  Each window asks `escape(evt, name)` from its
+   * own key listener; the one that is on top answers true and consumes the key press (stopImmediatePropagation: a window below it, and the
+   * detail panel behind both, do not see it - one Escape closes one thing).
+   */
+  function createWindowStack() {
+    const order = []; // the names, the newest last
+    const setters = new Map(); // name -> function (z) that puts the z-index on that window ("" = none)
+    const renumber = () => {
+      order.forEach((name, i) => {
+        const set = setters.get(name);
+        if (set) set(WINDOW_Z_BASE + i);
+      });
+    };
+    const drop = (name) => {
+      const i = order.indexOf(name);
+      if (i >= 0) order.splice(i, 1);
+    };
+    return {
+      /** `name` was opened (or brought to the front again): it is the newest now.  `setZ(z)` puts a z-index on its window. */
+      opened(name, setZ) {
+        drop(name);
+        order.push(name);
+        if (typeof setZ === "function") setters.set(name, setZ);
+        renumber();
+        return WINDOW_Z_BASE + order.length - 1;
+      },
+      /** `name` was closed: it gives its place back (no z-index of its own), the others move up to fill it. */
+      closed(name) {
+        const wasThere = order.includes(name);
+        drop(name);
+        const set = setters.get(name);
+        if (wasThere && set) set("");
+        renumber();
+      },
+      top: () => (order.length ? order[order.length - 1] : null),
+      list: () => order.slice(),
+      escape(evt, name) {
+        if (!evt || evt.key !== "Escape" || order[order.length - 1] !== name) return false;
+        if (typeof evt.stopImmediatePropagation === "function") evt.stopImmediatePropagation();
+        return true;
+      },
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1500,9 +1562,11 @@
     buildBudgetPayload,
     formatPercent,
     NICKNAME_MAX,
+    NICKNAME_COLON_ERROR,
     charLength,
     validateNickname,
     normalizeRoster,
+    createWindowStack,
     formatSeconds,
     formatCountdown,
     gameClockNow,

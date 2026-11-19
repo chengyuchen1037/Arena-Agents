@@ -6,9 +6,9 @@
   <meta name="theme-color" content="#ffffff" />
   <title>Arena-Agents</title>
   <!-- 相对路径：本地 "/" 与子路径反代（如 /arena/）均可用；页面需带结尾斜杠访问 -->
-  <link rel="stylesheet" href="static/css/style.css?v=0.13.0" />
+  <link rel="stylesheet" href="static/css/style.css?v=0.13.1" />
   <!-- v0.12.1: 平台检测放在 head 里同步执行，首屏就按设备（手机 / 平板 / 桌面）布局，不会闪一下 -->
-  <script src="static/js/platform.js?v=0.13.0"></script>
+  <script src="static/js/platform.js?v=0.13.1"></script>
   <script>
     (function () {
       var P = window.ArenaPlatform;
@@ -59,11 +59,22 @@
         <!-- v0.13: 接管期间代替视角栏；手机上它留在第一行，不收进「⋯」菜单 -->
         <div class="takeover-bar" id="takeover-bar" hidden>
           <span class="takeover-badge" id="takeover-badge" title="你正在以这个座位参与对局；它的 agent 已暂停">🎮 正在扮演 <strong id="takeover-seat"></strong></span>
+          <!-- v0.13.1 (G1-G5)：软暂停——在途的回答照常做完，然后所有 agent 停下、计时冻结；你仍可阅读、发言、作答。
+               「收尾中（还有 N 个回答）」→「agent 已暂停」；收尾中可以「立即暂停」（= 顶栏的硬暂停，会取消在途的调用） -->
+          <span class="softpause" id="softpause">
+            <span class="softpause-status" id="softpause-status" role="status" hidden></span>
+            <button type="button" class="btn btn-xs btn-softpause" id="btn-softpause" title="暂停 agent">⏸ 暂停 agent</button>
+            <button type="button" class="softpause-now" id="btn-softpause-now" title="立即暂停" hidden>立即暂停</button>
+          </span>
           <button type="button" class="btn btn-xs btn-danger-outline" id="btn-release-takeover" title="退出接管">退出接管</button>
         </div>
       </div>
 
       <div class="topbar-right">
+        <!-- v0.13.1 (G32)：错误日志（全部 LLM 调用与报错）；有未读错误时按钮上是红色数字徽章。手机上整个按钮收进「⋯」菜单，徽章改显示在「⋯」上 -->
+        <button class="btn btn-xs btn-calllog" id="btn-open-calllog" title="错误日志：全部 LLM 调用与报错" aria-haspopup="dialog">
+          <span class="calllog-icon" aria-hidden="true">📋</span><span class="calllog-label">日志</span><span class="calllog-badge" id="calllog-badge" hidden></span>
+        </button>
         <!-- v0.12.1: token / 费用统计，旁边是「上限」按钮；80% 变黄，100% 变红 -->
         <div class="usage-group" id="usage-group">
           <div class="usage-telemetry-pill" id="usage-telemetry-pill" data-budget="ok" title="点击打开模型绑定（费用按每次调用的价格快照累加）">
@@ -80,7 +91,7 @@
         <button class="btn btn-primary-outline" id="btn-start">开始</button>
         <button class="btn btn-default" id="btn-pause" disabled>暂停</button>
         <button class="btn btn-resume" id="btn-resume" disabled title="继续对局；对局结束后也可以继续">继续</button>
-        <button class="btn btn-more" id="btn-more" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu" title="更多操作">⋯</button>
+        <button class="btn btn-more" id="btn-more" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu" title="更多操作">⋯<span class="more-badge" id="more-badge" hidden></span></button>
       </div>
     </div>
 
@@ -173,7 +184,7 @@
               </label>
             </div>
           </div>
-          <button class="btn btn-xs btn-primary-outline" id="btn-review-all" hidden title="对局结束后，让每名玩家复盘本局并写入自己的记忆">复盘全部</button>
+          <button class="btn btn-xs btn-primary-outline" id="btn-review-all" hidden title="对局结束后，让每名玩家用自己的模型复盘本局：计入战绩，更新对其他玩家的印象和自己的经验">复盘全部</button>
         </div>
         <div class="board-header-right" id="board-header-right">
           <button class="btn btn-xs" id="btn-open-history-modal" title="历史对局：重放、继续或删除保存过的对局">📜 历史对局</button>
@@ -544,6 +555,9 @@
   <!-- 频道栏收缩成头像条时，质询工单折叠成一个带数字的图标；点开就是这个列表 -->
   <div class="ticket-pop" id="ticket-pop" role="dialog" aria-label="质询工单" hidden></div>
 
+  <!-- v0.13.1 (G16)：玩家卡片右上角的色点打开这个色板（8 种颜色 + 清除；只有颜色，没有文字）。内容由 marks.js 渲染 -->
+  <div class="mark-pop" id="mark-pop" role="dialog" aria-label="颜色标记" hidden></div>
+
   <!-- v0.12.1: 玩家详情：桌面 / 平板是贴着卡片的浮层，手机是底部抽屉。放在网格之外，重渲染不会把它冲掉 -->
   <div class="detail-backdrop" id="detail-backdrop" hidden></div>
   <div class="detail-panel" id="detail-panel" role="dialog" aria-label="玩家详情" hidden>
@@ -553,19 +567,49 @@
     <div class="detail-editors" id="detail-editors"></div>
   </div>
 
-  <script src="static/js/core.js?v=0.13.0"></script>
-  <script src="static/js/avatar.js?v=0.13.0"></script>
-  <script src="static/js/store.js?v=0.13.0"></script>
-  <script src="static/js/view.js?v=0.13.0"></script>
-  <script src="static/js/layout.js?v=0.13.0"></script>
-  <script src="static/js/providers.js?v=0.13.0"></script>
-  <script src="static/js/roster.js?v=0.13.0"></script>
-  <script src="static/js/budget.js?v=0.13.0"></script>
-  <script src="static/js/archive.js?v=0.13.0"></script>
-  <script src="static/js/takeover.js?v=0.13.0"></script>
-  <script src="static/js/composer.js?v=0.13.0"></script>
-  <script src="static/js/history.js?v=0.13.0"></script>
-  <script src="static/js/replay.js?v=0.13.0"></script>
-  <script src="static/js/app.js?v=0.13.0"></script>
+  <!-- v0.13.1 (G22)：思考记录——页面里的大窗口（不是浏览器弹窗，避免被拦截和重复处理令牌），可以和玩家详情同时存在，手机上全屏。内容由 thoughts.js 渲染 -->
+  <div class="vw-window thoughts-window" id="thoughts-window" role="dialog" aria-label="思考记录" hidden>
+    <div class="vw-card">
+      <div class="vw-header">
+        <div class="vw-head-main" id="thoughts-head"></div>
+        <button type="button" class="btn btn-xs" id="btn-thoughts-refresh" title="现在就读取新内容">⟳ 刷新</button>
+        <button type="button" class="pop-close" id="btn-close-thoughts" aria-label="关闭">✕</button>
+      </div>
+      <div class="vw-body th-list" id="thoughts-list"></div>
+      <button type="button" class="btn btn-xs th-latest" id="btn-thoughts-latest" hidden></button>
+      <div class="vw-foot form-hint" id="thoughts-foot"></div>
+    </div>
+  </div>
+
+  <!-- v0.13.1 (G32–G36)：错误日志——当前对局的全部 LLM 调用与运行错误；顶栏的「📋 日志」打开它。内容由 calllog.js 渲染 -->
+  <div class="vw-window calllog-window" id="calllog-window" role="dialog" aria-label="错误日志" hidden>
+    <div class="vw-card">
+      <div class="vw-header">
+        <div class="vw-head-main"><span class="vw-heading"><span class="vw-title">📋 错误日志</span><span class="vw-sub" id="calllog-sub"></span></span></div>
+        <button type="button" class="pop-close" id="btn-close-calllog" aria-label="关闭">✕</button>
+      </div>
+      <div class="vw-toolbar" id="calllog-toolbar"></div>
+      <div class="vw-body cl-list" id="calllog-list"></div>
+      <div class="vw-foot form-hint" id="calllog-foot"></div>
+    </div>
+  </div>
+
+  <script src="static/js/core.js?v=0.13.1"></script>
+  <script src="static/js/avatar.js?v=0.13.1"></script>
+  <script src="static/js/store.js?v=0.13.1"></script>
+  <script src="static/js/view.js?v=0.13.1"></script>
+  <script src="static/js/layout.js?v=0.13.1"></script>
+  <script src="static/js/providers.js?v=0.13.1"></script>
+  <script src="static/js/roster.js?v=0.13.1"></script>
+  <script src="static/js/thoughts.js?v=0.13.1"></script>
+  <script src="static/js/calllog.js?v=0.13.1"></script>
+  <script src="static/js/budget.js?v=0.13.1"></script>
+  <script src="static/js/archive.js?v=0.13.1"></script>
+  <script src="static/js/marks.js?v=0.13.1"></script>
+  <script src="static/js/takeover.js?v=0.13.1"></script>
+  <script src="static/js/composer.js?v=0.13.1"></script>
+  <script src="static/js/history.js?v=0.13.1"></script>
+  <script src="static/js/replay.js?v=0.13.1"></script>
+  <script src="static/js/app.js?v=0.13.1"></script>
 </body>
 </html>

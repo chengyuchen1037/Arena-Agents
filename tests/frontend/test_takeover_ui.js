@@ -709,34 +709,77 @@ test("技能 forms follow the parameter types: enums, integers, several players,
 // =====================================================================================================
 const wolfRequest = (over = {}) => F.makeRequest({ id: "r1", to: ["N3", "N6", "N10", "N12"], share_answers: true, seconds_left: 60, ...over });
 
-test("a request card of the played seat is clickable while the game runs: the options are buttons, a click answers", async () => {
+// v0.13.1 (G45): a click on an option only PICKS it; the card's own button (「提交」 / 「修改回答」) sends the pick
+const clickOption = (env, id, value) =>
+  env.el("feed-records-container").dispatch("click", { target: target({ "[data-req-answer]": { "data-req-answer": id, "data-value": value } }) });
+const clickConfirm = (env, id) =>
+  env.el("feed-records-container").dispatch("click", { target: target({ "[data-req-confirm]": { "data-req-confirm": id } }) });
+
+test("a request card of the played seat is clickable while the game runs: a click on an option only PICKS it, 「提交」 sends the pick (G45)", async () => {
   const { env, backend } = await livePlayed("N3", { status: "running", requests: [wolfRequest()] }, { requests: [F.seatRequest("r1", { channel_id: "wolves", deadline_clock: 72.5 })] });
   env.app().state.clockSync = { clock: 12.5, at: 0, running: false };
   channelClick(env, "wolves");
   env.flushRaf();
-  const card = feedHtml(env);
+  let card = feedHtml(env);
   assert.match(card, /<div class="req-action" data-req-action="r1">/);
   assert.match(card, /轮到你作答了/);
   for (const id of ["N1", "N4", "N5"]) assert.match(card, new RegExp(`data-req-answer="r1" data-value="${id}" aria-pressed="false"`));
   assert.doesNotMatch(card, /data-req-answer="r1"[^>]* disabled/);
   assert.match(card, /class="req-card req-open is-share has-action"/);
+  // nothing picked yet: 「提交」 is on the card, but it cannot be pressed
+  assert.match(card, /data-req-confirm="r1" title="先选一个选项，再提交" disabled>提交</);
+  assert.doesNotMatch(card, /req-pick/);
 
-  env.el("feed-records-container").dispatch("click", { target: target({ "[data-req-answer]": { "data-req-answer": "r1", "data-value": "N4" } }) });
+  // a click on an option only picks it: highlighted, "未提交", and NOTHING is sent
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  assert.equal(backend.seatCalls, undefined, "a pick is not a vote");
+  card = feedHtml(env);
+  assert.match(card, /class="req-opt picked" data-req-answer="r1" data-value="N4" aria-pressed="true"/);
+  assert.match(card, /已选：<strong>4号 David<\/strong> · 未提交/);
+  assert.match(card, /data-req-confirm="r1" title=""\s*>提交</, "pressable now");
+  assert.doesNotMatch(card, /data-req-confirm="r1"[^>]* disabled/);
+
+  // 「提交」 sends exactly the pick - once - and the pick is gone afterwards
+  clickConfirm(env, "r1");
   await flush(env);
   assert.deepEqual(backend.seatCalls.map((c) => [c.kind, c.body]), [["respond", { request_id: "r1", value: "N4" }]]);
   assert.match(lastToast(env), /已提交：4号 David/);
+  assert.equal(env.app().composer()._state.picked.size, 0);
 });
 
-test("an answered card marks the person's choice and may be changed until the request closes", async () => {
+test("an answered card marks the person's choice; changing it is a new pick + 「修改回答」, and the old choice stays marked until the change is sent (G45)", async () => {
   const mine = F.seatRequest("r1", { channel_id: "wolves", answered: true, my_answer: { value: "N4", label: "4号 David", reason: "" } });
   const { env, backend } = await livePlayed("N3", { status: "running", requests: [wolfRequest({ answers: [F.answer("N3", "N4", "4号 David")], answered_by: ["N3"] })] }, { requests: [mine] });
   channelClick(env, "wolves");
   env.flushRaf();
-  const card = feedHtml(env);
+  let card = feedHtml(env);
   assert.match(card, /你的选择：<strong>4号 David<\/strong><span class="req-mine-hint">（请求关闭前可以修改）/);
   assert.match(card, /class="req-opt selected" data-req-answer="r1" data-value="N4" aria-pressed="true"[^>]*>✓ 4号 David/);
   assert.match(card, /aria-pressed="false"[^>]*>1号 Alice/);
-  env.el("feed-records-container").dispatch("click", { target: target({ "[data-req-answer]": { "data-req-answer": "r1", "data-value": "N5" } }) });
+  assert.match(card, /data-req-confirm="r1" title="先选一个选项，再提交" disabled>修改回答</, "nothing new to send yet");
+  // a click on another option only picks it: the submitted choice keeps its ✓, the note says both, nothing is sent
+  clickOption(env, "r1", "N5");
+  await flush(env);
+  assert.equal(backend.seatCalls, undefined, "a change is not sent by the click");
+  card = feedHtml(env);
+  assert.match(card, /class="req-opt selected" data-req-answer="r1" data-value="N4" aria-pressed="false"[^>]*>✓ 4号 David/);
+  assert.match(card, /class="req-opt picked" data-req-answer="r1" data-value="N5" aria-pressed="true"/);
+  assert.match(card, /已提交：4号 David · 改选：<strong>5号 Eve<\/strong>（未提交）/);
+  assert.match(card, /data-req-confirm="r1" title=""\s*>修改回答</);
+  // picking the submitted choice again is "no change": nothing to send
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  assert.doesNotMatch(feedHtml(env), /req-pick|req-opt picked/);
+  assert.match(feedHtml(env), /data-req-confirm="r1"[^>]* disabled>修改回答</);
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.equal(backend.seatCalls, undefined);
+  assert.match(lastToast(env), /已经提交了这个选择/);
+  // the change: pick another, 「修改回答」 sends it
+  clickOption(env, "r1", "N5");
+  await flush(env);
+  clickConfirm(env, "r1");
   await flush(env);
   assert.deepEqual(backend.seatCalls.map((c) => c.body), [{ request_id: "r1", value: "N5" }], "a change is just another answer");
   // the request closes: the buttons are gone, the result stays
@@ -751,10 +794,15 @@ test("a paused game freezes the card: the options are disabled and the card says
   const card = feedHtml(env);
   assert.match(card, /data-req-answer="r1" data-value="N4" aria-pressed="false" disabled/);
   assert.match(card, /对局已暂停，继续后才能作答（请求的计时也已暂停）/);
-  env.el("feed-records-container").dispatch("click", { target: target({ "[data-req-answer]": { "data-req-answer": "r1", "data-value": "N4" } }) });
+  assert.match(card, /data-req-confirm="r1" title="对局已暂停[^"]*" disabled>提交</, "the button says why it is grey");
+  clickOption(env, "r1", "N4");
   await flush(env);
   assert.equal(backend.seatCalls, undefined, "nothing is sent while the game is paused");
   assert.match(lastToast(env), /对局已暂停/);
+  assert.equal(env.app().composer()._state.picked.size, 0, "a frozen card cannot even be picked on");
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.equal(backend.seatCalls, undefined);
   // idle / finished say so as well
   for (const [status, re] of [["idle", /对局还没有开始/], ["finished", /对局已结束/]]) {
     const other = await livePlayed("N3", { status, requests: [wolfRequest({ status: status === "finished" ? "open" : "open" })] }, { requests: [F.seatRequest("r1", { channel_id: "wolves" })] });
@@ -762,6 +810,83 @@ test("a paused game freezes the card: the options are disabled and the card says
     other.env.flushRaf();
     assert.match(feedHtml(other.env), re, status);
   }
+});
+
+test("a pick is only a pick: another option moves it, the same option takes it back, it survives repaints and a channel switch, and it goes with its request (G45)", async () => {
+  const { env, backend } = await livePlayed("N3", { status: "running", requests: [wolfRequest()] }, { requests: [F.seatRequest("r1", { channel_id: "wolves" })] });
+  channelClick(env, "wolves");
+  env.flushRaf();
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  assert.match(feedHtml(env), /class="req-opt picked" data-req-answer="r1" data-value="N4"/);
+  clickOption(env, "r1", "N5"); // another option moves the pick
+  await flush(env);
+  let card = feedHtml(env);
+  assert.match(card, /class="req-opt picked" data-req-answer="r1" data-value="N5"/);
+  assert.doesNotMatch(card, /req-opt picked" data-req-answer="r1" data-value="N4"/);
+  // the world moves on (the card is repainted) and the person looks at another channel: the pick stays
+  env.sse("request.progress", { request_id: "r1", answered_by: ["N6"], total: 4 });
+  channelClick(env, "public");
+  env.flushRaf();
+  channelClick(env, "wolves");
+  env.flushRaf();
+  assert.match(feedHtml(env), /class="req-opt picked" data-req-answer="r1" data-value="N5"/);
+  // the picked option again takes the pick back; the button is grey again
+  clickOption(env, "r1", "N5");
+  await flush(env);
+  card = feedHtml(env);
+  assert.doesNotMatch(card, /req-opt picked|req-pick/);
+  assert.match(card, /data-req-confirm="r1"[^>]* disabled>提交</);
+  // pressing the button without a pick sends nothing
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.equal(backend.seatCalls, undefined);
+  assert.match(lastToast(env), /先选一个选项/);
+  // a pick is dropped when its request closes (the buttons go, the result stays)
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  assert.equal(env.app().composer()._state.picked.get("r1"), "N4");
+  env.sse("request.closed", { request_id: "r1", reason: "all_answered", answered_by: ["N3", "N6", "N10", "N12"], defaulted: [], result: { reason: "all_answered", tally: { N5: 4 }, leaders: ["N5"], defaulted: [], missing: [] } });
+  env.app().composer().render();
+  assert.equal(env.app().composer()._state.picked.size, 0);
+  assert.doesNotMatch(feedHtml(env), /data-req-answer|data-req-confirm/);
+  assert.equal(backend.seatCalls, undefined, "a pick that was never submitted is never sent - the engine's default answer counts");
+});
+
+test("a refused answer keeps the pick (the person presses again); the same pick cannot be sent twice at once (G45)", async () => {
+  const { env, backend } = await livePlayed("N3", { status: "running", requests: [wolfRequest()] }, { requests: [F.seatRequest("r1", { channel_id: "wolves" })] });
+  channelClick(env, "wolves");
+  env.flushRaf();
+  backend.seatReply = { respond: { accepted: false, seq: null, code: "REQUEST_CLOSED", message: "这个请求已经关闭。" } };
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.match(lastToast(env), /这个请求已经关闭/);
+  assert.equal(env.app().composer()._state.picked.get("r1"), "N4", "the pick is still there");
+  assert.match(feedHtml(env), /已选：<strong>4号 David<\/strong> · 未提交/);
+  // the server takes it this time
+  backend.seatReply = {};
+  clickConfirm(env, "r1");
+  clickConfirm(env, "r1"); // a second press while the first is on its way
+  await flush(env);
+  assert.equal(backend.seatCalls.length, 2, "one refused + one accepted: the double press sent only one more");
+  assert.equal(env.app().composer()._state.picked.size, 0);
+});
+
+test("the note of a pick that was not submitted is flagged 15 game seconds before the deadline (the 1 Hz tick sets it) (G45)", async () => {
+  const { env } = await livePlayed("N3", { status: "running", requests: [wolfRequest({ seconds_left: 60 })] }, { requests: [F.seatRequest("r1", { channel_id: "wolves" })] });
+  env.app().state.clockSync = { clock: 100, at: 0, running: false };
+  env.app().renderAll(true);
+  channelClick(env, "wolves");
+  env.flushRaf();
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  const card = feedHtml(env);
+  const deadline = Number(/data-deadline="([0-9.]+)"/.exec(card)[1]);
+  assert.ok(Number.isFinite(deadline) && deadline > 15, "the card has a deadline");
+  assert.match(card, new RegExp(`class="req-pick" data-req-pick="r1" data-warn-at="${deadline - 15}"`));
+  assert.match(card, /<span class="req-pick-warn">⚠ 快到时间了，点「提交」才算数；到点按默认答案处理<\/span>/);
 });
 
 test("a request that is not for the seat, or is closed, has no buttons; the god view and a spectator never do", async () => {
@@ -813,6 +938,458 @@ test("the card's countdown follows the game clock; the answer part has no countd
   channelClick(env, "wolves");
   env.flushRaf();
   assert.match(feedHtml(env), /data-deadline="/);
+});
+
+// =====================================================================================================
+// request answers on their way (G45): what the page holds while an answer has not come back
+// =====================================================================================================
+// A press sends the answer; the reply comes later.  Meanwhile the person may pick again or type on, the request may
+// close, the game on screen may change (a request id comes back in every game: "r1" again).  The reply releases its
+// own slot (game + seat + request id) and drops only what it SENT - and only in the game it was sent for.
+
+/**
+ * Keep the REPLIES of POST api/seat/respond on the wire: the fake server has the answer (`backend.seatCalls`) but the
+ * page does not hear back until the test lets it.  `held[i].release()` lets the server's own reply through,
+ * `release(receipt)` a different one (the answer was refused after all), `fail(status, detail)` an HTTP error.  `held`
+ * lists the answers on their way, in the order they were sent.
+ */
+function holdAnswers({ env, backend }) {
+  const held = [];
+  const original = backend.fetch;
+  backend.fetch = async (url, init) => {
+    const res = await original(url, init);
+    if (!String(url).endsWith("/api/seat/respond")) return res;
+    const late = await new Promise((release) =>
+      held.push({ body: JSON.parse(init.body), release, fail: (status, detail) => release({ http: [status, detail] }) })
+    );
+    if (late === undefined) return res;
+    return late.http ? H.resp(late.http[0], { detail: late.http[1] }) : H.resp(200, late);
+  };
+  env.sandbox.fetch = backend.fetch;
+  return held;
+}
+
+/** The snapshot of ANOTHER game (a new session id) in which `seat` is played; its requests start again at "r1". */
+const gameOf = (id, seat, over = {}, takeoverOver = {}) =>
+  F.makeSession({ session_id: id, event_id: 700, ...playedOver(seat, { status: "running", ...over }, takeoverOver) });
+/** The slots of the answers on their way ("<game>|<seat>|<request id>"). */
+const slots = (env) => [...env.app().composer()._state.ops.keys()].sort();
+const sentBodies = (backend) => (backend.seatCalls || []).map((c) => c.body);
+const wolfSeat = (id = "r1", over = {}) => F.seatRequest(id, { channel_id: "wolves", ...over });
+const mineAnswered = (id, value, label, over = {}) => wolfSeat(id, { answered: true, my_answer: { value, label, reason: "" }, ...over });
+const closedPayload = (id) => ({
+  request_id: id,
+  reason: "all_answered",
+  answered_by: ["N3", "N6", "N10", "N12"],
+  defaulted: [],
+  result: { reason: "all_answered", tally: { N5: 4 }, leaders: ["N5"], defaulted: [], missing: [] },
+});
+const typeIntoCard = (env, id, value) =>
+  env.el("feed-records-container").dispatch("input", { target: target({ "[data-req-text]": { "data-req-text": id } }, { value }) });
+const pressSubmit = (env, id) => env.el("feed-records-container").dispatch("click", { target: target({ "[data-req-submit]": { "data-req-submit": id } }) });
+/** The wolves' request (a choice of N1 / N4 / N5 in the wolves' channel) of a played N3, the wolves' channel open. */
+async function wolvesGame(over = {}, extraRequests = []) {
+  const ctx = await livePlayed(
+    "N3",
+    { status: "running", requests: [wolfRequest(), ...extraRequests.map((r) => wolfRequest({ id: r }))], ...over },
+    { requests: [wolfSeat(), ...extraRequests.map((r) => wolfSeat(r))] }
+  );
+  channelClick(ctx.env, "wolves");
+  ctx.env.flushRaf();
+  return { ...ctx, composer: ctx.env.app().composer(), held: holdAnswers(ctx) };
+}
+
+test("G45 race A: a pick made while the answer before it is on its way survives that answer; the button says 提交中…, a second press sends nothing", async () => {
+  const { env, backend, composer, held } = await wolvesGame();
+
+  // N4 is picked and sent: the answer is on its way
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend), [{ request_id: "r1", value: "N4" }]);
+  assert.equal(held.length, 1);
+  assert.deepEqual(slots(env), ["s-test|N3|r1"]);
+  let card = feedHtml(env);
+  assert.match(card, /data-req-confirm="r1" title="上一次提交还没有完成，完成后可以再提交新的选择" disabled>提交中…</);
+  assert.doesNotMatch(card, /data-req-answer="r1"[^>]* disabled/, "the options stay usable");
+  assert.doesNotMatch(card, /req-pick/, "the pick that is being sent is not an 'unsubmitted' one");
+
+  // meanwhile the person picks N5: a newer wish, with a note of its own; the button is still grey (one answer at a time)
+  clickOption(env, "r1", "N5");
+  await flush(env);
+  assert.equal(composer._state.picked.get("r1"), "N5");
+  card = feedHtml(env);
+  assert.match(card, /class="req-opt picked" data-req-answer="r1" data-value="N5" aria-pressed="true"/);
+  assert.match(card, /已选：<strong>5号 Eve<\/strong> · 未提交/);
+  assert.match(card, /data-req-confirm="r1"[^>]* disabled>提交中…</);
+  // a second press - a keyboard, another tab, a script - sends nothing: neither N4 again nor N5
+  assert.equal(await composer.confirmPick("r1"), false);
+  assert.equal(await composer.respond("r1", "N5"), false);
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.equal(held.length, 1);
+  assert.equal(backend.seatCalls.length, 1);
+  // a reconnect (the snapshot of the same game) changes neither the slot nor the pick
+  env.sse("snapshot", { session: F.makeSession({ session_id: "s-test", event_id: 520, ...playedOver("N3", { status: "running", requests: [wolfRequest()] }, { requests: [wolfSeat()] }) }) }, 520);
+  assert.deepEqual(slots(env), ["s-test|N3|r1"]);
+  assert.equal(composer._state.picked.get("r1"), "N5");
+  assert.match(feedHtml(env), /data-req-confirm="r1"[^>]* disabled>提交中…</);
+
+  // N4 is accepted (the server tells the seat's state first, as it does)
+  takeover(env, "N3", { requests: [mineAnswered("r1", "N4", "4号 David")] });
+  held[0].release();
+  await flush(env);
+  assert.match(lastToast(env), /已提交：4号 David/);
+  assert.equal(composer._state.picked.get("r1"), "N5", "the newer pick is not the answer's to take away");
+  assert.deepEqual(slots(env), []);
+  card = feedHtml(env);
+  assert.match(card, /已提交：4号 David · 改选：<strong>5号 Eve<\/strong>（未提交）/);
+  assert.match(card, /data-req-confirm="r1" title=""\s*>修改回答</);
+  // the change goes out as the next answer; when it is accepted the pick is gone
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend), [{ request_id: "r1", value: "N4" }, { request_id: "r1", value: "N5" }]);
+  held[1].release();
+  await flush(env);
+  assert.equal(composer._state.picked.size, 0);
+  assert.deepEqual(slots(env), []);
+});
+
+test("G45 race A (the other order): the answer comes back before the seat's state does - the newer pick is offered as a new answer until it says otherwise", async () => {
+  const { env, backend, composer, held } = await wolvesGame();
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  clickConfirm(env, "r1");
+  await flush(env);
+  clickOption(env, "r1", "N5");
+  await flush(env);
+  held[0].release();
+  await flush(env);
+  assert.equal(composer._state.picked.get("r1"), "N5");
+  let card = feedHtml(env);
+  assert.match(card, /已选：<strong>5号 Eve<\/strong> · 未提交/);
+  assert.match(card, /data-req-confirm="r1" title=""\s*>提交</, "free again; the seat's state does not know the first answer yet");
+  // the seat's state arrives: now it is a change
+  takeover(env, "N3", { requests: [mineAnswered("r1", "N4", "4号 David")] });
+  card = feedHtml(env);
+  assert.match(card, /已提交：4号 David · 改选：<strong>5号 Eve<\/strong>（未提交）/);
+  assert.match(card, /data-req-confirm="r1" title=""\s*>修改回答</);
+  assert.equal(composer._state.picked.get("r1"), "N5");
+  assert.equal(backend.seatCalls.length, 1);
+});
+
+test("a refused answer, or one that failed on the way, keeps the picks and frees the slot - a newer pick included (G45)", async () => {
+  const { env, backend, composer, held } = await wolvesGame();
+  // N4 goes out, N5 is picked meanwhile; the server refuses N4
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  clickConfirm(env, "r1");
+  await flush(env);
+  clickOption(env, "r1", "N5");
+  await flush(env);
+  held[0].release({ accepted: false, seq: null, code: "REQUEST_CLOSED", message: "这个请求已经关闭。" });
+  await flush(env);
+  assert.match(lastToast(env), /这个请求已经关闭/);
+  assert.equal(composer._state.picked.get("r1"), "N5", "the picks are the person's, not the answer's");
+  assert.deepEqual(slots(env), []);
+  assert.match(feedHtml(env), /data-req-confirm="r1" title=""\s*>提交</, "free: the person may press again");
+
+  // N5 goes out and N1 is picked meanwhile; the reply is an HTTP error (the answer may have reached the server or not)
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend), [{ request_id: "r1", value: "N4" }, { request_id: "r1", value: "N5" }]);
+  clickOption(env, "r1", "N1");
+  await flush(env);
+  held[1].fail(503, "服务暂时不可用");
+  await flush(env);
+  assert.match(lastToast(env), /服务暂时不可用/);
+  assert.equal(composer._state.picked.get("r1"), "N1");
+  assert.deepEqual(slots(env), []);
+  // N1 goes out and is accepted: only now is the pick gone
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend).slice(2), [{ request_id: "r1", value: "N1" }]);
+  held[2].release();
+  await flush(env);
+  assert.equal(composer._state.picked.size, 0);
+  assert.deepEqual(slots(env), []);
+});
+
+test("G45 race B: the answer of the game before cannot touch the card of a new game whose request has the same id", async () => {
+  const { env, backend, composer, held } = await wolvesGame({ session_id: "g1" });
+
+  // game 1: N4 is on its way
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.deepEqual(slots(env), ["g1|N3|r1"]);
+
+  // the game on screen changes: a new one, whose first request is "r1" again
+  env.sse("snapshot", { session: gameOf("g2", "N3", { requests: [wolfRequest()] }, { requests: [wolfSeat()] }) }, 700);
+  channelClick(env, "wolves");
+  env.flushRaf();
+  assert.equal(env.app().state.session.session_id, "g2");
+  assert.equal(composer._state.picked.size, 0, "game 1's pick is gone");
+  let card = feedHtml(env);
+  assert.match(card, /data-req-confirm="r1" title="先选一个选项，再提交" disabled>提交</);
+  assert.doesNotMatch(card, /提交中/, "game 2's card is not 'on its way' because of game 1's answer");
+
+  // game 2: its first answer is not held up by game 1's (and goes out) ...
+  clickOption(env, "r1", "N5");
+  await flush(env);
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend), [{ request_id: "r1", value: "N4" }, { request_id: "r1", value: "N5" }]);
+  assert.deepEqual(slots(env), ["g1|N3|r1", "g2|N3|r1"]);
+  // ... and the person picks again meanwhile
+  clickOption(env, "r1", "N1");
+  await flush(env);
+  assert.equal(composer._state.picked.get("r1"), "N1");
+
+  // game 1's answer comes back, accepted: it changes nothing of game 2
+  const toasts = env.toasts.length;
+  held[0].release();
+  await flush(env);
+  assert.deepEqual(slots(env), ["g2|N3|r1"], "it released its own slot only");
+  assert.equal(composer._state.picked.get("r1"), "N1", "game 2's pick is still there");
+  assert.equal(env.toasts.length, toasts, "no 'submitted' toast for a game that is not on screen");
+  card = feedHtml(env);
+  assert.match(card, /data-req-confirm="r1"[^>]* disabled>提交中…</, "game 2's answer is still on its way");
+  assert.match(card, /已选：<strong>1号 Alice<\/strong> · 未提交/);
+  // ... so a second press in game 2 is still a double press
+  assert.equal(await composer.confirmPick("r1"), false);
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.equal(backend.seatCalls.length, 2);
+
+  // game 2's own answer: its slot is freed; N1 - picked after the press - stays
+  held[1].release();
+  await flush(env);
+  assert.match(lastToast(env), /已提交：5号 Eve/);
+  assert.deepEqual(slots(env), []);
+  assert.equal(composer._state.picked.get("r1"), "N1");
+});
+
+test("G45 race B (seat): the answer of the seat before cannot touch the page of the next seat, though it is the same game and the same request", async () => {
+  const { env, backend, composer, held } = await wolvesGame();
+  clickOption(env, "r1", "N4"); // N3 answers N4
+  await flush(env);
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.deepEqual(slots(env), ["s-test|N3|r1"]);
+
+  // N6 - another wolf, who has the same request - is played now (another tab gave the seat back and took this one)
+  takeover(env, "N6", { requests: [wolfSeat()] });
+  env.flushRaf();
+  assert.equal(env.app().state.viewpoint, "N6");
+  assert.equal(composer._state.picked.size, 0, "N3's pick is not N6's");
+  assert.doesNotMatch(feedHtml(env), /提交中/, "N6's card is not 'on its way' because of N3's answer");
+  clickOption(env, "r1", "N5");
+  await flush(env);
+  assert.equal(composer._state.picked.get("r1"), "N5");
+
+  held[0].release();
+  await flush(env);
+  assert.deepEqual(slots(env), []);
+  assert.equal(composer._state.picked.get("r1"), "N5", "N6's pick is still there");
+  assert.doesNotMatch(lastToast(env), /已提交/, "no 'submitted' toast for a seat that is not played any more");
+  // N6 answers on its own
+  clickConfirm(env, "r1");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend), [{ request_id: "r1", value: "N4" }, { request_id: "r1", value: "N5" }]);
+  assert.deepEqual(slots(env), ["s-test|N6|r1"]);
+  held[1].release();
+  await flush(env);
+  assert.equal(composer._state.picked.size, 0);
+  assert.deepEqual(slots(env), []);
+});
+
+test("G45 race B (text): the answer of the game before leaves the text typed in the new game alone", async () => {
+  const textReq = () => F.makeRequest({ id: "r2", kind: "text", options: [], question: "请留下遗言", to: ["N3"], share_answers: false, auto_close: "all_answered", seconds_left: 45 });
+  const textSeat = () => F.seatRequest("r2", { kind: "text", max_chars: 300, channel_id: "dm-N3" });
+  const ctx = await livePlayed("N3", { session_id: "g1", status: "running", requests: [textReq()] }, { requests: [textSeat()] });
+  const { env, backend } = ctx;
+  const composer = env.app().composer();
+  channelClick(env, "dm-N3");
+  env.flushRaf();
+  const held = holdAnswers(ctx);
+
+  typeIntoCard(env, "r2", "旧局的遗言");
+  pressSubmit(env, "r2");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend), [{ request_id: "r2", value: "旧局的遗言" }]);
+  assert.deepEqual(slots(env), ["g1|N3|r2"]);
+
+  env.sse("snapshot", { session: gameOf("g2", "N3", { requests: [textReq()] }, { requests: [textSeat()] }) }, 700);
+  channelClick(env, "dm-N3");
+  env.flushRaf();
+  assert.equal(composer._state.reqDrafts.size, 0, "game 1's draft is gone");
+  assert.match(feedHtml(env), /data-req-submit="r2">提交</, "game 2's card is not 'on its way'");
+
+  typeIntoCard(env, "r2", "新局的遗言");
+  held[0].release();
+  await flush(env);
+  assert.deepEqual(slots(env), []);
+  assert.equal(composer._state.reqDrafts.get("r2"), "新局的遗言", "game 2's text is not the answer of game 1 to take away");
+  assert.match(feedHtml(env), /data-req-submit="r2">提交</);
+
+  // game 2's answer goes out on its own; the same text again while it is on its way is a double press
+  pressSubmit(env, "r2");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend), [{ request_id: "r2", value: "旧局的遗言" }, { request_id: "r2", value: "新局的遗言" }]);
+  pressSubmit(env, "r2");
+  await flush(env);
+  assert.equal(backend.seatCalls.length, 2);
+  held[1].release();
+  await flush(env);
+  assert.equal(composer._state.reqDrafts.size, 0);
+  assert.deepEqual(slots(env), []);
+});
+
+test("an answer that comes back after its request closed resurrects nothing: no pick, no button, no slot (G45)", async () => {
+  const { env, composer, held } = await wolvesGame({}, ["r3"]);
+  // two answers on their way (N4 for r1, N5 for r3), a newer pick on each
+  clickOption(env, "r1", "N4");
+  clickConfirm(env, "r1");
+  clickOption(env, "r3", "N5");
+  clickConfirm(env, "r3");
+  await flush(env);
+  assert.equal(held.length, 2);
+  clickOption(env, "r1", "N1");
+  clickOption(env, "r3", "N1");
+  await flush(env);
+  assert.deepEqual([...composer._state.picked.keys()].sort(), ["r1", "r3"]);
+  // both requests close: the picks go with them, the buttons too
+  env.sse("request.closed", closedPayload("r1"));
+  env.sse("request.closed", closedPayload("r3"));
+  assert.equal(composer._state.picked.size, 0);
+  assert.doesNotMatch(feedHtml(env), /data-req-answer|data-req-confirm/);
+  assert.deepEqual(slots(env), ["s-test|N3|r1", "s-test|N3|r3"], "the answers are still on their way: the slots stay until they return");
+
+  // r1's answer was accepted just before the close, r3's refused just after it
+  held[0].release();
+  await flush(env);
+  assert.match(lastToast(env), /已提交：4号 David/);
+  assert.equal(composer._state.picked.size, 0, "nothing came back to life");
+  held[1].release({ accepted: false, seq: null, code: "REQUEST_CLOSED", message: "这个请求已经关闭。" });
+  await flush(env);
+  assert.match(lastToast(env), /这个请求已经关闭/);
+  assert.equal(composer._state.picked.size, 0);
+  assert.deepEqual(slots(env), []);
+  assert.doesNotMatch(feedHtml(env), /data-req-answer|data-req-confirm|req-pick/);
+});
+
+test("the answers of two requests have a slot each: both go out, each clears only its own pick (G45)", async () => {
+  const { env, backend, composer, held } = await wolvesGame({}, ["r3"]);
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  clickConfirm(env, "r1");
+  await flush(env);
+  // r1's answer is on its way: r3 is another request - its press is not held up
+  clickOption(env, "r3", "N5");
+  await flush(env);
+  clickConfirm(env, "r3");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend), [{ request_id: "r1", value: "N4" }, { request_id: "r3", value: "N5" }]);
+  assert.deepEqual(slots(env), ["s-test|N3|r1", "s-test|N3|r3"]);
+  held[1].release();
+  await flush(env);
+  assert.deepEqual(slots(env), ["s-test|N3|r1"]);
+  assert.equal(composer._state.picked.get("r1"), "N4", "r1's own answer is still on its way: its pick stays");
+  assert.equal(composer._state.picked.has("r3"), false, "r3's answer took r3's pick");
+  held[0].release();
+  await flush(env);
+  assert.deepEqual(slots(env), []);
+  assert.equal(composer._state.picked.size, 0);
+});
+
+test("G45: a text typed after the press stays, the text that was sent goes; the button says 提交中… meanwhile", async () => {
+  const request = F.makeRequest({ id: "r2", kind: "text", options: [], question: "请留下遗言", to: ["N3"], share_answers: false, auto_close: "all_answered", seconds_left: 45 });
+  const seatRow = (over = {}) => F.seatRequest("r2", { kind: "text", max_chars: 300, channel_id: "dm-N3", ...over });
+  const ctx = await livePlayed("N3", { status: "running", requests: [request] }, { requests: [seatRow()] });
+  const { env, backend } = ctx;
+  const composer = env.app().composer();
+  channelClick(env, "dm-N3");
+  env.flushRaf();
+  const held = holdAnswers(ctx);
+
+  typeIntoCard(env, "r2", "我是好人");
+  pressSubmit(env, "r2");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend), [{ request_id: "r2", value: "我是好人" }]);
+  let card = feedHtml(env);
+  assert.match(card, /data-req-submit="r2" title="上一次提交还没有完成，完成后可以再提交新的选择" disabled>提交中…</);
+  assert.doesNotMatch(card, /<textarea[^>]* disabled/, "the box stays usable");
+  // the person goes on typing; a second press sends nothing
+  typeIntoCard(env, "r2", "我是好人，真的");
+  pressSubmit(env, "r2");
+  await flush(env);
+  assert.equal(backend.seatCalls.length, 1);
+
+  takeover(env, "N3", { requests: [seatRow({ answered: true, my_answer: { value: "我是好人", label: "我是好人", reason: "" } })] });
+  held[0].release();
+  await flush(env);
+  assert.equal(composer._state.reqDrafts.get("r2"), "我是好人，真的", "the newer text is not the answer's to take away");
+  assert.deepEqual(slots(env), []);
+  assert.match(feedHtml(env), /data-req-submit="r2">修改回答</);
+  // the change goes out; the text that was sent goes with it - blanks around it do not count as newer
+  pressSubmit(env, "r2");
+  await flush(env);
+  assert.deepEqual(sentBodies(backend).slice(1), [{ request_id: "r2", value: "我是好人，真的" }]);
+  typeIntoCard(env, "r2", "我是好人，真的  ");
+  held[1].release();
+  await flush(env);
+  assert.equal(composer._state.reqDrafts.has("r2"), false);
+  assert.deepEqual(slots(env), []);
+});
+
+test("the card of a new game is not drawn with the pick of the game before, though its request has the same id (G45)", async () => {
+  const vote = () => F.makeRequest({ id: "r1", to: F.PLAYER_IDS, share_answers: false, auto_close: "all_answered", seconds_left: 60 });
+  const mine = () => ({ requests: [F.seatRequest("r1", { channel_id: "public" })] });
+  const { env } = await livePlayed("N3", { session_id: "g1", status: "running", requests: [vote()] }, mine());
+  const composer = env.app().composer();
+  // game 1: a vote of everybody lives in the public channel, the one that is open: a pick
+  clickOption(env, "r1", "N4");
+  await flush(env);
+  assert.match(feedHtml(env), /class="req-opt picked" data-req-answer="r1" data-value="N4"/);
+  // game 2 arrives and the page is painted - the feed first, the input box after it
+  env.sse("snapshot", { session: gameOf("g2", "N3", { requests: [vote()] }, mine()) }, 700);
+  const card = feedHtml(env);
+  assert.match(card, /data-req-answer="r1" data-value="N4" aria-pressed="false"/, "game 2's card is there");
+  assert.doesNotMatch(card, /req-opt picked|req-pick|已选/);
+  assert.match(card, /data-req-confirm="r1" title="先选一个选项，再提交" disabled>提交</);
+  assert.equal(composer._state.picked.size, 0);
+});
+
+test("a press that lands between the arrival of a new game and the repaint does not cast the pick of the game before (G45)", async () => {
+  const { env, backend, composer } = await wolvesGame({ session_id: "g1" });
+  clickOption(env, "r1", "N4"); // game 1: picked, not submitted
+  await flush(env);
+  // game 2 arrives (its first request is "r1" as well) - the page has not repainted yet: game 1's card is still there
+  env.sse("snapshot", { session: gameOf("g2", "N3", { requests: [wolfRequest()] }, { requests: [wolfSeat()] }) }, 700, { flush: false });
+  clickConfirm(env, "r1"); // the press on game 1's button
+  await flush(env);
+  assert.equal(backend.seatCalls, undefined, "nothing was sent: N4 was picked in the game before");
+  assert.match(lastToast(env), /先选一个选项/);
+  assert.equal(composer._state.picked.size, 0);
+  assert.deepEqual(slots(env), []);
+});
+
+test("a text typed in the game before is not put into the new game's input of the same request id, not even before the repaint (G45)", async () => {
+  const textVote = () => F.makeRequest({ id: "r2", kind: "text", options: [], question: "请留下遗言", to: F.PLAYER_IDS, share_answers: false, auto_close: "all_answered", seconds_left: 45 });
+  const mine = () => ({ requests: [F.seatRequest("r2", { kind: "text", max_chars: 300, channel_id: "public" })] });
+  const { env } = await livePlayed("N3", { session_id: "g1", status: "running", requests: [textVote()] }, mine());
+  const composer = env.app().composer();
+  typeIntoCard(env, "r2", "旧局的草稿");
+  assert.equal(composer._state.reqDrafts.get("r2"), "旧局的草稿");
+  env.sse("snapshot", { session: gameOf("g2", "N3", { requests: [textVote()] }, mine()) }, 700, { flush: false });
+  // the cards of game 2 are drawn now: their inputs are filled before the box has seen the new game
+  const input = { value: "?", getAttribute: (k) => ({ "data-req-text": "r2", "data-initial": "" })[k] ?? null };
+  composer.restoreRequestDrafts({ querySelectorAll: () => [input] });
+  assert.equal(input.value, "", "an empty input: the text typed in the game before is not this game's draft");
+  assert.equal(composer._state.reqDrafts.size, 0);
 });
 
 // =====================================================================================================

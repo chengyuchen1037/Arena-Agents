@@ -54,6 +54,9 @@ const project = (s) => ({
   seq: LIVE ? 0 : s.seq,
   memory_enabled: s.memory_enabled,
   stall_notice: s.stall_notice,
+  // v0.13.1 (§12.2): the soft pause and whether the game clock runs (they travel in every session.updated)
+  soft_pause: s.soft_pause,
+  clock_running: s.clock_running,
   budget: s.budget,
   review: { available: s.review.available, done: s.review.done, running: s.review.running },
   participants: Object.fromEntries(
@@ -150,7 +153,8 @@ if (differences.length) {
 assert.deepEqual(got, want);
 
 if (LIVE) {
-  assert.ok(states.size >= 1 && [...states].every((s) => ["acting", "sleeping", "thinking"].includes(s)), `agent states: ${[...states]}`);
+  // (v0.13.1: a log with a soft pause also has "held" - an agent waiting in front of the gate)
+  assert.ok(states.size >= 1 && [...states].every((s) => ["acting", "sleeping", "thinking", "held"].includes(s)), `agent states: ${[...states]}`);
   console.log(
     `live replay ok: ${data.events.length} events (${seenTypes.size} types), ${got.messages.length} messages, ` +
       `${Object.keys(got.channels).length} channels, ${got.requests.length} requests, ${got.tickets.length} tickets, ` +

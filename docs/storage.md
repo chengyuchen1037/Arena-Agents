@@ -49,7 +49,7 @@ that need storage answer 503) and nothing is saved.
 ├─ roster/                  names, avatars, persona and memory of the seats (plain files)
 │  ├─ roster.json           names + avatar descriptions + the "load memory" switch
 │  ├─ N1.persona.md  …      persona text of each seat (no text = no file)
-│  └─ N1.memory.md   …      memory of each seat: ## 战绩 / ## 对局记忆 / ## 经验与印象
+│  └─ N1.memory.md   …      memory of each seat: ## 战绩 / ## 印象 / ## 经验 (v0.13.1; older files are read as before and rewritten on the next save; UTF-8 BOM is accepted)
 ├─ games/
 │  ├─ index.json            the history list (a cache: rebuilt whenever it does not match the folders)
 │  └─ <id>/game.json        one game (save format v5, plain JSON)  + game.prev.json, the previous good copy
