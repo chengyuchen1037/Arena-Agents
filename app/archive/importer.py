@@ -254,7 +254,10 @@ class _Opened:
             if info.compress_type not in _ALLOWED_COMPRESSION:
                 raise ArchiveFormatError(f"存档里的文件用了不支持的压缩方式：{safe_text(name)}")
             mode = info.external_attr >> 16
-            if (info.create_system == 3 and mode and not stat.S_ISREG(mode)) or info.external_attr & 0x10:
+            # Unix ``ZipFile.writestr(name, ...)`` stores permission bits without an explicit S_IFREG.  No file-type
+            # bits is an ordinary file; reject only an explicit non-regular type (and the DOS directory flag).
+            file_type = stat.S_IFMT(mode) if info.create_system == 3 else 0
+            if file_type not in (0, stat.S_IFREG) or info.external_attr & 0x10:
                 raise ArchiveFormatError(f"存档里有符号链接或特殊文件：{safe_text(name)}")
             if info.file_size > limits.max_file_bytes:
                 raise ArchiveLimitError(f"存档里的文件太大：{safe_text(name)}")

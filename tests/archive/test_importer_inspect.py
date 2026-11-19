@@ -100,6 +100,24 @@ def test_an_archive_may_lack_optional_members(tmp_path: Path) -> None:
     assert (summary.games, summary.providers, summary.has_logs) == (0, 0, False)
 
 
+def test_unix_zip_entries_with_permissions_but_no_file_type_are_regular_files(tmp_path: Path) -> None:
+    """Python's Unix ``writestr(name, data)`` stores 0644 without S_IFREG; that is not a special file."""
+
+    def permissions_only(zf: zipfile.ZipFile) -> None:
+        for info in zf.filelist:
+            info.create_system = 3
+            info.external_attr = 0o644 << 16
+
+    only = write_zip(
+        tmp_path / "unix-permissions.arenaagents",
+        {"settings.json": dumps({"schema_version": 2, "default_bindings": {}, "last_session_id": None, "ui": {}, "model_templates": []})},
+        configure=permissions_only,
+    )
+    with zipfile.ZipFile(only) as zf:
+        assert all(info.create_system == 3 and stat.S_IFMT(info.external_attr >> 16) == 0 for info in zf.infolist())
+    assert importer.inspect(only).games == 0
+
+
 # ------------------------------------------------------------------------------- not an archive at all
 def test_things_that_are_not_archives_are_refused(tmp_path: Path) -> None:
     empty = tmp_path / "empty"

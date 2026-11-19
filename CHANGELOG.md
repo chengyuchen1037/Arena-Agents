@@ -78,6 +78,9 @@ pause, untimed-holder state, colour marks and read marks are deliberately not sa
 remain readable. v0.13 still cannot open v0.12.1 data directly: use the existing conversion script described in
 [docs/storage.md](docs/storage.md#upgrading-from-v0121).
 
+Archive import also accepts ordinary Unix ZIP entries that carry permission bits without an explicit file-type field;
+symbolic links, directories and other special files are still refused.
+
 ## 0.13.0
 
 0.13.0 does four things: **a person can play a seat**, **the storage was redone** (one data directory in the

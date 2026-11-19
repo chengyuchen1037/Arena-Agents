@@ -57,7 +57,7 @@ def _env(data_dir: Path) -> dict[str, str]:
 def probe(data_dir: Path) -> subprocess.CompletedProcess[str]:
     """Another process tries to lock ``data_dir`` (and gives the lock back by exiting)."""
     return subprocess.run(
-        [sys.executable, "-c", PROBE], env=_env(data_dir), cwd=REPOSITORY, capture_output=True, text=True, timeout=60
+        [sys.executable, "-c", PROBE], env=_env(data_dir), cwd=REPOSITORY, capture_output=True, text=True, encoding="utf-8", timeout=60
     )
 
 
@@ -69,7 +69,7 @@ def holder():
     def start(data_dir: Path) -> subprocess.Popen[str]:
         process = subprocess.Popen(
             [sys.executable, "-c", HOLDER], env=_env(data_dir), cwd=REPOSITORY,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
         )
         started.append(process)
         assert process.stdout.readline().strip() == "locked", process.stderr.read()
