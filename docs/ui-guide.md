@@ -1,6 +1,6 @@
 # UI Guide
 
-This guide describes the **v0.12.1** web UI. The UI itself is in Chinese; the Chinese label of a
+This guide describes the **v0.13.1** web UI. The UI itself is in Chinese; the Chinese label of a
 control is given in italics where it helps you find it. Everything below can be tried without an API
 key: start the server with `ARENA_DEMO=1` (scripted bots) or run the UI mock (see
 [Working on the UI](#working-on-the-ui)).

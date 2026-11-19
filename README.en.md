@@ -434,7 +434,7 @@ colour marks, thinking records and an LLM call log; votes and other choices now 
 An avatar code recreates exactly the same avatar, reviews update bounded impressions / lessons instead of
 appending diaries, and model-completed personas use a fixed behavioural template. Decisions and the test plan:
 [docs/v0.13.1-plan.md](docs/v0.13.1-plan.md) (G1–G45, in Chinese).
-The previous version, [0.13.0](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.13.0), introduced
+The 0.13.0 changes in this series introduced
 seat take-over, per-channel composers, the data directory, single-file `.arenaagents` archives and replay. This
 release keeps **save format v5 and archive format 1**. **v0.13 cannot open v0.12.1 data directly** (the workspace
 concept is gone): convert it with `tools/migrate_v0121_to_archive.py` and import the archive in the settings, see

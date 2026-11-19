@@ -355,7 +355,7 @@ docs/            架构、契约、Provider、存储、存档与 UI 文档，doc
 投票等选择请求改为**先选后提交**。头像编号可以精确重建同款头像；复盘改为更新固定座位的印象与经验，
 主持人模型完善的性格改为限长的固定格式行为指引。决策与测试方案见
 [docs/v0.13.1-plan.md](docs/v0.13.1-plan.md)（G1–G45）。
-上一个版本 [0.13.0](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.13.0) 引入座位接管、
+同一 0.13 系列的 0.13.0 变更引入了座位接管、
 每频道输入框、数据目录、单个 `.arenaagents` 存档和历史重放；本版的**存档仍为 v5、存档包格式仍为 1**。
 **v0.13 不能直接打开 v0.12.1 的数据**（工作文件夹概念已删除）：用 `tools/migrate_v0121_to_archive.py`
 转换后在设置里导入，细节见 [docs/storage.md](docs/storage.md#upgrading-from-v0121)。
