@@ -1,8 +1,6 @@
-"""End-to-end API tests against the REAL encrypted stores (temp data dir, test master key)."""
+"""End-to-end API tests against the REAL stores (temp data dir, test master key): plain registry, encrypted keys."""
 
 from __future__ import annotations
-
-import json
 
 import pytest
 from fastapi.testclient import TestClient
@@ -37,7 +35,7 @@ def everything_on_disk(data_dir) -> bytes:
     return b"".join(p.read_bytes() for p in data_dir.rglob("*") if p.is_file())
 
 
-def test_provider_lifecycle_is_encrypted_at_rest_and_key_never_returned(client, real):
+def test_provider_lifecycle_keeps_the_key_encrypted_at_rest_and_never_returns_it(client, real):
     created = client.post(
         "/api/providers",
         json={
@@ -63,8 +61,11 @@ def test_provider_lifecycle_is_encrypted_at_rest_and_key_never_returned(client, 
 
     blob = everything_on_disk(real.data_dir)
     assert blob  # something was written
-    assert NEW_KEY.encode() not in blob
-    assert b"api.anthropic.com" not in blob  # even the URL is inside the ciphertext
+    assert NEW_KEY.encode() not in blob  # the key is on disk only inside secrets.v1.enc, encrypted
+    assert (real.data_dir / "secrets.v1.enc").is_file()
+    registry = (real.data_dir / "providers.json").read_text(encoding="utf-8")
+    assert "api.anthropic.com" in registry and "claude-x" in registry  # everything else is plain, readable config
+    assert "api_key" not in registry
 
     # duplicates / prices handled
     dup = client.post(
@@ -124,55 +125,31 @@ def test_environment_provider_is_read_only_and_listed(client, real, monkeypatch)
     )
 
 
-def test_session_store_list_load_delete_through_api(client, real):
-    from app.storage.sessions import get_session_store
+def test_a_provider_without_a_key_is_listed_as_not_set_and_a_key_can_be_added_later(client, real):
+    """What an archive imported without keys leaves behind (F32): the provider is there, its key is not."""
+    from app.providers.store import ProviderStore
 
-    store = get_session_store()
-    good = json.loads(real.session.model_dump_json())
-    good["session_id"] = "stored-1"
-    store.save("stored-1", good)
-    store.save("stored-2", {**good, "session_id": "stored-2"})
+    keyless = ProviderStore(real.data_dir).create_provider("Imported", "openai_chat", "https://api.example.com/v1", "")
+    ProviderStore(real.data_dir).add_model(keyless.id, "m1", 1, 2)
 
-    listing = client.get("/api/sessions").json()["sessions"]
-    assert {s["session_id"] for s in listing} == {"stored-1", "stored-2"}
-    assert all("path" not in key for s in listing for key in s)
-    assert str(real.data_dir) not in json.dumps(listing)
+    listed = client.get("/api/providers").json()["providers"]
+    assert [(p["name"], p["api_key_set"]) for p in listed] == [("Imported", False)]
+    bound = client.put(
+        "/api/settings/bindings",
+        json={"bindings": {"moderator": {"provider_id": keyless.id, "model_id": "m1", "reasoning_depth": "low"}}},
+    )
+    assert bound.status_code == 200
+    issue = next(i for i in bound.json()["issues"] if i["actor_id"] == "moderator")
+    assert issue["message"] == "Provider「Imported」未设置 API Key"
 
-    assert client.post("/api/sessions/stored-1/load").status_code == 200
-    real.orch.load_session_data.assert_awaited_once()
-
-    assert client.delete("/api/sessions/stored-2").json() == {"ok": True}
-    assert not store.exists("stored-2")
-    assert client.delete("/api/sessions/stored-2").status_code == 404
-    # current game cannot be deleted
-    store.save("sec-test", {**good, "session_id": "sec-test"})
-    assert client.delete("/api/sessions/sec-test").status_code == 409
-
-
-@pytest.mark.parametrize("bad", ["CON", "nul", "COM1", "aux"])
-def test_reserved_windows_names_are_clean_400s(client, real, bad):
-    assert client.delete(f"/api/sessions/{bad}").status_code == 400
-    assert client.post(f"/api/sessions/{bad}/load").status_code == 400
-
-
-def test_import_with_reserved_session_id_is_rejected_before_replacing(client, real):
-    payload = json.loads(real.session.model_dump_json())
-    payload["session_id"] = "CON"
-    response = client.post("/api/session/import", content=json.dumps(payload).encode())
-    assert response.status_code == 400
-    real.orch.load_session_data.assert_not_awaited()
-
-
-def test_import_collision_with_real_store_gets_a_new_id(client, real):
-    from app.storage.sessions import get_session_store
-
-    payload = json.loads(real.session.model_dump_json())
-    payload["session_id"] = "taken-1"
-    get_session_store().save("taken-1", payload)
-    response = client.post("/api/session/import", content=json.dumps(payload).encode())
-    assert response.status_code == 200
-    assert response.json()["renamed_from"] == "taken-1"
-    assert real.orch.load_session_data.await_args.args[0]["session_id"] != "taken-1"
+    # nothing to protect yet: it may be moved without typing a key; then the key makes it usable
+    assert client.patch(f"/api/providers/{keyless.id}", json={"base_url": "https://api.other.example.com/v1"}).status_code == 200
+    assert client.patch(f"/api/providers/{keyless.id}", json={"api_key": NEW_KEY}).json()["api_key_set"] is True
+    after = client.get("/api/settings/bindings").json()["issues"]
+    assert all(i["actor_id"] != "moderator" for i in after)
+    assert NEW_KEY not in client.get("/api/providers").text
+    # ... and from then on a key protects its endpoint
+    assert client.patch(f"/api/providers/{keyless.id}", json={"base_url": "https://api.third.example.com/v1"}).status_code == 400
 
 
 def test_storage_unavailable_surfaces_503_not_plaintext_fallback(client, real, monkeypatch):
@@ -189,3 +166,19 @@ def test_storage_unavailable_surfaces_503_not_plaintext_fallback(client, real, m
     assert created.status_code == 503
     assert "主密钥" in created.json()["detail"]
     assert NEW_KEY.encode() not in everything_on_disk(real.data_dir) if real.data_dir.exists() else True
+    assert not (real.data_dir / "providers.json").exists()  # no half-made provider without its key
+    crypto.set_key_provider_for_tests(lambda _dir: b"\x07" * 32)
+    assert client.get("/api/providers").json() == {"providers": []}
+
+
+def test_a_key_that_can_no_longer_be_decrypted_does_not_take_the_providers_down(client, real):
+    created = client.post(
+        "/api/providers",
+        json={"name": "Real", "protocol": "openai_chat", "base_url": "https://api.example.com/v1", "api_key": NEW_KEY},
+    ).json()
+    crypto.set_key_provider_for_tests(lambda _dir: b"\x08" * 32)  # another master key (the data was copied elsewhere)
+    listing = client.get("/api/providers")
+    assert listing.status_code == 200 and listing.json()["providers"][0]["api_key_set"] is False
+    refused = client.patch(f"/api/providers/{created['id']}", json={"api_key": NEW_KEY + "2"})
+    assert refused.status_code == 503 and "无法解密" in refused.json()["detail"] and NEW_KEY not in refused.text
+    assert client.patch(f"/api/providers/{created['id']}", json={"name": "Renamed"}).status_code == 200

@@ -102,9 +102,6 @@ def all_text(*responses) -> str:
         ("get", "/api/settings/templates", None),
         ("put", "/api/settings/templates", {"templates": []}),
         ("post", "/api/settings/templates/1/apply", {"actor_ids": ["moderator"]}),
-        ("get", "/api/sessions", None),
-        ("delete", "/api/sessions/abc", None),
-        ("post", "/api/sessions/abc/load", None),
     ],
 )
 def test_every_new_endpoint_requires_the_token_when_configured(client, monkeypatch, method, path, body):
@@ -127,8 +124,6 @@ def test_every_new_endpoint_requires_the_token_when_configured(client, monkeypat
         ("put", "/api/settings/bindings", {"bindings": {}}),
         ("put", "/api/settings/templates", {"templates": []}),
         ("post", "/api/settings/templates/1/apply", {"actor_ids": ["moderator"]}),
-        ("delete", "/api/sessions/abc", None),
-        ("post", "/api/sessions/abc/load", None),
     ],
 )
 def test_writes_are_loopback_only_without_token(remote, env, method, path, body):
@@ -142,7 +137,6 @@ def test_writes_are_loopback_only_without_token(remote, env, method, path, body)
 def test_reads_stay_open_for_remote_clients_without_token(remote):
     assert remote.get("/api/providers").status_code == 200
     assert remote.get("/api/settings/bindings").status_code == 200
-    assert remote.get("/api/sessions").status_code == 200
 
 
 def test_cross_origin_writes_are_rejected_even_with_token(client, env, monkeypatch):
@@ -1080,131 +1074,22 @@ def test_start_requires_complete_bindings_with_clear_chinese_error(client, env):
     env.orch.start_or_resume.assert_awaited_once()
 
 
-# ------------------------------------------------------------ sessions
-def test_session_list_has_metadata_only_and_marks_current(client, env):
-    env.sessions.sessions["sec-test"] = {}
-    env.sessions.sessions["old-1"] = {}
-    body = client.get("/api/sessions").json()
-    by_id = {s["session_id"]: s for s in body["sessions"]}
-    assert set(by_id) == {"sec-test", "old-1"}
-    assert by_id["sec-test"]["current"] is True
-    assert by_id["old-1"]["current"] is False
-    assert "secret" not in json.dumps(body)
-    for item in body["sessions"]:
-        assert not any("path" in key or "dir" in key for key in item)
-
-
-def test_session_list_storage_failure_is_503(client, env):
-    env.sessions.fail_with = StorageError("主密钥不可用")
-    response = client.get("/api/sessions")
-    assert response.status_code == 503
-    detail(response)
-
-
-def test_delete_session_rules(client, env):
-    env.sessions.sessions["sec-test"] = {}
-    env.sessions.sessions["old-1"] = {}
-    assert client.delete("/api/sessions/old-1").json() == {"ok": True}
-    assert env.sessions.deleted == ["old-1"]
-    assert client.delete("/api/sessions/old-1").status_code == 404
-    current = client.delete("/api/sessions/sec-test")
-    assert current.status_code == 409
-    assert "sec-test" in env.sessions.sessions
-    for bad in ("..%2F..%2Fetc", "a%20b", "x" * 65, "evil.json", "a%5Cb"):
-        response = client.delete(f"/api/sessions/{bad}")
-        assert response.status_code in (400, 404), bad
-    assert env.sessions.deleted == ["old-1"]
-
-
-def test_load_stored_session_validates_before_replacing(client, env):
-    good = json.loads(env.session.model_dump_json())
-    good["session_id"] = "old-1"
-    env.sessions.sessions["old-1"] = good
-    response = client.post("/api/sessions/old-1/load")
-    assert response.status_code == 200
-    env.orch.load_session_data.assert_awaited_once()
-    assert env.orch.load_session_data.await_args.args[0]["session_id"] == "old-1"
-
-    env.orch.load_session_data.reset_mock()
-    env.sessions.sessions["bad-1"] = {"session_id": "../../x", "status": "exploding"}
-    assert client.post("/api/sessions/bad-1/load").status_code == 400
-    env.orch.load_session_data.assert_not_awaited()
-    assert client.post("/api/sessions/ghost/load").status_code == 404
-    assert client.post("/api/sessions/ab%2Fcd/load").status_code in (400, 404)
-
-
-def _stored_good_session(env, session_id="old-1"):
-    good = json.loads(env.session.model_dump_json())
-    good["session_id"] = session_id
-    env.sessions.sessions[session_id] = good
-    return good
-
-
-def test_load_saves_the_current_game_first_then_replaces_it(client, env):
-    _stored_good_session(env)
-    order: list[str] = []
-
-    async def persist(reason, **kwargs):
-        order.append(f"persist:{reason}")
-
-    async def load(payload):
-        order.append("load")
-        return env.session
-
-    env.orch.persist_session = AsyncMock(side_effect=persist)
-    env.orch.load_session_data = AsyncMock(side_effect=load)
-    response = client.post("/api/sessions/old-1/load")
-    assert response.status_code == 200
-    assert order == ["persist:pre-load", "load"]
-
-
+# ------------------------------------------------------------ the v0.12 session endpoints are gone
 @pytest.mark.parametrize(
-    "failure",
-    [StorageError("主密钥不可用"), OSError("C:\\secret\\dir\\disk full"), RuntimeError("boom")],
+    "method,path",
+    [
+        ("get", "/api/sessions"),
+        ("delete", "/api/sessions/abc"),
+        ("post", "/api/sessions/abc/load"),
+        ("post", "/api/session/save"),
+        ("post", "/api/session/import"),
+    ],
 )
-def test_load_aborts_with_503_when_the_pre_load_save_fails(client, env, failure):
-    _stored_good_session(env)
-    env.orch.persist_session = AsyncMock(side_effect=failure)
-    before = env.orch.session
-    response = client.post("/api/sessions/old-1/load")
-    assert response.status_code == 503
-    text = detail(response)
-    assert "加载已取消" in text and "未被改动" in text
-    assert "secret" not in text  # raw OS error text (paths) is never echoed
-    if isinstance(failure, StorageError):
-        assert "主密钥" in text
-    env.orch.load_session_data.assert_not_awaited()
-    assert env.orch.session is before
-
-
-def test_load_aborts_when_pre_load_save_reports_failure_by_return_value(client, env):
-    _stored_good_session(env)
-    env.orch.persist_session = AsyncMock(return_value=False)
-    response = client.post("/api/sessions/old-1/load")
-    assert response.status_code == 503
-    env.orch.load_session_data.assert_not_awaited()
-
-
-def test_invalid_or_missing_target_does_not_trigger_a_pre_load_save(client, env):
-    env.sessions.sessions["bad-1"] = {"session_id": "../../x", "status": "exploding"}
-    assert client.post("/api/sessions/bad-1/load").status_code == 400
-    assert client.post("/api/sessions/ghost/load").status_code == 404
+def test_the_v012_session_endpoints_no_longer_exist(client, env, method, path):
+    """v0.13 (F26, F34): saving and loading single games went away with the "会话" dialog; the history is /api/games."""
+    response = client.request(method.upper(), path, content=b"{}")
+    assert response.status_code in (404, 405)
     env.orch.persist_session.assert_not_awaited()
-
-
-def test_loading_the_current_session_is_refused_instead_of_clobbering_it(client, env):
-    _stored_good_session(env, "sec-test")
-    response = client.post("/api/sessions/sec-test/load")
-    assert response.status_code == 409
-    env.orch.persist_session.assert_not_awaited()
-    env.orch.load_session_data.assert_not_awaited()
-
-
-def test_load_stored_session_storage_failure_is_503(client, env):
-    env.sessions.sessions["old-1"] = {}
-    env.sessions.fail_with = StorageError("主密钥不可用")
-    response = client.post("/api/sessions/old-1/load")
-    assert response.status_code == 503
     env.orch.load_session_data.assert_not_awaited()
 
 

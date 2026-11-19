@@ -6,9 +6,9 @@
   <meta name="theme-color" content="#ffffff" />
   <title>Arena-Agents</title>
   <!-- 相对路径：本地 "/" 与子路径反代（如 /arena/）均可用；页面需带结尾斜杠访问 -->
-  <link rel="stylesheet" href="static/css/style.css?v=0.12.1" />
+  <link rel="stylesheet" href="static/css/style.css?v=0.13.1" />
   <!-- v0.12.1: 平台检测放在 head 里同步执行，首屏就按设备（手机 / 平板 / 桌面）布局，不会闪一下 -->
-  <script src="static/js/platform.js?v=0.12.1"></script>
+  <script src="static/js/platform.js?v=0.13.1"></script>
   <script>
     (function () {
       var P = window.ArenaPlatform;
@@ -27,10 +27,10 @@
           <span class="version-badge" id="app-version"></span>
         </div>
 
-        <!-- v0.11: 工作文件夹入口（Provider / 模板 / 绑定 / 对局都保存在工作文件夹内） -->
-        <button class="btn btn-workspace" id="btn-open-workspace-modal" title="选择工作文件夹（Provider、模板、模型绑定与对局存档都保存在该文件夹内）">
-          <span class="folder-icon" aria-hidden="true">📁</span>
-          <span class="workspace-name" id="workspace-name-label">工作文件夹</span>
+        <!-- v0.13: 设置（只有「导出存档 / 导入存档」）；手机上收进「⋯」菜单 -->
+        <button class="btn btn-settings" id="btn-open-settings-modal" title="设置：导出存档、导入存档">
+          <span class="settings-icon" aria-hidden="true">⚙</span>
+          <span class="settings-label">设置</span>
         </button>
 
         <button class="btn btn-xs layout-toggle" id="btn-toggle-board" title="折叠/展开参与者栏" aria-pressed="false">
@@ -41,17 +41,40 @@
           <span class="theme-icon">◐</span><span class="theme-label">明暗主题</span>
         </button>
 
-        <!-- v0.12: 观战视角（上帝视角 / 某名玩家）。纯前端过滤，切换不会重新请求服务器 -->
-        <label class="viewpoint-picker" id="viewpoint-picker" for="select-viewpoint"
-               title="观战视角：上帝视角看到全部；选择某名玩家后，只显示该玩家能看到的消息、频道、标签与请求">
-          <span class="viewpoint-icon" aria-hidden="true">👁</span>
-          <select id="select-viewpoint" class="viewpoint-select">
-            <option value="god" selected>上帝视角</option>
-          </select>
-        </label>
+        <!-- v0.12 / v0.13: 观战视角（上帝视角 / 某名玩家）。纯前端过滤，切换不会重新请求服务器。
+             v0.13：下拉框只选“要看谁”，点「切换」才生效；「接管」让你扮演所选座位（对局未开始或已暂停时可用）。
+             手机上整条视角栏被搬进「⋯」菜单（app.js RELOCATIONS） -->
+        <div class="viewpoint-bar" id="viewpoint-bar">
+          <label class="viewpoint-picker" id="viewpoint-picker" for="select-viewpoint"
+                 title="观战视角：上帝视角看到全部；选择某名玩家后，只显示该玩家能看到的消息、频道、标签与请求。选好后点「切换」">
+            <span class="viewpoint-icon" aria-hidden="true">👁</span>
+            <select id="select-viewpoint" class="viewpoint-select">
+              <option value="god" selected>上帝视角</option>
+            </select>
+          </label>
+          <button type="button" class="btn btn-xs" id="btn-viewpoint-switch" title="切换到所选的视角">切换</button>
+          <button type="button" class="btn btn-xs btn-takeover" id="btn-takeover" title="接管所选的座位">接管</button>
+        </div>
+
+        <!-- v0.13: 接管期间代替视角栏；手机上它留在第一行，不收进「⋯」菜单 -->
+        <div class="takeover-bar" id="takeover-bar" hidden>
+          <span class="takeover-badge" id="takeover-badge" title="你正在以这个座位参与对局；它的 agent 已暂停">🎮 正在扮演 <strong id="takeover-seat"></strong></span>
+          <!-- v0.13.1 (G1-G5)：软暂停——在途的回答照常做完，然后所有 agent 停下、计时冻结；你仍可阅读、发言、作答。
+               「收尾中（还有 N 个回答）」→「agent 已暂停」；收尾中可以「立即暂停」（= 顶栏的硬暂停，会取消在途的调用） -->
+          <span class="softpause" id="softpause">
+            <span class="softpause-status" id="softpause-status" role="status" hidden></span>
+            <button type="button" class="btn btn-xs btn-softpause" id="btn-softpause" title="暂停 agent">⏸ 暂停 agent</button>
+            <button type="button" class="softpause-now" id="btn-softpause-now" title="立即暂停" hidden>立即暂停</button>
+          </span>
+          <button type="button" class="btn btn-xs btn-danger-outline" id="btn-release-takeover" title="退出接管">退出接管</button>
+        </div>
       </div>
 
       <div class="topbar-right">
+        <!-- v0.13.1 (G32)：错误日志（全部 LLM 调用与报错）；有未读错误时按钮上是红色数字徽章。手机上整个按钮收进「⋯」菜单，徽章改显示在「⋯」上 -->
+        <button class="btn btn-xs btn-calllog" id="btn-open-calllog" title="错误日志：全部 LLM 调用与报错" aria-haspopup="dialog">
+          <span class="calllog-icon" aria-hidden="true">📋</span><span class="calllog-label">日志</span><span class="calllog-badge" id="calllog-badge" hidden></span>
+        </button>
         <!-- v0.12.1: token / 费用统计，旁边是「上限」按钮；80% 变黄，100% 变红 -->
         <div class="usage-group" id="usage-group">
           <div class="usage-telemetry-pill" id="usage-telemetry-pill" data-budget="ok" title="点击打开模型绑定（费用按每次调用的价格快照累加）">
@@ -63,13 +86,12 @@
           <button class="btn btn-xs btn-budget" id="btn-open-budget-modal" title="设置本局的 token / 费用上限"><span class="lbl-short">上限</span><span class="lbl-long">token / 费用上限</span></button>
         </div>
         <span class="topbar-divider"></span>
-        <button class="btn btn-default" id="btn-new" title="重置并开启新对局">新建</button>
-        <button class="btn btn-default" id="btn-save" title="保存并导出当前对局 JSON">保存</button>
+        <button class="btn btn-default" id="btn-new" title="重置并开启新对局（对局每次变化都会自动保存）">新建</button>
         <span class="topbar-divider"></span>
         <button class="btn btn-primary-outline" id="btn-start">开始</button>
         <button class="btn btn-default" id="btn-pause" disabled>暂停</button>
         <button class="btn btn-resume" id="btn-resume" disabled title="继续对局；对局结束后也可以继续">继续</button>
-        <button class="btn btn-more" id="btn-more" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu" title="更多操作">⋯</button>
+        <button class="btn btn-more" id="btn-more" aria-haspopup="true" aria-expanded="false" aria-controls="more-menu" title="更多操作">⋯<span class="more-badge" id="more-badge" hidden></span></button>
       </div>
     </div>
 
@@ -99,11 +121,48 @@
   <!-- v0.12: 暂停原因（主持人 hold / 预算）/ 出错 / 停滞 / 终局提示 -->
   <div class="status-banner" id="status-banner" role="status" hidden></div>
 
+  <!-- v0.13 (F36)：重放控制条（只在重放模式出现）。重放期间界面显示的是重放的会话，直播的对局被暂存 -->
+  <div class="replay-bar" id="replay-bar" role="region" aria-label="重放控制" hidden>
+    <span class="replay-badge">▶ 重放中</span>
+    <span class="replay-title" id="replay-title"></span>
+    <div class="replay-controls">
+      <button class="btn btn-xs" id="btn-replay-restart" title="回到开头" aria-label="回到开头">⏮</button>
+      <button class="btn btn-xs btn-primary-outline" id="btn-replay-play" title="播放" aria-label="播放">▶</button>
+      <select class="form-input replay-speed" id="select-replay-speed" title="倍速" aria-label="倍速">
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+        <option value="8">8×</option>
+      </select>
+      <label class="replay-skip" title="相邻两步之间超过 5 秒（游戏时间）的空档压缩成半秒">
+        <input type="checkbox" id="chk-replay-skip" checked />
+        <span>跳过空闲</span>
+      </label>
+    </div>
+    <input class="replay-seek" id="replay-seek" type="range" min="0" max="0" step="1" value="0" aria-label="重放进度" />
+    <span class="replay-time" id="replay-time">0:00 / 0:00</span>
+    <button class="btn btn-xs btn-danger-outline" id="btn-exit-replay" title="退出重放，回到当前对局">退出重放</button>
+  </div>
+
   <!-- 恢复/绑定提示条（仅在需要时显示，不会自动开始对局） -->
   <div class="notice-bar" id="restore-notice" hidden>
     <span id="restore-notice-text"></span>
     <button class="btn btn-xs" id="btn-notice-bindings">查看模型绑定</button>
     <button class="btn btn-xs" id="btn-dismiss-notice">知道了</button>
+  </div>
+
+  <!-- v0.13 (F24)：数据目录是空的、而默认位置有 v0.12.1 的工作区时提示一次；「忽略」会被记住。不会自动转换 -->
+  <div class="notice-bar legacy-notice" id="legacy-notice" hidden>
+    <span id="legacy-notice-text">检测到旧版（v0.12.1）的数据：请先运行转换脚本，再到「设置」里导入存档。</span>
+    <button class="btn btn-xs" id="btn-legacy-help">查看说明</button>
+    <button class="btn btn-xs" id="btn-legacy-dismiss">忽略</button>
+  </div>
+
+  <!-- v0.13 (F5)：对局未开始时接管了座位——你已经知道自己的身份，可以重新发牌。开始后这条消失，按钮不可点 -->
+  <div class="notice-bar takeover-reminder" id="takeover-reminder" hidden>
+    <span id="takeover-reminder-text">你已经知道自己的身份，建议点击「重新发牌」</span>
+    <button class="btn btn-xs btn-primary-outline" id="btn-shuffle-identities" title="重新给所有座位发身份（只在对局开始前可用）">重新发牌</button>
   </div>
 
   <!-- 主体容器；手机上 data-phone-tab 决定显示哪一块（信息流 / 频道 / 玩家） -->
@@ -116,10 +175,8 @@
           <button class="btn btn-xs" id="btn-regen-all-avatars" title="重新生成全部玩家的头像（仅对局未开始时可用）">🎲 重新生成全部头像</button>
           <div class="menu-wrap">
             <button class="btn btn-xs" id="btn-roster-menu" aria-haspopup="true" aria-expanded="false" aria-controls="roster-menu"
-                    title="名册：导出 / 导入 / 清除全部记忆，设置本局是否加载记忆">名册 ▾</button>
+                    title="名册：清除全部记忆，设置本局是否加载记忆（备份请用「设置」里的导出存档）">名册 ▾</button>
             <div class="dropdown" id="roster-menu" role="menu" hidden>
-              <button type="button" class="dropdown-item" id="btn-roster-export" role="menuitem" data-roster-action="export">导出全部记忆（.zip）</button>
-              <button type="button" class="dropdown-item" id="btn-roster-import" role="menuitem" data-roster-action="import">导入记忆包…</button>
               <button type="button" class="dropdown-item danger" id="btn-roster-clear" role="menuitem" data-roster-action="clear">清除全部记忆…</button>
               <label class="dropdown-item check" title="关闭后，本局的系统提示词不包含记忆段（记忆文件本身不受影响）">
                 <input type="checkbox" id="chk-memory-enabled" />
@@ -127,13 +184,10 @@
               </label>
             </div>
           </div>
-          <button class="btn btn-xs btn-primary-outline" id="btn-review-all" hidden title="对局结束后，让每名玩家复盘本局并写入自己的记忆">复盘全部</button>
+          <button class="btn btn-xs btn-primary-outline" id="btn-review-all" hidden title="对局结束后，让每名玩家用自己的模型复盘本局：计入战绩，更新对其他玩家的印象和自己的经验">复盘全部</button>
         </div>
         <div class="board-header-right" id="board-header-right">
-          <input type="file" id="file-import-session" accept=".json" style="display: none" />
-          <input type="file" id="file-import-memory" accept=".zip,application/zip" style="display: none" />
-          <button class="btn btn-xs" id="btn-import-session" title="导入已保存的对局 JSON 文件">导入存档</button>
-          <button class="btn btn-xs" id="btn-open-sessions-modal" title="查看/删除保存在服务端外部数据目录的对局存档">会话</button>
+          <button class="btn btn-xs" id="btn-open-history-modal" title="历史对局：重放、继续或删除保存过的对局">📜 历史对局</button>
           <button class="btn btn-xs" id="btn-open-bindings-modal" title="为主持人与每位玩家选择 Provider / 模型 / 思考深度">
             <span id="api-status-dot" class="api-dot"></span>
             <span id="api-status-label">模型绑定</span>
@@ -184,6 +238,23 @@
 
         <div class="feed-list" id="feed-list">
           <div id="feed-records-container" class="feed-records-container"></div>
+        </div>
+
+        <!-- v0.13：接管后的输入框，跟随当前频道（草稿按频道保留）。这里的 DOM 是静态的：JS 只改文字与状态，
+             不重写 innerHTML，所以打字时不会丢焦点。手机上它贴在底部标签栏的上方（只在「信息流」页签可见） -->
+        <div class="composer" id="composer" hidden>
+          <div class="composer-notice" id="composer-notice" role="status" hidden></div>
+          <textarea class="composer-input" id="composer-input" rows="1" spellcheck="false" autocomplete="off"
+                    aria-label="发言内容" placeholder="在这个频道发言"></textarea>
+          <div class="composer-bar">
+            <span class="composer-count" id="composer-count">0</span>
+            <span class="composer-hint" id="composer-hint"></span>
+            <span class="composer-buttons">
+              <button type="button" class="btn btn-xs" id="btn-composer-ability" title="技能">⚡ 技能</button>
+              <button type="button" class="btn btn-xs" id="btn-composer-pass" title="结束发言" hidden>结束发言</button>
+              <button type="button" class="btn btn-primary-outline composer-send" id="btn-composer-send">发送</button>
+            </span>
+          </div>
         </div>
       </section>
     </section>
@@ -405,7 +476,7 @@
     </div>
   </div>
 
-  <!-- v0.12.1: 通用确认对话框（导入记忆包预览、清除全部记忆、完善草稿…由 roster.js 填充内容） -->
+  <!-- v0.12.1: 通用确认对话框（清除全部记忆、完善草稿、旧数据说明…由 roster.js 的 openDialog 填充内容） -->
   <div class="modal-backdrop" id="dialog-modal" style="display: none">
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
       <div class="modal-header">
@@ -420,78 +491,33 @@
     </div>
   </div>
 
-  <!-- v0.11: 工作文件夹弹窗（当前工作区 / 最近工作区 / native picker / 手输路径 / 切换 / 载入本工作区对局） -->
-  <div class="modal-backdrop" id="workspace-modal" style="display: none">
-    <div class="modal-card modal-wide">
+  <!-- v0.13 (F26)：设置——里面只有「导出存档」和「导入存档」。向导的各个步骤由 archive.js 渲染到 settings-body / settings-footer -->
+  <div class="modal-backdrop" id="settings-modal" style="display: none">
+    <div class="modal-card modal-wide settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="modal-header">
-        <span class="modal-title">工作文件夹</span>
-        <button class="btn btn-xs" id="btn-close-workspace-modal">✕</button>
+        <span class="modal-title" id="settings-title">设置</span>
+        <button class="btn btn-xs" id="btn-close-settings-modal" aria-label="关闭">✕</button>
       </div>
-      <div class="modal-body workspace-modal-body">
-        <div class="workspace-current">
-          <div class="workspace-current-label">当前工作区</div>
-          <div class="workspace-current-name" id="workspace-current-name">—</div>
-          <div class="workspace-current-path" id="workspace-current-path">—</div>
-          <div class="workspace-current-meta form-hint" id="workspace-current-meta"></div>
-          <div class="form-hint" id="workspace-mode-hint"></div>
-        </div>
-
-        <div class="workspace-recent">
-          <div class="provider-section-title">最近工作区</div>
-          <div class="workspace-recent-list" id="workspace-recent-list">
-            <div class="empty-placeholder">暂无最近工作区</div>
-          </div>
-        </div>
-
-        <div class="workspace-switch">
-          <div class="provider-section-title">切换到其他工作文件夹</div>
-          <div class="workspace-picker-row">
-            <button type="button" class="btn btn-xs" id="btn-pick-native-folder" title="通过服务器本机的系统对话框选择文件夹">选择文件夹…</button>
-            <span class="form-hint" id="workspace-picker-status">仅本机可打开系统选择器；远程访问请手动输入绝对路径</span>
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="input-workspace-path">绝对路径（手动输入回退）</label>
-            <input type="text" class="form-input" id="input-workspace-path" placeholder="D:\Arena-Workspace\MyWorkspace" />
-          </div>
-          <label class="checkbox-label">
-            <input type="checkbox" id="chk-workspace-initialize-existing" />
-            <span>目标为已有非空文件夹（只初始化工作区标记与 .arena，不移动/删除原有文件）</span>
-          </label>
-          <label class="checkbox-label">
-            <input type="checkbox" id="chk-workspace-create-missing" checked />
-            <span>目标不存在时自动创建</span>
-          </label>
-          <div class="form-error" id="workspace-form-error" hidden></div>
-          <div class="workspace-switch-actions">
-            <button type="button" class="btn btn-primary-outline" id="btn-switch-workspace">切换工作区</button>
-            <span class="form-hint" id="workspace-switch-hint"></span>
-          </div>
-        </div>
-
-        <div class="workspace-sessions">
-          <div class="provider-section-title">载入本工作区对局</div>
-          <div class="session-list" id="workspace-session-list"></div>
-          <div class="workspace-sessions-actions">
-            <button type="button" class="btn btn-xs" id="btn-refresh-workspace-sessions">刷新</button>
-            <span class="form-hint" id="workspace-sessions-hint"></span>
-          </div>
-        </div>
-      </div>
+      <div class="modal-body settings-body" id="settings-body"></div>
+      <div class="modal-footer settings-footer" id="settings-footer"></div>
     </div>
   </div>
+  <input type="file" id="file-archive-import" accept=".arenaagents,application/octet-stream" style="display: none" />
 
-  <!-- 会话列表弹窗 -->
-  <div class="modal-backdrop" id="sessions-modal" style="display: none">
+  <!-- v0.13 (F34 / F35)：历史对局——列表、重放、继续、删除（取代旧的「会话」窗口） -->
+  <div class="modal-backdrop" id="history-modal" style="display: none">
     <div class="modal-card modal-wide">
       <div class="modal-header">
-        <span class="modal-title">外部存档（服务端加密保存）</span>
-        <button class="btn btn-xs" id="btn-close-sessions-modal">✕</button>
+        <span class="modal-title">历史对局</span>
+        <button class="btn btn-xs" id="btn-close-history-modal" aria-label="关闭">✕</button>
       </div>
       <div class="modal-body">
-        <div class="session-list" id="session-list"></div>
+        <div class="form-hint" id="history-hint"></div>
+        <div class="history-list" id="history-list"></div>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-default" id="btn-refresh-sessions">刷新</button>
+        <span class="form-hint history-footer-note">删除对局不会影响 agent 的记忆（性格与记忆单独保存在名册里）。</span>
+        <button class="btn btn-default" id="btn-refresh-history">刷新</button>
       </div>
     </div>
   </div>
@@ -529,6 +555,9 @@
   <!-- 频道栏收缩成头像条时，质询工单折叠成一个带数字的图标；点开就是这个列表 -->
   <div class="ticket-pop" id="ticket-pop" role="dialog" aria-label="质询工单" hidden></div>
 
+  <!-- v0.13.1 (G16)：玩家卡片右上角的色点打开这个色板（8 种颜色 + 清除；只有颜色，没有文字）。内容由 marks.js 渲染 -->
+  <div class="mark-pop" id="mark-pop" role="dialog" aria-label="颜色标记" hidden></div>
+
   <!-- v0.12.1: 玩家详情：桌面 / 平板是贴着卡片的浮层，手机是底部抽屉。放在网格之外，重渲染不会把它冲掉 -->
   <div class="detail-backdrop" id="detail-backdrop" hidden></div>
   <div class="detail-panel" id="detail-panel" role="dialog" aria-label="玩家详情" hidden>
@@ -538,15 +567,49 @@
     <div class="detail-editors" id="detail-editors"></div>
   </div>
 
-  <script src="static/js/core.js?v=0.12.1"></script>
-  <script src="static/js/avatar.js?v=0.12.1"></script>
-  <script src="static/js/store.js?v=0.12.1"></script>
-  <script src="static/js/view.js?v=0.12.1"></script>
-  <script src="static/js/layout.js?v=0.12.1"></script>
-  <script src="static/js/providers.js?v=0.12.1"></script>
-  <script src="static/js/roster.js?v=0.12.1"></script>
-  <script src="static/js/budget.js?v=0.12.1"></script>
-  <script src="static/js/workspace.js?v=0.12.1"></script>
-  <script src="static/js/app.js?v=0.12.1"></script>
+  <!-- v0.13.1 (G22)：思考记录——页面里的大窗口（不是浏览器弹窗，避免被拦截和重复处理令牌），可以和玩家详情同时存在，手机上全屏。内容由 thoughts.js 渲染 -->
+  <div class="vw-window thoughts-window" id="thoughts-window" role="dialog" aria-label="思考记录" hidden>
+    <div class="vw-card">
+      <div class="vw-header">
+        <div class="vw-head-main" id="thoughts-head"></div>
+        <button type="button" class="btn btn-xs" id="btn-thoughts-refresh" title="现在就读取新内容">⟳ 刷新</button>
+        <button type="button" class="pop-close" id="btn-close-thoughts" aria-label="关闭">✕</button>
+      </div>
+      <div class="vw-body th-list" id="thoughts-list"></div>
+      <button type="button" class="btn btn-xs th-latest" id="btn-thoughts-latest" hidden></button>
+      <div class="vw-foot form-hint" id="thoughts-foot"></div>
+    </div>
+  </div>
+
+  <!-- v0.13.1 (G32–G36)：错误日志——当前对局的全部 LLM 调用与运行错误；顶栏的「📋 日志」打开它。内容由 calllog.js 渲染 -->
+  <div class="vw-window calllog-window" id="calllog-window" role="dialog" aria-label="错误日志" hidden>
+    <div class="vw-card">
+      <div class="vw-header">
+        <div class="vw-head-main"><span class="vw-heading"><span class="vw-title">📋 错误日志</span><span class="vw-sub" id="calllog-sub"></span></span></div>
+        <button type="button" class="pop-close" id="btn-close-calllog" aria-label="关闭">✕</button>
+      </div>
+      <div class="vw-toolbar" id="calllog-toolbar"></div>
+      <div class="vw-body cl-list" id="calllog-list"></div>
+      <div class="vw-foot form-hint" id="calllog-foot"></div>
+    </div>
+  </div>
+
+  <script src="static/js/core.js?v=0.13.1"></script>
+  <script src="static/js/avatar.js?v=0.13.1"></script>
+  <script src="static/js/store.js?v=0.13.1"></script>
+  <script src="static/js/view.js?v=0.13.1"></script>
+  <script src="static/js/layout.js?v=0.13.1"></script>
+  <script src="static/js/providers.js?v=0.13.1"></script>
+  <script src="static/js/roster.js?v=0.13.1"></script>
+  <script src="static/js/thoughts.js?v=0.13.1"></script>
+  <script src="static/js/calllog.js?v=0.13.1"></script>
+  <script src="static/js/budget.js?v=0.13.1"></script>
+  <script src="static/js/archive.js?v=0.13.1"></script>
+  <script src="static/js/marks.js?v=0.13.1"></script>
+  <script src="static/js/takeover.js?v=0.13.1"></script>
+  <script src="static/js/composer.js?v=0.13.1"></script>
+  <script src="static/js/history.js?v=0.13.1"></script>
+  <script src="static/js/replay.js?v=0.13.1"></script>
+  <script src="static/js/app.js?v=0.13.1"></script>
 </body>
 </html>

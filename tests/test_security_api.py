@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import copy
 import json
 import os
 from unittest.mock import AsyncMock
@@ -13,7 +12,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.requests import Request
 
-from app.api import routes, security
+from app.api import security
 from app.game.session import GameSession
 from app.main import app
 from app.world.loader import load_scenario_v2
@@ -25,7 +24,6 @@ SECURITY_ENV = (
     "ARENA_API_TOKEN",
     "ARENA_ALLOWED_ORIGINS",
     "ARENA_ALLOWED_BASE_HOSTS",
-    "ARENA_MAX_IMPORT_BYTES",
     "DEEPSEEK_API_KEY",
     "DEEPSEEK_BASE_URL",
     "DEEPSEEK_MODEL",
@@ -74,8 +72,10 @@ def test_health_is_unauthenticated_and_minimal(client, monkeypatch):
     monkeypatch.setenv("ARENA_API_TOKEN", TOKEN)
     response = client.get("/api/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "version": "0.12.1"}
-    assert app.version == "0.12.1"
+    from app.config import APP_VERSION
+
+    assert response.json() == {"status": "ok", "version": APP_VERSION}
+    assert app.version == APP_VERSION
 
 
 # ------------------------------------------------------------- token auth
@@ -184,11 +184,6 @@ def test_remote_client_cannot_use_mutating_config_endpoints_without_token(remote
     response = remote_client.post("/api/config/llm", json={"model": "x"})
     assert response.status_code == 403
     assert_string_detail(response)
-    response = remote_client.post("/api/session/import", content=b"{}")
-    assert response.status_code == 403
-    response = remote_client.post("/api/sessions/abc/load")
-    assert response.status_code == 403
-    fake.load_session_data.assert_not_awaited()
     assert "DEEPSEEK_MODEL" not in os.environ
 
 
@@ -306,37 +301,13 @@ def test_default_session_id_is_valid():
     assert GameSession().session_id
 
 
-def test_save_refuses_traversal_session_id_and_never_writes_outside_saves(client, fake, tmp_path):
-    # model_copy skips validation, simulating a session that bypassed the validator.
-    for bad in ("../../escape", "..\\..\\escape"):
-        fake.session = GameSession().model_copy(update={"session_id": bad})
-        response = client.post("/api/session/save")
-        assert response.status_code == 400
-        assert_string_detail(response)
-    assert not any(tmp_path.rglob("*escape*"))
-    fake.persist_session.assert_not_awaited()
-
-
-def test_save_goes_through_external_store_and_returns_no_server_path(client, fake, tmp_path, monkeypatch):
+def test_there_is_no_save_endpoint_any_more_the_game_saves_itself(client, fake, tmp_path, monkeypatch):
+    """v0.13 (F26): no "保存" button and no ``/api/session/save`` - every change is saved within half a second."""
     monkeypatch.chdir(tmp_path)
     response = client.post("/api/session/save")
-    assert response.status_code == 200
-    body = response.json()
-    assert set(body) == {"ok", "filename", "session"}
-    assert body["filename"].endswith("_sec-test.json")
-    assert str(tmp_path) not in response.text
-    fake.persist_session.assert_awaited_once_with("manual")
-    # nothing is written next to the code any more
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_save_failure_is_reported_not_swallowed(client, fake):
-    from sec_api_fakes import StorageError
-
-    fake.persist_session = AsyncMock(side_effect=StorageError("主密钥不可用，无法保存"))
-    response = client.post("/api/session/save")
-    assert response.status_code == 503
-    assert "主密钥" in assert_string_detail(response)
+    assert response.status_code in (404, 405)
+    fake.persist_session.assert_not_awaited()
+    assert list(tmp_path.iterdir()) == []  # nothing is written next to the code
 
 
 # ------------------------------------------------------------ new game
@@ -363,178 +334,12 @@ def test_new_game_config_reload_error_is_400(client, fake):
 
 
 # ---------------------------------------------------------------- import
-def real_spec() -> dict:
-    return copy.deepcopy(load_scenario_v2("scenarios/minimal_test.md").model_dump(mode="json"))
-
-
-def valid_session_payload() -> dict:
-    session = GameSession(session_id="imported-1", title="Imported", scenario_spec=real_spec())
-    return json.loads(session.model_dump_json())
-
-
-def post_import(client, payload) -> object:
-    data = payload if isinstance(payload, (bytes, bytearray)) else json.dumps(payload).encode()
-    return client.post(
-        "/api/session/import", content=data, headers={"Content-Type": "application/json"}
-    )
-
-
-def assert_import_rejected(client, fake, payload, status=(400, 422)) -> str:
-    before = fake.session
-    response = post_import(client, payload)
-    assert response.status_code in status, response.text
-    detail = assert_string_detail(response)
+def test_there_is_no_single_game_import_any_more(client, fake):
+    """v0.13 (F26): a game comes back through the history (``/api/games``) or an archive import, never as a pasted JSON."""
+    for path in ("/api/session/import", "/api/sessions/abc/load"):
+        response = client.post(path, content=b"{}", headers={"Content-Type": "application/json"})
+        assert response.status_code in (404, 405), path
     fake.load_session_data.assert_not_awaited()
-    fake.force_pause.assert_not_awaited()
-    assert fake.session is before
-    return detail
-
-
-def test_import_valid_payload_succeeds_and_hides_internals(client, fake):
-    payload = valid_session_payload()
-    payload["world"] = {"marker": "SECRET-WORLD-MARKER"}
-    response = post_import(client, {"session": payload})
-    assert response.status_code == 200
-    fake.load_session_data.assert_awaited_once()
-    assert "SECRET-WORLD-MARKER" not in response.text
-    assert "world" not in response.json()["session"]
-
-
-def test_import_never_overwrites_an_existing_stored_session(client, fake, env):
-    env.sessions.sessions["imported-1"] = {"session_id": "imported-1"}
-    response = post_import(client, valid_session_payload())
-    assert response.status_code == 200
-    assert response.json()["renamed_from"] == "imported-1"
-    loaded = fake.load_session_data.await_args.args[0]
-    assert loaded["session_id"] != "imported-1"
-    assert loaded["session_id"].isalnum()
-    assert env.sessions.sessions == {"imported-1": {"session_id": "imported-1"}}
-
-
-def test_import_with_a_real_scenario_spec_succeeds(client, fake):
-    assert post_import(client, valid_session_payload()).status_code == 200
-    fake.load_session_data.assert_awaited_once()
-
-
-def test_import_of_an_old_engine_save_is_refused_with_an_explanation(client, fake):
-    payload = valid_session_payload()
-    payload["schema_version"] = 1
-    detail = assert_import_rejected(client, fake, payload, status=(400,))
-    assert "旧版本" in detail
-
-
-def test_import_too_large_rejected_without_touching_game(client, fake, monkeypatch):
-    monkeypatch.setenv("ARENA_MAX_IMPORT_BYTES", "2000")
-    payload = valid_session_payload()
-    payload["title"] = "x" * 5000
-    response = post_import(client, payload)
-    assert response.status_code == 413
-    assert_string_detail(response)
-    fake.load_session_data.assert_not_awaited()
-
-
-def test_import_default_limit_is_20_mb(monkeypatch):
-    assert security.max_import_bytes() == 20 * 1024 * 1024
-    monkeypatch.setenv("ARENA_MAX_IMPORT_BYTES", "garbage")
-    assert security.max_import_bytes() == 20 * 1024 * 1024
-    monkeypatch.setenv("ARENA_MAX_IMPORT_BYTES", "1234")
-    assert security.max_import_bytes() == 1234
-
-
-def test_import_streamed_body_over_limit_rejected(client, fake, monkeypatch):
-    monkeypatch.setenv("ARENA_MAX_IMPORT_BYTES", "1000")
-
-    def chunks():
-        for _ in range(5):
-            yield b" " * 400  # no Content-Length header: chunked upload
-
-    response = client.post("/api/session/import", content=chunks())
-    assert response.status_code == 413
-    fake.load_session_data.assert_not_awaited()
-
-
-@pytest.mark.parametrize("raw", [b"not json", b"", b"\xff\xfe", b"[1,2,3]", b'"string"', b"null", b"[" * 5000])
-def test_import_malformed_json_rejected(client, fake, raw):
-    assert_import_rejected(client, fake, raw, status=(400,))
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        {"session_id": "../../etc/passwd"},
-        {"session_id": "a/b"},
-        {"status": "exploding"},
-        {"participants": "nope"},
-        {"participants": [{"bogus": 1}]},
-        {"usage_stats": "many"},
-        {"model_bindings": {"p01": {"provider_id": 1}}},
-    ],
-)
-def test_import_invalid_session_structure_rejected(client, fake, mutation):
-    payload = valid_session_payload()
-    payload.update(mutation)
-    assert_import_rejected(client, fake, payload, status=(400,))
-
-
-@pytest.mark.parametrize(
-    "scenario_spec",
-    [
-        [],
-        {},
-        {"id": "x"},
-        {"id": "", "version": "1"},
-        {"id": "x", "version": "1", "schema_version": 1},
-        {"id": "x", "version": "1", "templates": {"t": {"text": "x", "users": "everyone"}}},
-        {"id": "x", "version": "1", "setup": {"identity_pool": [{"role": "ghost", "count": 1}]}},
-        {"id": "x", "version": "1", "unexpected_key": {"a": 1}},
-        {"id": "x", "version": "1", "defaults": {"floor": {"duration_s": "soon"}}},
-    ],
-)
-def test_import_invalid_scenario_spec_rejected(client, fake, scenario_spec):
-    payload = valid_session_payload()
-    payload["scenario_spec"] = scenario_spec
-    assert_import_rejected(client, fake, payload, status=(400,))
-
-
-def test_import_deeply_nested_or_unknown_spec_content_rejected(client, fake):
-    deep: dict = {}
-    cursor = deep
-    for _ in range(100):
-        cursor["x"] = {}
-        cursor = cursor["x"]
-    spec = real_spec()
-    spec["extra"] = deep  # extra="forbid": nothing unknown gets through, however it is nested
-    payload = valid_session_payload()
-    payload["scenario_spec"] = spec
-    assert_import_rejected(client, fake, payload, status=(400,))
-
-
-def test_engine_side_value_error_is_mapped_to_400(client, fake):
-    fake.load_session_data = AsyncMock(side_effect=ScenarioError("engine refused"))
-    response = post_import(client, valid_session_payload())
-    assert response.status_code == 400
-    assert "engine refused" in assert_string_detail(response)
-
-
-def test_failed_import_leaves_real_orchestrator_game_untouched(monkeypatch):
-    """End to end against the real singleton: a rejected import changes nothing."""
-
-    from app.game.orchestrator import orchestrator as real
-
-    monkeypatch.setattr(routes, "orchestrator", real)
-    real_client = TestClient(app)
-    session_before = real.session
-    snapshot_before = session_before.model_dump_json()
-    status_before = session_before.status
-    forged = valid_session_payload()
-    forged["session_id"] = "../../escape"
-    assert post_import(real_client, forged).status_code == 400
-    forged = valid_session_payload()
-    forged["scenario_spec"] = {"id": "x", "version": "1", "schema_version": 1}
-    assert post_import(real_client, forged).status_code == 400
-    assert real.session is session_before
-    assert real.session.status == status_before
-    assert real.session.model_dump_json() == snapshot_before
 
 
 # -------------------------------------------------- scenario spec unit

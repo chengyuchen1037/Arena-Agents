@@ -612,14 +612,13 @@ test("buildProviderPayload: edit sends only changes; protocol/base_url change ne
   assert.deepEqual(protoKey.payload, { protocol: "anthropic_messages", api_key: "k" });
 });
 
-test("normalizeProviders / normalizeModelIds / normalizeSessions are tolerant", () => {
+test("normalizeProviders / normalizeModelIds are tolerant", () => {
   assert.equal(Core.normalizeProviders({ providers: PROVIDERS }).length, 2);
   assert.equal(Core.normalizeProviders(PROVIDERS).length, 2);
   assert.deepEqual(Core.normalizeProviders(null), []);
   assert.deepEqual(Core.normalizeProviders([{ id: "x" }])[0].models, []);
   assert.deepEqual(Core.normalizeModelIds({ models: ["a", "a", { id: "b" }, "", 5, null] }), ["a", "b"]);
   assert.deepEqual(Core.normalizeModelIds(["z"]), ["z"]);
-  assert.deepEqual(Core.normalizeSessions({ sessions: [{ id: "s1" }, { session_id: "s2" }, {}] }).map((s) => s.session_id), ["s1", "s2"]);
 });
 
 test("bindingsLocked only while running", () => {
@@ -952,75 +951,6 @@ test("buildTemplatesPayload skips untouched slots, rejects partial/invalid refs"
   );
 });
 
-// --- v0.11: workspace ---------------------------------------------------------
-test("normalizeWorkspaceInfo falls back to the folder name and accepts remote payloads", () => {
-  assert.equal(Core.normalizeWorkspaceInfo(null), null);
-  assert.equal(Core.normalizeWorkspaceInfo({}), null);
-  const local = Core.normalizeWorkspaceInfo({
-    id: "w1",
-    name: "我的工作区",
-    path: "D:\\Arena-Workspace\\Mine",
-    last_session: "s1",
-    status: "ok",
-  });
-  assert.equal(local.name, "我的工作区");
-  assert.equal(local.path, "D:\\Arena-Workspace\\Mine");
-  assert.equal(local.last_session, "s1");
-  const remote = Core.normalizeWorkspaceInfo({ id: "w2", name: "Remote" });
-  assert.equal(remote.path, null);
-  assert.equal(Core.workspacePathDisplay(remote), "（远程访问不显示完整路径）");
-  const unnamed = Core.normalizeWorkspaceInfo({ path: "D:\\Arena-Workspace\\Default" });
-  assert.equal(unnamed.name, "Default");
-  assert.equal(Core.workspaceNameFromPath("/home/me/arena/"), "arena");
-
-  const all = Core.normalizeWorkspaces({
-    enabled: true,
-    current: { id: "w1", name: "N", path: "D:\\x" },
-    recent: [{ path: "D:\\x" }, { path: "D:\\x" }, { id: "w3", name: "Other" }, null],
-    default_path: "D:\\Arena-Workspace\\Default",
-    native_picker: false,
-  });
-  assert.equal(all.enabled, true);
-  assert.equal(all.recent.length, 2); // de-duplicated by path
-  assert.equal(all.native_picker, false);
-  assert.equal(all.default_path, "D:\\Arena-Workspace\\Default");
-});
-
-test("validateWorkspacePath only accepts absolute, non-root paths", () => {
-  for (const good of ["D:\\Arena-Workspace\\Mine", "C:/Users/me/arena", "/home/me/arena", "\\\\server\\share\\ws"]) {
-    assert.equal(Core.validateWorkspacePath(good).ok, true, good);
-  }
-  for (const bad of ["", "   ", "relative/path", "D:", "D:\\", "C:/", "/", "\\\\", "bad\u0000path"]) {
-    assert.equal(Core.validateWorkspacePath(bad).ok, false, JSON.stringify(bad));
-  }
-  assert.match(Core.validateWorkspacePath("").error, /绝对路径/);
-  assert.match(Core.validateWorkspacePath("D:\\").error, /磁盘根目录/);
-  assert.deepEqual(Core.validateWorkspacePath(" D:\\ws "), { ok: true, value: "D:\\ws" });
-});
-
-test("buildWorkspaceSelectPayload adds optional flags only when ticked", () => {
-  const plain = Core.buildWorkspaceSelectPayload({ path: "D:\\ws" });
-  assert.deepEqual(plain, { ok: true, payload: { path: "D:\\ws" } });
-  const flags = Core.buildWorkspaceSelectPayload({
-    path: "D:\\ws",
-    initialize_existing: true,
-    create_if_missing: true,
-  });
-  assert.deepEqual(flags.payload, {
-    path: "D:\\ws",
-    initialize_existing: true,
-    create_if_missing: true,
-  });
-  const bad = Core.buildWorkspaceSelectPayload({ path: "not-absolute" });
-  assert.equal(bad.ok, false);
-  assert.equal(Core.workspaceSwitchBlocked({ status: "running" }), true);
-  for (const st of ["paused", "idle", "finished", undefined]) {
-    assert.equal(Core.workspaceSwitchBlocked({ status: st }), false, String(st));
-  }
-  assert.equal(Core.workspaceSwitchBlocked(null), false);
-});
-
-
 // --- v0.12.1: four prices, price source, suggestions ---------------------------------------
 test("validateOptionalPrice: empty means null (input price); anything else must be a valid price", () => {
   for (const empty of ["", "  ", null, undefined]) assert.deepEqual(Core.validateOptionalPrice(empty), { ok: true, value: null });
@@ -1174,6 +1104,75 @@ test("nicknames: 1-20 characters (an emoji counts once), no control characters, 
   assert.equal(Core.validateNickname("bob", ["Bob"]).ok, true, "names are case sensitive");
   assert.equal(Core.charLength("a😀b"), 3);
   assert.equal(Core.NICKNAME_MAX, 20);
+});
+
+test("nicknames: a colon (':' or '：') is refused like the server does - after the length, before uniqueness; look-alikes are no colons", () => {
+  const COLON = "名字不能包含冒号（: 或 ：）。";
+  assert.equal(Core.NICKNAME_COLON_ERROR, COLON, "the server's words, exactly (tests/frontend/test_roster_drift.py compares them with the backend)");
+  for (const bad of ["A:B", "A：B", "A\uff1aB", ":", "：", "名字:", "：名字", "  Eve:2  ", "a".repeat(19) + ":", "😀:😀", "😀：".repeat(10)]) {
+    assert.deepEqual(Core.validateNickname(bad, []), { ok: false, error: COLON }, JSON.stringify(bad));
+  }
+  // the order of the server's checks: empty, (control characters), too long - THEN the colon, then 'taken'
+  assert.equal(Core.validateNickname("   ", []).error, "名字不能为空", "white space is empty, not a colon");
+  assert.match(Core.validateNickname(":".repeat(21), []).error, /最多 20/, "too long is said before the colon");
+  assert.equal(Core.validateNickname("a\u0000:", []).error, "名字含有非法控制字符", "a control character is said first");
+  assert.equal(Core.validateNickname("A:B", ["A:B"]).error, COLON, "the colon comes before uniqueness");
+  assert.equal(Core.validateNickname("Bob:", ["Alice", "Bob"]).error, COLON, "'Bob:' is not Bob: what is wrong with it is the colon");
+  // exactly two characters are colons: no normalizing (the server takes a look-alike, so must the page)
+  for (const fine of ["A\ua789B", "A\ufe55B", "A\u2236B", "A\u02d0B", "A\u0589B", "A;B", "A,B", "A.B", "A-B"]) {
+    assert.deepEqual(Core.validateNickname(fine, []), { ok: true, value: fine }, JSON.stringify(fine));
+  }
+  assert.equal(Core.validateNickname("a".repeat(20), []).ok, true, "20 characters without a colon are fine");
+  // the rule is about what is typed: an old name is never run through it (roster.js does not validate a name that did not change)
+  assert.deepEqual(Core.validateNickname("Carol", ["Carol:2"]), { ok: true, value: "Carol" });
+});
+
+test("createWindowStack: the newest window is on top - its z-index and the Escape key; one Escape answers for one window only", () => {
+  const stack = Core.createWindowStack();
+  const z = { a: "-", b: "-", c: "-" };
+  const setter = (name) => (v) => {
+    z[name] = String(v);
+  };
+  const press = (key = "Escape") => ({ key, stopped: 0, stopImmediatePropagation() { this.stopped++; } });
+  assert.equal(stack.top(), null);
+  assert.equal(stack.opened("a", setter("a")), 8100);
+  assert.equal(stack.opened("b", setter("b")), 8101);
+  assert.deepEqual([stack.top(), stack.list(), z.a, z.b], ["b", ["a", "b"], "8100", "8101"]);
+  // only the window on top answers, and it consumes the key press; other keys and other windows do not
+  const first = press();
+  assert.equal(stack.escape(first, "a"), false);
+  assert.equal(first.stopped, 0, "(a window that is not on top leaves the key alone)");
+  const second = press();
+  assert.equal(stack.escape(second, "b"), true);
+  assert.equal(second.stopped, 1, "(the listeners behind it do not see this key press)");
+  const enter = press("Enter");
+  assert.equal(stack.escape(enter, "b"), false);
+  assert.equal(enter.stopped, 0);
+  assert.equal(stack.escape(null, "b"), false);
+  assert.equal(stack.escape({ key: "Escape" }, "b"), true, "(an event without stopImmediatePropagation is fine)");
+  assert.equal(stack.escape(press(), "nobody"), false);
+  // opened again = brought to the front: every window gets its z-index again
+  stack.opened("a", setter("a"));
+  assert.deepEqual([stack.top(), z.a, z.b], ["a", "8101", "8100"]);
+  assert.equal(stack.opened("c", setter("c")), 8102);
+  assert.deepEqual([stack.list(), z.a, z.b, z.c], [["b", "a", "c"], "8101", "8100", "8102"]);
+  // closing gives the place back: no z-index of its own, the others move down to fill it
+  stack.closed("a");
+  assert.deepEqual([stack.list(), z.a, z.b, z.c], [["b", "c"], "", "8100", "8101"]);
+  stack.closed("a"); // (twice, or a window that was never opened: nothing happens)
+  stack.closed("never");
+  assert.deepEqual(stack.list(), ["b", "c"]);
+  assert.equal(stack.escape(press(), "b"), false);
+  assert.equal(stack.escape(press(), "c"), true);
+  stack.closed("c");
+  stack.closed("b");
+  assert.deepEqual([stack.top(), stack.list(), z.b, z.c], [null, [], "", ""]);
+  assert.equal(stack.escape(press(), "b"), false, "nothing open: nobody answers");
+  // a stack without z-index setters still orders the windows (a window created on its own)
+  const plain = Core.createWindowStack();
+  plain.opened("x");
+  plain.opened("y");
+  assert.deepEqual([plain.top(), plain.escape(press(), "y")], ["y", true]);
 });
 
 test("normalizeRoster tolerates partial payloads", () => {

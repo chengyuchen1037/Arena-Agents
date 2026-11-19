@@ -79,6 +79,13 @@ class WorldModule:
     def redeliver(self) -> None:
         """Queue deliveries for work that is still open (used when a game is resumed / restored)."""
 
+    def untimed_changed(self, before: frozenset[str]) -> None:
+        """``world.untimed_holders`` changed (``before`` is the old set): re-judge what depends on it (v0.13.1, G14)."""
+
+    def untimed_floor_open(self) -> bool:
+        """An untimed holder has a floor right now - the game waits for a person with no deadline (v0.13.1, G13)."""
+        return False
+
     def dump(self) -> dict[str, Any]:
         """Extra module state not covered by ``WorldState`` (JSON-serializable)."""
         return {}
@@ -107,6 +114,10 @@ class WorldCore:
         self._events: list[UiEvent] = []
         self._notifier: Callable[[], None] | None = None
         self._running = False
+        #: Participants whose floor in a *public* channel has no deadline (v0.13.1, G10 / G14): the seat a person
+        #: plays.  The orchestrator sets it from the takeover state (:meth:`set_untimed_holders`); it is not part of
+        #: the game's save, so it is empty after a load until the orchestrator says who is played.
+        self.untimed_holders: frozenset[str] = frozenset()
         self._invalidating = set(spec.invalidates_drafts)
         self._last_invalidating_seq = 0
         for entry in self.ledger:
@@ -173,6 +184,29 @@ class WorldCore:
         for module in self.modules:
             module.redeliver()
         self._notify()
+
+    # ------------------------------------------------------------- untimed floors --
+    def set_untimed_holders(self, holders: Iterable[str]) -> None:
+        """Say whose floor in a public channel has no deadline (v0.13.1, G10 / G14: the seat a person plays).
+
+        New floors of these holders are handed out without a deadline; a floor one of them *already holds* is
+        re-judged at once - it loses its deadline (keeping the nominal time it had left) or, for a holder that is
+        no longer in the set, gets it back with exactly that time left.  Nothing is written to the ledger."""
+        new = frozenset(str(h) for h in holders)
+        before = self.untimed_holders
+        if new == before:
+            return
+        self.untimed_holders = new
+        for module in self.modules:
+            try:
+                module.untimed_changed(before)
+            except Exception:  # noqa: BLE001 - one module's bug must not break the others
+                logger.exception("world module %s failed in untimed_changed()", module.name)
+        self._notify()
+
+    def untimed_floor_open(self) -> bool:
+        """A person who holds a floor without a deadline is being waited for (the watchdog counts that as activity)."""
+        return any(module.untimed_floor_open() for module in self.modules)
 
     # --------------------------------------------------------------------- ledger --
     def commit(

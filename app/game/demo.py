@@ -13,7 +13,8 @@ bot, so a demo game cannot be resumed after a process restart (the bot then hold
 v0.12.1: the bots play by the same rules as real models - every message wakes them, they ``sleep`` when
 there is nothing to do (the moderator with an alarm, ``sleep(seconds)``), the wolves agree on the knife
 through one shared request that closes when they are unanimous, and a one-shot call (post-game review,
-"complete it for me") is answered with text.  Token numbers imitate a persistent conversation with
+"complete it for me") is answered with what its prompt asks for (v0.13.1: JSON impressions, a fixed-format persona).
+Token numbers imitate a persistent conversation with
 prompt caching so the usage panel and the spending limit can be tried without a model.
 """
 
@@ -22,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -460,16 +462,30 @@ class DemoLlm:
         return total - read, read, self.rng.randint(40, 260)
 
     def _text(self, messages: list[dict[str, Any]]) -> str:
-        """The answer of a one-shot call (review / "complete it for me"): plain text, no tools."""
-        system = str(messages[0].get("content", "")) if messages else ""
+        """The answer of a one-shot call outside the game loop, no tools.  Which call it is, the prompt says (the
+        sections ``app.agents.review`` builds): the review of a finished game and "complete the memory" are answered with
+        the JSON those prompts ask for (impressions of the other seats, a lesson), "complete the persona" with the
+        fixed-format text."""
         user = str(messages[-1].get("content", "")) if messages else ""
-        if "复盘" in system:
-            return ("（演示）这一局我发言偏保守，关键轮次没有及时表态；对其他玩家的印象：多数人发言平稳，"
-                    "投票与发言基本一致。下次我会更早亮出自己的判断，并留意前后矛盾的人。")
-        notes = user.split("要点：", 1)[-1].strip() or "（无要点）"
-        if "性格设定" in system:
-            return f"你说话{notes}。做决定时先观察再表态，压力大的时候会放慢语速，把话说得更短、更稳。"
-        return f"## 对其他玩家的印象\n- {notes}\n\n## 自己的经验与教训\n- 先听后说，别在信息不足时站队。"
+        notes = user.rsplit("要点：\n", 1)[-1].strip() or "（无要点）"
+        found = re.search(r"【其他玩家】([^\n]*)", user)
+        others = [item.strip().partition(" ") for item in (found.group(1) if found else "").split("、")]
+        others = [(sid, name) for sid, _, name in others if sid and sid != "（无）"]
+        lesson = ["（演示）先听后说，别在信息不足时站队。"]
+        if "【你能看到的记录】" in user:  # the post-game review: revise the impression of everybody
+            impressions = {sid: f"（演示）{name}发言平稳，投票与发言基本一致，下次继续观察。" for sid, name in others}
+            return json.dumps({"impressions": impressions, "experience": lesson}, ensure_ascii=False)
+        if "【当前印象】" in user:  # "complete the memory": the notes become the impression of the first seat
+            impressions = {others[0][0]: f"（演示）{notes}"[:80]} if others else {}
+            return json.dumps({"impressions": impressions, "experience": lesson}, ensure_ascii=False)
+        return (  # "complete the persona"
+            f"【定位】（演示）{notes[:30]}的玩家。\n"
+            f"【说话风格】\n- 你说话{notes[:20]}，语速平稳。\n"
+            "【思考方式】\n- 先观察再表态，不急着站队。\n"
+            "【决策偏好】\n- 证据不足时宁可弃票，也不乱投。\n"
+            "【压力下】\n- 放慢语速，把话说得更短、更稳。\n"
+            "【口头禅】我们再看看。"
+        )
 
     async def complete(
         self, agent_id: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, *, max_tokens: int | None = None
@@ -515,14 +531,11 @@ def install_demo(orchestrator: Any, *, delay: float = 1.0, seed: int | None = No
             cache[key] = DemoLlm(orch.world, delay=delay, seed=seed)
         return cache[key]
 
+    # ``demo_mode`` is what the API layer looks at to skip the model-binding checks (``routes._require_complete_bindings``,
+    # ``providers.binding_issues``): nothing process-global is replaced, so installing the demo on one orchestrator
+    # (a test, say) cannot change how the API behaves for any other.
     orchestrator.demo_mode = True
     orchestrator.llm_port_factory = factory
     orchestrator.ensure_bindings_ready = lambda: None
     orchestrator.refresh_binding_issues = lambda: []
     orchestrator.session.binding_issues = []
-
-    import app.api.providers as providers_api
-    import app.api.routes as routes_api
-
-    routes_api._require_complete_bindings = lambda: None  # type: ignore[assignment]
-    providers_api.binding_issues = lambda: []  # type: ignore[assignment]

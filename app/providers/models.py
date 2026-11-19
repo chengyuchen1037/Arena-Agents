@@ -90,10 +90,13 @@ class ProviderConfig(BaseModel):
     name: str
     protocol: ProtocolType
     base_url: str
-    api_key: str = Field(repr=False)
+    #: The key lives in ``secrets.v1.enc``, never in ``providers.json``; ``""`` = not set (imported without keys)
+    api_key: str = Field(default="", repr=False)
     models: list[ModelEntry] = Field(default_factory=list)
     read_only: bool = False
-    source: str = "encrypted"
+    #: a label: ``user`` (made in the app), ``environment`` (DEEPSEEK_*); ``encrypted`` / ``legacy-migration`` come
+    #: from data of v0.12.1 and older and are kept as they are
+    source: str = "user"
     auto_append_path: bool = True
 
     @field_validator("id", "name", "base_url")

@@ -12,6 +12,16 @@ same order of checks as the ``speak`` commit gate (contracts §2.3):
    (system DMs have no limit and need no token)
 
 ``why_not`` is the string ``"<CODE>：<one-sentence reason>"`` (``None`` when the agent can write).
+
+``max_chars`` (v0.13) is the length cap of ONE free-text message the agent could write there right now
+(longer text is truncated by the gate, D19): the token's per-message cap clipped to what is left of its
+total (turn / queue), ``max_chars_per_message`` of the discussion (free), the ``dm`` default (system DM).
+``None`` when the agent cannot write or the moderator writes (no cap).  ``seat_status`` (``seat.py``) and
+``speech_gate`` (``chat.py``) say the same; ``tests/v12/world`` locks the three together.
+
+The board never reveals that a person plays a seat (v0.13.1, G15): a floor the person holds in a public channel has
+no deadline, yet the board shows the nominal length of the turn for it like for any other holder - there is no
+"untimed" anywhere in it.
 """
 
 from __future__ import annotations
@@ -19,6 +29,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from app.world.chat import token_untimed
 from app.world.game import ability_holders
 from app.world.projection import seat_sorted
 from app.world.spec import ParamSpec
@@ -50,7 +61,11 @@ def param_brief(spec: ParamSpec) -> str:
 # --------------------------------------------------------------------------- channels
 
 
-def _token_seconds(group: Any, token: Any, now: float) -> float | None:
+def _token_seconds(world: Any, channel: ChannelState, group: Any, token: Any, now: float) -> float | None:
+    if token_untimed(world, channel, token):
+        # G15 (v0.13.1): the seat a person plays holds this floor without a deadline - but the board must not say so.
+        # It shows the nominal length of the turn, as it would for any other holder, and never a word about "untimed".
+        return _secs(token.duration_s)
     if group.paused:
         return _secs(token.remaining)
     if token.deadline is not None:
@@ -116,6 +131,28 @@ def _write_status(world: Any, channel: ChannelState, agent_id: str, is_moderator
     return False, f"{Code.NO_FLOOR}：现在不能在该频道发言。"
 
 
+def _max_chars(
+    world: Any, channel: ChannelState, agent_id: str, is_moderator: bool, can_write: bool
+) -> int | None:
+    """The cap of one message of ``agent_id`` in ``channel`` (same numbers as ``speech_gate(...).max_chars``)."""
+    if is_moderator or not can_write:
+        return None
+    mode = channel.mode
+    if mode in ("turn", "queue"):
+        group = channel.group
+        tokens = [] if group is None else group.tokens
+        mine = next((t for t in tokens if t.holder == agent_id and t.status == "active"), None)
+        if mine is None:
+            return None
+        return max(0, min(mine.max_chars_per_message, mine.max_chars_total - mine.chars_used))
+    if mode == "free":
+        if channel.free is not None:
+            return channel.free.max_chars_per_message
+        defaults = world.spec.defaults
+        return defaults.dm.max_chars_per_message if channel.system else defaults.free.max_chars_per_message
+    return None
+
+
 def _floor_block(world: Any, channel: ChannelState, agent_id: str, is_moderator: bool) -> dict[str, Any]:
     now = float(world.clock.now())
     mode = channel.mode
@@ -143,7 +180,7 @@ def _floor_block(world: Any, channel: ChannelState, agent_id: str, is_moderator:
         active = next((t for t in group.tokens if t.status == "active"), None)
         if active is not None:
             floor["active"] = active.holder
-            floor["seconds_left"] = _token_seconds(group, active, now)
+            floor["seconds_left"] = _token_seconds(world, channel, group, active, now)
         if not is_moderator:
             mine = next((t for t in group.tokens if t.holder == agent_id and t.status == "active"), None)
             if mine is not None:
@@ -151,7 +188,7 @@ def _floor_block(world: Any, channel: ChannelState, agent_id: str, is_moderator:
                     "messages_left": max(0, mine.max_messages - mine.messages_used),
                     "chars_per_message": mine.max_chars_per_message,
                     "chars_left": max(0, mine.max_chars_total - mine.chars_used),
-                    "seconds_left": _token_seconds(group, mine, now),
+                    "seconds_left": _token_seconds(world, channel, group, mine, now),
                 }
     free = channel.free
     if mode == "free" and free is not None and not channel.system:
@@ -185,6 +222,7 @@ def _channel_block(world: Any, channel: ChannelState, agent_id: str, is_moderato
         "system": bool(channel.system),
         "can_write": can_write,
         "why_not": why_not,
+        "max_chars": _max_chars(world, channel, agent_id, is_moderator, can_write),
         "floor": _floor_block(world, channel, agent_id, is_moderator),
     }
 

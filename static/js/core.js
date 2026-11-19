@@ -327,6 +327,7 @@
       this.name = "ApiError";
       this.status = info.status || 0;
       this.detail = info.detail || "";
+      this.code = info.code || ""; // the server's machine-readable reason ({"detail", "code"}), when it sends one
       this.kind = info.kind || "http"; // http | network | bad-response | auth
     }
   }
@@ -446,6 +447,14 @@
     return t;
   }
 
+  /** The ``code`` of a ``{"detail", "code"}`` error body ("" when there is none). */
+  function extractErrorCode(body) {
+    if (body.kind === "json" && body.data && typeof body.data === "object" && typeof body.data.code === "string") {
+      return body.data.code;
+    }
+    return "";
+  }
+
   /**
    * Build an API client.
    *  fetchImpl:      fetch-compatible function
@@ -521,6 +530,7 @@
           throw new ApiError(describeHttpError(resp.status, detail), {
             status: resp.status,
             detail,
+            code: extractErrorCode(parsed),
             kind: "http",
           });
         }
@@ -991,18 +1001,28 @@
   // -------------------------------------------------------------------------
 
   const NICKNAME_MAX = 20;
+  // The name is the label in front of an impression ("- N5 Eve：…"): a colon in it would end the label early when the line is read
+  // back, so the server refuses one in a NEW name (app/storage/roster.py clean_name: exactly ":" and "：" U+FF1A - no normalizing,
+  // look-alikes such as U+A789 are fine) and says it in these words.  A name that is already stored still loads and still shows.
+  const NICKNAME_COLON_RE = /[:\uff1a]/;
+  const NICKNAME_COLON_ERROR = "名字不能包含冒号（: 或 ：）。";
 
   /** Count characters the way the user sees them (an emoji / CJK character is one). */
   function charLength(s) {
     return Array.from(String(s === undefined || s === null ? "" : s)).length;
   }
 
-  /** A nickname: trimmed, 1..20 characters, no control characters, unique among `others` (their names). */
+  /**
+   * A NEW nickname: trimmed, 1..20 characters, no control characters, no colon (":" or "：" - like the server, after the length
+   * check and before uniqueness), unique among `others` (their names).  It is a check for what is about to be saved: the name a
+   * player already has is never run through it (an old one with a colon still shows as it is).
+   */
   function validateNickname(raw, others) {
     const name = String(raw === undefined || raw === null ? "" : raw).trim();
     if (!name) return { ok: false, error: "名字不能为空" };
     if (hasControlChars(name)) return { ok: false, error: "名字含有非法控制字符" };
     if (charLength(name) > NICKNAME_MAX) return { ok: false, error: `名字最多 ${NICKNAME_MAX} 个字符` };
+    if (NICKNAME_COLON_RE.test(name)) return { ok: false, error: NICKNAME_COLON_ERROR };
     if ((others || []).some((o) => String(o) === name)) return { ok: false, error: `名字「${name}」已被其他玩家使用` };
     return { ok: true, value: name };
   }
@@ -1023,6 +1043,58 @@
         memory: typeof s.memory === "string" ? s.memory : "",
       }));
     return { memory_enabled: r.memory_enabled !== false, editable: r.editable !== false, seats };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.13.1: the floating windows of the page (the thinking record, the error log)
+  // -------------------------------------------------------------------------
+
+  const WINDOW_Z_BASE = 8100; // .vw-window in style.css; the dialogs (z-index 9000) stay above every window
+
+  /**
+   * The floating windows in the order they were opened: the newest is on top - on the screen (the stack puts the z-index on every window
+   * again whenever the order changes) and for the keyboard: Escape closes only that one.  Each window asks `escape(evt, name)` from its
+   * own key listener; the one that is on top answers true and consumes the key press (stopImmediatePropagation: a window below it, and the
+   * detail panel behind both, do not see it - one Escape closes one thing).
+   */
+  function createWindowStack() {
+    const order = []; // the names, the newest last
+    const setters = new Map(); // name -> function (z) that puts the z-index on that window ("" = none)
+    const renumber = () => {
+      order.forEach((name, i) => {
+        const set = setters.get(name);
+        if (set) set(WINDOW_Z_BASE + i);
+      });
+    };
+    const drop = (name) => {
+      const i = order.indexOf(name);
+      if (i >= 0) order.splice(i, 1);
+    };
+    return {
+      /** `name` was opened (or brought to the front again): it is the newest now.  `setZ(z)` puts a z-index on its window. */
+      opened(name, setZ) {
+        drop(name);
+        order.push(name);
+        if (typeof setZ === "function") setters.set(name, setZ);
+        renumber();
+        return WINDOW_Z_BASE + order.length - 1;
+      },
+      /** `name` was closed: it gives its place back (no z-index of its own), the others move up to fill it. */
+      closed(name) {
+        const wasThere = order.includes(name);
+        drop(name);
+        const set = setters.get(name);
+        if (wasThere && set) set("");
+        renumber();
+      },
+      top: () => (order.length ? order[order.length - 1] : null),
+      list: () => order.slice(),
+      escape(evt, name) {
+        if (!evt || evt.key !== "Escape" || order[order.length - 1] !== name) return false;
+        if (typeof evt.stopImmediatePropagation === "function") evt.stopImmediatePropagation();
+        return true;
+      },
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -1136,19 +1208,6 @@
             reasoning_depth: mod.reasoning_depth,
           }
     );
-  }
-
-  /** Normalize GET /sessions (array or {sessions:[..]}) to a list of objects. */
-  function normalizeSessions(resp) {
-    const list = Array.isArray(resp)
-      ? resp
-      : resp && Array.isArray(resp.sessions)
-        ? resp.sessions
-        : [];
-    return list
-      .filter((s) => s && typeof s === "object")
-      .map((s) => ({ ...s, session_id: s.session_id || s.id || "" }))
-      .filter((s) => s.session_id);
   }
 
   /** Total cost: the server accumulates per-call price snapshots. */
@@ -1397,104 +1456,6 @@
   }
 
   // -------------------------------------------------------------------------
-  // v0.11: workspace (工作文件夹)
-  // -------------------------------------------------------------------------
-
-  const WORKSPACE_DEFAULT_LABEL = "工作文件夹";
-
-  function workspaceNameFromPath(path) {
-    const parts = String(path === undefined || path === null ? "" : path)
-      .replace(/[\\/]+$/, "")
-      .split(/[\\/]/)
-      .filter(Boolean);
-    return parts.length ? parts[parts.length - 1] : "";
-  }
-
-  /** Normalize one workspace descriptor; returns null when it carries nothing useful. */
-  function normalizeWorkspaceInfo(raw) {
-    if (!raw || typeof raw !== "object") return null;
-    const path = typeof raw.path === "string" ? raw.path.trim() : "";
-    let name = typeof raw.name === "string" ? raw.name.trim() : "";
-    if (!name) name = workspaceNameFromPath(path);
-    const id = raw.id === undefined || raw.id === null ? "" : String(raw.id);
-    if (!name && !path && !id) return null;
-    return {
-      id,
-      name: name || WORKSPACE_DEFAULT_LABEL,
-      path: path || null,
-      last_session:
-        raw.last_session === undefined || raw.last_session === null ? null : raw.last_session,
-      status: typeof raw.status === "string" ? raw.status : "",
-      degraded: Boolean(raw.degraded),
-    };
-  }
-
-  function normalizeRecentWorkspaces(list) {
-    if (!Array.isArray(list)) return [];
-    const out = [];
-    const seen = new Set();
-    for (const item of list) {
-      const info = normalizeWorkspaceInfo(item);
-      if (!info) continue;
-      const key = info.path || info.id || info.name;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      out.push(info);
-    }
-    return out;
-  }
-
-  /** Normalize GET /api/workspaces -> {enabled, current, recent, default_path, native_picker}. */
-  function normalizeWorkspaces(resp) {
-    const r = resp && typeof resp === "object" && !Array.isArray(resp) ? resp : {};
-    return {
-      enabled: r.enabled !== false,
-      current: normalizeWorkspaceInfo(r.current),
-      recent: normalizeRecentWorkspaces(r.recent),
-      default_path: typeof r.default_path === "string" && r.default_path.trim()
-        ? r.default_path.trim()
-        : null,
-      native_picker: r.native_picker !== false,
-    };
-  }
-
-  /** Client-side sanity check; the server still validates the real path rules. */
-  function validateWorkspacePath(raw) {
-    const s = String(raw === undefined || raw === null ? "" : raw).trim();
-    if (!s) return { ok: false, error: "请选择或输入工作文件夹的绝对路径" };
-    if (hasControlChars(s)) return { ok: false, error: "路径含有非法控制字符" };
-    const winAbs = /^[A-Za-z]:[\\/]/.test(s) || /^\\\\[^\\]/.test(s);
-    const posixAbs = /^\//.test(s);
-    if (!winAbs && !posixAbs) {
-      return { ok: false, error: "必须输入绝对路径（例如 D:\\Arena-Workspace\\MyWorkspace）" };
-    }
-    if (/^[A-Za-z]:[\\/]?$/.test(s) || s === "/") {
-      return { ok: false, error: "不能选择磁盘根目录" };
-    }
-    return { ok: true, value: s };
-  }
-
-  /** Body for POST /api/workspaces/select (optional flags only when ticked). */
-  function buildWorkspaceSelectPayload(form) {
-    const checked = validateWorkspacePath(form && form.path);
-    if (!checked.ok) return checked;
-    const payload = { path: checked.value };
-    if (form && form.initialize_existing) payload.initialize_existing = true;
-    if (form && form.create_if_missing) payload.create_if_missing = true;
-    return { ok: true, payload };
-  }
-
-  /** Workspace switching must be refused while a game is running (pause first). */
-  function workspaceSwitchBlocked(session) {
-    return Boolean(session && session.status === "running");
-  }
-
-  function workspacePathDisplay(info) {
-    if (!info) return "";
-    return info.path || "（远程访问不显示完整路径）";
-  }
-
-  // -------------------------------------------------------------------------
   // v0.12: number / time formatting (top-bar usage pill, metrics popover, feed)
   // -------------------------------------------------------------------------
 
@@ -1567,7 +1528,6 @@
     bindingSummary,
     buildBindingsPayload,
     applyModeratorToAll,
-    normalizeSessions,
     sessionCostUsd,
     // v0.11
     LAYOUT_STORAGE_KEY,
@@ -1584,14 +1544,6 @@
     templateRowComplete,
     selectedActorIds,
     templateSummary,
-    WORKSPACE_DEFAULT_LABEL,
-    workspaceNameFromPath,
-    normalizeWorkspaceInfo,
-    normalizeWorkspaces,
-    validateWorkspacePath,
-    buildWorkspaceSelectPayload,
-    workspaceSwitchBlocked,
-    workspacePathDisplay,
     // v0.12.1
     DEFAULT_PRICING_SOURCE_URL,
     formatDateTime,
@@ -1610,9 +1562,11 @@
     buildBudgetPayload,
     formatPercent,
     NICKNAME_MAX,
+    NICKNAME_COLON_ERROR,
     charLength,
     validateNickname,
     normalizeRoster,
+    createWindowStack,
     formatSeconds,
     formatCountdown,
     gameClockNow,

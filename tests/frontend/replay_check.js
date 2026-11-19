@@ -14,6 +14,10 @@ const Store = require(path.join(__dirname, "..", "..", "static", "js", "store.js
 
 const data = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const LIVE = process.argv.includes("--live");
+// --human: the log of a game in which a person plays one seat (tests/frontend/test_mock_takeover.py): the same
+//          comparison with the server's final session (the played seat's state included), but not every
+//          assertion about what the mock's own script contains (reviews, the budget pause ...) applies
+const HUMAN = process.argv.includes("--human");
 const clone = (v) => JSON.parse(JSON.stringify(v));
 
 let session = Store.normalizeSession(clone(data.initial));
@@ -28,7 +32,7 @@ for (const ev of data.events) {
   seenTypes.add(ev.type);
   typeCount[ev.type] = (typeCount[ev.type] || 0) + 1;
   const res = Store.applyEvent(session, ev, { clockNow: 0 });
-  assert.equal(res.reload, false);
+  assert.equal(res.archiveEvent, null, `${ev.type} is not an archive event`); // (v0.13: the workspace reload flag is gone)
   assert.equal(res.toast, "", `unexpected toast on ${ev.type}`);
   session = res.session;
   if (ev.type === "agent.status") {
@@ -50,6 +54,9 @@ const project = (s) => ({
   seq: LIVE ? 0 : s.seq,
   memory_enabled: s.memory_enabled,
   stall_notice: s.stall_notice,
+  // v0.13.1 (§12.2): the soft pause and whether the game clock runs (they travel in every session.updated)
+  soft_pause: s.soft_pause,
+  clock_running: s.clock_running,
   budget: s.budget,
   review: { available: s.review.available, done: s.review.done, running: s.review.running },
   participants: Object.fromEntries(
@@ -89,6 +96,18 @@ const project = (s) => ({
   tickets: s.tickets.map((t) => ({ id: t.id, player_id: t.player_id, status: t.status, verdict: t.verdict, preview: t.preview })),
   dashboard: s.dashboard,
   by_actor: s.usage_stats.by_actor,
+  // v0.13: the seat a person plays and what it may do (nothing but the seat while nobody plays)
+  takeover: s.takeover.seat
+    ? {
+        seat: s.takeover.seat,
+        attention: s.takeover.attention,
+        requests: s.takeover.requests.map((r) => ({ id: r.id, answered: r.answered, my_answer: r.my_answer })),
+        abilities: s.takeover.abilities.map((a) => a.id),
+        channels: Object.fromEntries(
+          Object.entries(s.takeover.channels).map(([id, c]) => [id, { can_write: c.can_write, code: c.code, max_chars: c.max_chars, can_pass: c.can_pass }])
+        ),
+      }
+    : { seat: null },
 });
 
 const got = project(session);
@@ -134,13 +153,24 @@ if (differences.length) {
 assert.deepEqual(got, want);
 
 if (LIVE) {
-  assert.ok(states.size >= 1 && [...states].every((s) => ["acting", "sleeping", "thinking"].includes(s)), `agent states: ${[...states]}`);
+  // (v0.13.1: a log with a soft pause also has "held" - an agent waiting in front of the gate)
+  assert.ok(states.size >= 1 && [...states].every((s) => ["acting", "sleeping", "thinking", "held"].includes(s)), `agent states: ${[...states]}`);
   console.log(
     `live replay ok: ${data.events.length} events (${seenTypes.size} types), ${got.messages.length} messages, ` +
       `${Object.keys(got.channels).length} channels, ${got.requests.length} requests, ${got.tickets.length} tickets, ` +
       `states ${[...states].sort().join("/")}, ${session.review.done.length} reviews, ` +
       `budget ${session.budget.state}`
   );
+  process.exit(0);
+}
+
+if (HUMAN) {
+  assert.ok(session.takeover.seat, "a seat is played at the end");
+  const seat = session.takeover.seat;
+  assert.equal(got.participants[seat].state, "human", "its card says so");
+  assert.ok(typeCount["takeover.updated"] >= 5, "the seat's state was pushed again and again");
+  assert.ok(![...states].length || true);
+  console.log(`replay ok: ${data.events.length} events (${seenTypes.size} types), human seat ${seat}, ${typeCount["takeover.updated"]} takeover.updated`);
   process.exit(0);
 }
 

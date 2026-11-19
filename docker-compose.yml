@@ -2,14 +2,19 @@
 #
 # 首次使用：
 #   1. cp .env.example .env，按需填写（至少建议设置 ARENA_API_TOKEN）。
-#   2. 生成主密钥（base64，32 字节），保存到**项目目录之外**的文件，并限制权限：
+#   2. 生成主密钥（base64，32 字节），保存到**项目目录之外**的文件，并限制权限（只用来加密 API Key）：
 #        python -c "import base64,secrets; print(base64.urlsafe_b64encode(secrets.token_bytes(32)).decode())" > /srv/arena-secrets/master_key
 #        （或 openssl rand -base64 32 > /srv/arena-secrets/master_key）
 #        Linux：sudo chown 10001:10001 /srv/arena-secrets/master_key && sudo chmod 400 /srv/arena-secrets/master_key
-#      主密钥丢失后，/data 里的加密 Provider 库与存档无法解密——请单独备份主密钥（不要和 /data 放在一起）。
+#      主密钥丢失后，/app/data/secrets.v1.enc 里的 API Key 无法解密（其余数据是明文，不受影响，重新输入 Key 即可）；
+#      请单独备份主密钥（不要和数据放在一起），或定期在“设置”里导出带密码的存档。
 #   3. 在 .env 或 shell 里设置 ARENA_MASTER_KEY_HOST_FILE=/srv/arena-secrets/master_key（必填，缺失时 compose 报错，
-#      即 fail closed）；可选 ARENA_DATA_HOST=/srv/arena-data 指定宿主机数据目录（默认使用命名卷 arena-data）。
+#      即 fail closed）；可选 ARENA_DATA_HOST=/srv/arena-data 指定宿主机数据目录（默认使用命名卷 arena-appdata）。
 #   4. docker compose up -d --build
+#
+# 从 v0.12.1 升级：数据位置变了（旧：卷 arena-data 挂在 /data，里面是加密的工作区；新：卷 arena-appdata 挂在 /app/data），
+#   旧卷不会被使用，也不会被删除。把旧卷里的工作区用转换脚本 tools/migrate_v0121_to_archive.py 转成 .arenaagents
+#   存档，再在新实例的“设置 → 导入存档”里导入；具体命令见 docs/storage.md 的“升级”一节。确认无误之前请保留旧卷。
 #   开发（挂载源码 + 热重载）：docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 #
 # 安全默认值：
@@ -18,12 +23,12 @@
 #   * 经 Docker 端口映射进入容器的请求，来源地址是 docker 网关而不是回环地址，因此在**未设置**
 #     ARENA_API_TOKEN 时，后端会拒绝 Provider 管理、绑定修改、存档导入等修改类接口。
 #     容器部署请在 .env 中设置 ARENA_API_TOKEN。
-#   * 容器以非 root(uid 10001) 运行并丢弃全部 Linux capabilities；运行数据只写 /data。
+#   * 容器以非 root(uid 10001) 运行并丢弃全部 Linux capabilities；运行数据只写 /app/data。
 name: arena-agents
 
 services:
   arena-agents:
-    image: arena-agents:0.12.1
+    image: arena-agents:0.13.1
     build:
       context: .
       dockerfile: Dockerfile
@@ -35,11 +40,8 @@ services:
       - path: .env
         required: false
     environment:
-      # 以下两项由 compose 固定，覆盖 .env 里面向“本机直接运行”的同名变量。
-      ARENA_DATA_DIR: /data
-      # v0.11：Provider、模板、绑定、对局与日志都在工作区内；容器只能使用 /data 下的工作区，
-      # 原生文件夹选择框在容器内不可用。宿主工作区如需更换，修改此路径并确保 /data 内可写。
-      ARENA_WORKSPACE_DIR: /data/workspace/default
+      # 数据目录不用设置：容器里程序目录是 /app，默认数据目录就是 /app/data（下面的卷）。
+      # 由 compose 固定，覆盖 .env 里面向“本机直接运行”的同名变量。
       ARENA_MASTER_KEY_FILE: /run/secrets/arena_master_key
       # 兼容旧部署：.env 里的 DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL / DEEPSEEK_MODEL 仍会经 env_file
       # 传入，形成**只读**的“环境变量 Provider”（不可在界面编辑、不进入导出）。
@@ -48,16 +50,14 @@ services:
     secrets:
       - arena_master_key
     volumes:
-      # 外部数据目录：加密 Provider 库、settings.json、加密对局存档、日志。
-      # 默认命名卷：首次创建时继承镜像里 arena(uid 10001) 的属主与 0700 权限，非 root 即可写。
+      # 数据目录：providers.json（不含 Key）、secrets.v1.enc（只有 API Key 加密）、settings.json、名册、
+      # 对局（games/<id>/game.json，明文）、思考日志、导出的 .arenaagents 存档。
+      # 默认命名卷 arena-appdata（新卷名，不与 v0.12.1 的 arena-data 混用）：首次创建时继承镜像里
+      # arena(uid 10001) 的属主与 0700 权限，非 root 即可写。
       # 若设置 ARENA_DATA_HOST 为宿主机目录（绝对路径或 ./ 开头），则变为绑定挂载，Linux 上需先
       #   mkdir -p /srv/arena-data && sudo chown 10001:10001 /srv/arena-data && sudo chmod 700 /srv/arena-data
       # （Docker Desktop for Windows/macOS 通常无需处理权限）。
-      - ${ARENA_DATA_HOST:-arena-data}:/data
-      # 一次性迁移 v0.9 及更早的明文存档：临时取消下一行注释（需可写；迁移会先加密存档，再复制到
-      # /data/quarantine/legacy-saves 并校验，最后才移除 ./saves 中的原件；目录须对 uid 10001 可写），
-      # 启动一次完成迁移后再注释掉并重启：
-      # - ./saves:/app/saves
+      - ${ARENA_DATA_HOST:-arena-appdata}:/app/data
       # 可选：不重建镜像就调整配置/剧本/提示词时，取消下面几行注释（只读挂载）：
       # - ./config.yml:/app/config.yml:ro
       # - ./knowledge:/app/knowledge:ro
@@ -73,7 +73,7 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
-    # 退出时需要：暂停对局 → 刷新自动保存（加密落盘）→ 关闭 LLM 客户端；给足宽限期（uvicorn 另有 15s 连接排空）。
+    # 退出时需要：暂停对局 → 刷新自动保存（落盘）→ 关闭 LLM 客户端；给足宽限期（uvicorn 另有 15s 连接排空）。
     stop_grace_period: 45s
     security_opt:
       - no-new-privileges:true
@@ -89,4 +89,5 @@ secrets:
     file: ${ARENA_MASTER_KEY_HOST_FILE:?请先设置 ARENA_MASTER_KEY_HOST_FILE（主密钥文件路径），见 docker-compose.yml 顶部说明}
 
 volumes:
-  arena-data:
+  # v0.13 的数据卷（挂在 /app/data）。v0.12.1 的 arena-data 卷不再使用，升级步骤见 docs/storage.md。
+  arena-appdata:

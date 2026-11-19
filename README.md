@@ -11,7 +11,7 @@
 AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.12.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.13.1-blue.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 
@@ -19,6 +19,26 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 ## 主要能力
 
+- **亲自下场：接管一个座位（v0.13）**：对局未开始或已暂停时，点视角栏旁的「接管」，就能扮演某个玩家——它的 agent
+  暂停、不再产生 token，你看到该座位的视角；退出接管（同样只在不运行时）后座位交还给 agent，它下次醒来会拿到包括
+  你的发言在内的完整历史。未开始就接管时会提醒“你已经知道自己的身份”，并带一个「重新发牌」按钮——对局一开始就
+  **严格禁止**（界面隐藏，服务端也拒绝）。你的每个动作都走和 agent 完全一样的提交闸门：轮次、字数、条数、截止时间都不变。
+- **接管不停手，agent 可软暂停（v0.13.1）**：接管栏可让 agent 在收完当前回答后停下，时钟同时冻结；
+  你仍能慢慢阅读、发言、作答和使用技能，公共频道轮到你时**不限时**，请求仍按原截止时间。还可以给其他座位加
+  8 种颜色 / 形状的私人标记，只保存在本浏览器，不赋予颜色任何规则含义。
+- **每个频道一个输入框（v0.13）**：像多人聊天软件，切换频道就换成该频道自己的输入框（草稿各自保留，带字数上限）。
+  没轮到你、发言权已结束、频道被关闭 / 冻结 / 只听时，输入框仍可打字，发送按钮变成灰色的「禁言中」（悬停看原因）；
+  持有发言权时有「结束发言」；「技能」按钮释放白狼王自爆等主动技能；投票、选择之类的请求卡片先点选、再点「提交」，
+  防止误点直接作答，带倒计时。
+  质询主持人用和主持人的私聊。
+- **一个文件的存档（v0.13）**：设置里只有「导出存档 / 导入存档」两项，对象是单个 `.arenaagents` 文件——
+  内容（对局、日志、名册、Provider…）不加密，只有 API Key 可选导出并用你设的强密码加密；导出 / 导入都有进度，
+  导入会校验版本和每个文件的校验值，整体替换前先备份、失败自动回滚。附带 v0.12.1 → 存档的转换脚本。
+- **历史对局与重放（v0.13）**：列出每一局，可继续、删除（删除不影响 agent 的记忆）或**重放**——暂停、
+  0.5×–8× 倍速、可拖动进度条、跳过空闲，还能切换视角。
+- **思考记录与错误日志（v0.13.1）**：玩家 / 主持人详情里的「思考记录」用聊天气泡展示每次唤醒的思考与正文，
+  不夹工具调用；右上角「日志」列出当前局的 LLM 调用、重试、超时与错误，可按角色筛选、只看错误。
+  接管未终局时不能查看其他玩家的思考记录。
 - **全员异步 Agent（v0.12）**：每个玩家和主持人都是 Actor + Worker。Actor 永远能收发消息，
   不会被思考或工具执行阻塞；发言、投票、质询和能力随时可以发生，引擎在**提交的那一刻**校验。
 - **引擎不替你省钱（v0.12.1）**：每一条投递给 agent 的消息都会立刻唤醒它（没有防抖、没有轮数上限、没有
@@ -31,8 +51,10 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 - **价格源**：Provider 对话框里可从价格表（默认 LiteLLM 的 `model_prices_and_context_window.json`）
   自动填入模型的四个价格和上下文窗口，你仍可手动修改。
 - **角色名册**：12 个座位 `N1`–`N12`，默认名字 Alice…Leo，可改名并保存；每人有一个由程序化素材库随机组合的
-  **像素头像**（可重新生成全部或单个；主持人也有一个随机头像）；性格设定与记忆是工作区里的纯文本文件，默认为空，可导入 / 导出 /
-  清空，也可让主持人的模型把几句要点“完善”成草稿；赛后手动“复盘”会把战绩和第一人称笔记写进记忆。
+  **像素头像**（可重新生成全部或单个；主持人也有一个随机头像；v0.13.1 可复制头像编号、按编号精确重建）。
+  性格设定与记忆是数据目录里的纯文本文件（`data/roster/`），默认为空，可在界面里编辑 / 清空，也可让主持人的模型
+  把几句要点“完善”成草稿；性格是短小的固定格式行为指引，记忆按“战绩 / 对其他 11 人的印象 / 自己的经验”组织并限长。
+  赛后手动“复盘”更新印象和经验，不再逐局追加一长段笔记。
 - **自适应界面**：从 1920 宽屏到手机竖屏都能用（按平台与宽度自动切换布局）。
 - **LLM 主持人驱动流程**：轮流发言 = 主持人公告 + 发言权管理（`set_floor_queue` 等工具）；
   规则文本与“主持人手册”写在剧本里，引擎本身不含任何游戏词汇。
@@ -45,10 +67,12 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 - **多 Provider / 多模型**：支持 OpenAI Chat Completions、OpenAI Responses、Anthropic
   Messages；主持人及每位玩家可以使用不同模型和思考深度。
 - **模型模板**：保存 3 个 Provider/模型/思考深度预设，勾选玩家后一键应用。
-- **工作文件夹（Workspace）**：每个工作区独立保存 Provider、模板、绑定、对局、日志和加密密钥；
-  不同游戏、不同 API 配置不会互相污染。
-- **安全运行**：对局运行中锁定模型与工作区；切换工作区必须先暂停并保存成功。
-- **本地加密**：Provider 密钥和对局存档使用 AES-256-GCM；Windows 工作区主密钥由 DPAPI 保护。
+- **数据在程序目录下（v0.13）**：只有一个数据目录 `<程序目录>/data/`——不再有“工作文件夹”可选；
+  `ARENA_DATA_DIR` 可以覆盖，Docker 里是 `/app/data`；`data/` 已被 `.gitignore` 排除。
+  Provider、模板、绑定、对局、日志、名册都在里面。
+- **安全运行**：对局运行中锁定模型绑定、接管和导入；进程锁保证同一个数据目录只有一个服务在用。
+- **只加密 API Key**：Key 单独存放在 `secrets.v1.enc`（AES-256-GCM；Windows 的主密钥由 DPAPI 保护），
+  其余数据（对局、日志、名册、设置）都是明文，可直接查看、备份。
 - **API 端点预览**：保存 Provider 前显示最终消息地址和模型列表地址；支持自动拼接 `/v1/...`
   或直接填写完整自定义 endpoint。
 - **观战界面**：玩家用像素头像 + 名字 + 身份标签表示，点击玩家卡片看工具调用/思考/token 统计；
@@ -57,6 +81,10 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 ## 界面截图
 
+| 接管：软暂停、颜色标记与先选后提交（v0.13.1） | 聊天气泡式思考记录：只含思考 / 正文，不含工具调用（v0.13.1） |
+|---|---|
+| <img src="docs/images/v0131-softpause.png" alt="v0.13.1 接管模式：agent 已软暂停、公共频道不限时、颜色标记与先选后提交的请求卡片" width="100%"> | <img src="docs/images/v0131-thoughts.png" alt="v0.13.1 玩家详情旁的思考记录窗口，按唤醒分隔并显示游戏时间与轮次" width="100%"> |
+
 | 玩家详情（点击玩家卡片：四类 token、缓存命中率、性格设定与记忆、复盘） | 玩家视角（只看到该玩家可见的内容） |
 |---|---|
 | <img src="docs/images/v0121-popover.png" alt="玩家详情面板" width="100%"> | <img src="docs/images/v0121-player-view.png" alt="玩家视角" width="100%"> |
@@ -64,11 +92,11 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 | <img src="docs/images/v0121-main-dark.png" alt="深色主题" width="100%"> | <img src="docs/images/v0121-phone.png" alt="手机竖屏" width="60%"> |
 | **token / 费用上限（按局，可强制停止）** | **Provider 管理：价格源与四个价格** |
 | <img src="docs/images/v0121-budget-dialog.png" alt="token / 费用上限对话框" width="100%"> | <img src="docs/images/provider-modal.png" alt="Provider 管理：价格源与四个价格" width="100%"> |
-| **工作文件夹** | **模型模板与玩家绑定** |
-| <img src="docs/images/workspace-modal.png" alt="工作文件夹选择" width="100%"> | <img src="docs/images/templates-bindings.png" alt="模型模板与玩家绑定" width="100%"> |
+| **⚙ 设置：导出 / 导入存档** | **模型模板与玩家绑定** |
+| <img src="docs/images/settings-modal.png" alt="设置：导出与导入存档" width="100%"> | <img src="docs/images/templates-bindings.png" alt="模型模板与玩家绑定" width="100%"> |
 
 > 截图来自本地**演示模式**对局（脚本化机器人）；Provider 是一个演示用的示例（密钥为占位符），不包含任何真实凭据。
-> 工作文件夹与模板绑定两张图来自模拟服务（`tools/mock_ui_server.py`），其中的路径和名称都是虚构的。
+> 设置与模板绑定两张图来自模拟服务（`tools/mock_ui_server.py`），其中的路径和名称都是虚构的。
 
 详细操作见 [docs/ui-guide.md](docs/ui-guide.md)。
 
@@ -82,7 +110,7 @@ AI 桌游、AI 剧本杀、social deduction、AI Werewolf、LLM Werewolf**。
 
 ### 整体
 
-<img src="docs/images/arch-overview.zh.svg" alt="Arena-Agents 整体架构：浏览器、FastAPI、GameOrchestrator、Runtime（Actor + Worker）、Brain、World，以及 LLM 适配器、工作区与剧本" width="100%">
+<img src="docs/images/arch-overview.zh.svg" alt="Arena-Agents 整体架构：浏览器、FastAPI、GameOrchestrator、Runtime（Actor + Worker）、Brain、World，以及 LLM 适配器、数据目录与剧本" width="100%">
 
 自上而下：浏览器用 REST 控制、用 SSE v2 观战 → FastAPI → **GameOrchestrator** 管理一局的生命周期（创建世界和 13 个 agent、预算、名册、加密存档）→ **Runtime** 里每个 agent 是 Actor + Worker，**Supervisor** 把世界的投递泵给它们 → **Brain** 把世界翻译成模型读得懂的提示词和工具，再把工具调用翻译回 Intent → **World** 的提交闸门与只追加的账本。实线是调用与数据，虚线是通知（Envelope 唤醒 agent，UiEvent 推给浏览器）。
 
@@ -138,34 +166,32 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 打开 <http://127.0.0.1:8000>。
 
-首次启动会创建默认工作区：
+首次启动会在**程序所在文件夹**（含 `app/` 和 `config.yml` 的那个，与你从哪里启动无关）下创建数据目录
+`data/`；Provider、绑定、对局、日志、名册都在里面，不需要选择任何文件夹。Provider 配置在界面中完成，本地使用
+不需要 `.env`。
 
-```text
-Windows: %USERPROFILE%\Arena-Agents\Default
-macOS:   ~/Arena-Agents/Default
-Linux:   <应用数据目录>/workspace/default
-```
-
-Provider 配置在界面中完成，本地使用不需要 `.env`。
+> **⚠ 数据在程序目录下**：删除或重装程序目录、重新 `git clone`、执行 `git clean -xdf` 都会带走你的对局。
+> 请定期在 **⚙ 设置 → 导出存档** 备份（见下文“数据与存档”）。
 
 ### 演示模式（无需模型 / API Key）
 
 ```bash
-ARENA_DEMO=1 ARENA_DISABLE_WORKSPACE=1 uvicorn app.main:app --host 127.0.0.1 --port 8000
+ARENA_DEMO=1 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 演示模式用脚本化机器人扮演主持人和 12 名玩家，走真实的引擎、频道、发言权、请求和界面，
-但没有任何网络请求和费用；演示局不支持从存档继续（需要新建对局）。
+但没有任何网络请求和费用；数据放在 `.demo-data/demo/`（不会混进你真实的历史对局）。
+演示里同样可以接管一个座位、使用输入框，并重放已经打完的对局。
 
 ### 隔离的开发实例与真实模型冒烟
 
 ```bash
-# 与你的真实工作区完全隔离的实例（数据在 .demo-data/，已被 git 忽略）
+# 与你的真实数据完全隔离的实例（数据在 .demo-data/，已被 git 忽略）
 python tools/dev_server.py --demo --port 8123
-python tools/dev_server.py --copy-providers-from "<工作区>/.arena" --port 8124   # 复制 Provider 与绑定，会调用真实模型并产生费用
+python tools/dev_server.py --copy-providers-from "<程序目录>/data" --port 8124   # 复制 Provider、密钥与绑定，会调用真实模型并产生费用
 
 # 带硬性调用上限的真实模型冒烟（会产生费用），结束后打印工具使用、被拒绝的调用和发言权时间线
-python tools/real_smoke.py --from "<工作区>/.arena" --scenario scenarios/minimal_test.md --players 4 --max-calls 60
+python tools/real_smoke.py --from "<程序目录>/data" --scenario scenarios/minimal_test.md --players 4 --max-calls 60
 ```
 
 ### Docker Compose
@@ -180,9 +206,10 @@ export ARENA_MASTER_KEY_HOST_FILE=/secure/arena-master-key
 docker compose up -d --build
 ```
 
-容器以非 root 用户运行，默认只把 `127.0.0.1:${PORT:-8000}` 映射到宿主机；运行数据位于
-`/data/workspace/default/.arena`。主密钥通过 Docker Secret 或独立密钥文件提供，缺失时应用
-拒绝写入，不会回退到明文。
+容器以非 root 用户运行，默认只把 `127.0.0.1:${PORT:-8000}` 映射到宿主机；运行数据位于容器里的
+`/app/data`（命名卷 `arena-appdata`，v0.12.1 的 `/data` 卷不会被复用也不会被删除）。API Key 的主密钥通过
+Docker Secret 或独立密钥文件提供，缺失时应用拒绝保存 Key，不会回退到明文。从 v0.12.1 升级见
+[docs/storage.md](docs/storage.md#upgrading-from-v0121)。
 
 ## 配置模型
 
@@ -200,46 +227,55 @@ docker compose up -d --build
 
 完整说明见 [docs/providers.md](docs/providers.md)。
 
-## 工作文件夹
+## 数据与存档
 
-工作文件夹是一个普通目录，所有私有运行状态位于 `.arena/`：
+所有数据在一个目录里（默认 `<程序目录>/data/`），**只有 API Key 加密**，其余都是明文，可以直接查看：
 
 ```text
-<workspace>/
-├─ .arena-workspace.json      工作区标记
-└─ .arena/
-   ├─ master.v1.dpapi         Windows DPAPI 包装的工作区密钥
-   ├─ providers.v1.enc        加密 Provider 注册表
-   ├─ providers.v1.backup.enc 已知良好备份
-   ├─ settings.json           默认绑定、模板、上次对局、默认预算上限
-   ├─ pricing.v1.json         下载的价格表（公开数据，明文）
-   ├─ roster/                 名册：名字、头像、性格设定、记忆（明文文件，不含密钥）
-   ├─ sessions/<id>/          当前与上一版加密对局
-   ├─ logs/  exports/
-   └─ workspace.lock
+data/
+├─ settings.json            默认绑定、模板、上次对局、默认预算上限
+├─ providers.json           Provider 注册表（不含 API Key）
+├─ secrets.v1.enc           API Key（AES-256-GCM；Windows 的主密钥由 DPAPI 包装在 master.v1.dpapi 里）
+├─ pricing.json             下载的价格表（公开数据）
+├─ roster/                  名册：名字、头像、性格设定、记忆
+├─ games/<id>/game.json     一局（存档格式 v5，明文 JSON）+ games/index.json（历史列表的缓存，可重建）
+├─ logs/<id>/trace-*.jsonl  思考日志
+├─ exports/  backups/  tmp/ 导出的存档、导入前的备份（保留 3 份）、上传中的文件
+└─ .lock                    进程锁：同一个数据目录只有一个服务在用
 ```
 
-- 只有对局处于 idle/paused/finished 时才允许切换工作区；运行中返回 409。
-- 切换前会先保存当前对局；保存失败或目标无效时保持当前工作区。
-- 选择和切换工作区只允许本机回环客户端（即使设置了 `ARENA_API_TOKEN`）；原生文件夹选择器需要桌面环境，
-  没有桌面时在对话框里输入绝对路径。Docker 部署固定使用 `/data/workspace/default`，不能在界面里切换。
-- 代码资源（`config.yml`、`scenarios/`、`prompts/`）由所有工作区共享。
-- 早期单目录数据会复制到默认工作区并验证，原文件不会删除。
+- **没有“保存”按钮**：对局每次变化后半秒内自动保存，退出前再存一次；重启后上一局以**已暂停**恢复。
+- **设置只有两项**：**导出存档**与**导入存档**。存档是一个 `.arenaagents` 文件（zip 容器，内容不加密）；
+  导出时会问要不要带 API Key——要的话输入两次强密码（至少 12 位、含大小写 / 数字 / 符号中的三类），Key 用
+  `scrypt + AES-256-GCM` 加密，密码不会写进存档；导入时含 Key 的存档需要输入密码，也可以选择“跳过 API Key”
+  只导入其余内容。整个过程有进度，完成后会告诉你保存路径（`data/exports/`），也可以下载。
+- **导入会校验**格式版本、清单和每个文件的 SHA-256、路径与大小，之后整体替换当前数据：替换前先把旧数据备份到
+  `data/backups/<时间>/`，失败自动回滚。对局运行中不能导入。校验能发现损坏，但不是签名——只导入你信任的存档。
+- **从 v0.12.1 升级**：运行 `python tools/migrate_v0121_to_archive.py`（只读旧工作文件夹，必须用同一个 Windows
+  用户，或提供主密钥），再在设置里导入它生成的存档；首次启动发现旧数据时页面会提示一次（可以忽略）。
+- **历史对局**：**📜 历史对局**列出每一局，可以重放、继续、删除（“删除对局不会影响当前 agent 的记忆”——性格与
+  记忆属于座位，存在名册里，不属于某一局）。
 
-完整说明见 [docs/workspaces.md](docs/workspaces.md)。
+完整说明见 [docs/storage.md](docs/storage.md)（数据目录、加密范围、Docker、升级）和
+[docs/archive.md](docs/archive.md)（存档格式、校验、密码、转换脚本）。
 
 ## 界面操作
 
 - **参与者栏**：每名玩家一张卡片——像素头像 + 名字 + 一个身份标签，头像角上是状态（💭 思考 / ⚡ 行动 /
-  💤 休眠，休眠到点醒来的悬停提示会写剩余秒数）。点击卡片查看该 Agent 的工具调用、思考、LLM 调用、
-  四类 token、缓存命中率和费用，以及它的性格设定与记忆。出局者置灰。
+  💤 休眠，休眠到点醒来的悬停提示会写剩余秒数）。点击卡片查看思考记录入口、LLM 调用、
+  四类 token、缓存命中率和费用，以及它的性格设定与记忆；工具调用只在调用日志的错误详情里保留必要信息。出局者置灰。
 - **信息流**：只显示发言、公告和**请求卡片**（投票、选择、问答；带进度和结果），整条渲染；没有思维链、
   工具调用和流式输出。
-- **观战视角**：顶栏下拉框切换“上帝视角”或某名玩家的视角（只显示该玩家有权看到的频道与消息）。
+- **视角栏 `[视角▾] [切换] [接管]`**：下拉框只负责“选”，点「切换」才改变视角（上帝视角或某名玩家的视角，只显示
+  该玩家有权看到的频道与消息），点「接管」亲自扮演所选座位（未开始 / 已暂停时可用，有确认窗口）。接管期间视角锁定为
+  你扮演的座位，视角栏换成「🎮 正在扮演 3 · Carol  [退出接管]」（退出同样有确认窗口，只在不运行时可点）。
+  接管只在前端锁定视角：服务端仍向浏览器推送完整的观战数据（已知限制，见方案）。
+- **输入框与技能**：信息流底部是当前频道的输入框；投票等请求卡片先点选答案，再点「提交」，提交前可改选，不会在倒计时结束时自动提交；「结束发言」「技能」按钮见上文。
 - **频道栏**：显示每个频道的发言权状态（🎤 轮流发言 / 📋 队列 / 💬 自由讨论 / ❄ 已冻结 / 👁 只听 /
-  🔇 禁言中）；“质询工单”单独成组；私聊按对方的名字显示。
+  🔇 禁言中）；“质询工单”单独成组；私聊按对方的名字显示；接管时轮到你的频道会有“待你操作”标记。
 - **预算**：顶栏 token / 费用统计旁的上限按钮，按局设置 token 和 / 或美元上限，可选“达到上限后强制停止”。
 - **对局控制**：开始 / 暂停 / 继续；对局结束后仍可点击“继续”恢复（主持人会收到通知）；赛后可手动“复盘”。
+- **⚙ 设置 / 📜 历史对局**：导出 / 导入存档；重放、继续、删除历史对局（重放时有播放条：⏮ ▶/⏸、倍速、进度条、跳过空闲）。
 - **自适应布局**：宽屏、窄屏、平板和手机竖屏（迷你卡片 + 底部标签栏）按平台与宽度自动切换。看板可整体折叠，
   分隔条可拖动，双击恢复默认；布局保存在浏览器 `localStorage`。
 
@@ -249,29 +285,31 @@ docker compose up -d --build
 
 | 变量 | 默认值 | 用途 |
 |---|---|---|
-| `ARENA_WORKSPACE_DIR` | `%USERPROFILE%\Arena-Agents\Default`（Windows/macOS） | 初始/默认工作区 |
-| `ARENA_DISABLE_WORKSPACE` | 未设置 | 设为 1 禁用工作区，退回单目录兼容模式 |
-| `ARENA_DATA_DIR` | 平台应用目录 | 应用状态/兼容数据目录 |
-| `ARENA_MASTER_KEY_FILE` / `ARENA_MASTER_KEY` | 未设置（Windows 用 DPAPI） | Linux/Docker 的 32 字节工作区主密钥 |
+| `ARENA_DATA_DIR` | `<程序目录>/data`（演示模式：`<程序目录>/.demo-data/demo`） | 数据目录（测试、开发实例、自己的数据盘） |
+| `ARENA_MASTER_KEY_FILE` / `ARENA_MASTER_KEY` | 未设置（Windows 用 DPAPI） | Linux/Docker 加密 API Key 的 32 字节主密钥 |
+| `ARENA_MAX_ARCHIVE_BYTES` | `2147483648` | 上传的 `.arenaagents` 存档大小上限（2 GiB） |
 | `ARENA_API_TOKEN` | 未设置 | `/api/*` 访问令牌；SSE 也支持 `?token=` |
 | `ARENA_ALLOWED_ORIGINS` | 未设置 | 额外允许的跨源来源 |
 | `ARENA_ALLOWED_BASE_HOSTS` | 未设置 | Provider 主机白名单（可选） |
 | `ARENA_ALLOW_PRIVATE_PROVIDERS` | `false` | 允许本机/内网 Provider（如 Ollama） |
-| `ARENA_MAX_IMPORT_BYTES` | `20971520` | 导入存档大小上限 |
 | `ARENA_BIND` | `127.0.0.1` | Docker 宿主机绑定地址 |
 | `ARENA_DEMO` | 未设置 | 设为 1 启用演示模式（脚本化机器人，不调用模型） |
-| `ARENA_DISABLE_LEGACY_MIGRATION` | 未设置 | 设为 1 跳过旧版 `.env` / `saves` 的迁移 |
+
+v0.13 删除了 `ARENA_WORKSPACE_DIR`、`ARENA_DISABLE_WORKSPACE`、`ARENA_DISABLE_LEGACY_MIGRATION` 和
+`ARENA_MAX_IMPORT_BYTES`（程序不再读取它们）。
 
 `config.yml` 只放剧本路径、运行时参数（`runtime:`，见 [实现契约](docs/v0.12-contracts.md) §6）、知识库目录、
-座位的默认名字、标签样式、提示词路径和旧版的 LLM 默认值；Provider 注册表是加密的，不会写进 YAML 或 `.env`。
+座位的默认名字、标签样式、提示词路径和旧版的 LLM 默认值；API Key 加密保存在 `data/secrets.v1.enc`，
+不会写进 YAML 或 `.env`。
 
 ## 安全
 
 - Provider Key 加密保存，API 永不返回；修改协议、Base URL 或拼接模式必须重新输入 Key。
-- 非 GET 请求校验同源 `Origin`；无 token 时配置写接口仅允许回环客户端。
+- 非 GET 请求校验同源 `Origin`；无 token 时配置写接口（含接管、座位动作、存档导入导出、删除对局）仅允许回环客户端。
 - Provider URL 阻止云元数据/链路本地地址；本机/内网 Provider 需要显式开启。
-- 工作区切换和原生文件夹选择仅限本机；运行中不允许切换。
-- 导入存档有大小与结构校验，替换前不会破坏当前对局。
+- 导入存档：大小上限、路径白名单（拒绝绝对路径 / `..` / 符号链接）、压缩比与条目数上限、每个文件的 SHA-256、
+  对局结构校验；整体替换前先备份，失败自动回滚；运行中不允许导入。导出的 Key 用你的密码加密，密码不写入存档、日志或响应。
+- 接管：动作者永远由服务端决定（客户端不能替别的座位操作）；视角只在前端锁定，浏览器仍能收到完整的观战数据。
 - 默认监听 `127.0.0.1`；对外暴露请配置 TLS 反向代理与 `ARENA_API_TOKEN`。
 
 ## 测试
@@ -292,38 +330,47 @@ app/
 ├─ world/        物理层：提交闸门、账本、频道、发言权、请求、模板、能力、质询（同步、游戏无关）
 ├─ runtime/      异步运行时：Actor/Worker、Supervisor、LLM 闸门、trace 日志、事件总线、游戏时钟
 ├─ agents/       Brain：工具 schema、上下文构建、笔记与压缩、提示注入防护
-├─ game/         编排器、会话容器（存档 v4）、名册 / 预算 / 复盘、绑定、工作区切换、演示机器人
-├─ api/          REST + SSE v2、Provider、模板、工作区
+├─ game/         编排器、会话容器（存档 v5）、名册 / 预算 / 复盘、绑定、接管（takeover_runtime）、重放投影（replay）、演示机器人
+├─ api/          REST + SSE v2、Provider、模板、接管与座位动作、历史对局、存档导出 / 导入
+├─ archive/      .arenaagents 存档：格式与校验、API Key 的密码加密、导出 / 导入任务、备份与回滚
 ├─ engine/       LLM 客户端、表达式引擎
 ├─ llm/          三协议适配器与 API 端点规划
-├─ providers/    加密 Provider 注册表、模型的四个价格、价格源
+├─ providers/    Provider 注册表（Key 单独加密）、模型的四个价格、价格源
 ├─ avatars.py    像素头像（素材库 static/avatar/parts.json 由 tools/avatar_lab.py 生成）
-├─ storage/      工作区、设置、名册、对局、加密
-└─ migration.py  旧数据迁移
+└─ storage/      数据目录与进程锁、设置、名册、对局（GameStore）、API Key（SecretStore）、加密
 scenarios/       Markdown 剧本（schema v2）
 prompts/         主持人 / 玩家提示词模板
 knowledge/       主持人指南与策略资料
 static/          单页观战界面（static/js 前端模块、static/avatar 头像素材库）
 tools/           开发工具：dev_server（隔离实例）、real_smoke（真实模型冒烟）、mock_ui_server（模拟服务）、
-                 live_replay（事件回放校验）、avatar_lab（头像素材库）、make_diagrams（架构图）
-tests/           离线回归、API、存储、文档与 UI 测试
-docs/            架构、契约、Provider、工作区与 UI 文档，docs/images 是截图和架构图
+                 live_replay（事件回放校验）、avatar_lab（头像素材库）、make_diagrams（架构图）、
+                 migrate_v0121_to_archive（v0.12.1 → .arenaagents 转换脚本）
+tests/           离线回归、API、存储、存档、接管、重放、文档与 UI 测试
+docs/            架构、契约、Provider、存储、存档与 UI 文档，docs/images 是截图和架构图
 ```
 
 ## 版本说明
 
-当前版本为 **0.12.1**：在 0.12 的异步 Agent 之上，去掉引擎里所有“替用户省钱”的限制，
-改为持久会话 + 缓存 + 合并 + 压缩的编排，并加入按局预算、四价计费与价格源、角色名册（像素头像、性格与记忆）
-和自适应界面。**v0.12.1 不兼容 v0.12.0 及更早的对局存档**（旧存档会保留在存档列表中、不会被改动）。
-上一个公开版本是 [0.11.0](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.11.0)。各版本的发布页见
-[Releases](https://github.com/chengyuchen1037/Arena-Agents/releases)，高层发布说明见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本为 **0.13.1**：接管模式新增 **agent 软暂停**、公共频道不限时、8 色私人标记、思考记录与错误日志；
+投票等选择请求改为**先选后提交**。头像编号可以精确重建同款头像；复盘改为更新固定座位的印象与经验，
+主持人模型完善的性格改为限长的固定格式行为指引。决策与测试方案见
+[docs/v0.13.1-plan.md](docs/v0.13.1-plan.md)（G1–G45）。
+同一 0.13 系列的 0.13.0 变更引入了座位接管、
+每频道输入框、数据目录、单个 `.arenaagents` 存档和历史重放；本版的**存档仍为 v5、存档包格式仍为 1**。
+**v0.13 不能直接打开 v0.12.1 的数据**（工作文件夹概念已删除）：用 `tools/migrate_v0121_to_archive.py`
+转换后在设置里导入，细节见 [docs/storage.md](docs/storage.md#upgrading-from-v0121)。
+更早的 [0.12.1](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.12.1) 去掉了引擎里所有“替用户省钱”的
+限制，改为持久会话 + 缓存 + 合并 + 压缩的编排，并加入按局预算、四价计费与价格源、角色名册和自适应界面。
+各版本的发布页见 [Releases](https://github.com/chengyuchen1037/Arena-Agents/releases)，高层发布说明见
+[CHANGELOG.md](CHANGELOG.md)。
 
 ## 文档
 
 - [架构（Actor + Worker）](docs/architecture.md) · [English](docs/architecture.en.md)
-- [实现契约](docs/v0.12-contracts.md)（现行）· [v0.12.1 方案](docs/v0.12.1-plan.md)（决策 E1–E26）· [v0.12 方案](docs/v0.12-async-agents-plan.md)（历史，部分已被取代）
+- [实现契约](docs/v0.12-contracts.md)（现行；v0.13 增补在 §11，v0.13.1 在 §12）· [v0.13.1 方案](docs/v0.13.1-plan.md)（G1–G45）· [验收记录](docs/v0.13.1-acceptance.md)· [v0.13 方案](docs/v0.13-plan.md)（F1–F38）· [v0.12.1 方案](docs/v0.12.1-plan.md)（E1–E26）· [v0.12 方案](docs/v0.12-async-agents-plan.md)（历史）
 - [Provider 与模型](docs/providers.md)
-- [工作区与加密数据](docs/workspaces.md)
+- [数据、存储与加密](docs/storage.md)
+- [存档：导出、导入与转换](docs/archive.md)
 - [界面操作指南](docs/ui-guide.md)
 - [English README](README.en.md)
 - [发布说明](CHANGELOG.md)
@@ -334,7 +381,7 @@ docs/            架构、契约、Provider、工作区与 UI 文档，docs/imag
 
 1. 游戏规则放在 `scenarios/`，引擎保持游戏无关。
 2. 行为变更附带离线测试。
-3. 不要提交 `.env`、API Key、工作区、本地路径或运行数据。
+3. 不要提交 `.env`、API Key、数据目录 `data/`、导出的 `.arenaagents` 存档、本地路径或运行数据。
 4. 运行 `python -m pytest -q tests` 和 `node --check static/js/*.js`。
 5. 改了架构或界面，就同步更新文档；架构图的源头是 `tools/make_diagrams.py`，改完运行
    `python tools/make_diagrams.py` 重新生成（不要手改 SVG）。

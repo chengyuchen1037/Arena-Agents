@@ -3,7 +3,7 @@
 ``apply_price_source`` downloads the LiteLLM price table (the default *price source* of the app) and writes
 its prices into the model entries the given bindings use - in the data directory the process is configured
 with (``ARENA_DATA_DIR``), i.e. in the *scratch copy* the dev tools work on, never in a user's real
-workspace.  It is the same thing the Provider dialog's "刷新价格表" + "自动填入" do, so a development instance
+``data/`` directory.  It is the same thing the Provider dialog's "刷新价格表" + "自动填入" do, so a development instance
 shows the cost a provider really bills instead of whatever was typed into the registry by hand.
 """
 

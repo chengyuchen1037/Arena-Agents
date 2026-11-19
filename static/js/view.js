@@ -33,8 +33,10 @@
   const GOD = "god";
   const MODERATOR_ID = "moderator";
   const ENGINE_ID = "engine";
-  const STATE_ICONS = { thinking: "💭", acting: "⚡", sleeping: "💤" };
-  const STATE_LABELS = { thinking: "思考中", acting: "执行中", sleeping: "休眠" };
+  // v0.13 (F6): "human" is the card of a seat a person plays instead of its agent
+  // v0.13.1 (G3): "held" = woken up and waiting in front of the soft-pause gate ("⏸ 暂停中")
+  const STATE_ICONS = { thinking: "💭", acting: "⚡", sleeping: "💤", human: "🎮", held: "⏸" };
+  const STATE_LABELS = { thinking: "思考中", acting: "执行中", sleeping: "休眠", human: "人类操作中", held: "暂停中" };
   const BUDGET_WARN = 0.8;
 
   const num = (v, d = 0) => {
@@ -106,6 +108,188 @@
   function normalizeViewpoint(session, viewpoint) {
     if (!viewpoint || viewpoint === GOD) return GOD;
     return participantOf(session, viewpoint) ? String(viewpoint) : GOD;
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.13: playing a seat (F1-F5): the viewpoint bar [视角▾][切换][接管], the takeover bar, the reminder
+  // -------------------------------------------------------------------------
+
+  /** The seat a person plays right now (null: nobody). */
+  function takeoverSeat(session) {
+    const t = session && session.takeover;
+    return t && t.seat ? String(t.seat) : null;
+  }
+
+  /** "3 · Carol" */
+  function seatLabel(session, seat) {
+    const p = participantOf(session, seat);
+    return p ? `${p.seat} · ${p.name}` : String(seat);
+  }
+
+  /** Why a game in `status` cannot be acted in (the send button says it, hover texts repeat it). */
+  function notRunningText(status) {
+    if (status === "idle") return "对局还没有开始";
+    if (status === "finished") return "对局已结束";
+    return "对局已暂停";
+  }
+
+  /**
+   * May the seat chosen in the viewpoint drop-down be taken over (F2)?  Only a player seat, only while
+   * nobody is played yet, only while the game has not started or is paused.  `reason` is the tooltip.
+   */
+  function takeoverAvailability(session, seatId) {
+    if (session && session.replay) return { ok: false, reason: "重放中不能接管：请先退出重放" }; // (F36)
+    if (takeoverSeat(session)) return { ok: false, reason: "你已经在扮演一个座位：请先退出接管" };
+    if (!seatId || seatId === GOD) return { ok: false, reason: "先在下拉框里选一名玩家（上帝视角不能接管）" };
+    const p = participantOf(session, seatId);
+    if (!p) return { ok: false, reason: "这个座位不存在" };
+    const status = (session && session.status) || "idle";
+    if (status === "running") return { ok: false, reason: "对局进行中不能接管：请先点「暂停」" };
+    if (status === "finished") return { ok: false, reason: "对局已结束，不能接管" };
+    return {
+      ok: true,
+      reason: `接管 ${seatLabel(session, seatId)}：以这个座位参与对局，它的 agent 暂停（${
+        status === "idle" ? "对局未开始" : "对局已暂停"
+      }时可用）`,
+    };
+  }
+
+  /**
+   * The viewpoint bar: the drop-down only chooses what to look at ("切换" applies it), "接管" plays the chosen
+   * seat.  While a seat is played the bar is locked (the takeover bar replaces it).
+   *   draft      the drop-down's value (pending), viewpoint  the one that is applied
+   */
+  function viewpointBar(session, draft, viewpoint) {
+    const seat = takeoverSeat(session);
+    if (seat) {
+      return {
+        locked: true,
+        seat,
+        draft: seat,
+        canSwitch: false,
+        canTakeover: false,
+        switchTitle: "接管期间视角已锁定为你扮演的座位",
+        takeoverTitle: "你已经在扮演一个座位：请先退出接管",
+      };
+    }
+    const pending = normalizeViewpoint(session, draft === undefined || draft === null ? viewpoint : draft);
+    const applied = normalizeViewpoint(session, viewpoint);
+    const avail = takeoverAvailability(session, pending);
+    return {
+      locked: false,
+      seat: null,
+      draft: pending,
+      canSwitch: pending !== applied,
+      canTakeover: avail.ok,
+      switchTitle: pending !== applied ? "切换到所选的视角（只改变你看到的内容）" : "已经是这个视角；先在下拉框里选另一个",
+      takeoverTitle: avail.reason,
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.13.1: the soft pause (G1-G9, contract §12.2)
+  // -------------------------------------------------------------------------
+
+  /**
+   * The soft pause of the live game as {active, phase, inFlight}.  `phase` is "draining" (the model calls that were in
+   * flight are still being finished: `inFlight` of them) or "held" (every agent waits in front of the gate), null
+   * without a soft pause.  It only exists while the game runs (G6): `status` itself stays "running".
+   */
+  function softPauseOf(session) {
+    const sp = session && session.soft_pause;
+    if (!sp || (sp.state !== "draining" && sp.state !== "held") || session.status !== "running") {
+      return { active: false, phase: null, inFlight: 0 };
+    }
+    return { active: true, phase: sp.state, inFlight: sp.state === "held" ? 0 : Math.max(0, Math.round(num(sp.in_flight, 0))) };
+  }
+
+  /**
+   * Does the game clock run?  The page counts request / floor deadlines down locally only while it does.  The
+   * server says so (`clock_running`: `status` stays "running" during a soft pause); an older server that does not
+   * is judged by its status.
+   */
+  function clockRunning(session) {
+    if (!session) return false;
+    if (typeof session.clock_running === "boolean") return session.clock_running;
+    return session.status === "running" && !softPauseOf(session).active;
+  }
+
+  /** "⏳ 收尾中（还有 2 个回答）" while the calls in flight finish, "⏸ agent 已暂停" once all have stopped (G3). */
+  function softPauseText(sp) {
+    if (!sp.active) return "";
+    if (sp.phase === "held") return "⏸ agent 已暂停";
+    return sp.inFlight > 0 ? `⏳ 收尾中（还有 ${sp.inFlight} 个回答）` : "⏳ 收尾中";
+  }
+
+  /**
+   * What the soft-pause part of the takeover bar shows (G1, G3, G5):
+   *   action  "pause" (the button says 「⏸ 暂停 agent」) / "resume" (「▶ 继续」, also while the pause is still draining)
+   *   enabled the button works: pausing only while the game runs, resuming always
+   *   text    the state ("" without a soft pause)       showNow  the 「立即暂停」 link (only while draining)
+   */
+  function softPauseControl(session) {
+    const sp = softPauseOf(session);
+    const status = (session && session.status) || "idle";
+    if (sp.active) {
+      const draining = sp.phase === "draining";
+      return {
+        phase: sp.phase,
+        inFlight: sp.inFlight,
+        text: softPauseText(sp),
+        statusTitle: draining
+          ? `还有 ${sp.inFlight} 个模型回答没有收完：它们会照常完成并执行，之后所有 agent 暂停。游戏计时已经冻结，你不会超时。`
+          : "所有 agent 已暂停，游戏计时已冻结：你可以继续阅读、发言和作答；agent 要等你点「继续」才会处理。",
+        action: "resume",
+        label: "▶ 继续",
+        enabled: true,
+        title: draining ? "继续：取消这次暂停，agent 接着行动，计时恢复" : "继续：agent 先合并你这段时间的发言和作答，再接着行动；计时恢复",
+        showNow: draining,
+        nowTitle: "立即暂停：取消仍在途的模型调用（已花的 token 作废），所有 agent 马上停下；等同顶栏的「暂停」",
+      };
+    }
+    const running = status === "running";
+    return {
+      phase: null,
+      inFlight: 0,
+      text: "",
+      statusTitle: "",
+      action: "pause",
+      label: "⏸ 暂停 agent",
+      enabled: running,
+      title: running
+        ? "暂停 agent：已发出的回答会照常完成，然后所有 agent（含主持人）停下；游戏计时冻结，你可以继续阅读、发言和作答。点「继续」让它们接着行动"
+        : `${notRunningText(status)}，现在不能暂停 agent（对局运行中才可以）`,
+      showNow: false,
+      nowTitle: "",
+    };
+  }
+
+  /** The bar that replaces the viewpoint bar while a seat is played: "🎮 正在扮演 3 · Carol  [⏸ 暂停 agent]  [退出接管]". */
+  function takeoverBar(session) {
+    const seat = takeoverSeat(session);
+    if (!seat) return null;
+    const running = Boolean(session) && session.status === "running";
+    const label = seatLabel(session, seat);
+    return {
+      seat,
+      label,
+      text: `🎮 正在扮演 ${label}`,
+      canRelease: !running,
+      releaseTitle: running
+        ? "对局进行中不能退出接管：请先点「暂停」"
+        : "退出接管：这个座位交还给它的 agent（你不会再看到锁定的视角）",
+      softPause: softPauseControl(session), // (v0.13.1) the button, its state and the 「立即暂停」 link
+    };
+  }
+
+  /**
+   * The reminder of a seat taken over before the game started (F5): the player knows the identity now and may
+   * deal again - never once the game has started (the server refuses it as well).
+   */
+  function reshuffleReminder(session) {
+    const t = session && session.takeover;
+    const visible = Boolean(t && t.seat && session.status === "idle" && t.reshuffle_available);
+    return { visible, text: "你已经知道自己的身份，建议点击「重新发牌」" };
   }
 
   function viewpointLabel(session, viewpoint) {
@@ -263,16 +447,30 @@
   // player cards
   // -------------------------------------------------------------------------
 
-  /** thinking / acting / sleeping, only for god or the viewed player ("" otherwise). */
+  /** thinking / acting / sleeping / held, only for god or the viewed player ("" otherwise). */
   function stateBadge(viewpoint, actorId, state) {
     if (!STATE_LABELS[state]) return "";
     if (viewpoint !== GOD && viewpoint !== actorId) return "";
     return state;
   }
 
-  /** Hover text of a state: "思考中" / "执行中" / "休眠：等待新消息" / "休眠：定时醒来：剩余 12 秒". */
+  /**
+   * The state a card (or the moderator chip) shows.  The real one wherever the viewpoint may see it.  Elsewhere - the
+   * locked viewpoint of the seat a person plays hides every other agent's state (D4: who is thinking at night is a
+   * secret) - a soft pause that has stopped everybody (G3) puts the same "⏸ 暂停中" on every agent's card: that is
+   * the state of the whole game, so it gives nothing away about who was awake.
+   */
+  function cardState(session, viewpoint, actorId, state) {
+    const real = stateBadge(viewpoint, actorId, state);
+    if (real) return real;
+    if (STATE_LABELS[state] && state !== "human" && softPauseOf(session).phase === "held") return "held";
+    return "";
+  }
+
+  /** Hover text of a state: "思考中" / "执行中" / "暂停中…" / "休眠：等待新消息" / "休眠：定时醒来：剩余 12 秒". */
   function stateTitle(state, sleepUntil, clockNow) {
     if (!STATE_LABELS[state]) return "";
+    if (state === "held") return "暂停中：软暂停，等你点「继续」";
     if (state !== "sleeping") return STATE_LABELS[state];
     const has = sleepUntil !== null && sleepUntil !== undefined && Number.isFinite(Number(sleepUntil));
     if (!has) return "休眠：等待新消息";
@@ -294,7 +492,7 @@
   function tileModel(session, viewpoint, participant, ctx) {
     const id = participant.id;
     const main = mainTagInfo(session, viewpoint, participant);
-    const state = stateBadge(viewpoint, id, participant.state);
+    const state = cardState(session, viewpoint, id, participant.state);
     const clockNow = ctx && ctx.clockNow;
     const sTitle = stateTitle(state, participant.sleep_until, clockNow);
     return {
@@ -318,7 +516,7 @@
   /** The moderator is not a card: a small chip at the end of the status row. */
   function moderatorTile(session, viewpoint, ctx) {
     const m = (session && session.moderator) || { name: "主持人", state: "sleeping" };
-    const state = stateBadge(viewpoint, MODERATOR_ID, m.state);
+    const state = cardState(session, viewpoint, MODERATOR_ID, m.state);
     const sTitle = stateTitle(state, m.sleep_until, ctx && ctx.clockNow);
     const name = m.name || "主持人";
     return {
@@ -434,13 +632,14 @@
         let detail = "";
         if (names.length) {
           const shown = names.slice(0, 2).map((id) => displayName(session, id)).join("、");
-          detail = `持麦：${shown}${names.length > 2 ? ` 等${names.length}人` : ""}`;
+          detail = `持麦：${shown}${names.length > 2 ? ` 等${names.length}人` : ""}${f.untimed ? " · 不限时" : ""}`; // (v0.13.1, G10)
         }
         return {
           kind: "turn",
           icon: "🎤",
           text: f.paused ? "轮流（暂停）" : "轮流发言",
           detail,
+          untimed: Boolean(f.untimed),
         };
       }
       case "queue": {
@@ -451,7 +650,8 @@
           kind: "queue",
           icon: "📋",
           text: `队列 ${done}/${total}${f.paused ? "（暂停）" : ""}`,
-          detail: active ? `持麦：${displayName(session, active.holder)}` : "",
+          detail: active ? `持麦：${displayName(session, active.holder)}${f.untimed ? " · 不限时" : ""}` : "",
+          untimed: Boolean(f.untimed),
         };
       }
       default:
@@ -477,7 +677,10 @@
    */
   function channelModel(session, viewpoint, channel) {
     const dm = isDmChannel(channel);
-    const summary = floorSummary(session, channel);
+    // v0.13: for the seat a person plays, "muted" / "your turn" come from the server's seat state (F12, F18)
+    const mine = playedChannelState(session, viewpoint, channel.id);
+    const summary = personalFloorSummary(floorSummary(session, channel), mine);
+    const attention = mine !== null && list(session.takeover.attention).includes(channel.id);
     if (dm) {
       const others = dmCounterparts(session, viewpoint, channel);
       return {
@@ -487,6 +690,7 @@
         avatarId: others[0],
         glyph: "",
         summary,
+        attention,
         memberCount: list(channel.members).length,
         owner: channel.owner,
       };
@@ -499,9 +703,43 @@
       avatarId: null,
       glyph: Array.from(name)[0] || "#",
       summary,
+      attention,
       memberCount: list(channel.members).length,
       owner: null,
     };
+  }
+
+  /** The server's state of a channel for the seat a person plays, when `viewpoint` is that seat (else null). */
+  function playedChannelState(session, viewpoint, channelId) {
+    const seat = takeoverSeat(session);
+    if (!seat || viewpoint !== seat) return null;
+    return (session.takeover.channels && session.takeover.channels[channelId]) || null;
+  }
+
+  /**
+   * The floor chip of a channel for the seat a person plays: "🔇 禁言中" whenever the seat cannot write there
+   * (closed, listen-only, frozen, read-only, not its turn, quota used up: the server decides), the usual
+   * description of the channel after it; "🎤 轮到你" while it holds the floor.
+   */
+  function personalFloorSummary(base, state) {
+    if (!state) return base;
+    if (!state.can_write) {
+      const rest = base.kind === "closed" ? "" : [base.text, base.detail].filter(Boolean).join(" · ");
+      return { kind: "muted", icon: "🔇", text: "禁言中", detail: rest };
+    }
+    if (state.floor && state.floor.mine) {
+      const left = state.floor.messages_left;
+      return {
+        kind: "mine",
+        icon: "🎤",
+        text: "轮到你发言",
+        // (v0.13.1, G10) a public floor of the person who plays the seat has no deadline
+        detail: [left === null || left === undefined ? "" : `还可发 ${left} 条`, state.floor.untimed ? "不限时" : ""]
+          .filter(Boolean)
+          .join(" · "),
+      };
+    }
+    return base;
   }
 
   /** Title of a channel (the feed header): group name, or the other party of a private chat. */
@@ -734,6 +972,76 @@
       result,
       // sealed requests keep their answers from the other players; god always sees them
       answersHidden: request.sealed && viewpoint !== GOD,
+      // v0.13 (F17): what the person who plays a recipient may do with the card (null: nothing)
+      action: requestAction(session, viewpoint, request),
+    };
+  }
+
+  /**
+   * The buttons / input of a request card for the seat a person plays (F17): a choice shows its options (the
+   * current answer marked, a click changes it - an open request can be answered again until it closes), a
+   * text request an input.  Only a recipient, only while the request is open; the card is clickable while the
+   * game runs and shows why not otherwise (a paused game freezes the clock of the request as well).
+   */
+  function requestAction(session, viewpoint, request) {
+    const seat = takeoverSeat(session);
+    if (!seat || viewpoint !== seat || !request || request.status !== "open") return null;
+    if (!list(request.to).includes(seat)) return null;
+    const row = list(session.takeover.requests).find((r) => r.id === request.id) || null;
+    let mine = row && row.my_answer ? row.my_answer : null;
+    if (!mine) {
+      const own = list(request.answers).find((a) => a.player_id === seat && !a.defaulted);
+      if (own) mine = { value: String(own.value), label: own.label || String(own.value), reason: own.reason || "" };
+    }
+    const status = (session && session.status) || "idle";
+    const enabled = status === "running";
+    return {
+      kind: request.kind,
+      enabled,
+      disabledReason: enabled ? "" : `${notRunningText(status)}，继续后才能作答（请求的计时也已暂停）`,
+      answered: mine !== null,
+      myAnswer: mine,
+      maxChars: row && row.max_chars ? row.max_chars : null,
+      options: list(request.options).map((o) => ({
+        id: o.id,
+        label: o.label || o.id,
+        selected: mine !== null && String(mine.value) === String(o.id),
+      })),
+    };
+  }
+
+  /**
+   * v0.13.1 (G45): what a choice card says about the pick that is only on the page.  A click on an option merely
+   * PICKS it (highlighted, nothing is sent); the card's 「提交」 button sends the pick - so a stray click never casts a
+   * vote.  ``picked`` is the option id chosen but not submitted (null: none, or not an option of this request);
+   * ``dirty`` = it differs from the answer that was already submitted; ``canSubmit`` = the card is clickable and there
+   * is something new to send; ``kind`` = what the note under the options says: "none", "new" (只选了、还没答过) or
+   * "change" (答过了，改选中).
+   */
+  function requestPick(action, picked) {
+    const none = {
+      picked: null,
+      pickedLabel: "",
+      currentLabel: "",
+      dirty: false,
+      canSubmit: false,
+      submitLabel: "提交",
+      kind: "none",
+    };
+    if (!action || action.kind === "text") return none;
+    const submitLabel = action.answered ? "修改回答" : "提交";
+    const option =
+      picked === null || picked === undefined ? null : list(action.options).find((o) => String(o.id) === String(picked));
+    if (!option) return { ...none, submitLabel };
+    const dirty = !(action.answered && action.myAnswer && String(action.myAnswer.value) === String(option.id));
+    return {
+      picked: String(option.id),
+      pickedLabel: option.label,
+      currentLabel: action.answered && action.myAnswer ? action.myAnswer.label : "",
+      dirty,
+      canSubmit: Boolean(action.enabled) && dirty,
+      submitLabel,
+      kind: !dirty ? "none" : action.answered ? "change" : "new",
     };
   }
 
@@ -754,6 +1062,140 @@
       entries.push({ key: `r${r.id}`, kind: "req", seq, order: 1 + n++, ref: r });
     }
     return entries.sort((a, b) => a.seq - b.seq || a.order - b.order);
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.13: the input box of a played seat (F13-F16)
+  // -------------------------------------------------------------------------
+
+  /** Characters as the server counts them (code points of the trimmed text, like the gate's truncation). */
+  function countChars(text) {
+    return Array.from(String(text === undefined || text === null ? "" : text).trim()).length;
+  }
+
+  /** "1:05" for the seconds left of a floor / request (clamped at 0). */
+  function clockText(seconds) {
+    const s = Math.max(0, Math.ceil(num(seconds, 0)));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }
+
+  /**
+   * Seconds left of the seat's token at the client's clock estimate (frozen value while the floor is paused);
+   * null for a token without a deadline (`untimed`, v0.13.1: the person's turn in a public channel).
+   */
+  function floorSecondsLeft(floor, clockNow) {
+    if (!floor || !floor.mine || floor.untimed) return null;
+    if (floor.deadline_clock !== null && floor.deadline_clock !== undefined) {
+      return Math.max(0, num(floor.deadline_clock) - num(clockNow, 0));
+    }
+    return floor.seconds_left === null || floor.seconds_left === undefined ? null : Math.max(0, num(floor.seconds_left));
+  }
+
+  /**
+   * One line under the input: what the seat has left of its floor ("轮到你发言 · 还可发 2 条 · 单条 ≤ 300 字 ·
+   * 剩余 1:05") or why it cannot speak.  The reasons are written out (a phone has no hover).
+   */
+  function composerHint(session, state, clockNow) {
+    const status = (session && session.status) || "idle";
+    if (status === "idle") return "对局还没有开始：开始后才能发言，现在可以先写草稿。";
+    if (status === "finished") return "对局已结束。";
+    if (status === "paused") return "对局已暂停：发言权和请求的计时都已冻结，继续后才能发送。";
+    if (!state) return "频道状态同步中……";
+    if (!state.can_write) return state.why_not || "现在不能在这个频道发言。";
+    const f = state.floor;
+    if (f && f.mine) {
+      const parts = ["轮到你发言"];
+      if (f.messages_left !== null && f.messages_left !== undefined) parts.push(`还可发 ${f.messages_left} 条`);
+      if (state.max_chars) parts.push(`单条 ≤ ${state.max_chars} 字`);
+      if (f.untimed) {
+        parts.push("不限时"); // (v0.13.1, G10) no countdown: the turn lasts until the person ends it
+      } else {
+        const left = floorSecondsLeft(f, clockNow);
+        // (a soft pause stops the game clock: the countdown stands still, G2)
+        if (left !== null) parts.push(`剩余 ${clockText(left)}${softPauseOf(session).active ? "（计时已冻结）" : ""}`);
+      }
+      return parts.join(" · ");
+    }
+    if (f && f.kind === "free" && f.messages_left !== null && f.messages_left !== undefined) {
+      return `这次讨论你还可发 ${f.messages_left} 条`;
+    }
+    return "";
+  }
+
+  /**
+   * Everything the input box of the played seat shows for a channel (F13-F16):
+   *   the send button  发送 (may write) / 禁言中 (may not; the reason on hover) / 已暂停 / 未开始 / 已结束
+   *   the counter      "23/300" (the server's `max_chars`; over the limit the tail is cut when sent)
+   *   结束发言          only while the seat holds that channel's floor
+   *   技能              greyed without a usable ability
+   * Typing is always possible: only the buttons depend on the state.
+   */
+  function composerModel(session, channelId, text, ctx) {
+    const seat = takeoverSeat(session);
+    if (!seat || !channelId) return { visible: false };
+    const t = session.takeover;
+    const state = t.channels[channelId] || null;
+    const status = session.status || "idle";
+    const count = countChars(text);
+    const max = state && state.max_chars ? state.max_chars : null;
+    let mode;
+    let label;
+    let reason;
+    if (status === "idle") {
+      mode = "idle";
+      label = "未开始";
+      reason = "对局还没有开始：开始后才能发言";
+    } else if (status === "finished") {
+      mode = "finished";
+      label = "已结束";
+      reason = "对局已结束";
+    } else if (status === "paused") {
+      mode = "paused";
+      label = "已暂停";
+      reason = "对局已暂停：继续后才能发送";
+    } else if (!state) {
+      mode = "muted";
+      label = "禁言中";
+      reason = "频道状态同步中……";
+    } else if (!state.can_write) {
+      mode = "muted";
+      label = "禁言中";
+      reason = state.why_not || "现在不能在这个频道发言";
+    } else {
+      mode = "send";
+      label = "发送";
+      reason = count > 0 ? "发送（Enter）；Shift+Enter 换行" : "先写点什么";
+    }
+    const running = status === "running";
+    const showPass = Boolean(state && state.floor && state.floor.mine);
+    const abilities = list(t.abilities);
+    let abilityReason = "技能：释放前会让你确认";
+    if (!running) abilityReason = `${notRunningText(status)}，现在不能使用技能`;
+    else if (!abilities.length) abilityReason = "现在没有可用的技能（技能由主持人在特定环节启用）";
+    return {
+      visible: true,
+      seat,
+      channelId,
+      mode,
+      label,
+      reason,
+      sendEnabled: mode === "send" && count > 0,
+      count,
+      max,
+      over: max ? Math.max(0, count - max) : 0,
+      showPass,
+      canPass: showPass && running && Boolean(state && state.can_pass),
+      passTitle: showPass
+        ? running
+          ? state.can_pass
+            ? "结束发言：把发言权交给下一位"
+            : "现在不能结束发言（发言权已暂停或频道被冻结）"
+          : `${notRunningText(status)}，现在不能结束发言`
+        : "",
+      abilityEnabled: running && abilities.length > 0,
+      abilityReason,
+      hint: composerHint(session, state, ctx && ctx.clockNow),
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -785,13 +1227,16 @@
    * continued (D8); there is no separate force-pause any more.
    */
   function controlState(session) {
+    // v0.13: a replayed game is not the live one - none of the live game's controls applies to it
+    if (session && session.replay) return { start: false, pause: false, resume: false };
     const st = (session && session.status) || "idle";
     return { start: st === "idle", pause: st === "running", resume: st === "paused" || st === "finished" };
   }
 
   function statusDotClass(session) {
     const st = (session && session.status) || "idle";
-    if (st === "running") return "active";
+    // (v0.13.1) a soft pause that has stopped every agent: the game runs, but nothing moves - the amber dot
+    if (st === "running") return softPauseOf(session).phase === "held" ? "paused" : "active";
     if (st === "paused") return "paused";
     if (st === "finished") return "finished";
     return "idle";
@@ -800,10 +1245,13 @@
   function statusText(session) {
     const s = session || {};
     if (s.status === "paused" && s.pause_reason === "budget") return "因预算上限暂停";
-    if (s.active_status_text) return s.active_status_text;
+    // (v0.13.1) the status stays "running" in a soft pause: say what the agents are doing
+    const sp = softPauseOf(s);
+    const soft = sp.active ? ` · ${softPauseText(sp)}` : "";
+    if (s.active_status_text) return `${s.active_status_text}${soft}`;
     switch (s.status) {
       case "running":
-        return "对局进行中";
+        return `对局进行中${soft}`;
       case "paused":
         return "已暂停";
       case "finished":
@@ -976,6 +1424,15 @@
     actorAvatar,
     viewpointOptions,
     normalizeViewpoint,
+    takeoverSeat,
+    seatLabel,
+    takeoverAvailability,
+    viewpointBar,
+    takeoverBar,
+    softPauseOf,
+    softPauseControl,
+    clockRunning,
+    reshuffleReminder,
     viewpointLabel,
     canSee,
     visibleMessages,
@@ -991,6 +1448,7 @@
     badgeTags,
     tagVariant,
     stateBadge,
+    cardState,
     stateTitle,
     tileModel,
     moderatorTile,
@@ -998,6 +1456,7 @@
     shortFactionName,
     boardSummary,
     floorSummary,
+    personalFloorSummary,
     dmCounterparts,
     channelModel,
     channelTitle,
@@ -1014,7 +1473,15 @@
     requestChannelId,
     requestCountdown,
     requestCard,
+    requestAction,
+    requestPick,
     feedEntries,
+    countChars,
+    clockText,
+    floorSecondsLeft,
+    composerHint,
+    composerModel,
+    notRunningText,
     requestHints,
     controlState,
     statusDotClass,

@@ -150,7 +150,7 @@ const answer = (player_id, value, label, extra = {}) => ({ player_id, value, lab
 function makeSession(over = {}) {
   const session = {
     session_id: "s-test",
-    schema_version: 4,
+    schema_version: 5,
     version: "v0.12.1",
     title: "Arena-Agents",
     scenario_name: "werewolf_12p",
@@ -212,12 +212,169 @@ function makeSession(over = {}) {
   return { ...session, ...over };
 }
 
+// ---- v0.13: the seat a person plays (docs/v0.12-contracts.md §11.7) ----------------------------------------
+
+/** The server's state of one channel for the played seat; `over` replaces fields. */
+function seatChannel(over = {}) {
+  return { can_write: true, why_not: null, code: null, max_chars: 300, floor: null, can_pass: false, ...over };
+}
+
+/** The seat's token of a queue / turn floor (it holds the floor unless `mine` is false). */
+const seatFloor = (over = {}) => ({
+  kind: "queue",
+  mine: true,
+  paused: false,
+  messages_left: 2,
+  chars_left: 560,
+  seconds_left: 87.5,
+  deadline_clock: 100,
+  ...over,
+});
+
+/** The seat's share of a free discussion. */
+const seatFree = (over = {}) => ({
+  kind: "free",
+  mine: false,
+  paused: false,
+  messages_left: 4,
+  chars_left: null,
+  seconds_left: null,
+  deadline_clock: null,
+  ...over,
+});
+
+/** One open request of the played seat (its answer part). */
+const seatRequest = (id, over = {}) => ({
+  id,
+  kind: "choice",
+  max_chars: null,
+  answered: false,
+  my_answer: null,
+  seconds_left: 90,
+  deadline_clock: 102.5,
+  channel_id: "public",
+  ...over,
+});
+
+/** The white wolf king's ability as the server lists it for the seat that holds it (params from the scenario). */
+const explodeAbility = (over = {}) => ({
+  id: "white_wolf_explode",
+  description: "白狼王自爆：只在主持人启用期间可用。公开宣布自爆并带走一名存活的其他玩家。",
+  quota_left: 1,
+  params: [
+    { name: "target", type: "player_id", optional: false, candidates: PLAYER_IDS },
+    { name: "declaration", type: "text", optional: false, max_chars: 120 },
+  ],
+  ...over,
+});
+
+/**
+ * `PublicSession.takeover` of a game in which `seat` is played.  Every channel of the seat is in its default
+ * state - the free public chat open (4 messages left), the private chat open (600 characters), the closed group
+ * channels muted - unless `over.channels` replaces fields of one; `over` sets the rest (reshuffle_available,
+ * seq, requests, abilities, attention).
+ */
+function makeTakeover(seat, over = {}) {
+  const { channels: channelOver = {}, ...rest } = over;
+  const channels = {};
+  for (const ch of makeChannels()) {
+    if (!ch.members.includes(seat)) continue;
+    let base;
+    if (ch.mode === "free") {
+      base = seatChannel({ max_chars: ch.system ? 600 : 300, floor: ch.system ? null : seatFree() });
+    } else {
+      base = seatChannel({
+        can_write: false,
+        code: "CHANNEL_CLOSED",
+        why_not: `频道「${ch.name}」当前已关闭，只有主持人可以发言。`,
+        max_chars: null,
+      });
+    }
+    channels[ch.id] = { ...base, ...(channelOver[ch.id] || {}) };
+  }
+  return { seat, reshuffle_available: false, seq: 40, channels, requests: [], abilities: [], attention: [], ...rest };
+}
+
+/** A session in which `seat` is played (its card says "human"); `over` replaces top-level fields. */
+function makePlayedSession(seat, over = {}, takeoverOver = {}) {
+  return makeSession({
+    status: "paused",
+    participants: makeParticipants({ [seat]: { state: "human" } }),
+    takeover: makeTakeover(seat, takeoverOver),
+    ...over,
+  });
+}
+
 /** A `message.committed` event payload (flat MessageView). */
 function messageEvent(id, seq, channelId, from, content, kind = "speech", visible = EVERYONE, extra = {}) {
   return { id, type: "message.committed", data: msg(seq, channelId, from, content, kind, visible, extra) };
 }
 
+// ---- v0.13.1: the error log and the thinking record (docs/v0.12-contracts.md §12.3 / §12.4) ----------------------------
+
+/** One line of the error log (CallEntry): a successful turn of N3 (Carol) unless `over` says otherwise. */
+function makeCall(id, over = {}) {
+  return {
+    id,
+    ts: `2026-11-18T16:00:${String(id % 60).padStart(2, "0")}.000Z`,
+    gt: 10 + id,
+    kind: "call",
+    status: "ok",
+    actor_id: "N3",
+    actor_name: "Carol",
+    purpose: "turn",
+    provider_id: "deepseek",
+    model_id: "deepseek-chat",
+    attempt: 1,
+    elapsed_ms: 1234,
+    prompt_tokens: 1000,
+    completion_tokens: 200,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+    finish_reason: "stop",
+    http_status: null,
+    error_class: null,
+    message: null,
+    ...over,
+  };
+}
+
+/** A model request that went wrong (`status` "error" unless `over` says "timeout" / "retry"): HTTP 429, no numbers. */
+function makeFailedCall(id, over = {}) {
+  return makeCall(id, {
+    status: "error",
+    elapsed_ms: 900,
+    prompt_tokens: null,
+    completion_tokens: null,
+    cache_read_tokens: null,
+    cache_write_tokens: null,
+    finish_reason: null,
+    http_status: 429,
+    error_class: "RateLimitError",
+    message: "Rate limit reached for requests",
+    ...over,
+  });
+}
+
+/** One item of the thinking record (ThoughtItem); `n` makes the id (the position in the log) and the text. */
+function makeThought(n, over = {}) {
+  return {
+    id: `1:${n * 1000}`,
+    ts: `2026-11-18T16:00:${String(n % 60).padStart(2, "0")}.000Z`,
+    gt: 20 + n,
+    gen: 1,
+    round: 1,
+    kind: "thought",
+    text: `第 ${n} 条思考`,
+    model: "deepseek-reasoner",
+    ...over,
+  };
+}
+
 module.exports = {
+  makeCall,
+  makeFailedCall,
+  makeThought,
   NAMES,
   ROLE_BY_ID,
   PLAYER_IDS,
@@ -231,6 +388,13 @@ module.exports = {
   makeRequest,
   answer,
   makeSession,
+  seatChannel,
+  seatFloor,
+  seatFree,
+  seatRequest,
+  explodeAbility,
+  makeTakeover,
+  makePlayedSession,
   floorNone,
   channel,
   msg,

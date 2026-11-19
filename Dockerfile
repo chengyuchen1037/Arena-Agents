@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Arena-Agents 运行镜像（v0.11）
+# Arena-Agents 运行镜像（v0.13）
 #
 # 基础镜像固定到具体小版本（python:3.12.15-slim-bookworm）。如需按内容寻址再固定 digest：
 #   FROM python:3.12.15-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
@@ -25,9 +25,9 @@ WORKDIR /app
 COPY requirements.lock ./
 RUN pip install -r requirements.lock
 
-# 应用文件（代码与只读资产）。属主保持 root、arena 只读：v0.10 起运行时不会在 /app 下写任何东西
-# （Provider 密钥、设置、对局存档全部写入外部数据目录 /data）。
-# 只复制运行所需目录；.env、saves/、tests/、docs/、本机缓存等由 .dockerignore 排除。
+# 应用文件（代码与只读资产）。属主保持 root、arena 只读：运行时只有数据目录 /app/data 可写
+# （Provider 注册表、API Key、设置、名册、对局、日志全部写在那里）。
+# 只复制运行所需目录；.env、data/、tests/、docs/、本机缓存等由 .dockerignore 排除。
 COPY config.yml ./
 COPY knowledge/ ./knowledge/
 COPY scenarios/ ./scenarios/
@@ -35,20 +35,18 @@ COPY prompts/ ./prompts/
 COPY static/ ./static/
 COPY app/ ./app/
 
-# 外部数据目录 /data（加密的 Provider 库、settings.json、加密对局存档、日志）。
-# 必须由部署方在运行时挂载，且必须对 arena(uid 10001) 可写：
-#   * 使用 compose 默认的命名卷：首次创建时继承这里的属主(10001)与 0700 权限，无需额外操作；
+# 数据目录 /app/data：应用默认把数据放在“程序目录/data”，容器里程序目录就是 /app，所以不需要任何环境变量
+# （Provider 注册表、secrets.v1.enc、settings.json、名册、对局、日志、导出的存档都在这里）。
+# 必须是一个卷，且必须对 arena(uid 10001) 可写：
+#   * 使用 compose 默认的命名卷 arena-appdata：首次创建时继承这里的属主(10001)与 0700 权限，无需额外操作；
 #   * 使用宿主机目录绑定挂载：Linux 上需先 `sudo chown -R 10001:10001 <目录> && chmod 700 <目录>`；
 #     Docker Desktop（Windows/macOS）通常不需要。
-# 主密钥不在镜像里、也不放在 /data：通过 Docker Secret（compose 设置 ARENA_MASTER_KEY_FILE=/run/secrets/...）
-# 或只读挂载的密钥文件提供。
-# 未提供主密钥时应用会 fail closed（拒绝写入加密数据），不会以明文静默回退。
-RUN mkdir -p /data && chown arena:arena /data && chmod 700 /data
-ENV ARENA_DATA_DIR=/data
-# v0.11: all runtime state (providers, templates, bindings, sessions) lives in a workspace.
-# Compose normally pins this to /data/workspace/default; it must stay inside the writable /data volume.
-ENV ARENA_WORKSPACE_DIR=/data/workspace/default
-VOLUME ["/data"]
+# 这是 v0.13 的新位置，不要和 v0.12.1 的 /data 卷混用（旧卷请用转换脚本转成存档后导入，见 docs/storage.md）。
+# 主密钥不在镜像里、也不放在数据卷里：通过 Docker Secret（compose 设置 ARENA_MASTER_KEY_FILE=/run/secrets/...）
+# 或只读挂载的密钥文件提供。只有 API Key 加密保存，其余数据是明文。
+# 未提供主密钥时应用会 fail closed（不能保存 API Key），不会以明文静默回退。
+RUN mkdir -p /app/data && chown arena:arena /app/data && chmod 700 /app/data
+VOLUME ["/app/data"]
 
 USER arena
 

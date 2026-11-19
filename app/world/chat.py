@@ -28,7 +28,12 @@ Where the contract is silent the following (additive) choices were made:
   who is out, broadcasts do not (E23);
 * system DMs never use tokens or free-discussion limits: their only limits are ``defaults.dm`` and the
   moderator-controlled ``mode``; they cannot be given a floor (``open_floor`` / ``set_floor_queue``);
-* ``resume_queue`` on a channel without a group but frozen (a free discussion) just lifts the freeze.
+* ``resume_queue`` on a channel without a group but frozen (a free discussion) just lifts the freeze;
+* (v0.13.1, G10 / G14) a token held by one of ``world.untimed_holders`` (the seat a person plays) in a channel of
+  ``type == "public"`` has **no deadline**: ``deadline`` stays ``None`` and ``remaining`` holds its nominal time
+  (what it resumes with when the seat is given back); its ``floor.granted`` entry carries ``untimed: true`` and
+  ``FloorView.untimed`` tells the client.  Pausing / resuming the group and a change of the set
+  (:meth:`ChatModule.untimed_changed`) respect it.  Message and character limits are unchanged.
 """
 
 from __future__ import annotations
@@ -111,6 +116,15 @@ def token_seconds_left(world: WorldCore, token: Token) -> float | None:
     return None
 
 
+def token_untimed(world: WorldCore, channel: ChannelState, token: Token) -> bool:
+    """The floor of ``token`` has no deadline (v0.13.1, G10 / G14): its holder is one of the world's
+    ``untimed_holders`` - the seat a person plays - and the channel is a *public* one (by ``type``, never by id).
+    Messages and characters stay limited, only the clock is off; every other channel and every request keeps its
+    deadline.  While untimed, an active token has ``deadline is None`` and keeps the nominal time it has left in
+    ``remaining`` (what it resumes with when the seat is given back)."""
+    return channel.type == "public" and token.holder in world.untimed_holders
+
+
 def _active_tokens(group: FloorGroup | None) -> list[Token]:
     return [t for t in group.tokens if t.status == "active"] if group is not None else []
 
@@ -165,17 +179,21 @@ def floor_view(world: WorldCore, channel: ChannelState) -> dict[str, Any]:
 
     ``active`` is the holder of the first active token (a ``turn`` group may have several active
     tokens: read ``queue[].state`` for the full picture); ``seconds_left`` is the smallest remaining
-    time among the active tokens.
+    time among the active tokens that have a deadline.  ``untimed`` (v0.13.1, G14) is true when there are
+    active tokens and none of them has a deadline (the person who plays a seat holds a public floor): then
+    ``seconds_left`` is ``None`` and the client shows "不限时" instead of a countdown.
     """
     group = channel.group if channel.mode in FLOOR_MODES else None
     if group is not None:
         active = _active_tokens(group)
-        lefts = [s for s in (token_seconds_left(world, t) for t in active) if s is not None]
+        timed = [t for t in active if not token_untimed(world, channel, t)]
+        lefts = [s for s in (token_seconds_left(world, t) for t in timed) if s is not None]
         return {
             "kind": group.mode,
             "active": active[0].holder if active else None,
             "paused": bool(group.paused),
             "seconds_left": min(lefts) if lefts else None,
+            "untimed": bool(active) and not timed,
             "queue": [
                 {
                     "holder": t.holder,
@@ -189,8 +207,10 @@ def floor_view(world: WorldCore, channel: ChannelState) -> dict[str, Any]:
         }
     free = free_view(world, channel)
     if free is not None:
-        return {"kind": "free", "active": None, "paused": False, "seconds_left": None, "queue": [], "free": free}
-    return {"kind": "none", "active": None, "paused": False, "seconds_left": None, "queue": [], "free": None}
+        return {
+            "kind": "free", "active": None, "paused": False, "seconds_left": None, "untimed": False, "queue": [], "free": free,
+        }
+    return {"kind": "none", "active": None, "paused": False, "seconds_left": None, "untimed": False, "queue": [], "free": None}
 
 
 def channel_view(world: WorldCore, channel: ChannelState) -> dict[str, Any]:
@@ -938,17 +958,21 @@ class ChatModule(WorldModule):
         return group, opened
 
     def _activate(self, channel: ChannelState, group: FloorGroup, token: Token, actor: str) -> None:
-        """Hand the floor to ``token`` (it starts its timer unless the group is paused)."""
+        """Hand the floor to ``token`` (it starts its timer unless the group is paused, or the holder is the seat a
+        person plays and the channel is a public one: then it has no deadline at all, v0.13.1 G10 / G14)."""
         now = self._now()
+        untimed = token_untimed(self.w, channel, token)
         token.status = "active"
         token.started_gt = now
-        if group.paused:
+        if group.paused or untimed:
             token.deadline = None
-            token.remaining = float(token.duration_s)
+            token.remaining = float(token.duration_s)  # (untimed: the nominal time a release of the seat gives back)
         else:
             token.deadline = now + float(token.duration_s)
             token.remaining = None
         data: dict[str, Any] = {"group_id": group.id, "holder": token.holder, "limits": _limits_dict(token)}
+        if untimed:
+            data["untimed"] = True  # (an old entry has no such key: false) the replay shows no countdown for it
         position = next((i + 1 for i, t in enumerate(group.tokens) if t is token), None)
         if group.mode == "queue":
             data["position"] = position
@@ -1075,7 +1099,8 @@ class ChatModule(WorldModule):
 
     # ------------------------------------------------- pause / resume / close ------
     def _suspend_tokens(self, group: FloorGroup) -> list[str]:
-        """Freeze the clocks of the active tokens; returns their holders."""
+        """Freeze the clocks of the active tokens; returns their holders.  (An untimed token has no deadline and
+        already holds its nominal remaining time: it is kept as it is.)"""
         now = self._now()
         holders: list[str] = []
         for token in _active_tokens(group):
@@ -1134,6 +1159,9 @@ class ChatModule(WorldModule):
         now = self._now()
         resumed: list[Token] = []
         for token in _active_tokens(group):
+            if token_untimed(self.w, channel, token):
+                resumed.append(token)  # no deadline to restart: it keeps its nominal remaining time (G14)
+                continue
             remaining = token.remaining if token.remaining is not None else float(token.duration_s)
             token.deadline = now + remaining
             token.remaining = None
@@ -1247,6 +1275,46 @@ class ChatModule(WorldModule):
                     times.append(now)
         return min(times) if times else None
 
+    def untimed_changed(self, before: frozenset[str]) -> None:
+        """The world's ``untimed_holders`` changed (a seat was taken over or given back, v0.13.1, G14): the floors
+        those holders already hold in public channels are re-judged.  A token that becomes untimed freezes the
+        time it had left in ``remaining`` and drops its deadline; one that is timed again resumes with exactly that
+        time left (a floor in a paused group is frozen either way - only what the views say changes).  Whoever
+        draws the picture is told through ``floor.changed``; the ledger gets nothing (nobody is told, F6)."""
+        now = self._now()
+        for channel in self.w.state.channels:
+            group = channel.group
+            if group is None or channel.mode not in FLOOR_MODES or group.completed:
+                continue
+            touched = False
+            for token in _active_tokens(group):
+                untimed = token_untimed(self.w, channel, token)
+                if untimed == (channel.type == "public" and token.holder in before):
+                    continue  # this holder's judgement did not change
+                touched = True
+                if group.paused:
+                    continue
+                if untimed and token.deadline is not None:
+                    token.remaining = max(0.0, token.deadline - now)
+                    token.deadline = None
+                elif not untimed and token.deadline is None:
+                    remaining = token.remaining if token.remaining is not None else float(token.duration_s)
+                    token.deadline = now + remaining
+                    token.remaining = None
+            if touched:
+                self._emit_floor(channel)
+
+    def untimed_floor_open(self) -> bool:
+        """A person holds a floor that has no deadline and may speak (the group runs: not paused, not frozen) - the
+        game is waiting for them, so the watchdog must not take it for a stall (v0.13.1, G13)."""
+        for channel in self.w.state.channels:
+            group = channel.group
+            if group is None or channel.mode not in FLOOR_MODES or group.completed or group.paused or channel.frozen:
+                continue
+            if any(token_untimed(self.w, channel, t) for t in _active_tokens(group)):
+                return True
+        return False
+
     def redeliver(self) -> None:
         """After a resume / restore: tell the holders of running floors again (paused ones wait for the
         moderator's ``resume_queue``)."""
@@ -1285,4 +1353,5 @@ __all__ = [
     "speech_gate",
     "system_dm_id",
     "token_seconds_left",
+    "token_untimed",
 ]

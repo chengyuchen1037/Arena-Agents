@@ -390,8 +390,8 @@ def overview(c: Canvas) -> None:
     SX, SW = 800, 216  # side column
     R = X + W
     gap = 38
-    y1, h1 = 92, 74
-    y2, h2 = y1 + h1 + gap, 74
+    y1, h1 = 92, 102  # (two rows of chips since v0.13: takeover, history / replay, settings, the new API groups)
+    y2, h2 = y1 + h1 + gap, 102
     y3, h3 = y2 + h2 + gap, 96
     y4, h4 = y3 + h3 + gap, 170
     y5, h5 = y4 + h4 + gap, 84
@@ -401,13 +401,15 @@ def overview(c: Canvas) -> None:
     # ---- Row 1: browser
     c.card(X, y1, W, h1, c.L("浏览器 · 单页观战界面", "Browser · single-page spectator UI"), "sky", sub="static/")
     c.chips(X + 16, y1 + 40, [c.L("参与者栏", "Participants"), c.L("频道栏", "Channels"), c.L("信息流 + 请求卡片", "Feed + request cards"), c.L("玩家详情", "Player details"), c.L("上限 · 价格 · 名册", "Limit · Prices · Roster")], "sky", max_x=R - 16)
+    c.chips(X + 16, y1 + 68, [c.L("视角 · 接管", "Viewpoint · take over"), c.L("频道输入框 · 技能", "Channel input · ability"), c.L("历史 · 重放", "History · replay"), c.L("⚙ 设置：导出 / 导入存档", "⚙ Settings: archive")], "sky", max_x=R - 16)
     # ---- Row 2: API
     c.card(X, y2, W, h2, "FastAPI · app/api", "blue")
     c.chips(X + 16, y2 + 40, ["/api/state", "/api/events", "/api/control/*", "/api/roster*", "/api/budget", "/api/pricing/*"], "blue", mono=True, size=11.5, pad=8, gap=6, max_x=R - 16)
+    c.chips(X + 16, y2 + 68, ["/api/takeover*", "/api/seat/*", "/api/games*", "/api/archive/*"], "blue", mono=True, size=11.5, pad=8, gap=6, max_x=R - 16)
     # ---- Row 3: orchestrator
     c.card(X, y3, W, h3, "GameOrchestrator · app/game", "slate")
-    c.chips(X + 16, y3 + 40, [c.L("开始 / 暂停 / 继续", "start / pause / resume"), c.L("按局预算", "per-game budget"), c.L("名册 · 复盘 · 完善", "roster · review · refine"), c.L("存档 v4 · 自动保存", "save v4 · autosave")], "slate", max_x=R - 16)
-    c.chips(X + 16, y3 + 68, [c.L("工作区切换", "workspace switch"), c.L("模型绑定", "model bindings"), c.L("演示机器人", "demo bots")], "slate", max_x=R - 16)
+    c.chips(X + 16, y3 + 40, [c.L("开始 / 暂停 / 继续", "start / pause / resume"), c.L("按局预算", "per-game budget"), c.L("名册 · 复盘 · 完善", "roster · review · refine"), c.L("存档 v5 · 自动保存", "save v5 · autosave")], "slate", max_x=R - 16)
+    c.chips(X + 16, y3 + 68, [c.L("接管座位 Takeover", "seat takeover"), c.L("重放投影 Replay", "replay projection"), c.L("模型绑定", "model bindings"), c.L("演示机器人", "demo bots")], "slate", max_x=R - 16)
     # ---- Row 4: runtime
     c.card(X, y4, W, h4, c.L("Runtime · app/runtime（asyncio）", "Runtime · app/runtime (asyncio)"), "indigo", sub=c.L("13 个 Agent = Actor + Worker", "13 agents = Actor + Worker"))
     c.rect(X + 14, y4 + 44, W - 28, 28, rx=14, fill="#ffffff", stroke=THEMES["indigo"]["stroke"], sw=1.2)
@@ -433,13 +435,13 @@ def overview(c: Canvas) -> None:
 
     # ---- side cards (aligned with the layers they belong to)
     ws_h = y3 + h3 - y2 + 18
-    c.card(SX, y2, SW, ws_h, c.L("工作区 .arena/", "Workspace .arena/"), "slate", dash="6 4")
+    c.card(SX, y2, SW, ws_h, c.L("数据目录 data/", "Data directory data/"), "slate", dash="6 4")
     yy = y2 + 52
-    for it in ["providers.v1.enc", "settings.json", "roster/", "sessions/*.enc", "logs/trace-*.jsonl", "pricing.v1.json"]:
+    for it in ["secrets.v1.enc", "providers.json", "settings.json", "roster/", "games/<id>/game.json", "logs/trace-*.jsonl", "pricing.json"]:
         c.text(SX + 18, yy, it, size=12, mono=True, fill=INK2, max_w=SW - 36)
         yy += 20
-    c.text(SX + 18, yy + 14, c.L("密钥与存档：加密", "keys + saves: encrypted"), size=11.5, fill=MUTED, max_w=SW - 34)
-    c.text(SX + 18, yy + 30, c.L("名册与价格表：明文", "roster + prices: plain"), size=11.5, fill=MUTED, max_w=SW - 34)
+    c.text(SX + 18, yy + 14, c.L("只有 API Key 加密（第一项）", "only the API keys are encrypted"), size=11.5, fill=MUTED, max_w=SW - 34)
+    c.text(SX + 18, yy + 30, c.L("其余明文 · 导出 = .arenaagents", "the rest is plain · export = .arenaagents"), size=11.5, fill=MUTED, max_w=SW - 34)
 
     llm_h = y5 + h5 - y4
     c.card(SX, y4, SW, llm_h, c.L("LLM 适配器 · app/llm", "LLM adapters · app/llm"), "amber")
@@ -873,9 +875,9 @@ def worker(c: Canvas) -> None:
 
 def build(name: str, lang: str) -> Canvas:
     spec = {
-        "overview": (overview, 1040, 960, ("Arena-Agents 整体架构", "Arena-Agents overall architecture"), (
-            "浏览器、FastAPI、GameOrchestrator、Runtime（Actor + Worker）、Brain、World 的分层关系，以及 LLM 适配器、工作区与剧本。",
-            "Layers: browser, FastAPI, GameOrchestrator, Runtime (Actor + Worker), Brain and World, plus the LLM adapters, the workspace and the scenario.")),
+        "overview": (overview, 1040, 1016, ("Arena-Agents 整体架构", "Arena-Agents overall architecture"), (
+            "浏览器、FastAPI、GameOrchestrator、Runtime（Actor + Worker）、Brain、World 的分层关系，以及 LLM 适配器、数据目录与剧本。",
+            "Layers: browser, FastAPI, GameOrchestrator, Runtime (Actor + Worker), Brain and World, plus the LLM adapters, the data directory and the scenario.")),
     }
     spec["actor"] = (actor, 1040, 830, ("Actor：永远在线的信箱", "Actor: the always-on mailbox"), (
         "agent.deliver() 的判断树：休眠时 call_soon 安排一次激活；运行时合并，或在 interrupt 命中焦点时取消在途调用；另有闹钟、失败重试与停止三条旁路。",

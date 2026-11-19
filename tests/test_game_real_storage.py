@@ -1,4 +1,4 @@
-"""End-to-end engine persistence against the real encrypted stores (temp data dir, test key)."""
+"""End-to-end engine persistence against the real stores (temp data dir, test key): games are plain JSON, only the keys are encrypted."""
 
 from __future__ import annotations
 
@@ -6,54 +6,24 @@ import base64
 import copy
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-import app.config
 import app.game.orchestrator as orchestrator_module
-import app.migration
 from app.game.orchestrator import GameOrchestrator
 from app.providers.models import ModelBinding
 from app.providers.store import get_provider_store
 from app.storage import reset_stores_for_tests
-from app.storage.sessions import get_session_store
+from app.storage.games import get_game_store
+from app.storage.secrets import SecretStore
 from app.storage.settings import get_default_bindings, get_last_session_id
 from app.world.types import MODERATOR_ID
 from game_fakes import CFG, PLAYERS, async_test
 
-REAL_PROJECT_DIR = Path(app.config.BASE_DIR)  # captured at import, before any patching
-
-
-def _project_fingerprint() -> tuple[Any, ...]:
-    """Names + sizes + mtimes of the real project's .env and saves/ (never their contents)."""
-    entries: list[tuple[str, int, int]] = []
-    env_file = REAL_PROJECT_DIR / ".env"
-    if env_file.exists():
-        stat = env_file.stat()
-        entries.append((".env", stat.st_size, stat.st_mtime_ns))
-    saves = REAL_PROJECT_DIR / "saves"
-    if saves.is_dir():
-        for item in sorted(saves.iterdir()):
-            stat = item.stat()
-            entries.append((f"saves/{item.name}", stat.st_size, stat.st_mtime_ns))
-    return tuple(entries)
-
 
 @pytest.fixture(autouse=True)
-def isolated_migration(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """No test in this module may ever migrate (or delete) the real project's .env / saves."""
-    calls: list[Path] = []
-
-    def fake_migrate(base_dir: Path, cfg: dict[str, Any]) -> dict[str, Any]:
-        calls.append(Path(base_dir))  # recorded only; nothing is read, moved or deleted
-        return {"status": "ok", "providers_migrated": 0, "sessions_migrated": 0}
-
-    monkeypatch.setattr(app.migration, "migrate_legacy_data", fake_migrate)
+def small_scenario(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(orchestrator_module, "load_config", lambda *a, **k: copy.deepcopy(CFG))
-    before = _project_fingerprint()
-    yield calls
-    assert _project_fingerprint() == before, "the real project .env/saves were modified by a test"
 
 
 @pytest.fixture()
@@ -86,9 +56,7 @@ def bind_everybody(provider_id: str) -> dict[str, ModelBinding]:
 
 
 @async_test
-async def test_game_survives_a_restart_paused_with_bindings_and_costs(
-    data_dir: Path, isolated_migration: list[Path]
-) -> None:
+async def test_game_survives_a_restart_paused_with_bindings_and_costs(data_dir: Path) -> None:
     provider_id = make_provider()
 
     first = GameOrchestrator()
@@ -108,8 +76,6 @@ async def test_game_survives_a_restart_paused_with_bindings_and_costs(
     reset_stores_for_tests()
     second = GameOrchestrator()
     report = await second.startup()
-    assert len(isolated_migration) == 1  # ran against the empty temp project only
-    assert report["migration"]["sessions_migrated"] == 0
 
     assert report["restored"] == session_id and report["recovery_error"] is None
     game = second.session
@@ -128,33 +94,39 @@ async def test_game_survives_a_restart_paused_with_bindings_and_costs(
 
 
 @async_test
-async def test_nothing_secret_or_readable_reaches_disk(data_dir: Path) -> None:
+async def test_games_are_readable_json_and_only_the_api_key_is_encrypted(data_dir: Path) -> None:
     provider_id = make_provider()
     orch = GameOrchestrator()
     await orch.update_model_bindings({"p01": ModelBinding(provider_id=provider_id, model_id="m1")})
     orch.world.commit("message", MODERATOR_ID, {"content": "PLAINTEXT-MARKER-9981", "kind": "speech"}, visible_to="*")
     await orch.persist_session("test")
 
-    session_files = [p for p in data_dir.rglob("*") if p.is_file()]
-    assert session_files
-    blob = b"".join(p.read_bytes() for p in session_files if "settings" not in p.name)
-    assert SECRET.encode() not in blob and b"PLAINTEXT-MARKER-9981" not in blob  # encrypted
-    settings = (data_dir / "settings.json").read_text(encoding="utf-8")
-    assert SECRET not in settings and "sk-" not in settings
+    files = [p for p in data_dir.rglob("*") if p.is_file()]
+    assert files
+    # the game is an ordinary JSON file you can open, chat included ...
+    game_file = data_dir / "games" / orch.session.session_id / "game.json"
+    text = game_file.read_text(encoding="utf-8")
+    assert "PLAINTEXT-MARKER-9981" in text and json.loads(text)["session_id"] == orch.session.session_id
+    assert (data_dir / "games" / "index.json").is_file()
+    # ... and so are the providers and the settings; none of them holds the key
+    assert "Test" in (data_dir / "providers.json").read_text(encoding="utf-8")
+    assert SECRET not in (data_dir / "settings.json").read_text(encoding="utf-8")
+    # the key exists exactly once, encrypted: nowhere in the data directory in the clear, and not in the key file either
+    secrets_file = data_dir / "secrets.v1.enc"
+    assert secrets_file.is_file() and SECRET.encode() not in secrets_file.read_bytes()
+    assert [p for p in files if SECRET.encode() in p.read_bytes()] == []
+    assert SecretStore(data_dir).read_all() == {provider_id: SECRET}
     assert get_default_bindings()["p01"].model_id == "m1"
     assert get_last_session_id() == orch.session.session_id
     # And the saved game is readable through the store, with ids only.
-    saved = get_session_store().load(orch.session.session_id)
+    saved = get_game_store().load(orch.session.session_id)
     assert saved["model_bindings"]["p01"]["provider_id"] == provider_id
     assert SECRET not in json.dumps(saved)
     await orch.shutdown()
 
 
 @async_test
-async def test_deleting_the_bound_provider_surfaces_a_rebind_requirement_not_a_fallback(
-    data_dir: Path,
-    isolated_migration: list[Path],
-) -> None:
+async def test_deleting_the_bound_provider_surfaces_a_rebind_requirement_not_a_fallback(data_dir: Path) -> None:
     provider_id = make_provider()
     orch = GameOrchestrator()
     await orch.update_model_bindings(bind_everybody(provider_id))
@@ -164,7 +136,6 @@ async def test_deleting_the_bound_provider_surfaces_a_rebind_requirement_not_a_f
     reset_stores_for_tests()
     restarted = GameOrchestrator()
     await restarted.startup()
-    assert len(isolated_migration) == 1
 
     assert restarted.session.session_id == orch.session.session_id
     assert len(restarted.session.binding_issues) == 5  # the moderator and the four players

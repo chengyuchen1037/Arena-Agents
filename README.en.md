@@ -14,7 +14,7 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 [![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg)](https://fastapi.tiangolo.com/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-0.12.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.13.1-blue.svg)](CHANGELOG.md)
 
 ---
 
@@ -25,6 +25,35 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 
 ## Highlights
 
+- **Play a seat yourself: take-over (v0.13)** — while the game has not started or is paused, the *Take over*
+  button next to the viewpoint selector lets you play one player: its agent is paused (and costs no tokens),
+  you see that seat's viewpoint, and leaving (again only while the game is not running) gives the seat back —
+  the agent wakes up next time with the full history, including what you said. Taking over before the game
+  started reminds you that you already know your identity and offers **Re-deal** — which is **strictly refused
+  once the game has started** (the button is hidden and the server answers 409). Every action of yours goes
+  through the same commit gate as an agent's: turns, length, quotas and deadlines are unchanged.
+- **Soft-pause the agents, not yourself (v0.13.1)** — the take-over bar can hold every agent after its current
+  answer and freeze the clock at the same instant. You can still read, speak, answer and use abilities at your own
+  pace; your public-channel floor is **untimed**, while requests keep their deadlines. Eight colour/shape marks on
+  the other seats are private to this browser and carry no rule-defined meaning.
+- **One input box per channel (v0.13)** — like a group-chat app, switching the channel switches the input box
+  (each keeps its own draft; the length limit comes from the server). When it is not your turn, your turn is
+  over, or the channel is closed / frozen / listen-only you can still type, but the send button turns into a
+  grey *禁言中* ("muted", hover for the reason). *End my turn* appears while you hold the floor; the *Ability*
+  button releases active abilities such as the white wolf's explosion; votes and other choice requests require
+  **pick, then Submit**, so a stray click cannot answer for you, and still show a countdown. Challenging the moderator is done in the private chat with the moderator.
+- **One file for everything (v0.13)** — the settings hold exactly two items, *Export archive* and *Import
+  archive*, on a single `.arenaagents` file. Its contents (games, logs, roster, providers …) are not encrypted;
+  only the API keys can optionally be exported, encrypted with a strong password of your choice. Export and
+  import show progress; import verifies the format version and the SHA-256 of every file, backs the current data
+  up before replacing it and rolls back on failure. A conversion script brings v0.12.1 data over.
+- **History and replay (v0.13)** — every game is listed; continue it, delete it ("deleting a game does not
+  touch an agent's memory") or **replay** it with pause, 0.5×–8× speed, a draggable seek bar, skip-idle and
+  viewpoint switching.
+- **Thinking records and an error log (v0.13.1)** — the player / moderator details open a chat-like record of
+  thoughts and text for each wake-up, without tool calls. The top-right *Log* lists the current game's LLM calls,
+  retries, timeouts and errors, with actor and error-only filters. While a take-over is in progress and the game
+  is unfinished, other players' thoughts stay closed.
 - **Every agent is asynchronous (v0.12)** — each player and the moderator is an Actor + Worker. The
   actor is never blocked by thinking or tool execution; speech, votes, challenges and abilities can
   happen at any time and are validated by the engine *at commit time*.
@@ -40,10 +69,12 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 - **Price source** — the Provider dialog can fill a model's four prices and context window from a price
   table (default: LiteLLM's `model_prices_and_context_window.json`); you can still edit every number.
 - **Roster** — seats `N1`–`N12` with default names Alice…Leo that you can rename and keep; a **pixel
-  avatar** per seat (and one for the moderator) randomly assembled from a procedurally generated parts
-  library (regenerate one or all); persona and memory are plain text files in the workspace (empty by default, importable /
-  exportable / clearable, "complete it with the moderator's model" produces a draft you confirm); a
-  manual post-game review writes the record and a first-person note into each player's memory.
+  avatar** per seat (and one for the moderator) randomly assembled from a procedurally generated parts library
+  (regenerate one or all; v0.13.1 can copy a deterministic avatar code and recreate exactly that avatar from it).
+  Persona and memory are plain text files in `data/roster/`, editable / clearable in the UI, with an optional
+  moderator-model draft. The persona is a short fixed-format behaviour guideline; memory is capped and organised
+  as record / impressions of the other 11 seats / own lessons. A manual post-game review updates those impressions
+  and lessons instead of appending another long note after every game.
 - **Responsive UI** — from a 1920 px desktop to a phone in portrait (layout follows platform and width).
 - **An LLM moderator drives the flow** — taking turns = a moderator announcement + floor management
   (`set_floor_queue` and friends). The rules and the moderator manual live in the scenario; the
@@ -61,12 +92,14 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
   Messages; every player and the moderator can use a different model and reasoning depth.
 - **Model templates** — save up to three Provider/model/reasoning presets and apply them to
   selected players in one action.
-- **Workspaces** — each work folder has its own providers, templates, bindings, sessions, logs
-  and encryption key. Switch folders without mixing games or API keys.
-- **Safe live operations** — models are locked while a game is running; switching workspace
-  requires pausing and successfully saving first.
-- **Encrypted local data** — provider keys and sessions are encrypted with AES-256-GCM; on
-  Windows the workspace key is protected by DPAPI.
+- **Data lives in the program folder (v0.13)** — there is exactly one data directory, `<program dir>/data/`
+  (no "workspace" to choose; `ARENA_DATA_DIR` overrides it, Docker uses `/app/data`; `data/` is git-ignored).
+  Providers, templates, bindings, games, logs and the roster are in it.
+- **Safe live operations** — model bindings, take-over and import are locked while a game is running; a process
+  lock lets only one server use a data directory.
+- **Only the API keys are encrypted** — keys live apart in `secrets.v1.enc` (AES-256-GCM; on Windows the master
+  key is protected by DPAPI); everything else (games, logs, roster, settings) is plain text you can read and
+  back up.
 - **Endpoint preview** — see the exact message and model-list URLs before saving a Provider;
   either auto-append `/v1/...` paths or point at a complete custom endpoint.
 - **Spectator UI** — players are shown as a pixel avatar + name + role tag; click a player card for the
@@ -77,6 +110,10 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 
 ## Screenshots
 
+| Take-over: soft pause, colour marks and pick-then-submit (v0.13.1) | Chat-like thinking record: thoughts / text only, no tool calls (v0.13.1) |
+|---|---|
+| <img src="docs/images/v0131-softpause.png" alt="v0.13.1 take-over: agents soft-paused, an untimed public floor, colour marks and a pick-then-submit request" width="100%"> | <img src="docs/images/v0131-thoughts.png" alt="v0.13.1 thinking-record window beside player details, divided by wake-up and showing game time and round" width="100%"> |
+
 | Player details (click a card: the four token kinds, cache hit rate, persona and memory, review) | A player's viewpoint |
 |---|---|
 | <img src="docs/images/v0121-popover.png" alt="Player details panel" width="100%"> | <img src="docs/images/v0121-player-view.png" alt="A player's viewpoint" width="100%"> |
@@ -84,11 +121,11 @@ LLM Werewolf, AI 桌游, AI 剧本杀, multi-agent game**.
 | <img src="docs/images/v0121-main-dark.png" alt="Dark theme" width="100%"> | <img src="docs/images/v0121-phone.png" alt="Phone portrait" width="60%"> |
 | **Token / cost limit (per game, optional force stop)** | **Provider management: price source and four prices** |
 | <img src="docs/images/v0121-budget-dialog.png" alt="Token / cost limit dialog" width="100%"> | <img src="docs/images/provider-modal.png" alt="Provider management: price source and four prices" width="100%"> |
-| **Workspace selector** | **Model templates and bindings** |
-| <img src="docs/images/workspace-modal.png" alt="Workspace selector" width="100%"> | <img src="docs/images/templates-bindings.png" alt="Model templates and bindings" width="100%"> |
+| **⚙ Settings: export / import an archive** | **Model templates and bindings** |
+| <img src="docs/images/settings-modal.png" alt="Settings: export and import an archive" width="100%"> | <img src="docs/images/templates-bindings.png" alt="Model templates and bindings" width="100%"> |
 
 > Screenshots are taken from a local **demo-mode** game (scripted bots). The provider is a demo example (placeholder
-> key); no credentials are displayed. The workspace and template/bindings pictures come from the mock server
+> key); no credentials are displayed. The settings and template/bindings pictures come from the mock server
 > (`tools/mock_ui_server.py`); every path and name in them is made up.
 
 More UI walkthrough: [docs/ui-guide.md](docs/ui-guide.md).
@@ -103,9 +140,9 @@ The core of the engine is a single idea: **every role (12 players + the moderato
 
 ### Overview
 
-<img src="docs/images/arch-overview.en.svg" alt="Arena-Agents overall architecture: browser, FastAPI, GameOrchestrator, Runtime (Actor + Worker), Brain and World, plus the LLM adapters, the workspace and the scenario" width="100%">
+<img src="docs/images/arch-overview.en.svg" alt="Arena-Agents overall architecture: browser, FastAPI, GameOrchestrator, Runtime (Actor + Worker), Brain and World, plus the LLM adapters, the data directory and the scenario" width="100%">
 
-From top to bottom: the browser controls the game over REST and spectates over SSE v2 → FastAPI → the **GameOrchestrator** owns a game's lifecycle (it builds the world and 13 agents, enforces the budget, runs the roster, writes encrypted saves) → in the **Runtime** every agent is an Actor + Worker and the **Supervisor** pumps the world's deliveries into them → the **Brain** translates the world into prompts and tools a model can read and tool calls back into Intents → the **World**'s commit gate and its append-only ledger. Solid arrows are calls and data; dashed arrows are notifications (an Envelope wakes an agent, a UiEvent goes to the browser).
+From top to bottom: the browser controls the game over REST and spectates over SSE v2 → FastAPI → the **GameOrchestrator** owns a game's lifecycle (it builds the world and 13 agents — or 12 plus a person at the seat they took over —, enforces the budget, runs the roster, autosaves the game) → in the **Runtime** every agent is an Actor + Worker and the **Supervisor** pumps the world's deliveries into them → the **Brain** translates the world into prompts and tools a model can read and tool calls back into Intents → the **World**'s commit gate and its append-only ledger. Solid arrows are calls and data; dashed arrows are notifications (an Envelope wakes an agent, a UiEvent goes to the browser).
 
 ### Actor: the always-on mailbox
 
@@ -161,36 +198,36 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 Open <http://127.0.0.1:8000>.
 
-On first launch Arena-Agents creates the default workspace:
+On first launch Arena-Agents creates its data directory `data/` in the **program folder** (the one that holds
+`app/` and `config.yml`, wherever you start the server from). Providers, bindings, games, logs and the roster
+are all in it; there is no folder to choose. Provider settings are configured from the UI; no `.env` file is
+required for local use.
 
-```text
-Windows: %USERPROFILE%\Arena-Agents\Default
-macOS:   ~/Arena-Agents/Default
-Linux:   <app data dir>/workspace/default
-```
-
-Provider settings are configured from the UI; no `.env` file is required for local use.
+> **⚠ The data lives inside the program folder.** Deleting or re-installing it, a fresh `git clone`, or
+> `git clean -xdf` takes your games with it. Export an archive now and then (**⚙ Settings → Export archive**,
+> see "Data and archives" below).
 
 ### Demo mode (no model / API key)
 
 ```bash
-ARENA_DEMO=1 ARENA_DISABLE_WORKSPACE=1 uvicorn app.main:app --host 127.0.0.1 --port 8000
+ARENA_DEMO=1 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 Scripted bots play the moderator and the 12 players through the real engine, channels, floors,
-requests and UI, with no network traffic and no cost. A demo game cannot be resumed from a save
-(start a new game instead).
+requests and UI, with no network traffic and no cost. The data goes to `.demo-data/demo/`, so a demo never
+mixes into your real history. In the demo you can take over a seat, use the input box and replay finished
+games as well.
 
 ### Isolated dev instances and real-model smoke tests
 
 ```bash
-# An instance fully isolated from your real workspace (data in .demo-data/, git-ignored)
+# An instance fully isolated from your real data (data in .demo-data/, git-ignored)
 python tools/dev_server.py --demo --port 8123
-python tools/dev_server.py --copy-providers-from "<workspace>/.arena" --port 8124   # copies providers + bindings; calls real models and COSTS credits
+python tools/dev_server.py --copy-providers-from "<program dir>/data" --port 8124   # copies providers, keys + bindings; calls real models and COSTS credits
 
 # A real-model smoke test with a hard call budget (costs credits); prints tool usage,
 # rejected calls and the floor timeline when it ends
-python tools/real_smoke.py --from "<workspace>/.arena" --scenario scenarios/minimal_test.md --players 4 --max-calls 60
+python tools/real_smoke.py --from "<program dir>/data" --scenario scenarios/minimal_test.md --players 4 --max-calls 60
 ```
 
 ### Run with Docker Compose
@@ -207,8 +244,10 @@ docker compose up -d --build
 ```
 
 The container runs as uid 10001, serves on host `127.0.0.1:${PORT:-8000}` by default, and stores
-all runtime data in `/data/workspace/default/.arena`. The master key must be a Docker Secret or a
-separate readable file; without it the app fails closed instead of writing plaintext.
+all runtime data in `/app/data` (the named volume `arena-appdata`; the v0.12.1 `/data` volume is neither reused
+nor deleted). The master key that encrypts the API keys must be a Docker Secret or a separate readable file;
+without it the app refuses to save a key instead of writing it in the clear. Upgrading from v0.12.1:
+[docs/storage.md](docs/storage.md#upgrading-from-v0121).
 
 ## Configure a model
 
@@ -233,62 +272,71 @@ separate readable file; without it the app fails closed instead of writing plain
 
 Full details: [docs/providers.md](docs/providers.md).
 
-## Browse and load games
+## Data and archives
 
-Use **Session** in the game header or **Load game from this workspace** in the workspace dialog.
-Sessions are scoped to the current workspace. Loading a saved game keeps it paused; review model
-bindings and click **Resume** when ready.
-
-## Workspaces
-
-A workspace is a normal folder. Everything that belongs to a set of games lives under
-`<folder>/.arena/`:
+Everything is in one directory (by default `<program dir>/data/`); **only the API keys are encrypted**, the rest is
+plain and can be read directly:
 
 ```text
-<workspace>/
-├─ .arena-workspace.json      workspace marker
-└─ .arena/
-   ├─ master.v1.dpapi         Windows DPAPI-wrapped workspace key
-   ├─ providers.v1.enc        encrypted provider registry
-   ├─ providers.v1.backup.enc known-good backup
-   ├─ settings.json           default bindings, templates, last session, default spending limit
-   ├─ pricing.v1.json         the downloaded price table (public data, plain JSON)
-   ├─ roster/                 the roster: names, avatars, persona, memory (plain files, no keys)
-   ├─ sessions/<id>/          encrypted sessions and previous copy
-   ├─ logs/  exports/
-   └─ workspace.lock
+data/
+├─ settings.json            default bindings, templates, last game, default spending limit
+├─ providers.json           the provider registry (no API keys)
+├─ secrets.v1.enc           the API keys (AES-256-GCM; on Windows the master key is DPAPI-wrapped in master.v1.dpapi)
+├─ pricing.json             the downloaded price table (public data)
+├─ roster/                  names, avatars, persona, memory
+├─ games/<id>/game.json     one game (save format v5, plain JSON) + games/index.json (the history list's cache, rebuildable)
+├─ logs/<id>/trace-*.jsonl  the thinking logs
+├─ exports/  backups/  tmp/ exported archives, what an import replaced (3 are kept), uploads in progress
+└─ .lock                    process lock: one server per data directory
 ```
 
-- Switching is allowed only while the game is idle, paused or finished.
-- The current game is saved first; a failed save or invalid target leaves the current workspace
-  unchanged.
-- Running games cannot switch workspaces.
-- Picking and switching a workspace is allowed for loopback clients only (even when `ARENA_API_TOKEN`
-  is set). The native folder picker needs a desktop; without one, type an absolute path in the
-  dialog. A Docker deployment is pinned to `/data/workspace/default` and cannot switch from the UI.
-- Code assets (`config.yml`, `scenarios/`, `prompts/`) are shared by all workspaces.
-- An earlier single-directory data layout is copied into the default workspace and verified while
-  the originals are kept untouched.
+- **There is no "Save" button**: a game is saved half a second after anything changed and once more when the
+  server stops; after a restart the last game comes back **paused**.
+- **The settings hold two items**: **Export archive** and **Import archive**, on a single `.arenaagents` file (a
+  zip container, contents not encrypted). Export asks whether to include the API keys — if so you enter a strong
+  password twice (at least 12 characters, three of upper case / lower case / digits / symbols); the keys are
+  encrypted with `scrypt + AES-256-GCM` and the password is never written into the archive. Importing an archive
+  that holds keys needs the password; you may also choose to skip the keys and import everything else. Both show
+  progress, and the result dialog tells you where the file was saved (`data/exports/`) and offers a download.
+- **Import verifies** the format version, the manifest and the SHA-256 of every file, path and size limits, then
+  replaces the current data as a whole: the old data is moved to `data/backups/<time>/` first and a failure rolls
+  back by itself. It is refused while a game runs. Verification detects corruption but is not a signature — only
+  import archives you trust.
+- **Upgrading from v0.12.1**: run `python tools/migrate_v0121_to_archive.py` (it only reads the old workspace;
+  run it as the same Windows user, or provide the master key) and import the archive it writes in the settings;
+  on the first start the page offers an explanation once (dismissible).
+- **History**: **📜 History** lists every game; replay, continue or delete it ("deleting a game does not touch an
+  agent's memory" — persona and memory belong to the seat and live in the roster, not in a game).
 
-Full details: [docs/workspaces.md](docs/workspaces.md).
+Full details: [docs/storage.md](docs/storage.md) (data directory, what is encrypted, Docker, upgrading) and
+[docs/archive.md](docs/archive.md) (archive format, verification, password, conversion script; in Chinese).
 
 ## Using the UI
 
 - **Participant bar**: one card per player — pixel avatar + name + one role tag, with the state on the
   avatar's corner (💭 thinking / ⚡ acting / 💤 sleeping; the tooltip of a timed sleep shows the seconds
-  left). Click a card for that agent's tool calls, thinking rounds, LLM calls, the four token kinds, the
-  cache hit rate, cost, and its persona and memory. Players who are out are greyed.
+  left). Click a card for the thinking-record window, LLM call counts, the four token kinds, the cache hit rate,
+  cost, and its persona and memory; tool-call details stay out of that chat-like record. Players who are out are greyed.
 - **Feed**: spoken messages, announcements and **request cards** (votes, choices, questions; with
   progress and results), rendered whole; no chain of thought, no tool calls, no streaming.
-- **Spectating**: the top-bar selector switches between the god view and any player's view (only the
-  channels and messages that player may see).
+- **Viewpoint bar `[viewpoint ▾] [Switch] [Take over]`**: the drop-down only *chooses*; *Switch* applies it (the
+  god view or one player's view: only the channels and messages that player may see); *Take over* plays the chosen
+  seat (available before the game starts or while it is paused, with a confirmation). While a seat is played the
+  viewpoint is locked to it and the bar becomes "🎮 Playing 3 · Carol  [Leave]" (again with a confirmation, and
+  only while the game is not running). The lock is front-end only: the server still sends the browser the full
+  spectator data (a known limitation, see the plan).
+- **Input box and ability**: the bottom of the feed holds the current channel's input box. On a vote or another
+  request card, pick an answer and then click *Submit*; you can change the pick before submitting, and a deadline
+  never auto-submits it. *End my turn* and *Ability* are described above.
 - **Channel list**: shows each channel's floor state (🎤 turn / 📋 queue / 💬 free discussion /
   ❄ frozen / 👁 listen-only / 🔇 muted); challenge tickets form their own group; private channels are
-  named after the other person.
+  named after the other person; a channel where it is your turn gets a "your move" mark while you play a seat.
 - **Spending limit**: the button next to the token / cost counter sets a per-game token and / or USD
   limit, optionally with "stop when reached".
 - **Controls**: Start / Pause / Resume; a finished game can still be resumed (the moderator is told);
   after a game you can run the **Review** manually.
+- **⚙ Settings / 📜 History**: export / import an archive; replay, continue and delete past games (a replay has
+  a bar with ⏮ ▶/⏸, speed, a seek bar and skip-idle).
 - **Responsive layout**: wide, narrow, tablet and phone portrait (mini cards + a bottom tab bar) are
   chosen from the platform and the width. The board collapses as a whole, separators can be dragged
   (double-click to reset), and the layout is stored in the browser's `localStorage`.
@@ -297,39 +345,44 @@ Every control is described in [docs/ui-guide.md](docs/ui-guide.md).
 
 ## Configuration
 
-All runtime settings, provider keys, models and sessions belong to a workspace. The application
+All runtime settings, provider keys, models and games belong to the data directory. The application
 reads only these deployment-level environment variables:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ARENA_WORKSPACE_DIR` | `%USERPROFILE%\\Arena-Agents\\Default` (Windows/macOS) | Initial/default workspace |
-| `ARENA_DISABLE_WORKSPACE` | unset | `1` disables workspaces and uses the legacy single data directory |
-| `ARENA_DATA_DIR` | platform app directory | Application state / legacy data directory |
-| `ARENA_MASTER_KEY_FILE` / `ARENA_MASTER_KEY` | unset (Windows uses DPAPI) | 32-byte workspace master key for Linux/Docker |
+| `ARENA_DATA_DIR` | `<program dir>/data` (demo mode: `<program dir>/.demo-data/demo`) | The data directory (tests, dev instances, a data disk of your own) |
+| `ARENA_MASTER_KEY_FILE` / `ARENA_MASTER_KEY` | unset (Windows uses DPAPI) | 32-byte master key that encrypts the API keys on Linux/Docker |
+| `ARENA_MAX_ARCHIVE_BYTES` | `2147483648` | Maximum size of an uploaded `.arenaagents` archive (2 GiB) |
 | `ARENA_API_TOKEN` | unset | Bearer token for `/api/*` writes; also accepted as `?token=` for SSE |
 | `ARENA_ALLOWED_ORIGINS` | unset | Extra allowed cross-origin origins |
 | `ARENA_ALLOWED_BASE_HOSTS` | unset | Optional provider host allow-list |
 | `ARENA_ALLOW_PRIVATE_PROVIDERS` | `false` | Allow loopback/private provider endpoints (e.g. Ollama) |
-| `ARENA_MAX_IMPORT_BYTES` | `20971520` | Maximum session import size |
 | `ARENA_BIND` | `127.0.0.1` | Docker host bind address |
 | `ARENA_DEMO` | unset | `1` enables demo mode (scripted bots, no model calls) |
-| `ARENA_DISABLE_LEGACY_MIGRATION` | unset | `1` skips the migration of an old `.env` / `saves` |
+
+v0.13 removed `ARENA_WORKSPACE_DIR`, `ARENA_DISABLE_WORKSPACE`, `ARENA_DISABLE_LEGACY_MIGRATION` and
+`ARENA_MAX_IMPORT_BYTES` (nothing reads them any more).
 
 `config.yml` contains only the scenario path, the runtime parameters (`runtime:`, see the
 [contract](docs/v0.12-contracts.md) §6, in Chinese), the knowledge-base directory, the seats' default
-names, tag styles, prompt paths and the legacy LLM defaults. The provider registry is encrypted and is never
-stored in YAML or `.env`.
+names, tag styles, prompt paths and the legacy LLM defaults. API keys are stored encrypted in
+`data/secrets.v1.enc` and never in YAML or `.env`.
 
 ## Security
 
 - Provider keys are encrypted at rest and are never returned by the API. Changing protocol, Base
   URL or endpoint mode requires re-entering the key.
 - Non-GET requests require a same-origin `Origin` (or an allow-listed origin). Without a token,
-  configuration writes are limited to loopback clients.
+  configuration writes (including take-over, seat actions, archive export / import and deleting games) are
+  limited to loopback clients.
 - Provider URL validation blocks cloud metadata/link-local addresses; private/loopback endpoints
   require explicit opt-in.
-- Workspace switching and native folder selection are loopback-only and require a paused game.
-- Imported sessions are size-limited and validated before replacing the current game.
+- Importing an archive: size limit, a path allow-list (absolute paths, `..` and symbolic links are refused),
+  compression-ratio and entry-count limits, the SHA-256 of every file and a structural check of every game; the
+  current data is backed up before it is replaced and restored on failure; it is refused while a game runs.
+  Exported keys are encrypted with your password, which is never written into the archive, a log or a response.
+- Take-over: the actor is always chosen by the server (a client cannot act for another seat); the viewpoint is
+  locked in the front end only, the browser still receives the full spectator data.
 - The server defaults to `127.0.0.1`; expose it only behind a TLS reverse proxy with
   `ARENA_API_TOKEN` configured.
 
@@ -353,43 +406,53 @@ app/
 ├─ world/        physical layer: commit gate, ledger, channels, floors, requests, templates, abilities
 ├─ runtime/      async runtime: actors/workers, supervisor, LLM gate, trace log, event bus, game clock
 ├─ agents/       Brain: tool schemas, context building, notes and compaction, prompt-injection guard
-├─ game/         orchestrator, session container (save format v4), roster / budget / review, bindings, workspace switch, demo bots
-├─ api/          REST + SSE v2, providers, templates, workspaces
+├─ game/         orchestrator, session container (save format v5), roster / budget / review, bindings, take-over (takeover_runtime), replay projection (replay), demo bots
+├─ api/          REST + SSE v2, providers, templates, take-over and seat actions, history of games, archive export / import
+├─ archive/      .arenaagents archives: format and verification, password encryption of the API keys, export / import jobs, backup and rollback
 ├─ engine/       LLM client, expression engine
 ├─ llm/          protocol adapters and endpoint planning
-├─ providers/    encrypted provider registry, the four model prices, price source
+├─ providers/    provider registry (keys encrypted apart), the four model prices, price source
 ├─ avatars.py    pixel avatars (parts library static/avatar/parts.json is generated by tools/avatar_lab.py)
-├─ storage/      workspace, settings, roster, sessions, crypto
-└─ migration.py  legacy data migration
+└─ storage/      data directory and process lock, settings, roster, games (GameStore), API keys (SecretStore), crypto
 scenarios/       Markdown scenarios (schema v2)
 prompts/         moderator / player prompt templates
 knowledge/       moderator guide and strategy documents
 static/          single-page arena UI (static/js front-end modules, static/avatar parts library)
 tools/           dev tools: dev_server (isolated instances), real_smoke (real-model smoke test),
                  mock_ui_server (mock server), live_replay (event replay check), avatar_lab (avatar
-                 parts library), make_diagrams (architecture pictures)
-tests/           offline regression, API, storage, documentation and UI tests
-docs/            architecture, contract, provider, workspace and UI guides; docs/images holds the
+                 parts library), make_diagrams (architecture pictures), migrate_v0121_to_archive
+                 (v0.12.1 → .arenaagents conversion script)
+tests/           offline regression, API, storage, archive, take-over, replay, documentation and UI tests
+docs/            architecture, contract, provider, storage, archive and UI guides; docs/images holds the
                  screenshots and the architecture pictures
 ```
 
 ## Release
 
-The current version is **0.12.1**: on top of 0.12's asynchronous agents it removes every
-engine-side limit that saved money for the user (replaced by persistent conversations, caching, merging
-and compaction), and adds a per-game spending limit, four-price billing with a price source, the
-roster (pixel avatars, persona and memory) and a responsive UI. **v0.12.1 does not open v0.12.0 (or
-older) saves** — they stay in the saved-game list untouched. The previous public release is
-[0.11.0](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.11.0); every version has a page under
+The current version is **0.13.1**: take-over adds **agent-only soft pause**, untimed public floors, eight private
+colour marks, thinking records and an LLM call log; votes and other choices now require **pick, then submit**.
+An avatar code recreates exactly the same avatar, reviews update bounded impressions / lessons instead of
+appending diaries, and model-completed personas use a fixed behavioural template. Decisions and the test plan:
+[docs/v0.13.1-plan.md](docs/v0.13.1-plan.md) (G1–G45, in Chinese).
+The 0.13.0 changes in this series introduced
+seat take-over, per-channel composers, the data directory, single-file `.arenaagents` archives and replay. This
+release keeps **save format v5 and archive format 1**. **v0.13 cannot open v0.12.1 data directly** (the workspace
+concept is gone): convert it with `tools/migrate_v0121_to_archive.py` and import the archive in the settings, see
+[docs/storage.md](docs/storage.md#upgrading-from-v0121).
+The earlier [0.12.1](https://github.com/chengyuchen1037/Arena-Agents/releases/tag/v0.12.1) removed every
+engine-side limit that saved money for the user (replaced by persistent conversations, caching, merging and
+compaction) and added a per-game spending limit, four-price billing with a price source, the roster and a
+responsive UI. Every version has a page under
 [Releases](https://github.com/chengyuchen1037/Arena-Agents/releases), and [CHANGELOG.md](CHANGELOG.md) has the
 release notes.
 
 ## Documentation
 
 - [Architecture (Actor + Worker)](docs/architecture.en.md) · [中文](docs/architecture.md)
-- [Implementation contract](docs/v0.12-contracts.md) (current, Chinese) · [v0.12.1 plan](docs/v0.12.1-plan.md) (decisions E1–E26) · [v0.12 plan](docs/v0.12-async-agents-plan.md) (history; some decisions were superseded)
+- [Implementation contract](docs/v0.12-contracts.md) (current, Chinese; v0.13 additions are §11 and v0.13.1 is §12) · [v0.13.1 plan](docs/v0.13.1-plan.md) (G1–G45) · [acceptance record](docs/v0.13.1-acceptance.md) · [v0.13 plan](docs/v0.13-plan.md) (F1–F38) · [v0.12.1 plan](docs/v0.12.1-plan.md) (E1–E26) · [v0.12 plan](docs/v0.12-async-agents-plan.md) (history)
 - [Providers and models](docs/providers.md)
-- [Workspaces and encrypted data](docs/workspaces.md)
+- [Data, storage and encryption](docs/storage.md)
+- [Archives: export, import and conversion](docs/archive.md) (Chinese)
 - [UI guide](docs/ui-guide.md)
 - [简体中文 README](README.md)
 - [Release notes](CHANGELOG.md)
@@ -400,7 +463,7 @@ Issues and pull requests are welcome. Before opening a PR:
 
 1. Keep game rules in `scenarios/` and engine code game-agnostic.
 2. Add or update offline tests for behavior changes.
-3. Never commit `.env`, API keys, workspaces, local paths or generated runtime data.
+3. Never commit `.env`, API keys, the data directory `data/`, exported `.arenaagents` archives, local paths or generated runtime data.
 4. Run `python -m pytest -q tests` and `node --check static/js/*.js`.
 5. When you change the architecture or the UI, update the documentation; the source of the architecture
    pictures is `tools/make_diagrams.py` — run `python tools/make_diagrams.py` after editing it (never

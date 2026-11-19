@@ -1,4 +1,4 @@
-"""Provider registry, model catalogue, model bindings and stored-session endpoints (v0.10).
+"""Provider registry, model catalogue and model bindings (v0.10; the stored-session endpoints are gone in v0.13).
 
 Security rules carried over from v0.9: every route sits behind
 ``verify_api_access`` (token + Origin), every write additionally requires
@@ -25,7 +25,6 @@ from app.api.security import (
     verify_api_access,
 )
 from app.game.orchestrator import orchestrator
-from app.game.session import SESSION_ID_PATTERN
 from app.llm.discovery import DiscoveryError, discover_models
 from app.llm.endpoints import EndpointError, build_endpoints, endpoint_preview
 from app.providers.models import (
@@ -38,7 +37,6 @@ from app.providers.models import (
 from app.providers.pricing import get_price_store
 from app.providers.store import UNSET, get_provider_store
 from app.storage.errors import StorageError
-from app.storage.sessions import get_session_store
 from app.storage.settings import get_default_bindings
 from app.world.types import MODERATOR_ID
 
@@ -273,6 +271,8 @@ def effective_binding(actor_id: str) -> Any | None:
 def binding_issues() -> list[dict[str, str]]:
     """Actors whose binding is missing or no longer resolves ('需要重新绑定')."""
 
+    if getattr(orchestrator, "demo_mode", False):
+        return []  # scripted bots call no model: nothing needs a binding
     issues: list[dict[str, str]] = []
     store = get_provider_store()
     for actor in actor_ids():
@@ -281,11 +281,15 @@ def binding_issues() -> list[dict[str, str]]:
             issues.append({"actor_id": actor, "message": "尚未绑定模型"})
             continue
         try:
-            store.resolve(
+            provider, _model = store.resolve(
                 binding if isinstance(binding, ModelBinding) else ModelBinding.model_validate(binding)
             )
         except (ProviderError, ValueError):
             issues.append({"actor_id": actor, "message": "绑定的 Provider 或模型已不存在，需要重新绑定"})
+            continue
+        if not str(getattr(provider, "api_key", "") or "").strip():
+            # (an archive imported without keys, F32): the provider is there, but it cannot be called yet
+            issues.append({"actor_id": actor, "message": f"Provider「{provider.name}」未设置 API Key"})
     return issues
 
 
@@ -452,9 +456,10 @@ async def update_provider(provider_id: str, req: ProviderUpdateRequest) -> dict[
     api_key = validate_secret("API Key", req.api_key) if req.api_key is not None else ""
 
     # Any endpoint change (protocol / base_url / auto_append_path) would send the stored key
-    # to a different place, so the key must be typed again.
+    # to a different place, so the key must be typed again.  (A provider without a key - imported
+    # without keys - has nothing to protect and can be moved freely.)
     redirecting = any(k in changes for k in ("protocol", "base_url", "auto_append_path"))
-    if redirecting and not api_key:
+    if redirecting and provider.api_key and not api_key:
         raise HTTPException(
             status_code=400,
             detail="修改协议、Base URL 或“自动拼接路径”时必须同时重新输入 API Key（防止已保存的密钥被转发到新地址）。",
@@ -818,58 +823,3 @@ async def apply_template(slot: int, req: TemplateApplyRequest) -> dict[str, Any]
         return bindings_payload()
     except (ProviderError, StorageError) as exc:
         raise _http_error(exc) from exc
-
-
-# --------------------------------------------------------------------------
-# Stored sessions
-# --------------------------------------------------------------------------
-def _clean_session_meta(item: Any) -> dict[str, Any]:
-    if not isinstance(item, dict):
-        return {"session_id": str(item)}
-    # Metadata only; never expose filesystem locations.
-    return {
-        key: value
-        for key, value in item.items()
-        if "path" not in str(key).lower() and "dir" not in str(key).lower()
-    }
-
-
-@router.get("/sessions")
-async def list_sessions() -> dict[str, Any]:
-    try:
-        items = get_session_store().list_sessions()
-    except StorageError as exc:
-        raise _http_error(exc) from exc
-    current_id = str(getattr(orchestrator.session, "session_id", ""))
-    sessions = []
-    for item in items:
-        meta = _clean_session_meta(item)
-        meta["current"] = str(meta.get("session_id", "")) == current_id
-        sessions.append(meta)
-    return {"sessions": sessions}
-
-
-def check_session_id(session_id: str) -> str:
-    if not SESSION_ID_PATTERN.fullmatch(session_id):
-        raise HTTPException(status_code=400, detail="无效的 session_id。")
-    return session_id
-
-
-@router.delete("/sessions/{session_id}", dependencies=[Depends(require_trusted_client)])
-async def delete_session(session_id: str) -> dict[str, Any]:
-    check_session_id(session_id)
-    if session_id == str(getattr(orchestrator.session, "session_id", "")):
-        raise HTTPException(
-            status_code=409,
-            detail="这是当前对局，不能直接删除；请先新建或加载其他对局。",
-        )
-    store = get_session_store()
-    try:
-        if not store.exists(session_id):
-            raise HTTPException(status_code=404, detail="存档不存在。")
-        store.delete(session_id)
-    except StorageError as exc:
-        raise _http_error(exc) from exc
-    except ValueError as exc:  # reserved names such as CON/NUL
-        raise HTTPException(status_code=400, detail="无效的 session_id（保留名称或非法字符）。") from exc
-    return {"ok": True}

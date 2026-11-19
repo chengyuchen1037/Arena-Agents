@@ -19,21 +19,26 @@ function ids(src) {
 // ---- wiring --------------------------------------------------------------------
 test("every id used by the frontend modules exists in index.html", () => {
   const htmlIds = new Set([...HTML_SRC.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
-  const combined = SRC.app + SRC.providers + SRC.layout + SRC.workspace + SRC.roster + SRC.budget;
+  const combined = SRC.app + SRC.providers + SRC.layout + SRC.archive + SRC.roster + SRC.budget + SRC.takeover + SRC.composer;
   // the modules also read ids through their `$ = (id) => getElementById(id)` helper
   const viaHelper = new Set(
-    [SRC.app, SRC.roster, SRC.budget, SRC.providers, SRC.workspace].flatMap((src) => [...src.matchAll(/\$\(\s*[`"]([^`"$]+)[`"]\s*\)/g)].map((m) => m[1]))
+    [SRC.app, SRC.roster, SRC.budget, SRC.providers, SRC.archive, SRC.takeover, SRC.composer].flatMap((src) =>
+      [...src.matchAll(/\$\(\s*[`"]([^`"$]+)[`"]\s*\)/g)].map((m) => m[1])
+    )
   );
   // ids of elements the scripts render themselves (the detail panel's name field, the confirm dialog's
   // checkbox) are written as id="..." inside a template string
   const rendered = new Set([...combined.matchAll(/\bid="([^"$]+)"/g)].map((m) => m[1]));
+  // ... and the buttons of the settings wizard (archive.js), which are made by a helper: button(label, action, { id: "..." })
+  for (const m of SRC.archive.matchAll(/\bid: "([^"$]+)"/g)) rendered.add(m[1]);
   const missing = [...new Set([...ids(combined), ...viaHelper])].filter((i) => !htmlIds.has(i) && !rendered.has(i));
   assert.deepEqual(missing, []);
 });
 
 test("index.html uses relative asset paths and loads the scripts in dependency order", () => {
   assert.ok(!/(?:src|href)="\/(?:static|api)/.test(HTML_SRC));
-  const order = ["platform", "core", "avatar", "store", "view", "layout", "providers", "roster", "budget", "workspace", "app"].map((n) =>
+  // (v0.13: takeover.js and composer.js come after the panels they share the dialog with, and before app.js)
+  const order = ["platform", "core", "avatar", "store", "view", "layout", "providers", "roster", "budget", "archive", "takeover", "composer", "app"].map((n) =>
     HTML_SRC.indexOf(`static/js/${n}.js`)
   );
   assert.ok(order.every((i) => i >= 0), "every script is referenced");
@@ -41,7 +46,7 @@ test("index.html uses relative asset paths and loads the scripts in dependency o
 });
 
 test("frontend modules have no absolute /api or /static URLs", () => {
-  for (const src of [SRC.app, SRC.providers, SRC.layout, SRC.workspace, SRC.roster, SRC.budget, SRC.platform, SRC.avatar]) {
+  for (const src of [SRC.app, SRC.providers, SRC.layout, SRC.archive, SRC.roster, SRC.budget, SRC.platform, SRC.avatar, SRC.takeover, SRC.composer]) {
     assert.ok(!/["'`]\/(api|static)\//.test(src));
   }
 });
@@ -62,7 +67,6 @@ test("v0.11 / v0.12.0-only UI is gone: card sizes, force pause, tool toggle, fol
     "btn-expand-all",
     "btn-collapse-all",
     "feed-streaming-container",
-    "btn-shuffle-identities",
     "moderator-status-pill",
   ]) {
     assert.ok(!HTML_SRC.includes(gone), `index.html still has ${gone}`);
@@ -82,12 +86,28 @@ test("v0.11 / v0.12.0-only UI is gone: card sizes, force pause, tool toggle, fol
     assert.equal(Core[gone], undefined, `core still exports ${gone}`);
   }
   // the control buttons that remain
-  for (const id of ["btn-new", "btn-save", "btn-start", "btn-pause", "btn-resume", "btn-import-session"]) {
+  // (v0.13: "保存" and the single-game JSON import are gone - the game saves itself - and "工作文件夹" became "⚙ 设置")
+  for (const id of ["btn-new", "btn-start", "btn-pause", "btn-resume", "btn-open-settings-modal"]) {
     assert.ok(HTML_SRC.includes(`id="${id}"`), `missing #${id}`);
   }
   // ... and the v0.12 widgets
   for (const id of [
     "select-viewpoint",
+    // v0.13: the viewpoint bar [视角▾][切换][接管], the takeover bar, the reshuffle reminder, the input box
+    // ("btn-shuffle-identities" was a v0.11 button that v0.12 removed: it is the reminder's button now)
+    "viewpoint-bar",
+    "btn-viewpoint-switch",
+    "btn-takeover",
+    "takeover-bar",
+    "btn-release-takeover",
+    "takeover-reminder",
+    "btn-shuffle-identities",
+    "composer",
+    "composer-input",
+    "composer-count",
+    "btn-composer-send",
+    "btn-composer-pass",
+    "btn-composer-ability",
     "request-hints",
     "status-banner",
     "detail-panel",
@@ -127,11 +147,11 @@ test("no token needed: no modal, no header, sub-path prefix, first SSE connect c
   assert.deepEqual(
     calls.map((c) => c.url).sort(),
     [
+      "/arena/api/llm/calls?errors_only=true&limit=2000", // v0.13.1 (G32): the failed lines of the error log - the red badge needs them after a reload
       "/arena/api/providers",
       "/arena/api/roster",
       "/arena/api/settings/bindings",
       "/arena/api/state",
-      "/arena/api/workspaces",
       "/arena/static/avatar/parts.json", // the sprite library: a public static file, fetched under the sub-path prefix
     ]
   );
@@ -141,7 +161,7 @@ test("no token needed: no modal, no header, sub-path prefix, first SSE connect c
   // moderator binding shown in the status pill; no legacy config endpoint used
   assert.match(env.el("api-status-label").textContent, /DeepSeek \/ model-x/);
   assert.ok(calls.every((c) => !c.url.endsWith("/api/config/llm")));
-  assert.equal(env.el("app-version").textContent, "v0.12.1-test"); // the application version, not the session's
+  assert.equal(env.el("app-version").textContent, "v0.13.1-test"); // the application version, not the session's
 
   // SSE is delayed 300ms and uses the prefixed URL without a token; the first stream always starts
   // with a snapshot (no last_event_id even though /api/state reported event_id=100)
@@ -290,12 +310,15 @@ test("a snapshot after a gap replaces the session and resets the resume point (e
   assert.equal(env.app().state.session.phase_text, "继续");
 });
 
-test("workspace.changed reloads the page (the whole server context changed)", async () => {
+test("archive.progress is not part of the game: no reload, no repaint of the session, and the stream id still advances", async () => {
   const { env } = await H.bootLive();
   env.sse("snapshot", { session: F.makeSession() }, 10);
+  const before = JSON.stringify(env.app().state.session);
+  env.sse("archive.progress", { job_id: "j1", kind: "export", phase: "pack", done: 5, total: 10, status: "running" }, 11);
   assert.equal(env.reloads.length, 0);
-  env.sse("workspace.changed", {}, 11);
-  assert.equal(env.reloads.length, 1);
+  assert.equal(env.app().state.lastEventId, 11, "a reconnect resumes after it");
+  assert.equal(JSON.stringify(env.app().state.session), before);
+  // (what the settings dialog does with it is tested in test_archive_ui.js)
 });
 
 test("SSE error events are toasted; broken payloads never crash the stream", async () => {
@@ -351,31 +374,7 @@ test("an HTTP session that is older than the stream does not roll the store back
   assert.equal(env.app().state.lastEventId, 210);
 });
 
-// ---- import / non-JSON ---------------------------------------------------------------------
-test("import adopts the imported game (new session id) and toasts", async () => {
-  const calls = [];
-  const fetchImpl = async (url, init) => {
-    calls.push({ url, init });
-    if (url.endsWith("/api/session/import")) {
-      return resp(200, { session: F.makeSession({ session_id: "s2", status: "paused" }) });
-    }
-    return routeFetch([])(url, init);
-  };
-  const env = makeEnv({ fetchImpl });
-  env.run();
-  await settle();
-  env.flushRaf();
-  const file = { name: "x.json", text: async () => JSON.stringify({ session: {} }) };
-  env.el("file-import-session").dispatch("change", { target: { files: [file], value: "" } });
-  await settle();
-  env.flushRaf();
-  const imp = calls.find((c) => c.url.endsWith("/api/session/import"));
-  assert.ok(imp, "import request sent");
-  assert.ok(env.toasts.some((t) => /已成功导入/.test(t.textContent)));
-  assert.equal(env.app().state.session.session_id, "s2");
-  assert.equal(env.app().state.selectedChannel, "public"); // there is no "all" channel: the public one is the default
-});
-
+// ---- non-JSON ---------------------------------------------------------------------
 test("non-JSON 500 on init does not crash and toasts a clear message", async () => {
   const fetchImpl = async () => resp(500, "<html>boom</html>", "text/html");
   const env = makeEnv({ fetchImpl });
@@ -691,7 +690,7 @@ test("restored session shows a notice, never auto-starts, and can be dismissed",
   assert.equal(env.el("restore-notice").hidden, true);
 });
 
-test("a notice the server sends WITHOUT a restore (old save, unreadable save, workspace failure) is shown too", async () => {
+test("a notice the server sends WITHOUT a restore (old save, unreadable save, data directory failure) is shown too", async () => {
   // v0.12.1 starts a blank game and says why when the last game was saved by an older version (the save is kept)
   const notice = "上次的对局来自旧版本引擎（v0.12.0 及更早），v0.12.1 不兼容，已保留在存档列表中、未被改动；已为你新建了一局。";
   const session = F.makeSession({ status: "idle", restored_from_save: false, restore_notice: notice });
@@ -704,10 +703,10 @@ test("a notice the server sends WITHOUT a restore (old save, unreadable save, wo
   // starting / creating a game clears it on the server: the next snapshot has no notice and the bar stays hidden
   env.sse("snapshot", { session: { ...session, restore_notice: "" } }, 50);
   assert.equal(env.el("restore-notice").hidden, true);
-  // an unreadable last save and a workspace that did not open say so in the same way
-  const broken = F.makeSession({ status: "idle", restore_notice: "工作文件夹初始化失败：不可用。已有数据未被改动或删除；请选择一个可用的工作文件夹后继续。" });
+  // an unreadable last save and a data directory that cannot be used say so in the same way
+  const broken = F.makeSession({ status: "idle", restore_notice: "数据目录不可用：已有数据未被改动或删除；请检查 data 文件夹的权限后重启。" });
   const second = await H.bootLive({ session: broken });
-  assert.match(second.env.el("restore-notice-text").textContent, /工作文件夹初始化失败/);
+  assert.match(second.env.el("restore-notice-text").textContent, /数据目录不可用/);
   assert.equal(second.env.el("restore-notice").hidden, false);
   // nothing to say, nothing shown
   const quiet = await H.bootLive({ session: F.makeSession({ status: "idle" }) });
@@ -728,33 +727,17 @@ test("/api/state top-level restored=true also raises the notice", async () => {
   assert.equal(env.el("restore-notice").hidden, false);
 });
 
-test("sessions modal lists, loads and deletes external saves (current one is protected)", async () => {
-  const { env, backend } = await boot();
-  env.el("btn-open-sessions-modal").dispatch("click");
-  await settle();
-  const html = env.el("session-list").innerHTML;
-  assert.match(html, /old-1/);
-  assert.match(html, /当前/);
-  assert.match(html, /data-action="delete-session" disabled/);
-  env.el("session-list").dispatch("click", {
-    target: target({ "[data-action]": { "data-action": "delete-session" }, ".session-item": { "data-session-id": "old-1" } }),
-  });
-  await settle();
-  assert.ok(backend.calls.some((c) => c.method === "DELETE" && c.url.endsWith("/api/sessions/old-1")));
-  assert.ok(!env.el("session-list").innerHTML.includes("old-1"));
-
-  backend.sessions.push({ session_id: "s9", current: false, status: "paused" });
-  env.el("btn-refresh-sessions").dispatch("click");
-  await settle();
-  env.el("session-list").dispatch("click", {
-    target: target({ "[data-action]": { "data-action": "load-session" }, ".session-item": { "data-session-id": "s9" } }),
-  });
-  await settle();
-  env.flushRaf();
-  assert.ok(backend.calls.some((c) => c.method === "POST" && c.url.endsWith("/api/sessions/s9/load")));
-  assert.equal(env.el("sessions-modal").style.display, "none");
-  assert.ok(!backend.calls.some((c) => c.url.includes("/control/start")));
-  assert.equal(env.app().state.session.session_id, "s9"); // the loaded game replaced the old one
+test("the old sessions window is gone: the history of games (history.js, replay.js) replaced it", () => {
+  for (const gone of ["btn-open-sessions-modal", "sessions-modal", "session-list", "btn-refresh-sessions", "btn-close-sessions-modal"]) {
+    assert.ok(!HTML_SRC.includes(`id="${gone}"`), `index.html still has #${gone}`);
+    assert.ok(!SRC.providers.includes(gone), `providers.js still refers to ${gone}`);
+    assert.ok(!SRC.app.includes(gone), `app.js still refers to ${gone}`);
+  }
+  assert.ok(!SRC.providers.includes("api/sessions") && !SRC.app.includes("api/sessions"), "nothing asks for /api/sessions any more");
+  for (const id of ["btn-open-history-modal", "history-modal", "history-list", "btn-refresh-history", "replay-bar", "btn-replay-play", "btn-replay-restart", "select-replay-speed", "chk-replay-skip", "replay-seek", "btn-exit-replay"]) {
+    assert.ok(HTML_SRC.includes(`id="${id}"`), `missing #${id}`);
+  }
+  // (the behaviour is tested in test_history_ui.js)
 });
 
 test("the execution depth is gone (backend removed it): no select, no endpoint, no label; the reasoning depth stays per role", () => {
@@ -780,35 +763,101 @@ test("a session that still carries execution_depth (an older save) does not brin
   assert.ok(!env.el("participants-grid").innerHTML.includes("执行深度"));
 });
 
-// ---- v0.11: app wiring for layout + workspace ------------------------------------------------------
-test("v0.11 app: workspace label, board collapse and workspace modal are wired", async () => {
+// ---- v0.11 layout wiring; v0.13 settings entry ------------------------------------------------------
+test("app: the board collapses and expands from its toggle; the workspace folder button is gone", async () => {
   const { env, backend } = await boot();
-  assert.ok(backend.calls.some((c) => c.url.endsWith("/api/workspaces")));
-  assert.equal(env.el("workspace-name-label").textContent, "Av11WS");
-
+  assert.ok(!backend.calls.some((c) => c.url.includes("/api/workspaces")), "nothing asks for workspaces any more");
   assert.ok(!env.el("main-container").classList.contains("board-collapsed"));
   env.el("btn-toggle-board").dispatch("click");
   assert.ok(env.el("main-container").classList.contains("board-collapsed"));
   env.el("btn-toggle-board").dispatch("click");
   assert.ok(!env.el("main-container").classList.contains("board-collapsed"));
-
-  env.el("btn-open-workspace-modal").dispatch("click");
-  await settle(40);
-  assert.equal(env.el("workspace-modal").style.display, "flex");
-  assert.equal(env.el("workspace-current-name").textContent, "Av11WS");
-  assert.match(env.el("workspace-session-list").innerHTML, /old-1/);
 });
 
-test("v0.11 app: a successful workspace switch reloads the page (window.location)", async () => {
-  // switching is refused while a game runs, so start from a fresh (idle) one
-  const { env, backend } = await boot({ session: F.makeSession({ status: "idle" }) });
-  env.el("btn-open-workspace-modal").dispatch("click");
-  await settle(40);
-  env.el("input-workspace-path").value = "D:\\Arena-WS\\Next";
-  env.el("btn-switch-workspace").dispatch("click");
-  await settle(40);
-  assert.equal(backend.lastWorkspaceSelect.path, "D:\\Arena-WS\\Next");
-  assert.equal(env.reloads.length, 1);
+test("v0.13: the folder / save / import-JSON / memory-pack entries are gone from the page and the scripts", () => {
+  for (const gone of [
+    "btn-open-workspace-modal",
+    "workspace-modal",
+    "workspace-name-label",
+    "btn-save",
+    "btn-import-session",
+    "file-import-session",
+    "btn-roster-export",
+    "btn-roster-import",
+    "file-import-memory",
+  ]) {
+    assert.ok(!HTML_SRC.includes(`id="${gone}"`), `index.html still has #${gone}`);
+    for (const name of ["app", "roster", "providers", "layout", "budget"]) {
+      assert.ok(!SRC[name].includes(`"${gone}"`), `${name}.js still refers to #${gone}`);
+    }
+  }
+  assert.equal(SRC.workspace, undefined, "static/js/workspace.js is deleted");
+  for (const gone of ["api/workspaces", "api/session/save", "api/session/import", "memory:export", "memory:import"]) {
+    for (const name of ["app", "roster", "providers", "archive"]) assert.ok(!SRC[name].includes(gone), `${name}.js still calls ${gone}`);
+  }
+  for (const gone of ["ArenaWorkspaceUI", "workspace.changed", "normalizeWorkspaces", "validateWorkspacePath"]) {
+    for (const name of ["app", "core", "store"]) assert.ok(!SRC[name].includes(gone), `${name}.js still has ${gone}`);
+  }
+  assert.ok(!CSS_SRC.includes(".btn-workspace") && !CSS_SRC.includes(".workspace-modal-body"), "the folder dialog's styles are gone");
+});
+
+test("v0.13: the settings button opens the dialog (it has only export and import)", async () => {
+  const { env } = await boot();
+  assert.ok(HTML_SRC.includes('id="btn-open-settings-modal"') && HTML_SRC.includes('id="settings-modal"'));
+  env.el("btn-open-settings-modal").dispatch("click");
+  await settle();
+  assert.equal(env.el("settings-modal").style.display, "flex");
+  assert.match(env.el("settings-body").innerHTML, /导出存档/);
+  assert.match(env.el("settings-body").innerHTML, /导入存档/);
+});
+
+test("the shared dialog (takeover, history, import ... all ask through it): Esc answers it 'no'; a new dialog answers the old one 'no'", async () => {
+  const { env } = await boot();
+  const ask = (o) => env.app().roster().openDialog({ title: "问", bodyHtml: "<p>?</p>", ...o });
+
+  // Esc = cancel, and the dialog closes
+  const first = ask({ title: "一" });
+  assert.equal(env.el("dialog-modal").style.display, "flex");
+  assert.equal(env.el("dialog-title").textContent, "一");
+  env.document.dispatchEvent("keydown", { key: "Escape" });
+  assert.equal((await first).ok, false);
+  assert.equal(env.el("dialog-modal").style.display, "none");
+
+  // nothing keeps listening after it closed (an Esc with no dialog open is a plain Esc again)
+  env.document.dispatchEvent("keydown", { key: "Escape" });
+  assert.equal(env.el("dialog-modal").style.display, "none");
+
+  // another key does nothing; the OK button answers "yes" and collects the values
+  const second = ask({ collect: () => ({ picked: 3 }) });
+  env.document.dispatchEvent("keydown", { key: "Enter" });
+  assert.equal(env.el("dialog-modal").style.display, "flex", "only Esc closes it");
+  env.el("btn-dialog-ok").dispatch("click");
+  const answered = await second; // (objects made inside the page's realm: compare their fields, not their prototype)
+  assert.equal(answered.ok, true);
+  assert.equal(answered.values.picked, 3);
+  env.document.dispatchEvent("keydown", { key: "Escape" }); // (the closed dialog no longer listens)
+
+  // a dialog that opens while another one is open answers the old one "no" - its promise never hangs
+  const older = ask({ title: "旧" });
+  const newer = ask({ title: "新" });
+  assert.equal((await older).ok, false);
+  assert.equal(env.el("dialog-title").textContent, "新", "the new one is on screen");
+  assert.equal(env.el("dialog-modal").style.display, "flex");
+  env.el("btn-close-dialog").dispatch("click"); // the ✕ button = cancel
+  assert.equal((await newer).ok, false);
+  assert.equal(env.el("dialog-modal").style.display, "none");
+});
+
+test("Esc closes only the dialog when a dialog is open (the roster menu / detail panel behind it stay)", async () => {
+  const { env } = await boot();
+  env.el("btn-roster-menu").dispatch("click"); // the roster menu opens
+  assert.equal(env.el("roster-menu").hidden, false);
+  const pending = env.app().roster().openDialog({ title: "问", bodyHtml: "<p>?</p>" });
+  env.document.dispatchEvent("keydown", { key: "Escape" });
+  assert.equal((await pending).ok, false);
+  assert.equal(env.el("roster-menu").hidden, false, "the first Esc went to the dialog");
+  env.document.dispatchEvent("keydown", { key: "Escape" });
+  assert.equal(env.el("roster-menu").hidden, true, "the next one closes the menu as before");
 });
 
 H.runTests(tests);

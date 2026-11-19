@@ -16,7 +16,7 @@ def env(monkeypatch):
     return install(monkeypatch)
 
 
-def test_state_serves_the_public_session_but_save_payload_retains_the_world(env) -> None:
+def test_state_serves_the_public_session_but_the_save_payload_retains_the_world(env) -> None:
     async def run_test() -> None:
         session = GameSession(
             session_id="state-save-markers",
@@ -26,17 +26,12 @@ def test_state_serves_the_public_session_but_save_payload_retains_the_world(env)
         env.orch.session = session
 
         state = await routes.get_state()
-        response = await routes.save_session()
 
         # /state is the spectator view (orchestrator.public_session): no raw world dump inside
         assert "world" not in state["session"] and "scenario_spec" not in state["session"]
         assert "WORLD_MARKER" not in json.dumps(state)
-
-        assert isinstance(response, routes.JSONResponse)
-        response_payload = json.loads(response.body)
-        assert "saved_path" not in response_payload
-        assert response_payload["session"]["world"] == {"marker": "WORLD_MARKER"}
-        env.orch.persist_session.assert_awaited_once_with("manual")
+        # ... while what is saved (the game file) keeps the whole world
+        assert env.orch.session_payload()["world"] == {"marker": "WORLD_MARKER"}
 
     asyncio.run(run_test())
 
@@ -55,19 +50,13 @@ def test_state_exposes_restore_signal_and_binding_issues(env) -> None:
     asyncio.run(run_test())
 
 
-def test_state_includes_the_workspace_summary_and_keeps_direct_calls_working(env) -> None:
+def test_state_has_no_workspace_any_more_and_never_carries_a_key(env) -> None:
     async def run_test() -> None:
-        # v0.11: /state carries the active-workspace summary (never the API key).
+        # v0.13 (F20): there is one data directory and nothing to choose; /state says nothing about it.
         state = await routes.get_state()
-        assert "workspace" in state
-        assert state["workspace"]["enabled"] is False  # fake workspace module: disabled
+        assert "workspace" not in state
         assert SECRET_KEY not in json.dumps(state)
-
-        env.workspace.set_enabled(True)
-        state = await routes.get_state()
-        assert state["workspace"]["enabled"] is True
-        assert state["workspace"]["name"] == "Test Workspace"
-        assert state["workspace"]["path"].endswith("Test")  # unit call: no Request -> local
+        assert {"app_version", "restored", "binding_issues", "session"} <= set(state)
 
     asyncio.run(run_test())
 

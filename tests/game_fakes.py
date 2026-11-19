@@ -1,7 +1,7 @@
 """Shared fakes for the v0.12 orchestrator tests: in-memory stores + a real orchestrator wired to them.
 
 The orchestrator under test is the *real* :class:`GameOrchestrator` (real world, real runtime); only
-the storage (providers / settings / encrypted sessions) is replaced, and the scenario is the small
+the storage (providers / settings / games) is replaced, and the scenario is the small
 ``minimal_test`` one so a game finishes in seconds with scripted agents (``tests/v12/bots.py``).
 """
 
@@ -25,6 +25,7 @@ from app.providers.models import (
     ProviderNotFound,
     StorageError,
 )
+from app.storage.games import GameNotFoundError, GameStore
 from app.world.types import MODERATOR_ID
 from v12.bots import BotLlm, Call, simple_player
 
@@ -56,7 +57,9 @@ def async_test(fn: Callable[..., Any]) -> Callable[..., Any]:
     return wrapper
 
 
-class FakeSessions:
+class FakeGames:
+    """An in-memory ``GameStore`` (``orch.game_store``): what is saved is in ``data``, every save in ``saves``."""
+
     def __init__(self) -> None:
         self.data: dict[str, dict[str, Any]] = {}
         self.saves: list[str] = []
@@ -73,11 +76,20 @@ class FakeSessions:
 
     def load(self, session_id: str) -> dict[str, Any]:
         if session_id not in self.data:
-            raise StorageError("存档不存在或已损坏")
+            raise GameNotFoundError("对局不存在。")
         return copy.deepcopy(self.data[session_id])
 
     def exists(self, session_id: str) -> bool:
         return session_id in self.data
+
+    def delete(self, session_id: str) -> None:
+        self.data.pop(session_id, None)
+
+    def list_games(self) -> list[dict[str, Any]]:
+        return [GameStore.summarize(payload) | {"session_id": sid} for sid, payload in self.data.items()]
+
+
+FakeSessions = FakeGames  # the v0.12 name
 
 
 class FakeSettings:
@@ -134,7 +146,7 @@ def real_orch(
     orch = GameOrchestrator()
     orch.provider_store = FakeProviders(*providers)
     orch.settings_store = FakeSettings(defaults)
-    orch.session_store = FakeSessions()
+    orch.game_store = FakeGames()
     orch._autosave_delay = 0.01
     # The constructor ran against the real (isolated) stores; rebuild the fresh game the way startup()
     # does, so its default bindings come from the stores injected above.

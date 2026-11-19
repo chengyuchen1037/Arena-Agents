@@ -1,6 +1,6 @@
 "use strict";
 // Frontend tests for the v0.11 features that survive in v0.12.1: layout collapse/resize (the right-hand
-// "对局状态" column is gone, the channel column collapses to an avatar rail), workspace (工作文件夹) modal,
+// "对局状态" column is gone, the channel column collapses to an avatar rail),
 // provider auto_append_path + endpoint preview, and the 3-slot model templates with actor checkboxes.
 // Runs against a tiny fake DOM (no browser).
 // Run: node tests/frontend/test_v011_ui.js
@@ -14,7 +14,6 @@ const Core = require(path.join(ROOT, "static", "js", "core.js"));
 const APP_SRC = fs.readFileSync(path.join(ROOT, "static", "js", "app.js"), "utf8");
 const PROVIDERS_SRC = fs.readFileSync(path.join(ROOT, "static", "js", "providers.js"), "utf8");
 const LAYOUT_SRC = fs.readFileSync(path.join(ROOT, "static", "js", "layout.js"), "utf8");
-const WORKSPACE_SRC = fs.readFileSync(path.join(ROOT, "static", "js", "workspace.js"), "utf8");
 const HTML_SRC = fs.readFileSync(path.join(ROOT, "static", "index.html"), "utf8");
 const CSS_SRC = fs.readFileSync(path.join(ROOT, "static", "css", "style.css"), "utf8");
 
@@ -177,23 +176,6 @@ const PROVIDERS = [
   },
 ];
 
-const WORKSPACES = {
-  enabled: true,
-  current: {
-    id: "w1",
-    name: "MyWS",
-    path: "D:\\Arena-WS\\MyWS",
-    status: "ok",
-    last_session: "s1",
-  },
-  recent: [
-    { id: "w1", name: "MyWS", path: "D:\\Arena-WS\\MyWS" },
-    { id: "w2", name: "Other", path: "D:\\Arena-WS\\Other" },
-  ],
-  default_path: "D:\\Arena-Workspace\\Default",
-  native_picker: true,
-};
-
 function makeSession(overrides = {}) {
   return {
     session_id: "s1",
@@ -232,7 +214,6 @@ function makeBackend(sessionRef) {
         valid: true,
       },
     ],
-    workspaces: clone(WORKSPACES),
     sessions: [
       { session_id: "s1", current: true, status: "idle" },
       { session_id: "old-1", current: false, status: "paused" },
@@ -293,17 +274,6 @@ function makeBackend(sessionRef) {
         bindings[a] = { provider_id: "p1", model_id: "ds-chat", reasoning_depth: "xhigh" };
       });
       return resp(200, { bindings, providers: b.providers, locked: false, issues: [] });
-    }
-    if (key === "GET /api/workspaces") return resp(200, b.workspaces);
-    if (key === "POST /api/workspaces/pick-native-folder") {
-      return resp(200, { path: "D:\\Picked\\Ws" });
-    }
-    if (key === "POST /api/workspaces/select") {
-      b.lastSelect = body;
-      return resp(200, {
-        workspace: { id: "w9", name: "ws9", path: body.path, status: "ok" },
-        session: makeSession({ status: "paused" }),
-      });
     }
     if (key === "GET /api/sessions") return resp(200, { sessions: b.sessions });
     if ((m = key.match(/^POST \/api\/sessions\/(.+)\/load$/))) {
@@ -416,7 +386,6 @@ function makeEnv(opts = {}) {
   vm.createContext(sandbox);
   vm.runInContext(LAYOUT_SRC, sandbox, { filename: "layout.js" });
   vm.runInContext(PROVIDERS_SRC, sandbox, { filename: "providers.js" });
-  vm.runInContext(WORKSPACE_SRC, sandbox, { filename: "workspace.js" });
 
   const api = Core.createApiClient({
     fetchImpl: sandbox.fetch,
@@ -438,17 +407,6 @@ function makeEnv(opts = {}) {
     },
     onChange: () => {},
   });
-  const workspaceUI = sandbox.ArenaWorkspaceUI.create({
-    api,
-    Core,
-    showToast,
-    getSession: sessionRef,
-    onSessionLoaded: (s) => {
-      session = s;
-      loadedSessions.push(s);
-    },
-    reload: () => reloads.push(1),
-  });
 
   return {
     sandbox,
@@ -462,7 +420,6 @@ function makeEnv(opts = {}) {
     timers,
     layout,
     providerUI,
-    workspaceUI,
     el: (id) => document.getElementById(id),
     getSession: sessionRef,
     setSession: (s) => {
@@ -495,11 +452,6 @@ async function openProviderModal(env) {
 
 async function openBindingsModal(env) {
   env.el("btn-open-bindings-modal").dispatch("click");
-  await settle(40);
-}
-
-async function openWorkspaceModal(env) {
-  env.el("btn-open-workspace-modal").dispatch("click");
   await settle(40);
 }
 
@@ -541,17 +493,12 @@ const checkboxTarget = (actor, checked) => ({
 // ---- HTML / CSS contract -----------------------------------------------------
 test("index.html ships every v0.11 control that survives (the right-hand column is gone)", () => {
   for (const id of [
-    "btn-open-workspace-modal",
-    "workspace-name-label",
+    "btn-open-settings-modal",
     "btn-toggle-board",
     "btn-toggle-channels",
     "board-resizer",
     "channels-resizer",
-    "workspace-modal",
-    "input-workspace-path",
-    "btn-pick-native-folder",
-    "btn-switch-workspace",
-    "workspace-session-list",
+    "settings-modal",
     "chk-auto-append",
     "endpoint-preview",
     "endpoint-preview-message-url",
@@ -578,7 +525,7 @@ test("index.html ships every v0.11 control that survives (the right-hand column 
   const p = HTML_SRC.indexOf("static/js/providers.js");
   const r = HTML_SRC.indexOf("static/js/roster.js");
   const b = HTML_SRC.indexOf("static/js/budget.js");
-  const w = HTML_SRC.indexOf("static/js/workspace.js");
+  const w = HTML_SRC.indexOf("static/js/archive.js");
   const a = HTML_SRC.indexOf("static/js/app.js");
   assert.ok(pf >= 0 && pf < c && c < l && l < p && p < r && r < b && b < w && w < a);
 });
@@ -614,7 +561,8 @@ test("style.css defines the collapse/resize/template hooks and the v0.12.1 card 
     ".endpoint-preview-url",
     ".template-row",
     ".advanced-bindings",
-    ".workspace-current-path",
+    ".settings-section",
+    ".archive-bar-fill",
   ]) {
     assert.ok(CSS_SRC.includes(frag), `missing CSS ${frag}`);
   }
@@ -763,160 +711,6 @@ test("layout: the platform's <html data-layout> decides (a touch tablet at 1024 
   html.setAttribute("data-layout", "phone");
   env.layout.apply();
   assert.ok(!env.el("workspace-grid").classList.contains("narrow-layout"));
-});
-
-// ---- workspace ---------------------------------------------------------------
-test("workspace: load labels the top bar; modal shows current + recent + sessions", async () => {
-  const env = makeEnv();
-  const res = await env.workspaceUI.load();
-  assert.equal(res.ok, true);
-  assert.equal(env.el("workspace-name-label").textContent, "MyWS");
-  assert.ok(env.count("GET", "/api/workspaces") >= 1);
-
-  await openWorkspaceModal(env);
-  assert.equal(env.el("workspace-modal").style.display, "flex");
-  assert.equal(env.el("workspace-current-name").textContent, "MyWS");
-  assert.match(env.el("workspace-current-path").textContent, /Arena-WS/);
-  assert.match(env.el("workspace-current-meta").textContent, /上次对局：s1/);
-  const recent = env.el("workspace-recent-list").innerHTML;
-  assert.match(recent, /Other/);
-  assert.match(recent, /D:\\Arena-WS\\Other/);
-  const sessions = env.el("workspace-session-list").innerHTML;
-  assert.match(sessions, /old-1/);
-  assert.match(sessions, /当前/);
-  assert.ok(env.count("GET", "/api/sessions") >= 1);
-});
-
-test("workspace: /api/state workspace summary labels the top bar without a fetch", async () => {
-  const env = makeEnv();
-  env.workspaceUI.onState({ name: "FromState", path: "D:\\state\\ws" });
-  assert.equal(env.el("workspace-name-label").textContent, "FromState");
-  assert.equal(env.calls.filter((c) => c.url.endsWith("/api/workspaces")).length, 0);
-});
-
-test("workspace: native picker fills the path; failure falls back to manual input", async () => {
-  const env = makeEnv();
-  await openWorkspaceModal(env);
-  env.el("btn-pick-native-folder").dispatch("click");
-  await settle();
-  assert.equal(env.count("POST", "/api/workspaces/pick-native-folder"), 1);
-  assert.equal(env.el("input-workspace-path").value, "D:\\Picked\\Ws");
-  assert.match(env.el("workspace-picker-status").textContent, /已选择/);
-
-  env.backend.failures["POST /api/workspaces/pick-native-folder"] = [
-    400,
-    "native folder picker is unavailable in this environment",
-  ];
-  env.el("btn-pick-native-folder").dispatch("click");
-  await settle();
-  assert.match(env.el("workspace-picker-status").textContent, /手动输入/);
-  assert.ok(env.toasts.some((t) => /手动输入绝对路径/.test(t)));
-});
-
-test("workspace: switch validates, confirms, POSTs select and reloads the page", async () => {
-  const env = makeEnv();
-  await openWorkspaceModal(env);
-  env.el("input-workspace-path").value = "relative/path";
-  env.el("btn-switch-workspace").dispatch("click");
-  await settle();
-  assert.equal(env.el("workspace-form-error").hidden, false);
-  assert.match(env.el("workspace-form-error").textContent, /绝对路径/);
-  assert.equal(env.count("POST", "/api/workspaces/select"), 0);
-
-  env.setConfirm(false);
-  env.el("input-workspace-path").value = "D:\\Arena-WS\\Next";
-  env.el("btn-switch-workspace").dispatch("click");
-  await settle();
-  assert.equal(env.count("POST", "/api/workspaces/select"), 0); // user cancelled
-
-  env.setConfirm(true);
-  env.el("chk-workspace-create-missing").checked = true;
-  env.el("chk-workspace-initialize-existing").checked = false;
-  env.el("btn-switch-workspace").dispatch("click");
-  await settle();
-  assert.equal(env.count("POST", "/api/workspaces/select"), 1);
-  assert.deepEqual(env.backend.lastSelect, {
-    path: "D:\\Arena-WS\\Next",
-    create_if_missing: true,
-  });
-  assert.equal(env.el("workspace-current-name").textContent, "ws9");
-  assert.equal(env.reloads.length, 1);
-  assert.ok(env.toasts.some((t) => /工作区已切换/.test(t)));
-});
-
-test("workspace: live session updates flip the running lock while the modal is open", async () => {
-  const env = makeEnv();
-  await openWorkspaceModal(env);
-  assert.equal(env.el("btn-switch-workspace").disabled, false);
-  env.setSession(makeSession({ status: "running" }));
-  env.workspaceUI.onSession();
-  assert.equal(env.el("btn-switch-workspace").disabled, true);
-  assert.match(env.el("workspace-switch-hint").textContent, /暂停/);
-  env.setSession(makeSession({ status: "paused" }));
-  env.workspaceUI.onSession();
-  assert.equal(env.el("btn-switch-workspace").disabled, false);
-});
-
-test("workspace: switching is disabled while running and never posts select", async () => {
-  const env = makeEnv({ session: { status: "running" } });
-  await openWorkspaceModal(env);
-  assert.equal(env.el("btn-switch-workspace").disabled, true);
-  assert.match(env.el("workspace-switch-hint").textContent, /暂停/);
-  env.el("input-workspace-path").value = "D:\\Arena-WS\\Next";
-  env.el("btn-switch-workspace").dispatch("click");
-  await settle();
-  assert.equal(env.count("POST", "/api/workspaces/select"), 0);
-  assert.ok(env.toasts.some((t) => /暂停/.test(t)));
-});
-
-test("workspace: backend switch failure keeps the old workspace and shows the error", async () => {
-  const env = makeEnv();
-  await openWorkspaceModal(env);
-  env.backend.failures["POST /api/workspaces/select"] = [409, "工作区被锁定"];
-  env.el("input-workspace-path").value = "D:\\Arena-WS\\Next";
-  env.el("btn-switch-workspace").dispatch("click");
-  await settle();
-  assert.match(env.el("workspace-form-error").textContent, /切换失败：.*工作区被锁定/);
-  assert.equal(env.el("workspace-current-name").textContent, "MyWS");
-  assert.equal(env.reloads.length, 0);
-});
-
-test("workspace: loading a game reuses /api/sessions and notifies the app", async () => {
-  const env = makeEnv();
-  await openWorkspaceModal(env);
-  assert.match(env.el("workspace-session-list").innerHTML, /old-1/);
-  env.el("workspace-session-list").dispatch("click", {
-    target: {
-      closest: (sel) => {
-        if (sel === "[data-action]") return { getAttribute: () => "load-session" };
-        if (sel.includes("session-item")) return { getAttribute: () => "old-1" };
-        return null;
-      },
-    },
-  });
-  await settle();
-  assert.equal(env.count("POST", "/api/sessions/old-1/load"), 1);
-  assert.equal(env.loadedSessions.length, 1);
-  assert.equal(env.loadedSessions[0].session_id, "old-1");
-  assert.equal(env.el("workspace-modal").style.display, "none");
-});
-
-test("workspace: session loading is disabled while running", async () => {
-  const env = makeEnv({ session: { status: "running" } });
-  await openWorkspaceModal(env);
-  const html = env.el("workspace-session-list").innerHTML;
-  assert.match(html, /disabled/);
-  env.el("workspace-session-list").dispatch("click", {
-    target: {
-      closest: (sel) => {
-        if (sel === "[data-action]") return { getAttribute: () => "load-session" };
-        if (sel.includes("session-item")) return { getAttribute: () => "old-1" };
-        return null;
-      },
-    },
-  });
-  await settle();
-  assert.equal(env.count("POST", "/api/sessions/old-1/load"), 0);
 });
 
 // ---- provider: auto_append_path + endpoint preview ---------------------------

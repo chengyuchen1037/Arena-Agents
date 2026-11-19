@@ -1,15 +1,20 @@
-"""The session container (save format v4, v0.12.1).
+"""The session container (save format v5, v0.13).
 
 It holds what the *application* persists next to the world: bindings, flags shown to the user, the
 spending limit, the roster snapshot of the game (names, avatars, persona / memory as they were when it
-started) and the serialized world / usage.  The live game objects (``World``, ``Supervisor`` ...) are
-owned by the orchestrator; ``world`` / ``usage_stats`` here are refreshed right before every save.
+started), the serialized world / usage, and (v0.13) who - if anybody - plays a seat instead of its agent.
+The live game objects (``World``, ``Supervisor`` ...) are owned by the orchestrator; ``world`` /
+``usage_stats`` here are refreshed right before every save.
+
+v4 -> v5 (docs/v0.13-plan.md F10, F22): ``takeover``, ``human_spans``, ``created_at`` / ``started_at`` /
+``finished_at``.  Games of v0.12.1 (v4) are converted with ``tools/migrate_v0121_to_archive.py``.
 """
 
 from __future__ import annotations
 
 import re
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -18,8 +23,8 @@ from app.game.budget import BudgetSettings
 from app.providers.models import ModelBinding
 from app.world.types import MODERATOR_ID
 
-SESSION_SCHEMA_VERSION = 4
-APP_ENGINE_VERSION = "v0.12.1"
+SESSION_SCHEMA_VERSION = 5
+APP_ENGINE_VERSION = "v0.13.1"
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 __all__ = [
@@ -29,9 +34,32 @@ __all__ = [
     "SESSION_SCHEMA_VERSION",
     "BindingIssue",
     "GameSession",
+    "HumanSpan",
     "IncompatibleSessionError",
     "Participant",
+    "Takeover",
+    "utc_now_iso",
 ]
+
+
+def utc_now_iso() -> str:
+    """The current time as ISO-8601 UTC text (``created_at`` / ``started_at`` / ``finished_at`` of a game)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+class Takeover(BaseModel):
+    """Who plays a seat instead of its agent (F2, F10): ``seat`` is ``None`` while nobody does."""
+
+    seat: str | None = None
+
+
+class HumanSpan(BaseModel):
+    """A stretch of the ledger during which a person played ``seat`` (F22): ``from_seq`` is the world's
+    ``seq`` when the takeover began, ``to_seq`` the ``seq`` when it ended (``None`` = still taken over)."""
+
+    seat: str
+    from_seq: int = 0
+    to_seq: int | None = None
 
 
 class IncompatibleSessionError(ValueError):
@@ -81,6 +109,13 @@ class GameSession(BaseModel):
     moderator_avatar: dict[str, Any] | None = None  # the moderator's random pixel avatar, fixed for this game
     review_done: list[str] = Field(default_factory=list)  # seats whose post-game review has been written (E21)
 
+    # v0.13 (F10, F22)
+    takeover: Takeover = Field(default_factory=Takeover)  # the seat a person plays right now, if any
+    human_spans: list[HumanSpan] = Field(default_factory=list)  # every stretch a person played a seat
+    created_at: str | None = Field(default_factory=utc_now_iso)  # ISO-8601 UTC; when the game was created
+    started_at: str | None = None  # when it was first started
+    finished_at: str | None = None  # when it last ended (cleared when it is continued)
+
     scenario_spec: dict[str, Any] = Field(default_factory=dict)
     world: dict[str, Any] = Field(default_factory=dict)
     usage_stats: dict[str, Any] = Field(default_factory=dict)
@@ -100,7 +135,7 @@ class GameSession(BaseModel):
         if value != SESSION_SCHEMA_VERSION:
             raise IncompatibleSessionError(
                 f"该存档来自不同版本的引擎（存档格式 v{value}，当前为 v{SESSION_SCHEMA_VERSION}），"
-                "v0.12.1 不兼容旧版本存档。"
+                "v0.13 不能直接打开；v0.12.1 的对局请用 tools/migrate_v0121_to_archive.py 转换后导入。"
             )
         return value
 

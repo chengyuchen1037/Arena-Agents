@@ -33,7 +33,7 @@ INJECT_HISTORY_CHARS = 8_000
 RECENT_ACTIONS_LIMIT = 12
 
 _FALLBACK_PLAYER = (
-    "你是 {{id}} {{name}}（座位 {{seat}}），一名参与者。{{persona}}\n\n{{rules}}\n\n{{memory_block}}\n\n"
+    "你是 {{id}} {{name}}（座位 {{seat}}），一名参与者。\n\n# 你的性格与行为指引\n\n{{persona}}\n\n{{rules}}\n\n{{memory_block}}\n\n"
     "你会被每一条新消息唤醒；你的对话是连续的，但重要的结论请用 write_note 记下。发言只能通过 speak 工具；"
     "没有事情要做时调用 sleep。"
 )
@@ -41,7 +41,11 @@ _FALLBACK_MODERATOR = (
     "你是主持人。你负责按规则推进对局：开放发言权、发起请求、裁决、公告。\n\n{{rules}}\n\n{{manual}}\n\n"
     "你会被每一条新消息唤醒；你的对话是连续的，但重要的结论请用 write_note 记下；没有事情要做时调用 sleep。"
 )
+_PLACEHOLDER_RE = re.compile(r"\{\{(\w+)\}\}")
 NO_PERSONA = "（没有特别设定，按你自己的判断行事。）"
+#: A persona longer than this (an old, free-form one) is cut when it goes into the prompt; the file is left alone (G44).
+#: ``app.storage.roster.PERSONA_CHARS`` is the same number: a test keeps them equal (this package does not import storage).
+PERSONA_PROMPT_CHARS = 500
 
 NUDGE_TEXT = (
     "（系统提示）你的正文不会发送到任何频道。如果要发言，请调用 speak（或 speak_template）；"
@@ -100,6 +104,14 @@ class ArenaBrain:
         player = getter(agent_id) if callable(getter) else None
         return str(getattr(player, "persona", "") or "")
 
+    def _persona_text(self, agent_id: str) -> str:
+        """The persona as the prompt gets it: ``NO_PERSONA`` when there is none, cut to ``PERSONA_PROMPT_CHARS`` when it is
+        longer (the cut text ends with an ellipsis)."""
+        persona = self._persona(agent_id).strip()
+        if len(persona) > PERSONA_PROMPT_CHARS:
+            persona = persona[: PERSONA_PROMPT_CHARS - 1].rstrip() + "…"
+        return persona or NO_PERSONA
+
     def system_prompt(self, agent_id: str) -> str:
         cached = self._prompt_cache.get(agent_id)
         if cached is not None:
@@ -112,15 +124,16 @@ class ArenaBrain:
             "name": str(me.get("name") or agent_id),
             "seat": str(me.get("seat") or ""),
             "id": agent_id,
-            "persona": self._persona(agent_id).strip() or NO_PERSONA,
+            "persona": self._persona_text(agent_id),
             "memory_block": f"# 你的记忆与经验\n\n{memory}\n" if memory and kind != "moderator" else "",
             "memory": memory,
             "rules": self.spec.rules_text.strip(),
             "manual": self.spec.manual_text.strip(),
         }
-        text = self._prompt_template(kind)
-        for key, value in values.items():
-            text = text.replace("{{" + key + "}}", value)
+        # ONE pass over the template: what is put in for a variable is never scanned again.  (Replacing the variables one after
+        # the other would let a persona or a memory that says ``{{manual}}`` pull the moderator's manual into a player's
+        # prompt, and a text that says ``{{id}}`` would be rewritten.)  A placeholder that is not a variable stays as it is.
+        text = _PLACEHOLDER_RE.sub(lambda m: values.get(m.group(1), m.group(0)), self._prompt_template(kind))
         text = re.sub(r"\n{3,}", "\n\n", text)  # an empty {{memory_block}} must not leave a hole
         self._prompt_cache[agent_id] = text
         return text

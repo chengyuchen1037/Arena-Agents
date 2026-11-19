@@ -2,7 +2,7 @@
 
 The default source is LiteLLM's ``model_prices_and_context_window.json``.  A refresh downloads it (https
 only, SSRF-guarded like model discovery, size capped, no redirects) and keeps a *reduced* copy in the
-data directory (``pricing.v1.json``, plain JSON: it is public data).  :meth:`PriceStore.match` then
+data directory (``pricing.json``, plain JSON: it is public data).  :meth:`PriceStore.match` then
 finds the entry of a provider's model so the UI can fill in the four prices and the context window; the
 user can still edit them.
 
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_PRICE_SOURCE_URL = (
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 )
-PRICE_FILE = "pricing.v1.json"
+PRICE_FILE = "pricing.json"
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 30.0
 MAX_ENTRIES = 50_000
@@ -275,7 +275,7 @@ async def fetch_source(
 
 
 class PriceStore:
-    """The price table of one data directory (workspace): source URL, reduced entries, status."""
+    """The price table of the data directory: source URL, reduced entries, status."""
 
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = Path(data_dir).resolve()

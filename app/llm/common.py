@@ -197,6 +197,21 @@ class StreamProgress:
     emitted: bool = False
 
 
+def _notify_retry(
+    callback: Callable[[BaseException, int, float], None] | None, exc: BaseException, attempt: int, delay: float
+) -> None:
+    """Tell the observer of :func:`run_with_retry` about an attempt that failed and will be repeated.
+
+    The error log (v0.13.1, G34) listens here; an observer that raises is ignored: watching must never break
+    the retry."""
+    if callback is None:
+        return
+    try:
+        callback(exc, attempt, delay)
+    except Exception:  # noqa: BLE001 - observing must never break a request
+        logger.debug("on_retry callback failed", exc_info=True)
+
+
 async def run_with_retry(
     attempt: Callable[[StreamProgress], Awaitable[LLMResponse]],
     *,
@@ -204,16 +219,25 @@ async def run_with_retry(
     downgrade: Callable[[BaseException], bool] | None = None,
     rand: Callable[[], float] = random.random,
     label: str = "LLM",
+    on_retry: Callable[[BaseException, int, float], None] | None = None,
 ) -> LLMResponse:
     """Run ``attempt`` with transient-error retries.
 
     * ``downgrade(exc)`` may edit the request and return True to retry at once
       without spending the retry budget (parameter rejected by the upstream);
-    * retries only happen while the stream has produced nothing visible.
+    * retries only happen while the stream has produced nothing visible;
+    * ``on_retry(exc, attempt, delay)`` is called (synchronously, before the wait) for every attempt that failed
+      and is going to be repeated after a wait: ``attempt`` is its 1-based number (a downgrade counts as an
+      attempt), ``delay`` the seconds that are waited first.  The failure that ends the loop is not reported
+      here, it is raised; neither is a downgrade (an upstream that rejects an optional parameter does so on every
+      request: that is a compatibility step, not an error to list).  ``exc`` is the raw exception: a caller that
+      stores its text scrubs it first.
     """
     failures = 0
+    attempts = 0  # attempts made so far (what ``on_retry`` calls ``attempt``)
     while True:
         progress = StreamProgress()
+        attempts += 1
         try:
             return await attempt(progress)
         except Exception as exc:  # noqa: BLE001 - classified below
@@ -237,6 +261,7 @@ async def run_with_retry(
                 policy.max_attempts - 1,
                 delay,
             )
+            _notify_retry(on_retry, exc, attempts, delay)
             await asyncio.sleep(delay)
 
 

@@ -134,7 +134,7 @@ def test_ui_events_follow_the_contract_shapes() -> None:
     kinds = {e.type for e in events}
     assert kinds <= {"channel.created", "channel.updated", "floor.changed", "message.committed"}
     channel_keys = {"id", "name", "type", "mode", "members", "readonly", "frozen", "system", "owner", "floor"}
-    floor_keys = {"kind", "active", "paused", "seconds_left", "queue", "free"}
+    floor_keys = {"kind", "active", "paused", "seconds_left", "untimed", "queue", "free"}
     for event in events:
         if event.type.startswith("channel."):
             assert set(event.data) == {"channel"} and set(event.data["channel"]) == channel_keys

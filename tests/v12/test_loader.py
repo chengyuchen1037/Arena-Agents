@@ -790,6 +790,10 @@ def test_system_prompts_render_with_the_werewolf_scenario(ww: ScenarioSpec) -> N
         assert "\n\n\n" not in text  # an empty variable leaves no hole
     assert "Alex" in player and "p1" in player and "冷静而谨慎" in player
     assert player.startswith("# 你是谁\n\n你是 **p1 Alex**")  # the form models see: ``<id> <name>``
+    assert "# 你的性格与行为指引\n\n冷静而谨慎\n\n" in player  # (G44) its own section, between who he is and what he remembers
+    assert player.index("# 你的性格与行为指引") < player.index("# 你的记忆与经验") < player.index(ww.rules_text.strip())
+    plain = ArenaBrain(world, ww, docs_dir=None).system_prompt("p1")
+    assert "# 你的性格与行为指引\n\n（没有特别设定，按你自己的判断行事。）\n\n" in plain  # no persona: the section stays, with the fallback text
     # the memory block is for players only (and only when there is a memory)
     assert "# 你的记忆与经验" in player and "上一局我总被怀疑。" in player and "上一局" not in moderator
     assert "你的记忆与经验" not in ArenaBrain(world, ww, docs_dir=None).system_prompt("p1")
@@ -1426,6 +1430,11 @@ def test_prompt_templates_use_only_the_documented_variables() -> None:
     lines = participant.splitlines()
     at = lines.index("{{memory_block}}")
     assert lines[at - 1] == "" and lines[at + 1] == ""
+    # v0.13.1 (G44): the persona is a section of its own - a heading and a paragraph - not a clause of the introduction
+    assert participant.count("{{persona}}") == 1 and "你的性格与表达风格" not in participant
+    at = lines.index("{{persona}}")
+    assert lines[at - 2] == "# 你的性格与行为指引" and lines[at - 1] == "" and lines[at + 1] == ""
+    assert lines.index("# 你的性格与行为指引") < lines.index("{{memory_block}}") < lines.index("{{rules}}")  # persona, then memory, then the rules
 
 
 def test_the_prompts_stay_game_agnostic() -> None:

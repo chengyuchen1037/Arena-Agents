@@ -16,12 +16,20 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import deque
+from collections.abc import Collection
 from typing import Any
 
 from app.world.types import UiEvent
 
-#: Event types that are safe to drop under back-pressure: each one is superseded by the next of its kind.
-ORDINARY_TYPES = frozenset({"agent.status", "agent.metrics", "request.progress", "budget.updated"})
+#: Event types that are safe to drop under back-pressure: each one is superseded by the next of its kind
+#: (``llm.call``, v0.13.1: one line of the error log - a client that missed some asks ``GET /api/llm/calls?after=``).
+ORDINARY_TYPES = frozenset({"agent.status", "agent.metrics", "request.progress", "budget.updated", "llm.call"})
+
+#: Event types only a *trusted* client may be sent (v0.13.1).  An ``llm.call`` line says which model answered a call, how
+#: many tokens it took and what an error said - what ``GET /api/llm/calls`` gives to trusted clients only
+#: (``require_trusted_client``: a token, or a loopback peer).  The SSE endpoint subscribes every other client with
+#: ``exclude=TRUSTED_ONLY_TYPES``: it gets no such event, neither live nor in a replay.
+TRUSTED_ONLY_TYPES = frozenset({"llm.call"})
 
 # v0.12.1: every message wakes every agent, so ``agent.status`` / ``agent.metrics`` events are far more
 # frequent than before - the ring holds more of them so a short disconnect can still be resumed.
@@ -60,14 +68,20 @@ class BusEvent:
 
 
 class SubscriberQueue(asyncio.Queue):
-    """A bounded per-subscriber queue that sheds the least valuable event when it is full."""
+    """A bounded per-subscriber queue that sheds the least valuable event when it is full.
 
-    def __init__(self, maxsize: int = DEFAULT_QUEUE_SIZE) -> None:
+    ``exclude`` = event types this subscriber is never told about: they are not queued at all (so they cannot crowd
+    anything out of the queue either)."""
+
+    def __init__(self, maxsize: int = DEFAULT_QUEUE_SIZE, exclude: Collection[str] = ()) -> None:
         super().__init__(maxsize=max(1, int(maxsize)))
+        self.exclude: frozenset[str] = frozenset(exclude)
         self.dropped = 0  # events shed because the subscriber was too slow
         self.lost_important = False  # an event that is *not* self-superseding was shed
 
     def offer(self, event: BusEvent) -> None:
+        if event.type in self.exclude:
+            return
         if self.full():
             self._evict_one()
         self.put_nowait(event)
@@ -116,7 +130,7 @@ class EventBus:
 
     # ------------------------------------------------------------------ subscribing --
     def subscribe(
-        self, last_event_id: int | str | None = None
+        self, last_event_id: int | str | None = None, *, exclude: Collection[str] = ()
     ) -> tuple[list[BusEvent] | None, SubscriberQueue]:
         """Register a subscriber.
 
@@ -125,15 +139,22 @@ class EventBus:
         when it cannot be resumed (first connection, or the gap is too large, or the id is unknown):
         the endpoint must then send a full snapshot first.  Events published from now on arrive on
         ``queue``; no event is both in ``replay`` and in ``queue`` (this method does not await).
+
+        ``exclude``: event types this subscriber must not get (:data:`TRUSTED_ONLY_TYPES` for a client that is not
+        trusted) - neither in the replay nor on the queue.  The ring still holds them for everybody else; the ids the
+        subscriber sees simply skip them, which a resume with ``Last-Event-ID`` does not mind.
         """
-        queue = SubscriberQueue(self.queue_size)
+        blocked = frozenset(exclude)
+        queue = SubscriberQueue(self.queue_size, exclude=blocked)
         self._subscribers.add(queue)
-        return self._replay_after(last_event_id), queue
+        return self._replay_after(last_event_id, blocked), queue
 
     def unsubscribe(self, queue: SubscriberQueue) -> None:
         self._subscribers.discard(queue)
 
-    def _replay_after(self, last_event_id: int | str | None) -> list[BusEvent] | None:
+    def _replay_after(
+        self, last_event_id: int | str | None, exclude: frozenset[str] = frozenset()
+    ) -> list[BusEvent] | None:
         if last_event_id is None:
             return None
         try:
@@ -147,4 +168,4 @@ class EventBus:
         oldest = self._ring[0].id if self._ring else self._last_id + 1
         if last + 1 < oldest:
             return None  # the ring no longer holds the whole gap
-        return [event for event in self._ring if event.id > last]
+        return [event for event in self._ring if event.id > last and event.type not in exclude]

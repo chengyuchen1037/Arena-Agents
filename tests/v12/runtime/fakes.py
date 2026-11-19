@@ -278,6 +278,7 @@ class FakeWorld:
         self.redeliver_count = 0
         self.notify_calls = 0
         self.notifier: Callable[[], None] | None = None
+        self.untimed_open = False  # what ``untimed_floor_open()`` answers: a person holds a floor without a deadline
 
     # -- state
     def set_running(self, running: bool, reason: str = "") -> None:
@@ -308,6 +309,9 @@ class FakeWorld:
 
     def next_deadline(self) -> float | None:
         return self.deadline
+
+    def untimed_floor_open(self) -> bool:
+        return self.untimed_open
 
     def redeliver(self) -> None:
         self.redeliver_count += 1
@@ -648,6 +652,7 @@ class Rig:
         config: AgentConfig | None = None,
         *,
         context_window: Callable[[], int] | None = None,
+        soft_gate: Any = None,
         **cfg: Any,
     ) -> Agent:
         """An :class:`Agent` wired to this rig with fast timings (override through ``cfg``)."""
@@ -663,6 +668,7 @@ class Rig:
             config or fast_config(**cfg),
             book=self.book,
             context_window=context_window,
+            soft_gate=soft_gate,
         )
 
     def conversation(self, agent_id: str = "a1") -> Any:

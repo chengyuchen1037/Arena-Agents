@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from app.world.chat import FLOOR_MODES
+from app.world.chat import FLOOR_MODES, floor_view, token_untimed
 from app.world.types import ENGINE_ID, MODERATOR_ID, Code, Receipt
 
 from .helpers import (
@@ -61,7 +61,9 @@ def check_invariants(world: ChatWorld) -> None:
                 assert set(statuses[at + 1 :]) <= {"pending", "done"}  # (a waiting member may have been removed)
             for token in group.tokens:
                 if token.status == "active":
-                    if group.paused:
+                    if group.paused or token_untimed(world, channel, token):
+                        # frozen, or (v0.13.1) held by the seat a person plays in a public channel: no deadline,
+                        # the nominal time left is kept
                         assert token.deadline is None and token.remaining is not None
                     else:
                         assert token.deadline is not None and token.remaining is None
@@ -113,7 +115,7 @@ def check_after_tick(world: ChatWorld) -> None:
         group = channel.group
         if group is not None and not group.paused:
             for token in group.tokens:
-                if token.status == "active":
+                if token.status == "active" and not token_untimed(world, channel, token):
                     assert token.deadline > now, "tick() must have expired every overdue token"
 
 
@@ -245,6 +247,47 @@ def test_random_sequences_keep_the_world_consistent(seed: int) -> None:
         check_deliveries(world, world.drain_outbox(), f"seed {seed} step {step}")
         world.drain_events()
     assert world.ledger  # something happened
+
+
+def random_move_with_a_person(rng: random.Random, world: ChatWorld) -> Receipt | None:
+    """Like :func:`random_move`, and now and then a person takes a seat over / gives it back (v0.13.1)."""
+    if rng.random() < 0.06:
+        world.set_untimed_holders(rng.choice([[], ["N1"], ["N2"], ["N1", "N3"], ["ghost"]]))
+        return None
+    return random_move(rng, world)
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_random_sequences_with_a_played_seat_keep_the_world_consistent(seed: int) -> None:
+    """The seat a person plays holds public floors without a deadline; taking it over and giving it back in the
+    middle of anything must leave every floor in a state the invariants accept (an untimed token has no deadline
+    and its nominal time, every other active token of a running group has a deadline and tick() expires it)."""
+    rng = random.Random(1000 + seed)
+    world = make_world()
+    world.set_untimed_holders([rng.choice(PLAYERS)])
+    for cid in CHANNELS:
+        members = pick(rng, PLAYERS, 2, 4)
+        mode = rng.choice(["closed", "free", "listen"])
+        assert new_channel(world, cid, members=members, mode=mode, type_=rng.choice(["public", "group"])).ok
+    for step in range(120):
+        if rng.random() < 0.01:
+            holders = world.untimed_holders
+            world = reload(world)
+            world.set_untimed_holders(holders)  # (what the orchestrator does after a load: the save does not know)
+        receipt = random_move_with_a_person(rng, world)
+        if receipt is not None:
+            assert receipt.code != Code.INTERNAL_ERROR, f"seed {seed} step {step}: {receipt.message}"
+        check_invariants(world)
+        for channel in world.state.channels:  # the view agrees with the tokens
+            view = floor_view(world, channel)
+            group = channel.group if channel.mode in FLOOR_MODES else None
+            active = [t for t in group.tokens if t.status == "active"] if group is not None else []
+            timed = [t for t in active if not token_untimed(world, channel, t)]
+            assert view["untimed"] is (bool(active) and not timed), f"seed {seed} step {step}"
+            assert view["untimed"] is False or view["seconds_left"] is None
+        check_deliveries(world, world.drain_outbox(), f"seed {seed} step {step}")
+        world.drain_events()
+    assert world.ledger
 
 
 def test_the_fuzz_reaches_most_rejection_codes() -> None:

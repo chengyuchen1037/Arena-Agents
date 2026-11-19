@@ -45,13 +45,15 @@ ENV/
 build/
 dist/
 
-# Runtime data and workspaces
+# Runtime data (v0.13: <program dir>/data; the volume is mounted at /app/data at run time)
+data/
 saves/
 sessions/
 logs/
 workspaces/
 arena-data/
 .arena/
+**/*.arenaagents
 **/*.log
 
 # Not needed in the image

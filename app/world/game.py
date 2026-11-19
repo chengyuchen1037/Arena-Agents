@@ -97,6 +97,17 @@ def _type_matches(entry_type: str, patterns: list[str]) -> bool:
     return False
 
 
+def _data_for_a_model(entry_type: str, data: dict[str, Any]) -> dict[str, Any]:
+    """A copy of a ledger entry's ``data`` for ``get_ledger``, without what only the spectators' clients need.
+
+    v0.13.1 (G15): a floor handed out without a deadline is marked ``untimed`` in the ledger (the replay draws no
+    countdown for it); the moderator must not learn from that which seat a person plays."""
+    out = copy.deepcopy(data)
+    if entry_type == "floor.granted":
+        out.pop("untimed", None)
+    return out
+
+
 def _cut(text: str, limit: int) -> tuple[str, dict[str, int] | None]:
     """Truncate ``text`` to ``limit`` characters (D19); the second item is the receipt ``truncated``."""
     if limit > 0 and len(text) > limit:
@@ -1132,7 +1143,7 @@ class GameModule(WorldModule):
                 "type": e.type,
                 "channel_id": e.channel_id,
                 "actor_id": e.actor_id,
-                "data": copy.deepcopy(e.data),
+                "data": _data_for_a_model(e.type, e.data),
             }
             for e in entries
         ]

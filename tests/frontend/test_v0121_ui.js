@@ -1,7 +1,7 @@
 "use strict";
 // v0.12.1 features of the UI against the fake DOM (see harness.js):
 //   roster      names / avatars / persona / memory editors, "用主持人模型完善" (draft first, confirm to save),
-//               regenerate (one / all), the 名册 menu (export, import with a preview, clear, load-memory switch),
+//               regenerate (one / all), the 名册 menu (clear, load-memory switch; v0.13: export / import moved to the settings),
 //               review (复盘全部 / 复盘此玩家 / progress / 已复盘)
 //   budget      the "上限" dialog (GET/PUT /api/budget)
 //   prices      price source bar, four model prices, suggestions that fill the form
@@ -35,6 +35,13 @@ const typeInto = (env, kind, id, text) => {
   env.el(`ta-detail-${kind}`).value = text;
   env.el("detail-panel").dispatch("input", { target: { id: `ta-detail-${kind}`, value: text, getAttribute: (k) => (k === "data-draft-key" ? `${id}:${kind}` : null) } });
 };
+// v0.13.1 (G42): the memory editor is structured - an input per other seat, a box for the lessons, a box for the notes of "完善"
+const typeImpression = (env, otherId, text) =>
+  env.el("detail-panel").dispatch("input", { target: { id: "", value: text, getAttribute: (k) => (k === "data-imp-id" ? otherId : null) } });
+const typeBox = (env, boxId, text) => {
+  env.el(boxId).value = text;
+  env.el("detail-panel").dispatch("input", { target: { id: boxId, value: text, getAttribute: () => null } });
+};
 const textOf = (html) => html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 const html = (env, id) => env.el(id).innerHTML;
 const cardName = (env, id) => ((env.el("participants-grid").innerHTML.split(/(?=<div class="pcard[ "])/).find((p) => p.includes(`data-actor="${id}"`)) || "").match(/<span class="pcard-name">([^<]*)<\/span>/) || [])[1];
@@ -56,7 +63,9 @@ test("before the game starts the name is editable (1-20 characters, unique); sav
   const head = html(env, "detail-head");
   assert.match(head, /<input type="text" class="form-input detail-name-input" id="input-detail-name" value="Carol"/);
   assert.match(head, /data-detail-action="save-name"/);
-  assert.match(head, /data-detail-action="regen-avatar"/);
+  // (v0.13.1, G29: the re-roll lives in the small panel behind the 🎲 next to the avatar code)
+  assert.match(head, /data-detail-action="toggle-avatar-pop"/);
+  assert.ok(!head.includes("regen-avatar"), "the panel is closed until the 🎲 is pressed");
 
   env.el("input-detail-name").value = "Caroline";
   panelClick(env, "save-name");
@@ -82,6 +91,9 @@ test("name validation happens locally first: empty, too long, a duplicate; the s
   assert.match(await attempt("   "), /名字不能为空/);
   assert.match(await attempt("x".repeat(21)), /名字最多 20 个字符/);
   assert.match(await attempt("Bob"), /名字「Bob」已被其他玩家使用/);
+  // (v0.13.1) a colon is refused as well - ASCII or full-width - in the server's own words
+  assert.match(await attempt("Carol:2"), /名字不能包含冒号（: 或 ：）。/);
+  assert.match(await attempt("Carol：2"), /名字不能包含冒号（: 或 ：）。/);
   assert.equal((backend.rosterPuts || []).length, 0, "nothing was sent");
   assert.equal(cardName(env, "N3"), "Carol");
   // unchanged name: no request either
@@ -93,6 +105,49 @@ test("name validation happens locally first: empty, too long, a duplicate; the s
   assert.match(after, /名字含有非法字符/);
   assert.equal(cardName(env, "N3"), "Carol");
   assert.match(lastToast(env), /名字含有非法字符/);
+});
+
+test("an OLD name with a colon (stored before the server refused them) still loads and shows; Save on it changes nothing; only a NEW nickname with a colon is refused", async () => {
+  const OLD = "Carol:2";
+  const COLON = /名字不能包含冒号（: 或 ：）。/;
+  const participants = F.makeSession().participants.map((p) => (p.id === "N3" ? { ...p, name: OLD } : p));
+  const { env, backend } = await live({ status: "idle", participants });
+  backend.roster.seats[2].name = OLD; // (the server still holds it and still sends it)
+  await env.app().roster().load();
+  const attempt = async (value) => {
+    env.el("input-detail-name").value = value;
+    panelClick(env, "save-name");
+    await flush(env, 20);
+    return textOf(html(env, "detail-head"));
+  };
+  // shown as it is: the card, the viewpoint list and the name box of the panel - nothing complains about a name that is only displayed
+  assert.equal(cardName(env, "N3"), OLD);
+  assert.match(html(env, "select-viewpoint"), /<option value="N3">3 · Carol:2<\/option>/);
+  cardClick(env, "N3");
+  assert.match(html(env, "detail-head"), /id="input-detail-name" value="Carol:2"/);
+  assert.doesNotMatch(textOf(html(env, "detail-head")), /冒号/);
+  // Save / Enter on the name as it is (with or without white space around it): nothing to save - no request, no complaint
+  assert.doesNotMatch(await attempt("Carol:2"), /冒号/);
+  assert.doesNotMatch(await attempt("  Carol:2  "), /冒号/);
+  assert.equal((backend.rosterPuts || []).length, 0);
+  assert.equal(cardName(env, "N3"), OLD);
+  assert.match(html(env, "detail-head"), /id="input-detail-name" value="Carol:2"/, "the box shows the old name again");
+  // a NEW nickname with a colon - the old one changed a little, a bare colon, a full-width one - is refused here, in the server's words
+  for (const bad of ["Carol:3", "Carol：2", ":", "：", "Carol:2:"]) assert.match(await attempt(bad), COLON, JSON.stringify(bad));
+  assert.equal((backend.rosterPuts || []).length, 0, "nothing was sent");
+  assert.equal(cardName(env, "N3"), OLD, "and the old name stays");
+  // the way out: a name without one is saved (the old one is replaced), and the box no longer shows the complaint
+  assert.doesNotMatch(await attempt("Caroline"), COLON);
+  assert.deepEqual(backend.rosterPuts, [{ id: "N3", name: "Caroline" }]);
+  assert.equal(cardName(env, "N3"), "Caroline");
+  // Enter in the name box takes the same road: an unchanged old name does nothing there either
+  const second = await live({ status: "idle", participants });
+  cardClick(second.env, "N3");
+  second.env.el("input-detail-name").value = OLD;
+  second.env.el("detail-panel").dispatch("keydown", { key: "Enter", preventDefault: () => {}, target: { id: "input-detail-name", getAttribute: () => null } });
+  await flush(second.env, 20);
+  assert.equal((second.backend.rosterPuts || []).length, 0);
+  assert.doesNotMatch(textOf(html(second.env, "detail-head")), /冒号/);
 });
 
 test("once the game has started the name is read-only text and the regenerate button is gone", async () => {
@@ -111,6 +166,7 @@ test("regenerate avatar (one player): POST .../avatar:regenerate, only that card
   const { env, backend } = await live({ status: "idle" });
   const before = Object.fromEntries(F.PLAYER_IDS.map((id) => [id, cardImg(env, id)]));
   cardClick(env, "N5");
+  panelClick(env, "toggle-avatar-pop");
   panelClick(env, "regen-avatar");
   await flush(env, 30);
   assert.equal(posts(backend, "POST", "/api/roster/N5/avatar:regenerate").length, 1);
@@ -151,10 +207,12 @@ test("the moderator's panel shows its random avatar and, before the game, a butt
   assert.notEqual(before, H.Avatar.moderatorUrl(), "a random avatar, not the top hat");
   modClick(env);
   const head = html(env, "detail-head");
-  assert.match(head, /data-detail-action="regen-avatar"/);
+  assert.match(head, /data-detail-action="toggle-avatar-pop"/);
   assert.ok(head.includes(before), "the panel shows the same picture");
   assert.ok(!head.includes("input-detail-name") && !head.includes("save-name"), "the moderator's name is fixed");
 
+  panelClick(env, "toggle-avatar-pop");
+  assert.match(html(env, "detail-head"), /data-detail-action="regen-avatar"/);
   panelClick(env, "regen-avatar");
   await flush(env, 30);
   assert.equal(posts(backend, "POST", "/api/roster/moderator/avatar:regenerate").length, 1);
@@ -171,9 +229,11 @@ test("the moderator's regenerate button is gone once the game has started, and a
   const running = await live(withHost("running"));
   modClick(running.env);
   assert.ok(!html(running.env, "detail-head").includes("regen-avatar"));
+  assert.ok(!html(running.env, "detail-head").includes("toggle-avatar-pop"), "no 🎲 once the game has started");
   const { env, backend } = await live(withHost("idle"));
   backend.session.status = "paused"; // the server says the game moved on while the panel was open
   modClick(env);
+  panelClick(env, "toggle-avatar-pop");
   panelClick(env, "regen-avatar");
   await flush(env, 30);
   assert.match(lastToast(env), /对局已开始/);
@@ -196,6 +256,7 @@ test("an older backend (no moderator avatar anywhere): the top hat stays and the
   assert.equal(chipImg(env), H.Avatar.moderatorUrl());
   modClick(env);
   assert.ok(!html(env, "detail-head").includes("regen-avatar"), "no avatar, no endpoint, no button");
+  assert.ok(!html(env, "detail-head").includes("toggle-avatar-pop") && !html(env, "detail-head").includes("avatar-code"), "and no code to show either");
 });
 
 // =====================================================================================================
@@ -209,7 +270,9 @@ test("persona and memory are two expandable editors, empty by default; Save PUTs
   assert.match(editors, /<section class="detail-editor" data-kind="memory">/);
   assert.match(editors, /性格设定/);
   assert.match(editors, /记忆/);
-  assert.equal((editors.match(/<textarea/g) || []).length, 2);
+  // (v0.13.1) the persona is one text box; the memory is structured: a box per OTHER seat, one for the lessons and one for notes
+  assert.equal((editors.match(/<textarea/g) || []).length, 1 + 11 + 2);
+  assert.equal((editors.match(/class="form-input mem-input"/g) || []).length, 11, "one impression per other seat");
   assert.match(editors, /detail-editor-meta">空<\/span>/, "empty by default");
   assert.match(editors, /id="btn-detail-save-persona"[^>]* disabled/, "nothing to save yet");
   // collapsed -> expanded
@@ -231,12 +294,15 @@ test("persona and memory are two expandable editors, empty by default; Save PUTs
   await env.app().roster().load();
   assert.equal(env.app().roster().seat("N3").persona, "说话简短直接，喜欢用反问");
 
-  // memory is independent
+  // memory is independent; what is saved are the PARTS that changed (`memory_parts`), never the whole text
   panelClick(env, "toggle-editor", "memory");
-  typeInto(env, "memory", "N3", "Bob 总是附和别人");
+  typeImpression(env, "N2", "总是附和别人");
+  assert.equal(env.el("btn-detail-save-memory").disabled, false);
   panelClick(env, "save-text", "memory");
   await flush(env, 30);
-  assert.deepEqual(backend.rosterPuts.filter((p) => "memory" in p).pop(), { id: "N3", memory: "Bob 总是附和别人" });
+  assert.deepEqual(backend.rosterPuts.filter((p) => "memory_parts" in p).pop(), { id: "N3", memory_parts: { impressions: { N2: "总是附和别人" } } });
+  assert.ok(!backend.rosterPuts.some((p) => "memory" in p), "the whole memory text is never sent by the editor");
+  assert.match(lastToast(env), /记忆已保存/);
 });
 
 test("unsaved text survives collapsing / expanding and live repaints of the panel", async () => {
@@ -294,14 +360,20 @@ test("refine needs some text first, and shows the server's error; memory is refi
   assert.match(lastToast(env), /请先在「性格设定」里写几个要点/);
   assert.equal(backend.lastRefine, undefined);
   panelClick(env, "toggle-editor", "memory");
-  typeInto(env, "memory", "N3", "我常输");
+  panelClick(env, "refine", "memory"); // (v0.13.1) the notes of the memory are their own box: empty -> the same hint
+  await flush(env, 10);
+  assert.match(lastToast(env), /请先在「记忆」里写几个要点/);
+  assert.equal(backend.lastRefine, undefined);
+  typeBox(env, "ta-detail-memory-notes", "我常输");
   backend.refineError = "主持人没有绑定模型";
   panelClick(env, "refine", "memory");
   await flush(env, 30);
   assert.match(lastToast(env), /完善失败：.*主持人没有绑定模型/);
   assert.ok(!html(env, "detail-editors").includes("detail-draft"));
   assert.equal(backend.lastRefine.kind, "memory");
+  assert.equal(backend.lastRefine.text, "我常输");
   assert.match(html(env, "detail-editors"), /id="btn-detail-refine-memory"(?![^>]*disabled)/, "the button is usable again");
+  assert.match(html(env, "detail-editors"), />我常输<\/textarea>/, "and the notes are still there");
 });
 
 test("an older backend without the roster API: the editors are disabled with an explanation, the rest of the UI works", async () => {
@@ -316,78 +388,27 @@ test("an older backend without the roster API: the editors are disabled with an 
 });
 
 // =====================================================================================================
-// roster menu: export / import (preview first) / clear / "load memory"
+// roster menu: clear / "load memory" (v0.13: the memory pack export / import is gone, the archive covers it)
 // =====================================================================================================
-test("名册 menu: opens and closes; export downloads the zip with the server's file name", async () => {
+test("名册 menu: opens and closes; it only has clear-all-memory and the load-memory switch (the pack export / import is gone)", async () => {
   const { env, backend } = await live({ status: "idle" });
   assert.equal(env.el("roster-menu").hidden, true);
   env.el("btn-roster-menu").dispatch("click");
   assert.equal(env.el("roster-menu").hidden, false);
   assert.equal(env.el("btn-roster-menu").getAttribute("aria-expanded"), "true");
+  assert.ok(!H.HTML_SRC.includes("btn-roster-export") && !H.HTML_SRC.includes("btn-roster-import") && !H.HTML_SRC.includes("file-import-memory"));
+  assert.ok(!H.SRC.roster.includes("memory:export") && !H.SRC.roster.includes("memory:import"));
+  // an old menu entry does nothing (and calls nothing)
   menuClick(env, "export");
-  await flush(env, 30);
-  assert.equal(posts(backend, "GET", "/api/roster/memory:export").length, 1);
-  assert.equal(env.downloads.length, 1);
-  assert.equal(env.downloads[0].download, "arena-memory-test.zip");
-  assert.equal(env.el("roster-menu").hidden, true, "choosing an item closes the menu");
-  assert.match(lastToast(env), /已导出全部记忆：arena-memory-test\.zip/);
+  await flush(env, 10);
+  assert.equal(backend.calls.filter((c) => /memory:(export|import)/.test(c.url)).length, 0);
+  assert.equal(env.downloads.length, 0);
   // a click elsewhere / Esc closes it
-  env.el("btn-roster-menu").dispatch("click");
   env.document.dispatchEvent("click", { target: target({}) });
   assert.equal(env.el("roster-menu").hidden, true);
   env.el("btn-roster-menu").dispatch("click");
   env.document.dispatchEvent("keydown", { key: "Escape" });
   assert.equal(env.el("roster-menu").hidden, true);
-});
-
-test("import: a dry run shows WHICH players' texts will be overwritten; only after confirming is it applied", async () => {
-  const { env, backend } = await live({ status: "idle" });
-  const bytes = new Uint8Array([80, 75, 3, 4, 1, 2, 3]);
-  const file = { name: "pack.zip", arrayBuffer: async () => bytes.buffer };
-  env.el("file-import-memory").dispatch("change", { target: { files: [file], value: "x" } });
-  await flush(env, 40);
-  assert.equal(backend.importCalls.length, 1, "only the preview so far");
-  assert.deepEqual([backend.importCalls[0].dry_run, backend.importCalls[0].contentType], [true, "application/zip"]);
-  assert.equal(backend.importCalls[0].body, bytes.buffer, "the raw zip bytes are sent, not JSON");
-  assert.equal(env.el("dialog-modal").style.display, "flex");
-  const body = textOf(html(env, "dialog-body"));
-  assert.match(body, /覆盖/);
-  assert.match(body, /Carol\s*：\s*性格设定、记忆 将被覆盖/);
-  assert.match(body, /Eve\s*：\s*记忆 将被覆盖/);
-  assert.ok(!/\bN3\b/.test(body), "nicknames, not ids");
-  assert.match(env.el("btn-dialog-ok").textContent, /确认导入 2 名玩家/);
-  assert.equal(env.el("file-import-memory").value, "", "the file input is reset so the same file can be picked again");
-  // confirm
-  env.el("btn-dialog-ok").dispatch("click");
-  await flush(env, 40);
-  assert.equal(backend.importCalls.length, 2);
-  assert.equal(backend.importCalls[1].dry_run, false);
-  assert.equal(env.el("dialog-modal").style.display, "none");
-  assert.match(lastToast(env), /已导入 2 名玩家的记忆/);
-});
-
-test("import: cancelling the preview changes nothing; a broken pack is reported; an empty pack says so", async () => {
-  const { env, backend } = await live({ status: "idle" });
-  const file = { name: "pack.zip", arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer };
-  env.el("file-import-memory").dispatch("change", { target: { files: [file], value: "" } });
-  await flush(env, 40);
-  env.el("btn-dialog-cancel").dispatch("click");
-  await flush(env, 20);
-  assert.equal(backend.importCalls.length, 1, "no real import");
-  assert.equal(env.el("dialog-modal").style.display, "none");
-  // a broken pack (the server says 400 on the dry run)
-  backend.importError = "不是有效的 zip 记忆包";
-  env.el("file-import-memory").dispatch("change", { target: { files: [file], value: "" } });
-  await flush(env, 40);
-  assert.match(lastToast(env), /记忆包无法导入：.*不是有效的 zip 记忆包/);
-  assert.equal(env.el("dialog-modal").style.display, "none");
-  // nothing to import
-  backend.importError = "";
-  backend.importChanges = [];
-  env.el("file-import-memory").dispatch("change", { target: { files: [file], value: "" } });
-  await flush(env, 40);
-  assert.match(lastToast(env), /记忆包里没有可导入的玩家内容/);
-  assert.equal(backend.importCalls.filter((c) => !c.dry_run).length, 0);
 });
 
 test("clear all memory: a second confirmation (danger), optionally persona too; nothing happens on cancel", async () => {
@@ -431,7 +452,7 @@ test("clear all memory: a second confirmation (danger), optionally persona too; 
   assert.match(html(env, "detail-editors"), /detail-editor-meta">空<\/span>/);
 });
 
-test("'本局加载记忆' switch: PUT /api/roster/memory-enabled; it follows the session; idle-only (and import / clear too)", async () => {
+test("'本局加载记忆' switch: PUT /api/roster/memory-enabled; it follows the session; idle-only (and clear too)", async () => {
   const { env, backend } = await live({ status: "idle", memory_enabled: true });
   assert.equal(env.el("chk-memory-enabled").checked, true);
   env.el("chk-memory-enabled").checked = false;
@@ -451,12 +472,10 @@ test("'本局加载记忆' switch: PUT /api/roster/memory-enabled; it follows th
   await flush(env, 30);
   assert.equal(env.el("chk-memory-enabled").checked, true);
   assert.match(lastToast(env), /对局已开始/);
-  // while a game runs the switch, import and clear are locked; export stays available
+  // while a game runs the switch and clear are locked
   env.sse("game.status", { status: "running", reason: "started", winner: null });
   assert.equal(env.el("chk-memory-enabled").disabled, true);
-  assert.equal(env.el("btn-roster-import").disabled, true);
   assert.equal(env.el("btn-roster-clear").disabled, true);
-  assert.equal(env.el("btn-roster-export").disabled, false);
 });
 
 test("a new game reloads the roster (names / avatars / memory may have changed in between)", async () => {
@@ -513,16 +532,21 @@ test("a player's panel: 复盘此玩家 → 复盘中 → 已复盘 (and the mem
   assert.match(html(env, "detail-live"), /正在复盘…/);
   assert.ok(!html(env, "detail-live").includes("review-one"), "no second review of the same game");
   // the memory file changed on the server: finishing refreshes the roster, then "已复盘" with a way to look at it
-  backend.roster.seats[3].memory = "## 战绩\n- 本局：预言家，胜";
+  // (v0.13.1: a review REVISES the impressions of the other seats; the record is the engine's)
+  const seat4 = backend.roster.seats[3];
+  seat4.memory_parts = { record: "本局：预言家，胜", impressions: { ...seat4.memory_parts.impressions, N5: "爱悍跳" }, experience: ["先听完再站边"], legacy: "" };
+  seat4.memory = "## 战绩\n本局：预言家，胜";
   const gets = () => backend.calls.filter((c) => c.method === "GET" && c.url.endsWith("/api/roster")).length;
   const before = gets();
-  env.sse("review.progress", { id: "N4", state: "done", message: "已写入" });
+  env.sse("review.progress", { id: "N4", state: "done", message: "已更新印象", changes: { impressions: [{ id: "N5", before: "", after: "爱悍跳" }], experience: null } });
   await flush(env, 30);
   assert.equal(gets(), before + 1);
   assert.match(html(env, "detail-live"), /✓ 已复盘/);
   panelClick(env, "show-memory");
   assert.match(html(env, "detail-editors"), /<section class="detail-editor open" data-kind="memory">/);
-  assert.match(html(env, "detail-editors"), /## 战绩\n- 本局：预言家，胜<\/textarea>/);
+  assert.match(html(env, "detail-editors"), /<span class="mem-record-text">本局：预言家，胜<\/span>/, "the record is shown (read-only)");
+  assert.match(html(env, "detail-editors"), /data-imp-id="N5"[^>]*>爱悍跳<\/textarea>/, "and the revised impression is in its box");
+  assert.match(html(env, "detail-editors"), />先听完再站边<\/textarea>/, "and the lesson in its box");
   // other players can still be reviewed; a failed one shows why and can be retried
   cardClick(env, "N4");
   cardClick(env, "N5");
@@ -969,9 +993,10 @@ test("phone: secondary top-bar buttons move into the ⋯ menu (the real elements
     boardRight: new FakeEl("div"),
   };
   const place = (home, ...ids) => ids.forEach((id) => home.appendChild(env.el(id)));
-  place(homes.left, "btn-open-workspace-modal", "btn-theme", "viewpoint-picker");
-  place(homes.right, "usage-telemetry-pill", "btn-open-budget-modal", "btn-new", "btn-save", "btn-start", "btn-pause", "btn-resume", "btn-more");
-  place(homes.boardRight, "btn-import-session", "btn-open-sessions-modal", "btn-open-bindings-modal", "btn-open-provider-modal");
+  // (v0.13: the whole viewpoint bar [视角▾][切换][接管] moves, the takeover bar stays in the first row)
+  place(homes.left, "btn-open-settings-modal", "btn-theme", "viewpoint-bar", "takeover-bar");
+  place(homes.right, "btn-open-calllog", "usage-telemetry-pill", "btn-open-budget-modal", "btn-new", "btn-start", "btn-pause", "btn-resume", "btn-more");
+  place(homes.boardRight, "btn-open-history-modal", "btn-open-bindings-modal", "btn-open-provider-modal");
   homes.status.appendChild(env.el("mod-chip"));
   env.run();
   await settle();
@@ -984,9 +1009,11 @@ test("phone: secondary top-bar buttons move into the ⋯ menu (the real elements
   env.sandbox.innerWidth = 390;
   env.sandbox.innerHeight = 844;
   env.sandbox.dispatchEvent("resize");
-  const inMenu = ["btn-open-workspace-modal", "btn-theme", "viewpoint-picker", "btn-open-budget-modal", "btn-new", "btn-save", "btn-import-session", "btn-open-sessions-modal", "btn-open-bindings-modal", "btn-open-provider-modal"];
+  // (v0.13.1, G32: the error log's button moves too; its badge then shows on ⋯)
+  const inMenu = ["btn-open-settings-modal", "btn-theme", "viewpoint-bar", "btn-open-budget-modal", "btn-open-calllog", "btn-new", "btn-open-history-modal", "btn-open-bindings-modal", "btn-open-provider-modal"];
   for (const id of inMenu) assert.equal(env.el(id).parentNode, menu, `${id} is in the menu`);
   assert.equal(menu.children.length, inMenu.length);
+  assert.equal(env.el("takeover-bar").parentNode, homes.left, "the takeover bar stays in the first row of the phone (F3)");
   for (const id of ["btn-start", "btn-pause", "btn-resume", "btn-more"]) assert.equal(env.el(id).parentNode, homes.right, `${id} stays on the bar`);
   assert.equal(env.el("usage-telemetry-pill").parentNode, homes.status, "the usage pill moves to the status row");
   assert.ok(homes.status.children.indexOf(env.el("usage-telemetry-pill")) < homes.status.children.indexOf(env.el("mod-chip")), "... before the moderator chip");
@@ -1014,9 +1041,9 @@ test("phone: secondary top-bar buttons move into the ⋯ menu (the real elements
   env.sandbox.innerHeight = 900;
   env.sandbox.dispatchEvent("resize");
   assert.equal(menu.children.length, 0);
-  for (const id of ["btn-open-workspace-modal", "btn-theme", "viewpoint-picker"]) assert.equal(env.el(id).parentNode, homes.left, id);
-  for (const id of ["usage-telemetry-pill", "btn-open-budget-modal", "btn-new", "btn-save"]) assert.equal(env.el(id).parentNode, homes.right, id);
-  for (const id of ["btn-import-session", "btn-open-sessions-modal", "btn-open-bindings-modal", "btn-open-provider-modal"]) assert.equal(env.el(id).parentNode, homes.boardRight, id);
+  for (const id of ["btn-open-settings-modal", "btn-theme", "viewpoint-bar", "takeover-bar"]) assert.equal(env.el(id).parentNode, homes.left, id);
+  for (const id of ["usage-telemetry-pill", "btn-open-budget-modal", "btn-new"]) assert.equal(env.el(id).parentNode, homes.right, id);
+  for (const id of ["btn-open-history-modal", "btn-open-bindings-modal", "btn-open-provider-modal"]) assert.equal(env.el(id).parentNode, homes.boardRight, id);
   assert.equal(env.el("more-menu").hidden, true);
 });
 

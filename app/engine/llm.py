@@ -310,7 +310,11 @@ class LLMClient:
         on_chunk: StreamCallback | None = None,
         max_tokens_override: int | None = None,
         binding: Any = None,
+        on_retry: Callable[[BaseException, int, float], None] | None = None,
     ) -> LLMResponse:
+        """One model request (v0.13.1: ``on_retry(exc, attempt, delay)`` hears about every attempt that failed and
+        is repeated after a wait - the error log; the exception's text has been scrubbed of the provider's key by
+        then.  A silent downgrade of rejected optional parameters is not reported)."""
         target = self.build_target(binding, is_moderator=is_moderator)
         adapter = get_adapter(target.protocol)
         request = adapter.build_request(
@@ -336,6 +340,13 @@ class LLMClient:
                     )
                 return changed
 
+            def retried(exc: BaseException, attempt_no: int, delay: float) -> None:
+                # (the final failure is scrubbed below; the ones that are repeated are scrubbed here, because
+                # the observer keeps their text)
+                if on_retry is not None:
+                    redact_exception(exc, target.api_key)
+                    on_retry(exc, attempt_no, delay)
+
             try:
                 resp = await run_with_retry(
                     attempt,
@@ -343,6 +354,7 @@ class LLMClient:
                     downgrade=downgrade,
                     rand=lambda: self._random(),
                     label=f"LLM[{target.protocol}]",
+                    on_retry=retried if on_retry is not None else None,
                 )
             except Exception as exc:
                 redact_exception(exc, target.api_key)

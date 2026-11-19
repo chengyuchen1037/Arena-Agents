@@ -1,5 +1,5 @@
 "use strict";
-// Shared test harness (not a test): runs static/js/app.js (+ layout / providers / workspace) under node
+// Shared test harness (not a test): runs static/js/app.js (+ layout / providers / archive) under node
 // against a tiny fake DOM and a fake backend. No browser, no jsdom.
 const fs = require("node:fs");
 const path = require("node:path");
@@ -20,9 +20,16 @@ const SRC = {
   app: read("app.js"),
   providers: read("providers.js"),
   layout: read("layout.js"),
-  workspace: read("workspace.js"),
+  archive: read("archive.js"),
   roster: read("roster.js"),
   budget: read("budget.js"),
+  marks: read("marks.js"), // v0.13.1: the colour marks on the players
+  thoughts: read("thoughts.js"), // v0.13.1: the thinking record window
+  calllog: read("calllog.js"), // v0.13.1: the error log window + the badge
+  takeover: read("takeover.js"),
+  composer: read("composer.js"),
+  history: read("history.js"),
+  replay: read("replay.js"),
   platform: read("platform.js"),
   avatar: read("avatar.js"),
   core: read("core.js"),
@@ -204,6 +211,63 @@ function resp(status, body, ct = "application/json", extraHeaders = {}) {
   };
 }
 
+/** A fake XMLHttpRequest: records the request; tests (or `hooks.auto`) drive progress / the answer. */
+function makeXhrClass(list, hooks) {
+  return class FakeXhr {
+    constructor() {
+      this.headers = {};
+      this.status = 0;
+      this.responseText = "";
+      this.upload = { onprogress: null, onload: null };
+      this.aborted = false;
+      this.sent = false;
+      list.push(this);
+    }
+
+    open(method, url) {
+      this.method = method;
+      this.url = url;
+    }
+
+    setRequestHeader(name, value) {
+      this.headers[name] = value;
+    }
+
+    send(body) {
+      this.body = body;
+      this.sent = true;
+      if (hooks.auto) Promise.resolve().then(() => hooks.auto(this));
+    }
+
+    abort() {
+      this.aborted = true;
+      if (this.onabort) this.onabort({});
+    }
+
+    /** the browser's upload progress event */
+    progress(loaded, total) {
+      if (this.upload.onprogress) this.upload.onprogress({ loaded, total, lengthComputable: true });
+    }
+
+    /** the request body has been sent completely (the server is now checking the file) */
+    uploaded() {
+      if (this.upload.onload) this.upload.onload({});
+    }
+
+    /** the server's answer */
+    respond(status, body) {
+      this.status = status;
+      this.responseText = typeof body === "string" ? body : JSON.stringify(body);
+      if (this.onload) this.onload({});
+    }
+
+    /** a network failure */
+    fail() {
+      if (this.onerror) this.onerror({});
+    }
+  };
+}
+
 function makeEnv({
   fetchImpl,
   storedToken = "",
@@ -220,9 +284,12 @@ function makeEnv({
   let timerId = 0;
   const rafQueue = [];
   const toasts = [];
+  const clipboard = []; // v0.13.1: what the page copied (navigator.clipboard.writeText)
   const esInstances = [];
   const reloads = [];
   const downloads = [];
+  const xhrs = [];
+  const xhrHooks = { auto: null };
   const storage = new Map(Object.entries(initialStorage));
   if (storedToken) storage.set("arena_api_token", storedToken);
 
@@ -249,8 +316,18 @@ function makeEnv({
       docListeners[t] = (docListeners[t] || []).filter((f) => f !== fn);
     },
     dispatchEvent(t, evt = {}) {
+      // (v0.13.1: stopImmediatePropagation keeps the listeners registered after the one that called it from running)
+      let stopped = false;
+      const own = evt.stopImmediatePropagation;
       const e = { type: t, target: this, preventDefault() {}, ...evt };
-      (docListeners[t] || []).slice().forEach((fn) => fn(e));
+      e.stopImmediatePropagation = () => {
+        stopped = true;
+        if (typeof own === "function") own();
+      };
+      for (const fn of (docListeners[t] || []).slice()) {
+        if (stopped) break;
+        fn(e);
+      }
       return e;
     },
     documentElement: new FakeEl("html"),
@@ -283,7 +360,14 @@ function makeEnv({
     },
     EventSource: FakeEventSource,
     fetch: fetchImpl,
-    navigator: { userAgent, maxTouchPoints, platform: "", userAgentData: null },
+    XMLHttpRequest: makeXhrClass(xhrs, xhrHooks),
+    navigator: {
+      userAgent,
+      maxTouchPoints,
+      platform: "",
+      userAgentData: null,
+      clipboard: { writeText: async (text) => void clipboard.push(String(text)) },
+    },
     matchMedia: (q) => ({ matches: /pointer:\s*coarse/.test(q) ? Boolean(coarse) : false, addEventListener() {} }),
     location: {
       search,
@@ -340,8 +424,11 @@ function makeEnv({
     esInstances,
     storage,
     toasts,
+    clipboard,
     reloads,
     downloads,
+    xhrs,
+    xhrHooks,
     document,
     el: (id) => document.getElementById(id),
     run: () => {
@@ -349,7 +436,14 @@ function makeEnv({
       vm.runInContext(SRC.providers, sandbox, { filename: "providers.js" });
       vm.runInContext(SRC.roster, sandbox, { filename: "roster.js" });
       vm.runInContext(SRC.budget, sandbox, { filename: "budget.js" });
-      vm.runInContext(SRC.workspace, sandbox, { filename: "workspace.js" });
+      vm.runInContext(SRC.archive, sandbox, { filename: "archive.js" });
+      vm.runInContext(SRC.marks, sandbox, { filename: "marks.js" });
+      vm.runInContext(SRC.thoughts, sandbox, { filename: "thoughts.js" });
+      vm.runInContext(SRC.calllog, sandbox, { filename: "calllog.js" });
+      vm.runInContext(SRC.takeover, sandbox, { filename: "takeover.js" });
+      vm.runInContext(SRC.composer, sandbox, { filename: "composer.js" });
+      vm.runInContext(SRC.history, sandbox, { filename: "history.js" });
+      vm.runInContext(SRC.replay, sandbox, { filename: "replay.js" });
       vm.runInContext(SRC.app, sandbox, { filename: "app.js" });
     },
     flushRaf: () => {
@@ -378,6 +472,33 @@ function makeEnv({
 
 // ---- fake backend ------------------------------------------------------------
 const clone = (v) => JSON.parse(JSON.stringify(v));
+
+/** The `takeover` of a session in which `seat` is played and nothing else is going on yet (F.takeover with defaults). */
+function takeoverOf(session, seat, over = {}) {
+  return F.makeTakeover(seat, { reshuffle_available: session.status === "idle", ...over });
+}
+
+// ---- v0.13.1: the memory of a seat as the server keeps it (contract §12.5): the impressions of the OTHER seats + lessons ----
+const LIMITS = { impression_chars: 80, experience_items: 3, experience_chars: 300, memory_chars: 1500, legacy_chars: 600, persona_chars: 500, persona_item_chars: 40 };
+const emptyParts = (id) => ({
+  record: "",
+  impressions: Object.fromEntries(F.PLAYER_IDS.filter((p) => p !== id).map((p) => [p, ""])),
+  experience: [],
+  legacy: "",
+});
+
+/** The canonical memory text of a seat (the server renders it; GET /api/roster sends it as `memory`, ``""`` when there is nothing). */
+function memoryTextOf(seat, seats) {
+  const p = seat.memory_parts;
+  if (!(p.record.trim() || Object.values(p.impressions).some(Boolean) || p.experience.length || p.legacy.trim())) return "";
+  const name = (id) => (seats.find((s) => s.id === id) || {}).name || id;
+  const blocks = [];
+  if (p.record.trim()) blocks.push(`## 战绩\n${p.record.trim()}`);
+  const lines = Object.keys(p.impressions).map((id) => `- ${id} ${name(id)}：${p.impressions[id] || "（暂无）"}`);
+  blocks.push(`## 印象\n${lines.join("\n")}\n\n## 经验${p.experience.length ? `\n${p.experience.map((e) => `- ${e}`).join("\n")}` : ""}`);
+  if (p.legacy.trim()) blocks.push(`## 旧记忆（待整理）\n${p.legacy.trim()}`);
+  return blocks.join("\n\n");
+}
 
 function makeBackend(overrides = {}) {
   const session = overrides.session || F.makeSession();
@@ -429,6 +550,14 @@ function makeBackend(overrides = {}) {
       { session_id: "s-test", current: true, status: "idle", record_count: 0 },
       { session_id: "old-1", current: false, status: "paused", record_count: 7 },
     ],
+    // v0.13 (history.js): the rows of GET /api/games (the live game is marked `current` by the route) and, per id, the
+    // answer of GET /api/games/{id}/replay
+    games: [
+      { session_id: "s-test", title: "Arena-Agents", scenario_title: "狼人杀 12 人局", status: "idle", winner: null, created_at: "2026-11-18T08:00:00Z", updated_at: "2026-11-18T08:00:00Z", duration_gt: 0, players: 12, tokens: 0, cost_usd: 0, human_involved: false, schema_version: 5, size_bytes: 1200 },
+      { session_id: "old-1", title: "Arena-Agents", scenario_title: "狼人杀 12 人局", status: "finished", winner: "好人阵营", created_at: "2026-11-17T09:00:00Z", updated_at: "2026-11-17T10:00:00Z", duration_gt: 1523, players: 12, tokens: 1250000, cost_usd: 0.5, human_involved: false, schema_version: 5, size_bytes: 91000 },
+      { session_id: "old-2", title: "Arena-Agents", scenario_title: "狼人杀 12 人局", status: "paused", winner: null, created_at: "2026-11-16T09:00:00Z", updated_at: "2026-11-16T09:40:00Z", duration_gt: 600, players: 12, tokens: 3200, cost_usd: 0.01, human_involved: true, schema_version: 5, size_bytes: 40000 },
+    ],
+    replays: {},
     discovered: ["model-x", "m-new", "other/slash"],
     suggestions: {}, // model id -> a `suggested` object (null / missing = no match)
     pricing: { url: Core.DEFAULT_PRICING_SOURCE_URL, default_url: Core.DEFAULT_PRICING_SOURCE_URL, fetched_at: "2026-11-17T08:00:00Z", entries: 2345, error: null },
@@ -436,6 +565,7 @@ function makeBackend(overrides = {}) {
     roster: {
       memory_enabled: true,
       editable: true,
+      limits: { ...LIMITS }, // v0.13.1: the limits of persona and memory (contract §12.5)
       seats: F.PLAYER_IDS.map((id, i) => ({
         seat: i + 1,
         id,
@@ -444,25 +574,62 @@ function makeBackend(overrides = {}) {
         avatar: F.avatarOf(i + 1),
         persona: "",
         memory: "",
+        memory_parts: emptyParts(id),
       })),
       moderator: { id: "moderator", name: "主持人", avatar: F.avatarOf(13) },
     },
-    importChanges: [{ id: "N3", persona: true, memory: true }, { id: "N5", persona: false, memory: true }],
     refineDraft: "【草稿】这是主持人模型完善后的设定。",
+    // v0.13.1: the memory draft `refine` answers with (`null`: the fake merges the notes into what the seat remembers as one lesson)
+    refineMemory: null,
+    // v0.13.1: the error log (GET /api/llm/calls, contract §12.3): CallEntry lines, oldest first (ids count up from 1);
+    // `callsFailure` = [status, detail] makes the endpoint fail
+    llmCalls: [],
+    callsFailure: null,
+    // v0.13.1: the thinking record (GET /api/agents/{id}/thoughts, §12.4): agent id -> ThoughtItem, oldest first;
+    // `thoughtsFailure` = [status, detail] makes the endpoint fail
+    thoughts: {},
+    thoughtsFailure: null,
     reviewStarted: ["N1"],
-    workspaces: {
-      enabled: true,
-      current: { id: "w1", name: "Av11WS", path: "D:\\Av11\\WS", status: "ok" },
-      recent: [{ id: "w1", name: "Av11WS", path: "D:\\Av11\\WS" }],
-      default_path: "D:\\Arena-Workspace\\Default",
-      native_picker: true,
+    // v0.13 (archive.js, contract section 11.9): /api/state.legacy_data, GET /api/archive/status, the import summary
+    legacyData: { found: false, dismissed: false },
+    archiveStatus: { busy: false, job: null, import: null, game_active: false },
+    importSummary: {
+      archive_id: "0123456789abcdef0123456789abcdef",
+      format_version: 1,
+      app_version: "v0.13.1",
+      created_at: "2026-11-18T00:42:07-08:00",
+      size_bytes: 123456,
+      uncompressed_bytes: 654321,
+      file_count: 20,
+      games: 3,
+      providers: 2,
+      roster_seats: 12,
+      has_secrets: false,
+      has_logs: true,
+      provider_names: ["DeepSeek", "Claude"],
+      game_list: [],
+      games_listed: 0,
+      warnings: [],
     },
+    archiveJobs: {}, // job id -> what GET /api/archive/jobs/{id} answers
     parts: PARTS_MIN, // the sprite library served at static/avatar/parts.json (null = 404)
     requireToken: "",
     failures: {},
     controlSession: null, // what POST /api/control/* answers with (defaults to the current session)
     ...overrides,
     session,
+  };
+  /** The default answer to an archive upload (POST /api/archive/import by XHR): progress, "uploaded", then the reply. */
+  b.uploadHandler = (xhr) => {
+    const size = Number((xhr.body && xhr.body.size) || 0);
+    const name = decodeURIComponent((String(xhr.url).match(/[?&]name=([^&]*)/) || [])[1] || "");
+    b.uploads = (b.uploads || []).concat([{ url: xhr.url, name, size, headers: { ...xhr.headers } }]);
+    xhr.progress(Math.floor(size / 2), size);
+    xhr.progress(size, size);
+    xhr.uploaded();
+    const reply = typeof b.uploadReply === "function" ? b.uploadReply(xhr, size, name) : b.uploadReply;
+    if (reply) return xhr.respond(reply[0], reply[1]);
+    return xhr.respond(200, { import_id: "imp-1", name, size_bytes: size, summary: b.importSummary, expires_in: 7200 });
   };
   b.fetch = async (url, init0) => {
     const init = { method: "GET", ...(init0 || {}), headers: { ...((init0 && init0.headers) || {}) } };
@@ -481,8 +648,10 @@ function makeBackend(overrides = {}) {
     if (b.failures[key]) return resp(b.failures[key][0], { detail: b.failures[key][1] });
     const find = (id) => b.providers.find((p) => p.id === id);
     let m;
-    if (key === "GET /api/state") return resp(200, { app_version: "v0.12.1-test", session: b.session });
-    if (/^POST \/api\/control\/(new|start|pause|force-pause)$/.test(key)) {
+    if (key === "GET /api/state") return resp(200, { app_version: "v0.13.1-test", legacy_data: b.legacyData, session: b.session });
+    // (v0.13.1: soft-pause / soft-resume answer like the other controls - a test sets `controlSession` to what the
+    // server would answer with, e.g. the session with `soft_pause: {state: "draining", in_flight: 2}`)
+    if (/^POST \/api\/control\/(new|start|pause|force-pause|soft-pause|soft-resume)$/.test(key)) {
       return resp(200, { ok: true, session: b.controlSession || b.session });
     }
     if (key === "GET /api/providers") return resp(200, { providers: b.providers });
@@ -539,11 +708,31 @@ function makeBackend(overrides = {}) {
     }
     if (key === "GET /api/settings/templates") return resp(200, { templates: [], slots: 3, locked: false });
     if (key === "GET /api/sessions") return resp(200, { sessions: b.sessions });
-    if (key === "GET /api/workspaces") return resp(200, b.workspaces);
-    if (key === "POST /api/workspaces/pick-native-folder") return resp(200, { path: "D:\\Picked\\WS" });
-    if (key === "POST /api/workspaces/select") {
-      b.lastWorkspaceSelect = body;
-      return resp(200, { workspace: { id: "w9", name: "Next", path: body.path }, session: b.session });
+    // ---- v0.13: archive export / import (archive.js; contract section 11.5 / 11.9)
+    if (key === "GET /api/archive/status") return resp(200, b.archiveStatus);
+    if (key === "POST /api/archive/export") {
+      b.exportCalls = (b.exportCalls || []).concat([body]);
+      if (b.exportReply) return resp(b.exportReply[0], b.exportReply[1]);
+      return resp(202, { job_id: "job-export-1", kind: "export" });
+    }
+    if ((m = key.match(/^GET \/api\/archive\/jobs\/([^/]+)$/))) {
+      const job = b.archiveJobs[decodeURIComponent(m[1])];
+      return job ? resp(200, job) : resp(404, { detail: "找不到这个任务。", code: "not_found" });
+    }
+    if ((m = key.match(/^POST \/api\/archive\/import\/([^/]+)\/apply$/))) {
+      b.applyCalls = (b.applyCalls || []).concat([{ import_id: decodeURIComponent(m[1]), body }]);
+      const reply = typeof b.applyReply === "function" ? b.applyReply(body, b.applyCalls.length) : b.applyReply;
+      if (reply) return resp(reply[0], reply[1]);
+      return resp(202, { job_id: "job-import-1", kind: "import" });
+    }
+    if ((m = key.match(/^DELETE \/api\/archive\/import\/([^/]+)$/))) {
+      b.discardCalls = (b.discardCalls || []).concat([decodeURIComponent(m[1])]);
+      return resp(200, { ok: true, discarded: true });
+    }
+    if (key === "POST /api/notices/legacy-data:dismiss") {
+      b.legacyDismissed = (b.legacyDismissed || 0) + 1;
+      b.legacyData = { ...b.legacyData, dismissed: true };
+      return resp(200, { ok: true });
     }
     if ((m = key.match(/^DELETE \/api\/sessions\/(.+)$/))) {
       b.sessions = b.sessions.filter((x) => x.session_id !== decodeURIComponent(m[1]));
@@ -551,6 +740,26 @@ function makeBackend(overrides = {}) {
     }
     if ((m = key.match(/^POST \/api\/sessions\/(.+)\/load$/))) {
       return resp(200, { ok: true, session: { ...b.session, session_id: decodeURIComponent(m[1]), status: "paused" } });
+    }
+    // ---- v0.13: the history of games (history.js; contract section 11.5 / 11.8)
+    if (key === "GET /api/games") {
+      const current = b.session.session_id;
+      return resp(200, { games: b.games.map((g) => ({ ...g, current: g.session_id === current })), current });
+    }
+    if ((m = key.match(/^DELETE \/api\/games\/([^/]+)$/))) {
+      const id = decodeURIComponent(m[1]);
+      if (id === b.session.session_id) return resp(409, { detail: "当前对局不能删除：请先新建或载入另一局。" });
+      b.games = b.games.filter((g) => g.session_id !== id);
+      return resp(200, { ok: true, session_id: id });
+    }
+    if ((m = key.match(/^POST \/api\/games\/([^/]+)\/load$/))) {
+      if (b.loadError) return resp(409, { detail: b.loadError });
+      return resp(200, { ok: true, session: { ...b.session, session_id: decodeURIComponent(m[1]), status: "paused" } });
+    }
+    if ((m = key.match(/^GET \/api\/games\/([^/]+)\/replay$/))) {
+      if (b.replayError) return resp(409, { detail: b.replayError });
+      const replay = b.replays[decodeURIComponent(m[1])];
+      return replay ? resp(200, replay) : resp(404, { detail: "对局不存在。" });
     }
     // ---- v0.12.1: price source, budget, roster, review
     if (key === "GET /api/pricing/source") return resp(200, b.pricing);
@@ -579,18 +788,11 @@ function makeBackend(overrides = {}) {
       b.roster.memory_enabled = Boolean(body.enabled);
       return resp(200, { enabled: b.roster.memory_enabled });
     }
-    if (key === "GET /api/roster/memory:export") {
-      return resp(200, "ZIPDATA", "application/zip", { "content-disposition": 'attachment; filename="arena-memory-test.zip"' });
-    }
-    if ((m = key.match(/^POST \/api\/roster\/memory:import\?dry_run=(true|false)$/))) {
-      b.importCalls = (b.importCalls || []).concat([{ dry_run: m[1] === "true", body, contentType: init.headers["Content-Type"] }]);
-      if (b.importError) return resp(400, { detail: b.importError });
-      return resp(200, { dry_run: m[1] === "true", changes: b.importChanges });
-    }
     if (key === "POST /api/roster/memory:clear") {
       b.lastClear = body;
       for (const seat of b.roster.seats) {
         seat.memory = "";
+        seat.memory_parts = emptyParts(seat.id);
         if (body && body.include_persona) seat.persona = "";
       }
       return resp(200, { ok: true });
@@ -613,8 +815,24 @@ function makeBackend(overrides = {}) {
     }
     if ((m = key.match(/^POST \/api\/roster\/([^/]+)\/refine$/))) {
       b.lastRefine = { id: m[1], ...body };
+      b.refineCalls = (b.refineCalls || []).concat([{ id: m[1], ...body }]);
       if (b.refineError) return resp(502, { detail: b.refineError });
+      if (body.kind === "memory") {
+        // v0.13.1 (contract §12.5): {draft: the 印象 / 经验 text, memory_parts: {impressions (every OTHER seat), experience}} - never legacy / record
+        const seat = b.roster.seats.find((x) => x.id === m[1]);
+        if (b.refineMemory) return resp(200, b.refineMemory);
+        const parts = { impressions: { ...seat.memory_parts.impressions }, experience: [String(body.text).split("\n")[0], ...seat.memory_parts.experience].slice(0, 3) };
+        const draft = `## 印象\n${Object.entries(parts.impressions).map(([id, t]) => `- ${id} ${(b.roster.seats.find((x) => x.id === id) || {}).name}：${t || "（暂无）"}`).join("\n")}\n\n## 经验\n${parts.experience.map((e) => `- ${e}`).join("\n")}`;
+        return resp(200, { draft, memory_parts: parts });
+      }
       return resp(200, { draft: b.refineDraft });
+    }
+    if (key === "PUT /api/roster/moderator") {
+      // the moderator only has an avatar to change (contract §10.9), and only before the game starts
+      b.rosterPuts = (b.rosterPuts || []).concat([{ id: "moderator", ...body }]);
+      if (b.session.status !== "idle") return resp(409, { detail: "对局已开始，不能修改头像" });
+      b.roster.moderator.avatar = body.avatar;
+      return resp(200, b.roster.moderator);
     }
     if ((m = key.match(/^PUT \/api\/roster\/([^/]+)$/))) {
       const seat = b.roster.seats.find((x) => x.id === m[1]);
@@ -625,7 +843,16 @@ function makeBackend(overrides = {}) {
         if (b.roster.seats.some((x) => x.id !== m[1] && x.name === body.name)) return resp(422, { detail: `名字「${body.name}」已被使用` });
         seat.name = body.name;
       }
-      for (const k of ["persona", "memory", "avatar"]) if (k in body) seat[k] = body[k];
+      for (const k of ["persona", "avatar"]) if (k in body) seat[k] = body[k];
+      if ("memory" in body) seat.memory_parts = { ...emptyParts(seat.id), legacy: String(body.memory) }; // (a whole text: free text becomes the legacy text)
+      if (body.memory_parts) {
+        // only the parts that are given change; `record` is the engine's (accepted, ignored)
+        const mp = body.memory_parts;
+        if (mp.impressions) Object.assign(seat.memory_parts.impressions, mp.impressions);
+        if ("experience" in mp) seat.memory_parts.experience = mp.experience.slice();
+        if ("legacy" in mp) seat.memory_parts.legacy = mp.legacy;
+      }
+      seat.memory = memoryTextOf(seat, b.roster.seats);
       return resp(200, seat);
     }
     if (key === "POST /api/game/review") {
@@ -633,9 +860,107 @@ function makeBackend(overrides = {}) {
       if (b.reviewError) return resp(409, { detail: b.reviewError });
       return resp(200, { started: b.reviewStarted });
     }
-    if (key === "POST /api/session/save") return resp(200, { ok: true, filename: "x.json", session: b.session });
-    if (key === "POST /api/session/import") return resp(200, { ok: true, session: { ...b.session, session_id: "imported" } });
+    // ---- v0.13.1: the error log (G32-G36, contract §12.3).  `b.llmCalls` is the log (oldest first); `b.llmCallRequests`
+    // records the query of every GET
+    if ((m = key.match(/^GET \/api\/llm\/calls(?:\?(.*))?$/))) {
+      const q = new URLSearchParams(m[1] || "");
+      b.llmCallRequests = (b.llmCallRequests || []).concat([Object.fromEntries(q)]);
+      if (b.callsFailure) return resp(b.callsFailure[0], { detail: b.callsFailure[1] });
+      const after = Number(q.get("after") || 0);
+      const limit = Number(q.get("limit") || 500);
+      const failed = new Set(["retry", "timeout", "error"]);
+      let rows = b.llmCalls.filter((c) => c.id > after && (q.get("errors_only") !== "true" || failed.has(c.status)));
+      if (rows.length > limit) rows = rows.slice(rows.length - limit);
+      return resp(200, {
+        calls: rows,
+        last_id: b.llmCalls.reduce((n, c) => Math.max(n, c.id), 0),
+        total: b.llmCalls.length,
+        errors: b.llmCalls.filter((c) => c.status === "timeout" || c.status === "error").length,
+        retries: b.llmCalls.filter((c) => c.status === "retry").length,
+      });
+    }
+    // ---- v0.13.1: the thinking record (G21-G26, contract §12.4): the newest page first, `before` = the id of the oldest
+    // item of an earlier page; 404 / 409 like the server (409: another seat is played and the game is not over)
+    if ((m = key.match(/^GET \/api\/agents\/([^/?]+)\/thoughts(?:\?(.*))?$/))) {
+      const id = decodeURIComponent(m[1]);
+      const q = new URLSearchParams(m[2] || "");
+      b.thoughtRequests = (b.thoughtRequests || []).concat([{ id, ...Object.fromEntries(q) }]);
+      if (b.thoughtsFailure) return resp(b.thoughtsFailure[0], { detail: b.thoughtsFailure[1] });
+      if (id !== "moderator" && !F.PLAYER_IDS.includes(id)) return resp(404, { detail: "没有这个玩家。" });
+      const played = b.session.takeover && b.session.takeover.seat;
+      if (played && b.session.status !== "finished" && id !== played) {
+        return resp(409, { detail: "接管期间不能查看其他玩家的思考记录，对局结束后开放。" });
+      }
+      const all = b.thoughts[id] || [];
+      let older = all;
+      if (q.get("before")) {
+        const at = all.findIndex((t) => t.id === q.get("before"));
+        if (at < 0) return resp(400, { detail: "游标无效。" });
+        older = all.slice(0, at);
+      }
+      const limit = Number(q.get("limit") || 50);
+      const items = older.slice(Math.max(0, older.length - limit));
+      const hasMore = older.length > items.length;
+      const name = id === "moderator" ? "主持人" : F.NAMES[F.PLAYER_IDS.indexOf(id)];
+      return resp(200, { agent_id: id, name, items, next_before: hasMore ? items[0].id : null, has_more: hasMore });
+    }
+    // ---- v0.13: playing a seat (docs/v0.12-contracts.md §11.7).  The fake keeps no game: a test sets
+    // `b.takeoverResult` (what POST /api/takeover answers with), `b.seatReply.<kind>` (a receipt, or a function of
+    // the body returning one) and reads `b.takeoverCalls` / `b.releaseCalls` / `b.shuffleCalls` / `b.seatCalls`.
+    if (key === "POST /api/takeover") {
+      b.takeoverCalls = (b.takeoverCalls || []).concat([body]);
+      const taken = b.takeoverResult || { ...b.session, takeover: takeoverOf(b.session, body.seat) };
+      return resp(200, { ok: true, session: taken });
+    }
+    if (key === "POST /api/takeover/release") {
+      b.releaseCalls = (b.releaseCalls || 0) + 1;
+      return resp(200, { ok: true, session: b.releaseResult || { ...b.session, takeover: { seat: null, reshuffle_available: false } } });
+    }
+    if (key === "POST /api/control/shuffle-identities") {
+      b.shuffleCalls = (b.shuffleCalls || 0) + 1;
+      return resp(200, { ok: true, session: b.controlSession || b.session });
+    }
+    if ((m = key.match(/^POST \/api\/seat\/(speak|pass|respond|ability)$/))) {
+      b.seatCalls = (b.seatCalls || []).concat([{ kind: m[1], body }]);
+      const reply = (b.seatReply || {})[m[1]];
+      const out = typeof reply === "function" ? reply(body) : reply;
+      return resp(200, out || { accepted: true, seq: 99, code: null, message: "已发送。" });
+    }
     return resp(404, { detail: "nf" });
+  };
+  // v0.13.1: `b.hold(test)` parks the answers of the requests that `test(key, url)` accepts.  An answer is COMPUTED when the request is made
+  // (what the server said at that moment) and DELIVERED when the gate lets it go - the way to make an older answer arrive after a newer one.
+  // gate.parked = [{key, url}] in the order the requests were made; gate.release(i = 0) delivers one, gate.releaseAll() the rest,
+  // gate.off() stops holding (and delivers what is parked).
+  b.holds = [];
+  b.hold = (test) => {
+    const gate = {
+      test,
+      parked: [],
+      release(i = 0) {
+        const entry = gate.parked.splice(i, 1)[0];
+        if (entry) entry.resolve();
+        return Boolean(entry);
+      },
+      releaseAll() {
+        while (gate.parked.length) gate.release(0);
+      },
+      off() {
+        b.holds = b.holds.filter((h) => h !== gate);
+        gate.releaseAll();
+      },
+    };
+    b.holds.push(gate);
+    return gate;
+  };
+  const served = b.fetch;
+  b.fetch = (url, init0) => {
+    const answer = served(url, init0);
+    if (!b.holds.length) return answer; // (the very promise it always was: no extra tick for the many tests that never hold anything)
+    const key = `${(init0 && init0.method) || "GET"} ${String(url).replace(/^\/arena/, "")}`;
+    const gate = b.holds.find((h) => h.test(key, url));
+    if (!gate) return answer;
+    return answer.then((out) => new Promise((resolve) => gate.parked.push({ key, url, resolve: () => resolve(out) })));
   };
   return b;
 }
@@ -655,6 +980,7 @@ function routeFetch(calls, { requireToken = "", session } = {}) {
 async function boot(overrides, envOpts) {
   const backend = makeBackend(overrides);
   const env = makeEnv({ fetchImpl: backend.fetch, ...(envOpts || {}) });
+  if (!backend.uploadManual) env.xhrHooks.auto = backend.uploadHandler;
   env.run();
   await settle();
   env.flushRaf();
@@ -671,9 +997,19 @@ async function bootLive(overrides, envOpts) {
 const posts = (b, method, suffix) => b.calls.filter((c) => c.method === method && c.url.endsWith(suffix));
 
 function runTests(tests) {
+  let finished = false;
+  let running = "";
+  // A test that waits for something that never happens (a dialog nobody answers, a promise nobody resolves) does
+  // not hang node: the event loop simply runs dry and the process ends with exit code 0, which looks like a pass.
+  process.on("exit", () => {
+    if (finished) return;
+    console.log(`FAIL - the process ended before the tests finished (stuck in: ${running || "?"})`);
+    process.exitCode = 1;
+  });
   (async () => {
     let failed = 0;
     for (const [name, fn] of tests) {
+      running = name;
       try {
         await fn();
         console.log(`ok   - ${name}`);
@@ -682,6 +1018,7 @@ function runTests(tests) {
         console.log(`FAIL - ${name}\n${e && e.stack ? e.stack : e}`);
       }
     }
+    finished = true;
     console.log(`\n${tests.length - failed}/${tests.length} passed`);
     process.exit(failed ? 1 : 0);
   })();

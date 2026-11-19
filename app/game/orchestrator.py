@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import logging
-import os
 import random
 from collections.abc import Callable, Coroutine
 from pathlib import Path
@@ -29,6 +28,7 @@ from app.agents.brain import ArenaBrain
 from app.config import load_config
 from app.engine.llm import LLMClient
 from app.game.bindings import BindingError
+from app.game.observe_runtime import ObserveRuntimeMixin
 from app.game.roster_runtime import RosterRuntimeMixin
 from app.game.session import (
     APP_ENGINE_VERSION,
@@ -36,16 +36,20 @@ from app.game.session import (
     SESSION_SCHEMA_VERSION,
     GameSession,
     Participant,
+    utc_now_iso,
 )
-from app.game.session_runtime import OLD_SAVE_NOTICE, SessionRuntimeMixin
+from app.game.session_runtime import OLD_SAVE_LOAD_NOTICE, SessionRuntimeMixin
+from app.game.softpause_runtime import SoftPauseRuntimeMixin
+from app.game.takeover_runtime import TakeoverError, TakeoverRuntimeMixin
 from app.runtime.agent import Agent, AgentConfig
 from app.runtime.bus import EventBus
 from app.runtime.clock import GameClock
 from app.runtime.conversation import ConversationBook
-from app.runtime.llm_gate import GatedEngineLlm, LlmGate
+from app.runtime.llm_gate import GatedEngineLlm, LlmGate, LoggedLlm
 from app.runtime.supervisor import Supervisor, SupervisorConfig
 from app.runtime.trace_log import TraceLog
 from app.runtime.usage import UsageBook
+from app.storage.paths import demo_mode_enabled
 from app.world.loader import load_scenario_v2
 from app.world.projection import world_snapshot
 from app.world.spec import ScenarioError, ScenarioSpec
@@ -59,6 +63,7 @@ __all__ = [
     "ConfigReloadError",
     "GameOrchestrator",
     "SessionLoadError",
+    "TakeoverError",
     "get_orchestrator",
     "orchestrator",
 ]
@@ -107,7 +112,9 @@ def load_config_spec(cfg: dict[str, Any]) -> ScenarioSpec:
     return load_scenario_v2(str(path))
 
 
-class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
+class GameOrchestrator(
+    SoftPauseRuntimeMixin, ObserveRuntimeMixin, TakeoverRuntimeMixin, RosterRuntimeMixin, SessionRuntimeMixin
+):
     # Class-level defaults so partially initialized instances (tests) stay valid.
     _supervisor: Supervisor | None = None
     _reload_deferred: bool = False
@@ -134,8 +141,8 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         self.world: World
         self.clock: GameClock
         self.usage: UsageBook
-        # The first game is built before the workspace is activated (``startup()``): it must not read or
-        # create roster files in whatever directory is active *now*; ``startup()`` reloads it afterwards.
+        # The first game is built before the data directory is locked (``startup()``): it must not read or
+        # create roster files yet; ``startup()`` reloads it afterwards.
         self._roster_io_suspended = True
         try:
             self._reset_game(default_bindings=None)
@@ -199,6 +206,10 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
             clock,
             seed=seed if seed is not None else random.SystemRandom().randrange(1, 2**31),
         )
+        # (v0.13.1) A re-dealt / renamed game keeps the seat a person plays.  The seat is read from the session that is live
+        # *now*: for a brand-new game (``_reset_game``) that is still the old one, which is why ``_set_session`` - called right
+        # after, with the new session - tells the world again and has the last word.
+        self._sync_untimed_holders(world)
         world.drain_outbox()  # nobody is listening yet; the snapshot is built from state
         world.drain_events()
         return world, clock
@@ -225,6 +236,7 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         self.world, self.clock = world, clock
         self.usage = UsageBook()
         self.agent_state = {}
+        self._takeover_signature = ""  # (v0.13) nobody plays a seat of a fresh game; nothing was pushed for it yet
         self._reset_conversations()
         self._set_session(session)
         self._attach_budget()
@@ -238,7 +250,6 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
 
     async def new_game(self, *, randomize_identities: bool | None = None) -> GameSession:
         """Start a fresh game (identities are always dealt anew)."""
-        self._refuse_while_switching()
         if self._autosave_enabled and not self._recovery_pending and self.world.seq > 0:
             await self.flush_autosave("pre-new-game")
         await self._halt()
@@ -250,14 +261,18 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         return self.session
 
     async def shuffle_identities(self) -> GameSession:
-        """Re-deal the identities of a game that has not started."""
-        self._ensure_not_switching()  # never swap the world under a workspace switch / without a workspace
-        if self.session.status != "idle":
-            raise RuntimeError("仅未开始的新对局可以刷新身份；请先新建对局。")
-        self.world, self.clock = self._new_world(self.spec, players=self._session_players())
-        self._reset_conversations()
-        await self.broadcast_state("identities_shuffled")
-        return self.session
+        """Re-deal the identities of a game that has not started (F5).
+
+        Refused (:class:`TakeoverError`, HTTP 409) as soon as the game is not ``idle`` or has a start record
+        (``started_at`` / a ``running`` entry in the ledger).  It shares the control lock with
+        :meth:`start_or_resume`, so a re-deal can never overtake a start.
+        """
+        async with self._control():
+            self._guard_reshuffle()
+            self.world, self.clock = self._new_world(self.spec, players=self._session_players())
+            self._reset_conversations()
+            await self.broadcast_state("identities_shuffled")
+            return self.session
 
     def _session_players(self) -> list[dict[str, Any]]:
         """The seats of the *current* game (kept when only the identities are re-dealt)."""
@@ -286,8 +301,12 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
 
     def _build_runtime(self, *, fresh: bool = False) -> Supervisor:
         rt = self.cfg.get("runtime") or {}
+        call_log = self.call_log()  # (v0.13.1, G34) the error log of this game: every model request leaves lines in it
+        # (v0.13.1) one soft-pause gate per runtime, shared by the real model port (which counts its own calls from the moment
+        # their concurrency slot is granted and sends nothing while the gate is closed) and by every agent / the supervisor
+        soft_gate = self._new_soft_gate()
         if self.llm_port_factory is not None:
-            llm_port = self.llm_port_factory(self)
+            llm_port = LoggedLlm(self.llm_port_factory(self), call_log, self.session.get_model_binding)
         else:
             gate = LlmGate(
                 max_concurrent=int(rt.get("llm_concurrency", 0)),
@@ -298,16 +317,24 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
                 self.session.get_model_binding,
                 gate,
                 float(rt.get("llm_timeout_seconds", 120)),
+                call_log=call_log,
+                soft_gate=soft_gate,
             )
         brain = self._ensure_brain(fresh=fresh)
         trace = TraceLog(self._logs_root(), self.session.session_id)
         self._register_trace_secrets(trace)
+        trace = self._observe_trace(trace)  # (v0.13.1) the agents' errors become lines of the error log, too
         agent_config = AgentConfig(
             compact_at=float(rt.get("compact_at", 0.6)),
             trim_at=float(rt.get("trim_at", 0.9)),
         )
         self._agent_config = agent_config
         sink = _CallableSink(self._publish)
+        # v0.13 (F2, F9): the seat a person plays gets no agent - nothing calls a model for it, nothing is
+        # counted for it, and what the world addresses to it is dropped by the supervisor.  (Its model binding
+        # is still required: ``ensure_bindings_ready`` runs before this, and the seat's agent comes back, and
+        # reviews the game, when the seat is given back.)
+        human_seat = self.takeover_seat
         agents = [
             Agent(
                 agent_id,
@@ -323,6 +350,7 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
                 context_window=self._context_window_of(agent_id),
             )
             for agent_id in [MODERATOR_ID, *(p.id for p in self.session.participants)]
+            if agent_id != human_seat
         ]
         supervisor_config = SupervisorConfig(
             tick_interval=float(rt.get("tick_interval", 0.1)),
@@ -339,6 +367,7 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
             usage=self.usage,
             trace=trace,
             book=self._book,
+            soft_gate=soft_gate,  # (v0.13.1) a soft pause holds all the agents of this runtime
         )
 
     def _register_trace_secrets(self, trace: TraceLog) -> None:
@@ -366,7 +395,11 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         return get_data_dir() / "logs"
 
     async def start_or_resume(self) -> GameSession:
-        self._ensure_not_switching()  # also refuses while the workspace is unusable
+        # (F5) one lock for starting and for the re-deal: a re-deal can never overtake a start
+        async with self._control():
+            return await self._start_or_resume()
+
+    async def _start_or_resume(self) -> GameSession:
         if self._is_active():
             return self.session
         self.reload_config()
@@ -384,6 +417,10 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         session.restore_notice = ""
         session.pause_reason = ""
         session.hold_reason = ""
+        if session.started_at is None:
+            session.started_at = utc_now_iso()  # (F22) the first time the game is started
+        if reason == "continued":
+            session.finished_at = None  # a continued game is not finished any more
         self._stall_notice = ""
         self._supervisor = self._build_runtime(fresh=reason == "started")
         self.clock.resume()
@@ -399,11 +436,12 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         supervisor, self._supervisor = self._supervisor, None
         if supervisor is not None:
             await supervisor.stop()
+        self._clear_soft_pause()  # (v0.13.1, G6) a hard pause, the end, the budget, hold_game, a new / loaded game ...
         if self.world.running:
             self.world.set_running(False, why)
         self.clock.pause()
         self._flush_world()
-        self.agent_state = {k: "sleeping" for k in self.agent_state}  # a stopped game is a sleeping one
+        self.agent_state = self._sleeping_states()  # a stopped game is a sleeping one (a played seat stays "human")
 
     def _flush_world(self) -> None:
         """Publish spectator events the world queued while nobody was draining it."""
@@ -416,6 +454,7 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         session = self.session
         if self.world.state.status == "finished":
             session.status = "finished"
+            session.finished_at = utc_now_iso()  # (F22) when the game ended (cleared again when it is continued)
         else:
             session.status = "paused"
             session.pause_reason = why if why in ("user", "hold", "error", "stall", "budget") else "user"
@@ -464,12 +503,13 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         if event.type in AUTOSAVE_EVENT_TYPES:
             self.schedule_autosave(event.type)
         self.bus.publish(event)
+        self._after_publish(event)  # v0.13: the state of a played seat follows the world (one push per loop turn)
+        if event.type == "error":
+            self._log_error_event(event)  # (v0.13.1, G33) a runtime error is a line of the error log, too
 
     async def broadcast_state(self, event_type: str = "state_update") -> None:
         """Tell spectators that session-level state changed (the world publishes its own events)."""
-        if event_type in {"new_game", "session_loaded", "identities_shuffled", "workspace_changed"}:
-            if event_type == "workspace_changed":
-                self.bus.publish(UiEvent(type="workspace.changed", data={}))
+        if event_type in {"new_game", "session_loaded", "identities_shuffled"}:
             self.bus.publish(UiEvent(type="snapshot", data={"session": self.public_session()}))
             if event_type != "identities_shuffled":
                 self.schedule_autosave(event_type)
@@ -496,6 +536,9 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
                     "review": self.review_view(),
                     "stall_notice": self._stall_notice,
                     "clock": round(float(self.clock.now()), 3),
+                    # (v0.13.1, §12.2) the soft pause and whether the game clock runs - the page's countdown follows it
+                    "soft_pause": self.soft_pause_payload(),
+                    "clock_running": self.clock_running(),
                 },
             )
         )
@@ -527,12 +570,14 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         s = self.session
         snap = world_snapshot(self.world)
         avatars = {p.id: p.avatar for p in s.participants}
+        taken = self.takeover_seat
         participants = [
             {
                 **p,
                 "avatar": avatars.get(str(p.get("id"))),
-                "state": self.agent_state.get(str(p.get("id")), "sleeping"),
-                "sleep_until": self._sleep_until(str(p.get("id"))),
+                # v0.13 (F6): the seat a person plays says "human" (no agent: nothing sleeps or wakes there)
+                "state": self._agent_state_of(str(p.get("id"))),
+                "sleep_until": None if str(p.get("id")) == taken else self._sleep_until(str(p.get("id"))),
             }
             for p in snap.get("players", [])
         ]
@@ -580,6 +625,11 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
             "review": self.review_view(),
             "stall_notice": self._stall_notice,
             "demo": bool(getattr(self, "demo_mode", False)),  # scripted bots, no models
+            # v0.13 (F10, F12): the seat a person plays and what it may do (docs/v0.12-contracts.md §11.7)
+            "takeover": self.takeover_payload(),
+            # v0.13.1 (G2, G6): null, or {"state": "draining" | "held", "in_flight": n}; and whether the game clock runs
+            "soft_pause": self.soft_pause_payload(),
+            "clock_running": self.clock_running(),
         }
 
     def _sleep_until(self, agent_id: str) -> float | None:
@@ -603,7 +653,7 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         if not isinstance(data, dict):
             raise SessionLoadError("存档必须是 JSON 对象")
         if data.get("schema_version") != SESSION_SCHEMA_VERSION:
-            raise SessionLoadError(OLD_SAVE_NOTICE)
+            raise SessionLoadError(OLD_SAVE_LOAD_NOTICE)  # (startup restore has its own notice: OLD_SAVE_NOTICE)
         try:
             loaded = GameSession.model_validate(data)
             spec = ScenarioSpec.model_validate(loaded.scenario_spec)
@@ -636,6 +686,7 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         from app.game.bindings import fill_missing_from_defaults
 
         fill_missing_from_defaults(loaded, self._load_defaults())
+        self._sanitize_takeover(loaded)  # (a save that names a seat it does not have is played by nobody)
         self.spec, self.clock, self.world, self.usage = spec, clock, world, usage
         self.agent_state = {}
         self._reset_conversations()  # conversations are not saved: a restored game starts them from the board
@@ -643,21 +694,23 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
         self._attach_budget()
         self.refresh_binding_issues()
 
-    async def load_session_data(self, data: dict[str, Any]) -> GameSession:
-        """Replace the current game with an imported one.
+    async def load_session_data(self, data: dict[str, Any], *, notice_prefix: str = "已导入存档") -> GameSession:
+        """Replace the current game with the save payload ``data`` (a game that is not read from the game store).
 
         Validate first; on failure (:class:`SessionLoadError`, a ``ValueError``) the running game is
-        not paused, reset or otherwise modified.
+        not paused, reset or otherwise modified.  Nothing is saved here: the caller saves the old game first.
         """
-        self._refuse_while_switching()
-        loaded = self._validate_session_data(data)
+        return await self._replace_game(self._validate_session_data(data), notice_prefix)
+
+    async def _replace_game(self, loaded: GameSession, notice_prefix: str) -> GameSession:
+        """Stop the live game and make the validated ``loaded`` the live one (paused)."""
         await self._halt()
         try:
             self.reload_config()
         except ConfigReloadError:
-            logger.warning("Config reload failed during import; keeping the current config", exc_info=True)
+            logger.warning("Config reload failed while replacing the game; keeping the current config", exc_info=True)
         self._recovery_pending = False
-        await self._adopt_loaded_session(loaded, "已导入存档")
+        await self._adopt_loaded_session(loaded, notice_prefix)
         await self.broadcast_state("session_loaded")
         return self.session
 
@@ -668,6 +721,7 @@ class GameOrchestrator(RosterRuntimeMixin, SessionRuntimeMixin):
     def _set_session(self, session: GameSession) -> None:
         self._session_generation += 1
         self.session = session
+        self._sync_untimed_holders()  # (v0.13.1) the world is told which seat this game's person plays (if any)
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +737,7 @@ def get_orchestrator() -> GameOrchestrator:
     global _instance
     if _instance is None:
         _instance = GameOrchestrator()
-        if os.environ.get("ARENA_DEMO", "").strip() not in ("", "0", "false", "no"):
+        if demo_mode_enabled():
             from app.game.demo import install_demo
 
             install_demo(_instance)

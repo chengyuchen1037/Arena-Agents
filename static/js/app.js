@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Arena-Agents v0.12.1 Frontend Controller
+   Arena-Agents v0.13.1 Frontend Controller
    (async agents · SSE v2 · player cards with pixel avatars · request cards · responsive)
 
    Pure logic lives in
@@ -9,7 +9,7 @@
      view.js      viewpoint filtering, cards, channels, request cards, banners
      platform.js  desktop / tablet / phone detection (<html data-platform>)
    Panels with their own state: roster.js (detail panel, roster menu), budget.js (limit dialog),
-   providers.js (Provider / price source / bindings), layout.js, workspace.js.
+   providers.js (Provider / price source / bindings), layout.js, archive.js (settings: export / import an archive).
    This file wires them to the DOM.
 
    What is NOT here (v0.12 -> v0.12.1): the 🎤 / ✋ / ■ card states and their legend, the execution
@@ -47,11 +47,18 @@
   const MESSAGE_HTML_CACHE_MAX = 5000;
   const FLASH_MS = 3000;
   const LONG_PRESS_MS = 450;
-  let providerUI = null; // v0.10 provider/binding/session-list UI (providers.js)
+  let providerUI = null; // v0.10 provider / binding UI (providers.js)
   let layoutUI = null; // v0.11 collapse/resize UI (layout.js)
-  let workspaceUI = null; // v0.11 workspace (工作文件夹) UI (workspace.js)
+  let archiveUI = null; // v0.13 settings dialog (export / import an archive) + the "old data found" notice (archive.js)
   let rosterUI = null; // v0.12.1 detail panel + roster menu (roster.js)
   let budgetUI = null; // v0.12.1 token / cost limit dialog (budget.js)
+  let historyUI = null; // v0.13 history of games: list, delete, continue, replay (history.js)
+  let replayUI = null; // v0.13 replay player: plays a saved game back in a session of its own (replay.js)
+  let takeoverUI = null; // v0.13 viewpoint bar / takeover bar / reshuffle reminder (takeover.js)
+  let composerUI = null; // v0.13 input box, abilities, request answers of the played seat (composer.js)
+  let marksUI = null; // v0.13.1 colour marks on the players: dots, palette, localStorage (marks.js)
+  let thoughtsUI = null; // v0.13.1 the thinking record window of an agent (thoughts.js)
+  let calllogUI = null; // v0.13.1 the error log window + the unread badge of the top bar (calllog.js)
   let platformCtl = null; // platform.js controller
 
   const state = {
@@ -71,6 +78,7 @@
     read: { baseline: 0, seqs: {} }, // unread watermarks per channel
     flash: new Map(), // actor id -> expiry (ms): briefly highlights a card (ability.used)
     clockSync: { clock: 0, at: 0, running: false }, // estimate of the game clock (sleep timers, request deadlines)
+    replay: null, // v0.13: while a saved game is replayed: {live} - the live session is kept aside (replay.js)
     // SSE
     sse: null,
     sseAttempt: 0,
@@ -85,7 +93,6 @@
     lastBoardHtml: null,
     lastSummaryHtml: null,
     lastChannelsHtml: null,
-    lastViewpointHtml: null,
     lastHintsHtml: null,
     lastBannerHtml: null,
     lastModHtml: null,
@@ -164,7 +171,6 @@
   const elUsageCostText = $("usage-cost-text");
 
   const elBtnNew = $("btn-new");
-  const elBtnSave = $("btn-save");
   const elBtnStart = $("btn-start");
   const elBtnPause = $("btn-pause");
   const elBtnResume = $("btn-resume");
@@ -231,9 +237,13 @@
     return Core.gameClockNow(state.clockSync, Date.now());
   }
 
-  /** The server told us the clock (snapshot / session.updated): trust it and run from now on. */
+  /**
+   * The server told us the clock (snapshot / session.updated): trust it and run from now on - but only while the clock
+   * runs.  v0.13.1 (G2, §12.2): `status` stays "running" during a soft pause while the clock stands still, so the
+   * session's `clock_running` decides (judged by `status` when a server does not send it).
+   */
   function syncClock(session) {
-    state.clockSync = { clock: Number(session.clock) || 0, at: Date.now(), running: session.status === "running" };
+    state.clockSync = { clock: Number(session.clock) || 0, at: Date.now(), running: View.clockRunning(session) };
   }
 
   // ---------------------------------------------------------------------------
@@ -296,14 +306,21 @@
     }, FLASH_MS);
   }
 
-  /** Names + avatars: every cached HTML that contains them is keyed by this. */
+  /**
+   * Names + avatars (+ the colour marks, v0.13.1): every cached HTML that contains them is keyed by this - a mark
+   * that changes must repaint the messages that were drawn with the old one.
+   */
   function computeRosterSig(s) {
     return (
       `${state.avatarEpoch}|` +
       s.participants.map((p) => `${p.id}:${p.name}:${Avatar.descriptionKey(p.avatar)}`).join("|") +
-      `|${s.moderator.name}:${Avatar.descriptionKey(s.moderator.avatar)}`
+      `|${s.moderator.name}:${Avatar.descriptionKey(s.moderator.avatar)}` +
+      `|${marksUI ? marksUI.signature() : ""}`
     );
   }
+
+  /** The coloured dot of a marked player (before a name); "" for an unmarked one, for the moderator and without marks. */
+  const markDot = (id) => (marksUI ? marksUI.nameDotHtml(id) : "");
 
   /** An <img> for any actor (moderator / engine / player). */
   function avatarImg(id, size, className) {
@@ -314,19 +331,6 @@
   // ---------------------------------------------------------------------------
   // Rendering: top bar
   // ---------------------------------------------------------------------------
-
-  function renderViewpointSelect(s) {
-    if (!elSelectViewpoint) return;
-    const options = View.viewpointOptions(s);
-    const html = options
-      .map((o) => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.label)}</option>`)
-      .join("");
-    if (html !== state.lastViewpointHtml) {
-      state.lastViewpointHtml = html;
-      elSelectViewpoint.innerHTML = html;
-    }
-    if (elSelectViewpoint.value !== state.viewpoint) elSelectViewpoint.value = state.viewpoint;
-  }
 
   function renderRequestHints(s) {
     if (!elRequestHints) return;
@@ -427,8 +431,20 @@
     elBtnStart.disabled = !ctl.start;
     elBtnPause.disabled = !ctl.pause;
     elBtnResume.disabled = !ctl.resume;
+    // v0.13.1 (G7): during a soft pause the top bar's 暂停 is the hard pause (it ends the soft pause), and the soft
+    // pause is continued from the takeover bar - the top bar's 继续 stays grey
+    const softPaused = View.softPauseOf(s).active;
+    if (elBtnPause.setAttribute) {
+      elBtnPause.setAttribute("title", softPaused ? "硬暂停：立即停下所有 agent，取消仍在途的模型调用（同时结束软暂停）" : "");
+    }
+    if (elBtnResume.setAttribute) {
+      elBtnResume.setAttribute("title", softPaused ? "现在是软暂停：请用接管栏里的「▶ 继续」" : "继续对局；对局结束后也可以继续");
+    }
+    elBtnNew.disabled = Boolean(s.replay); // a replay is not the live game: nothing of the live controls applies
+    if (historyUI) historyUI.onSession();
 
-    renderViewpointSelect(s);
+    // v0.13: the viewpoint bar [视角▾][切换][接管] / the takeover bar / the reshuffle reminder (takeover.js)
+    if (takeoverUI) takeoverUI.render();
     renderRequestHints(s);
     renderBanner(s);
     renderModeratorChip(s);
@@ -436,7 +452,7 @@
       elFeedViewing.textContent = `视角：${View.viewpointLabel(s, state.viewpoint)}`;
       elFeedViewing.classList.toggle("is-player", state.viewpoint !== View.GOD);
     }
-    if (elSelectViewpoint) elSelectViewpoint.classList.toggle("is-player", state.viewpoint !== View.GOD);
+    // (the drop-down's own colour follows its pending choice: takeover.js)
     if (budgetUI) budgetUI.onSession(s);
     if (rosterUI) rosterUI.renderControls();
   }
@@ -452,6 +468,12 @@
     if (t.state) classes.push(`st-${t.state}`);
     if (state.flash.has(t.id)) classes.push("flash");
     if (rosterUI && rosterUI.openId() === t.id) classes.push("popover-open");
+    // v0.13.1 (G16, G18): the colour mark - a stripe along the card's top edge and a dot in the top-right corner (the
+    // button of the palette while a seat is played); the sheriff's badge makes room for it
+    const markEl = marksUI ? marksUI.cardMarkHtml(t.id) : "";
+    const markClass = marksUI ? marksUI.cardClass(t.id) : "";
+    if (markClass) classes.push(markClass);
+    if (markEl) classes.push("mark-slot");
 
     const badges = t.badges
       .map(
@@ -475,7 +497,7 @@
       ` data-until="${until}" role="button" tabindex="0" title="${escapeHtml(t.title)}"` +
       ` aria-label="${escapeHtml(t.name)}，${numText(t.seat)} 号">` +
       `<span class="pcard-num">${numText(t.seat)}</span>` +
-      `<span class="pcard-badges">${badges}</span>` +
+      `<span class="pcard-badges">${badges}</span>${markEl}` +
       `<span class="pcard-avatar">${avatarImg(t.id, 40)}</span>` +
       `<span class="pcard-text"><span class="pcard-name">${escapeHtml(t.name)}</span>${tag}</span>` +
       `${stateEl}</div>`
@@ -541,7 +563,11 @@
     const isDm = m.kind === "dm";
     // A private chat is normally "free": the chip is only worth showing when it is muted / frozen.
     const showChip = Boolean(sum.icon) && !(isDm && sum.kind === "free");
-    const tipText = `${m.title}${showChip ? `｜${sum.icon} ${sum.text}${sum.detail ? `（${sum.detail}）` : ""}` : ""}`;
+    // v0.13 (F18): the channels that wait for the person who plays a seat (it holds the floor / has an open request)
+    const attention = Boolean(m.attention);
+    const tipText =
+      `${m.title}${showChip ? `｜${sum.icon} ${sum.text}${sum.detail ? `（${sum.detail}）` : ""}` : ""}` +
+      `${attention ? "｜✋ 待你操作" : ""}`;
     const hue = Avatar.HUES[Avatar.hashString(ch.id) % Avatar.HUES.length];
     const avatar = isDm
       ? avatarImg(m.avatarId, 40, "chan-avatar-img")
@@ -552,13 +578,23 @@
       : "";
     const detail = sum.detail && showChip ? `<span class="channel-detail">${escapeHtml(sum.detail)}</span>` : "";
     const members = isDm ? "" : `<span class="channel-members">${numText(m.memberCount)} 人</span>`;
+    const attn = attention
+      ? `<span class="attn-chip" title="轮到你发言，或有一个请求等你作答">待你操作</span>`
+      : "";
+    // v0.13.1 (G18): the colour mark of the player a private chat is with - before its name (and, on the avatar rail
+    // where names are hidden, on the avatar's corner)
+    const mark = isDm ? markDot(m.avatarId) : "";
     return (
-      `<div class="channel-item${isDm ? " is-dm" : " is-group"}${active ? " active" : ""}${n ? " has-unread" : ""}"` +
+      `<div class="channel-item${isDm ? " is-dm" : " is-group"}${active ? " active" : ""}${n ? " has-unread" : ""}${
+        attention ? " needs-action" : ""
+      }"` +
       ` data-channel="${escapeHtml(ch.id)}" data-title="${escapeHtml(tipText)}" title="${escapeHtml(tipText)}" role="button" tabindex="0">` +
       `<span class="chan-avatar">${avatar}` +
-      `${showChip ? `<span class="chan-ov ov-state">${sum.icon}</span>` : ""}${unreadBadge(n, "chan-ov ov-unread")}</span>` +
-      `<span class="chan-body"><span class="chan-row"><span class="channel-name">${escapeHtml(m.title)}</span>${unreadBadge(n)}</span>` +
-      `<span class="channel-meta">${chip}${members}</span>${detail}</span></div>`
+      `${showChip ? `<span class="chan-ov ov-state">${sum.icon}</span>` : ""}${unreadBadge(n, "chan-ov ov-unread")}` +
+      `${attention ? `<span class="chan-ov ov-attn" title="待你操作">✋</span>` : ""}` +
+      `${mark ? `<span class="chan-ov ov-mark">${mark}</span>` : ""}</span>` +
+      `<span class="chan-body"><span class="chan-row"><span class="channel-name">${mark}${escapeHtml(m.title)}</span>${unreadBadge(n)}</span>` +
+      `<span class="channel-meta">${chip}${attn}${members}</span>${detail}</span></div>`
     );
   }
 
@@ -734,7 +770,8 @@
       `<article class="${classes.join(" ")}" data-seq="${numText(m.seq)}"` +
       ` data-from="${escapeHtml(m.from)}"${m.ticket_id ? ` data-ticket-msg="${escapeHtml(m.ticket_id)}"` : ""}>` +
       `<div class="msg-avatar">${avatarImg(m.from, 40, "msg-avatar-img")}</div>` +
-      `<div class="msg-main"><div class="msg-head"><span class="msg-name">${escapeHtml(name)}</span>` +
+      // (v0.13.1, G18: the speaker's colour mark sits before the name; it is part of rosterSig, so a changed mark repaints)
+      `<div class="msg-main"><div class="msg-head">${markDot(m.from)}<span class="msg-name">${escapeHtml(name)}</span>` +
       `${label}${ticket}<span class="msg-time">${escapeHtml(time)}</span></div>` +
       `<div class="msg-body formatted-text">${body}</div></div></article>`;
     Core.boundedSet(state.msgHtml, cacheKey, html, MESSAGE_HTML_CACHE_MAX);
@@ -773,7 +810,8 @@
           ans = `<span class="req-ans pending">…</span>`;
         }
         return (
-          `<li class="req-row${r.answered ? " answered" : ""}"><span class="req-who">${avatarImg(r.id, 20, "req-avatar")}` +
+          // (v0.13.1, G18: a recipient's colour mark sits before its name)
+          `<li class="req-row${r.answered ? " answered" : ""}"><span class="req-who">${avatarImg(r.id, 20, "req-avatar")}${markDot(r.id)}` +
           `<span class="req-name">${escapeHtml(r.name)}</span></span>${ans}</li>`
         );
       })
@@ -806,14 +844,18 @@
       }
     }
     const question = View.annotateIdRefs(Core.renderInlineFormatting(c.question), s);
+    // v0.13 (F17): the person who plays a recipient answers right on the card
+    const action = composerUI && c.action ? composerUI.requestActionHtml(c) : "";
     return (
-      `<article class="req-card req-${escapeHtml(c.status)}${c.sealed ? " is-sealed" : ""}${c.shareAnswers ? " is-share" : ""}" data-req="${escapeHtml(c.id)}">` +
+      `<article class="req-card req-${escapeHtml(c.status)}${c.sealed ? " is-sealed" : ""}${c.shareAnswers ? " is-share" : ""}${
+        action ? " has-action" : ""
+      }" data-req="${escapeHtml(c.id)}">` +
       `<div class="req-head"><span class="req-icon" aria-hidden="true">${icon}</span><span class="req-kind">${kindLabel}请求</span>` +
       `<span class="req-status st-${escapeHtml(c.status)}">${escapeHtml(c.statusLabel)}</span>${chips.join("")}${timer}</div>` +
       `<div class="req-question">${question || "（没有问题文本）"}</div>` +
       `<div class="req-progress"><span class="req-progress-text">${numText(c.answeredCount)}/${numText(c.total)} 已作答</span>` +
       `<span class="req-bar"><span class="req-bar-fill" style="width:${pct}%"></span></span></div>` +
-      `<ul class="req-rows">${rows}</ul>${result}</article>`
+      `<ul class="req-rows">${rows}</ul>${action}${result}</article>`
     );
   }
 
@@ -821,7 +863,31 @@
     const tpl = document.createElement("template");
     tpl.innerHTML = html;
     const node = tpl.content && tpl.content.firstElementChild;
-    if (node) elFeedRecords.appendChild(node);
+    if (node) {
+      elFeedRecords.appendChild(node);
+      if (composerUI) composerUI.restoreRequestDrafts(node);
+    }
+  }
+
+  /**
+   * A text the person typed into a request card (data-draft-key): when the card is drawn again while the
+   * input has the focus, the caret must stay where it was.
+   */
+  function focusedDraft(node) {
+    const a = document.activeElement;
+    if (!a || !node || typeof node.contains !== "function" || !node.contains(a)) return null;
+    const key = typeof a.getAttribute === "function" ? a.getAttribute("data-draft-key") : null;
+    return key ? { key, start: a.selectionStart, end: a.selectionEnd } : null;
+  }
+
+  function refocusDraft(fresh, keep) {
+    if (!keep || typeof fresh.querySelector !== "function") return;
+    const box = fresh.querySelector(`[data-draft-key="${cssEscape(keep.key)}"]`);
+    if (!box) return;
+    if (typeof box.focus === "function") box.focus();
+    if (typeof box.setSelectionRange === "function" && keep.start !== undefined && keep.start !== null) {
+      box.setSelectionRange(keep.start, keep.end);
+    }
   }
 
   /** Replace the i-th block in place (a request card changed); false when the DOM cannot do it. */
@@ -832,7 +898,10 @@
     tpl.innerHTML = html;
     const fresh = tpl.content && tpl.content.firstElementChild;
     if (!fresh) return false;
+    const keep = focusedDraft(node);
     elFeedRecords.replaceChild(fresh, node);
+    if (composerUI) composerUI.restoreRequestDrafts(fresh);
+    refocusDraft(fresh, keep);
     return true;
   }
 
@@ -845,7 +914,8 @@
         View.viewpointLabel(s, state.viewpoint)
       )} 在这个频道里还没有看到任何内容</div>`;
     }
-    return `<div class="empty-placeholder">这个频道里还没有发言 — 这里显示发言与请求卡片；思维链与工具调用只写入日志</div>`;
+    // (v0.13.1, G26: the thoughts are no longer "only in the log": the detail panel of a player opens them)
+    return `<div class="empty-placeholder">这个频道里还没有发言 — 这里显示发言与请求卡片；玩家的思考内容在详情面板的「🧠 思考记录」里查看，工具调用只写入日志</div>`;
   }
 
   function tickCountdowns() {
@@ -854,6 +924,11 @@
       for (const n of Array.from(elFeedRecords.querySelectorAll("[data-deadline]"))) {
         const d = Number(n.getAttribute("data-deadline"));
         n.textContent = Core.formatCountdown(d - now);
+      }
+      // v0.13.1 (G45): a vote that was picked but not submitted is flagged when the deadline is close
+      for (const n of Array.from(elFeedRecords.querySelectorAll("[data-warn-at]"))) {
+        const at = Number(n.getAttribute("data-warn-at"));
+        if (n.classList && typeof n.classList.toggle === "function") n.classList.toggle("urgent", Number.isFinite(at) && now >= at);
       }
     }
   }
@@ -876,7 +951,10 @@
     const prev = state.feed.rows;
 
     const rebuild = () => {
+      const keep = focusedDraft(elFeedRecords);
       elFeedRecords.innerHTML = rows.length ? rows.map((r) => r.html).join("") : emptyFeedHtml(s);
+      if (composerUI) composerUI.restoreRequestDrafts(elFeedRecords);
+      refocusDraft(elFeedRecords, keep);
     };
 
     if (force || state.feed.key !== key) {
@@ -952,6 +1030,10 @@
     }
     if (d.feed) renderFeed(force);
     if (d.popover) renderPopover();
+    // v0.13: the input box follows the selected channel and the seat's state (it only touches what changed)
+    if (composerUI) composerUI.render();
+    // v0.13.1: an open colour palette follows the marks - and goes when the seat was given back / a replay began
+    if (marksUI) marksUI.sync();
   }
 
   function renderAll(force = false) {
@@ -1017,8 +1099,17 @@
     }
   }
 
+  /**
+   * The viewpoint a session asks for: the seat a person plays is locked as the viewpoint (v0.13, F3); otherwise
+   * what the user chose.  (Front end only: the server still sends the god view's data, a known limit.)
+   */
+  function effectiveViewpoint(session) {
+    return View.normalizeViewpoint(session, View.takeoverSeat(session) || state.viewpointPref);
+  }
+
   /** Switch the spectator viewpoint. Pure front-end: nothing is requested from the server. */
   function setViewpoint(id, persist = true) {
+    if (View.takeoverSeat(state.session)) return; // locked while a seat is played
     const vp = View.normalizeViewpoint(state.session, id);
     state.viewpointPref = vp;
     state.viewpoint = vp;
@@ -1032,8 +1123,86 @@
     renderAll(true);
   }
 
+  /**
+   * The played seat changed (takeover.updated): the viewpoint becomes that seat, or - after leaving it - what
+   * the user had chosen before.  A different message set: the feed is drawn again.
+   */
+  function syncViewpointLock() {
+    const next = effectiveViewpoint(state.session);
+    if (next === state.viewpoint) return;
+    state.viewpoint = next;
+    state.selectedChannel = state.channelChosen
+      ? View.normalizeSelectedChannel(state.session, next, state.selectedChannel)
+      : View.defaultChannelId(state.session, next);
+    markChannelRead(state.selectedChannel);
+    state.autoScroll = true;
+    state.feed.key = "";
+    if (rosterUI && rosterUI.isOpen()) rosterUI.render();
+  }
+
+  // ---------------------------------------------------------------------------
+  // v0.13 (F36): replaying a saved game (replay.js).  While a replay runs, `state.session` IS the replayed session
+  // (so every renderer shows it); the live game is kept aside in `state.replay.live` and still follows the SSE
+  // stream, so leaving the replay shows the game exactly as it is now.
+  // ---------------------------------------------------------------------------
+
+  /** The live game's session (while a replay runs `state.session` is the replayed one). */
+  const liveSession = () => (state.replay ? state.replay.live : state.session);
+
+  /** Show `session` (a replay) instead of the live one; called again for every rebuild after a seek. */
+  function enterReplay(session) {
+    if (!state.replay) state.replay = { live: state.session, installing: false };
+    state.replay.installing = true;
+    try {
+      state.sessionKey = null; // a different "game": the selected channel and the unread marks start afresh
+      replaceSession(session);
+    } finally {
+      state.replay.installing = false;
+    }
+    state.clockSync = { clock: Number(session.clock) || 0, at: Date.now(), running: false }; // the replay sets the clock itself
+  }
+
+  /** Back to the live game. */
+  function leaveReplay() {
+    if (!state.replay) return;
+    const live = state.replay.live;
+    state.replay = null;
+    state.sessionKey = null;
+    replaceSession(live);
+    syncClock(live);
+    renderAll(true);
+  }
+
+  /** An event of the live stream while a replay is shown: it goes into the session kept aside, nothing is painted. */
+  function handleLiveEventDuringReplay(payload) {
+    const live = state.replay.live;
+    const id = Store.eventIdOf(payload, NaN);
+    const result = Store.applyEvent(live, payload, { clockNow: Number(live.clock) || 0 });
+    if (result.replaced) {
+      state.lastEventId = Number.isFinite(id) ? id : result.session.event_id;
+      state.sseResumeId = state.lastEventId;
+      state.replay.live = result.session;
+    } else if (Number.isFinite(id) && id > 0) {
+      if (id > state.lastEventId) state.lastEventId = id;
+      if (id > state.sseResumeId) state.sseResumeId = id;
+      if (id > live.event_id) live.event_id = id;
+    }
+    if (historyUI) historyUI.onSession();
+    // the settings dialog: archive import needs the LIVE game paused, whatever replay is on screen
+    if (archiveUI && (result.replaced || payload.type === "game.status" || payload.type === "session.updated")) archiveUI.onSession(state.replay.live);
+    // v0.13.1: the error log belongs to the LIVE game: its lines keep coming (and its badge keeps counting) during a replay
+    if (calllogUI) {
+      if (result.llmCall) calllogUI.onEvent(result.llmCall);
+      if (result.replaced) calllogUI.onSession(state.replay.live);
+    }
+  }
+
   /** Replace the whole session (snapshot, state fetch, control / import / load response). */
   function replaceSession(next) {
+    if (state.replay && !state.replay.installing) {
+      state.replay.live = next; // a snapshot / HTTP answer of the LIVE game during a replay: kept aside, not shown
+      return;
+    }
     const prevKey = state.sessionKey;
     const key = next.session_id || null;
     state.session = next;
@@ -1050,7 +1219,7 @@
     } else if (!state.read.baseline) {
       resetReadState(next);
     }
-    state.viewpoint = View.normalizeViewpoint(next, state.viewpointPref);
+    state.viewpoint = effectiveViewpoint(next);
     state.selectedChannel = state.channelChosen
       ? View.normalizeSelectedChannel(next, state.viewpoint, state.selectedChannel)
       : View.defaultChannelId(next, state.viewpoint);
@@ -1058,9 +1227,13 @@
     if (rosterUI && rosterUI.openId() && rosterUI.openId() !== MOD && !View.participantOf(next, rosterUI.openId())) {
       rosterUI.close();
     }
-    if (providerUI) providerUI.onSession(next);
-    if (workspaceUI) workspaceUI.onSession(next);
+    // providers, bindings, the notice bar and the archive import concern the LIVE game (during a replay, `next` is the
+    // replayed one); the roster shows what is on screen
+    if (providerUI) providerUI.onSession(liveSession());
+    if (archiveUI) archiveUI.onSession(liveSession());
+    if (calllogUI) calllogUI.onSession(liveSession()); // v0.13.1: the error log is the live game's, also while a replay is on screen
     if (rosterUI) rosterUI.onSession(next);
+    if (thoughtsUI) thoughtsUI.onSession(next); // v0.13.1: the open thinking record re-checks "may I look" (a seat taken over, a replay) and follows a new game
     // The feed compares what it already shows (view key + blocks), so an identical
     // snapshot after a reconnect does not rebuild the list or move the scroll position.
     scheduleRender(Store.newDirty(true));
@@ -1070,10 +1243,11 @@
   function adoptHttpSession(raw, opts = {}) {
     if (!raw || typeof raw !== "object") return false;
     const incoming = Store.normalizeSession(raw);
-    if (!opts.force && !Store.shouldAdoptHttpSession(state.session, incoming, state.lastEventId)) {
+    const current = liveSession(); // (during a replay the live game is the one kept aside)
+    if (!opts.force && !Store.shouldAdoptHttpSession(current, incoming, state.lastEventId)) {
       return false;
     }
-    const differentGame = incoming.session_id !== state.session.session_id;
+    const differentGame = incoming.session_id !== current.session_id;
     if (differentGame) state.lastEventId = incoming.event_id > 0 ? incoming.event_id : 0;
     else if (incoming.event_id > state.lastEventId) state.lastEventId = incoming.event_id;
     replaceSession(incoming);
@@ -1096,8 +1270,22 @@
   function handleEvent(payload) {
     if (!payload || typeof payload !== "object" || !payload.type) return;
     if (Store.isStaleEvent(state.lastEventId, payload)) return; // replayed after a reconnect
+    if (payload.type === "archive.progress") {
+      // v0.13: an export / import job is not part of any game: handled the same with or without a replay on screen
+      const archiveResult = Store.applyEvent(state.session, payload, null);
+      const archiveEventId = Store.eventIdOf(payload, NaN);
+      if (Number.isFinite(archiveEventId) && archiveEventId > 0) {
+        if (archiveEventId > state.lastEventId) state.lastEventId = archiveEventId;
+        if (archiveEventId > state.sseResumeId) state.sseResumeId = archiveEventId;
+      }
+      if (archiveUI && archiveResult.archiveEvent) archiveUI.onEvent(archiveResult.archiveEvent);
+      return;
+    }
+    if (state.replay) {
+      handleLiveEventDuringReplay(payload); // a saved game is on screen: the live game follows in the background
+      return;
+    }
     const id = Store.eventIdOf(payload, NaN);
-    const prevStatus = state.session.status;
     const before = clockNow();
     const result = Store.applyEvent(state.session, payload, { clockNow: before });
 
@@ -1112,19 +1300,19 @@
       if (id > state.sseResumeId) state.sseResumeId = id;
       if (id > state.session.event_id) state.session.event_id = id;
     }
-    if (result.reload) {
-      // A workspace switch changes providers, templates and sessions for the whole
-      // server process; every tab must rebuild its UI instead of merging a session.
-      if (typeof window.location.reload === "function") window.location.reload();
-      return;
-    }
-    // the game clock stops while the game is not running (D18): freeze / resume our estimate
+    // the game clock stops while the game is not running (D18), and - v0.13.1 (G2) - while a soft pause holds it
+    // although the status stays "running": freeze / resume our estimate (`clock_running`, judged by the status
+    // when a server does not send it)
     const s = state.session;
     if (payload.type === "session.updated" && payload.data && payload.data.clock !== undefined) {
       syncClock(s);
-    } else if (s.status !== prevStatus) {
-      state.clockSync = { clock: before, at: Date.now(), running: s.status === "running" };
+    } else if (View.clockRunning(s) !== state.clockSync.running) {
+      state.clockSync = { clock: before, at: Date.now(), running: View.clockRunning(s) };
     }
+    if (result.takeoverChanged) syncViewpointLock();
+    // v0.13.1: whether the thoughts of another agent may be read depends on the played seat and on the game being over
+    if (thoughtsUI && (result.takeoverChanged || payload.type === "game.status")) thoughtsUI.onSession(state.session);
+    if (result.llmCall && calllogUI) calllogUI.onEvent(result.llmCall); // one more line of the error log (and maybe a red badge)
     if (result.toast) showToast(result.toast);
     if (result.message) onMessageSeen(result.message);
     if (result.flash) flashActor(result.flash);
@@ -1132,12 +1320,12 @@
     if (result.budgetEvent === "reached") showToast("⛔ 已达到预算上限");
     if (result.reviewEvent) {
       const ev = result.reviewEvent;
-      if (ev.state === "done" && rosterUI) rosterUI.onReviewDone();
+      if (ev.state === "done" && rosterUI) rosterUI.onReviewDone(ev.id);
       if (ev.state === "error") showToast(`复盘失败（${View.displayName(s, ev.id)}）：${ev.message || "未知错误"}`);
     }
     if (PROVIDER_RELEVANT.has(payload.type)) {
       if (providerUI) providerUI.onSession(state.session);
-      if (workspaceUI) workspaceUI.onSession(state.session);
+      if (archiveUI) archiveUI.onSession(state.session);
     }
     scheduleRender(result.dirty);
   }
@@ -1227,16 +1415,27 @@
     });
   }
 
+  // v0.13.1 (G16): the colour dot in a card's corner (only while a seat is played) opens the palette - never the panel
+  bindPress(elParticipantsGrid, "[data-mark-toggle]", "data-mark-toggle", (node) => {
+    if (marksUI) marksUI.togglePalette(node.getAttribute("data-mark-toggle"), node);
+  });
   // a player card (or the moderator chip) opens the detail panel / drawer
-  bindPress(elParticipantsGrid, ".pcard[data-actor]", "data-actor", (node) =>
-    togglePopover(node.getAttribute("data-actor"))
-  );
+  bindPress(elParticipantsGrid, ".pcard[data-actor]", "data-actor", (node, evt) => {
+    if (closestFrom(evt && evt.target, "[data-mark-toggle]")) return; // (the dot is handled above)
+    togglePopover(node.getAttribute("data-actor"));
+  });
   bindPress(elTopbarStatus, "#mod-chip", "data-actor", (node) =>
     togglePopover(node.getAttribute("data-actor") || MOD)
   );
   if (elParticipantsGrid) {
     elParticipantsGrid.addEventListener("keydown", (evt) => {
       if (!evt || (evt.key !== "Enter" && evt.key !== " ")) return;
+      const dot = closestFrom(evt.target, "[data-mark-toggle]");
+      if (dot) {
+        if (typeof evt.preventDefault === "function") evt.preventDefault();
+        if (marksUI) marksUI.togglePalette(dot.getAttribute("data-mark-toggle"), dot);
+        return;
+      }
       const card = closestFrom(evt.target, ".pcard[data-actor]");
       if (!card) return;
       if (typeof evt.preventDefault === "function") evt.preventDefault();
@@ -1339,14 +1538,15 @@
 
   // Real elements are moved (so their listeners keep working) and put back when the screen widens.
   const RELOCATIONS = [
-    { id: "btn-open-workspace-modal", slot: "menu" },
+    { id: "btn-open-settings-modal", slot: "menu" },
     { id: "btn-theme", slot: "menu" },
-    { id: "viewpoint-picker", slot: "menu" },
+    // v0.13: the whole bar [视角▾][切换][接管] moves; the takeover bar (#takeover-bar) stays in the first row
+    { id: "viewpoint-bar", slot: "menu" },
     { id: "btn-open-budget-modal", slot: "menu" },
+    // v0.13.1 (G32): the error log button moves too; its unread badge then shows on the ⋯ button (calllog.js)
+    { id: "btn-open-calllog", slot: "menu" },
     { id: "btn-new", slot: "menu" },
-    { id: "btn-save", slot: "menu" },
-    { id: "btn-import-session", slot: "menu" },
-    { id: "btn-open-sessions-modal", slot: "menu" },
+    { id: "btn-open-history-modal", slot: "menu" },
     { id: "btn-open-bindings-modal", slot: "menu" },
     { id: "btn-open-provider-modal", slot: "menu" },
     { id: "usage-telemetry-pill", slot: "status" },
@@ -1412,9 +1612,7 @@
     htmlEl.setAttribute("data-theme", next);
   });
 
-  if (elSelectViewpoint) {
-    elSelectViewpoint.addEventListener("change", () => setViewpoint(elSelectViewpoint.value));
-  }
+  // (v0.13: the drop-down only chooses; "切换" / "接管" are wired in takeover.js)
 
   /** POST a control endpoint and adopt the session in its response. */
   async function control(path, okMessage) {
@@ -1454,34 +1652,9 @@
     control("api/control/pause", "已暂停：所有 Agent 已休眠，计时冻结")
   );
 
-  elBtnSave.addEventListener("click", async () => {
-    try {
-      const res = await apiPost("api/session/save");
-      const filename = (res && res.filename) || "arena_session.json";
-      if (res && res.session) {
-        const blob = new Blob([JSON.stringify(res.session, null, 2)], {
-          type: "application/json",
-        });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-      }
-      showToast(`对局已保存: ${filename}`);
-    } catch (err) {
-      showToast(err.message);
-    }
-  });
-
   // ---------------------------------------------------------------------------
-  // Session import
+  // Usage pill + adopting a session that an HTTP answer carries (v0.13: the single-game JSON import is gone)
   // ---------------------------------------------------------------------------
-  const elBtnImportSession = document.getElementById("btn-import-session");
-  const elFileImportSession = document.getElementById("file-import-session");
   if (elUsagePill) {
     // Cost breakdown lives with the model bindings.
     elUsagePill.addEventListener("click", () => {
@@ -1496,32 +1669,6 @@
     renderAll(true);
   }
 
-  if (elBtnImportSession && elFileImportSession) {
-    elBtnImportSession.addEventListener("click", () => {
-      elFileImportSession.click();
-    });
-    elFileImportSession.addEventListener("change", async (evt) => {
-      const file = evt.target.files && evt.target.files[0];
-      if (!file) return;
-      try {
-        const text = await file.text();
-        let json;
-        try {
-          json = JSON.parse(text);
-        } catch {
-          throw new Error("文件不是有效的 JSON");
-        }
-        const res = await apiPost("api/session/import", json);
-        handleSessionLoaded(res.session);
-        showToast(`已成功导入存档: ${file.name}`);
-      } catch (err) {
-        showToast(`导入失败: ${err.message}`);
-      } finally {
-        elFileImportSession.value = "";
-      }
-    });
-  }
-
   if (window.ArenaLayout) {
     // Layout is pure DOM/state: create it before the first render so the saved
     // collapsed panels are applied immediately.
@@ -1533,8 +1680,8 @@
       api,
       Core,
       showToast,
-      getSession: () => state.session,
-      onSessionLoaded: handleSessionLoaded,
+      // (v0.13: the providers, the bindings and the "未绑定模型" light concern the LIVE game, also while a replay is on screen)
+      getSession: () => liveSession(),
       // Providers/bindings changed: the detail panel shows the model of an agent.
       onChange: () => scheduleRender({ ...Store.newDirty(false), popover: true }),
     });
@@ -1546,6 +1693,21 @@
     const providers = providerUI ? providerUI.getProviders() : [];
     if (providers.length === 0) return `${b.model_id || "未绑定"} · ${b.reasoning_depth || "high"}`;
     return Core.bindingSummary(b, providers);
+  }
+
+  // v0.13.1 (G16-G20): the colour marks on the players (marks.js).  Created before the detail panel: the palette of
+  // the panel's head comes from here (ctx.markHeadHtml below), and this module's document listeners (Escape, a click
+  // outside the palette) must answer first.
+  if (window.ArenaMarks) {
+    marksUI = window.ArenaMarks.create({
+      View,
+      getSession: () => state.session,
+      getViewpoint: () => state.viewpoint,
+      isReplaying: () => Boolean(state.replay),
+      // a mark was set / cleared here, or in another tab: every place that shows one is drawn again (the feed's cache
+      // key holds the marks, see computeRosterSig)
+      onChange: () => scheduleRender({ ...Store.newDirty(false), board: true, channels: true, feed: true, popover: true }),
+    });
   }
 
   if (window.ArenaRosterUI) {
@@ -1563,8 +1725,140 @@
         if (providerUI) providerUI.openBindings(id);
       },
       setViewpoint: (id) => setViewpoint(id),
+      // v0.13 (F3): while a seat is played the viewpoint is locked: "以 X 的视角观看" is disabled
+      lockedSeat: () => View.takeoverSeat(state.session),
+      // v0.13.1 (G16, G18): the colour palette (or the read-only dot) in the head of the detail panel
+      markHeadHtml: (id) => (marksUI ? marksUI.headHtml(id) : ""),
+      // v0.13.1 (G21, G25): "🧠 思考记录" opens the window of an agent; while a seat is played the others' records are closed
+      // (the reason is the button's tooltip and a line of text)
+      openThoughts: (id) => {
+        if (thoughtsUI) thoughtsUI.open(id);
+      },
+      thoughtsBlocked: (id) => (window.ArenaThoughtsUI ? window.ArenaThoughtsUI.blockedReason(state.session, id, { replaying: Boolean(state.replay) }) : ""),
+      // Escape closes a window that is open before it closes the panel behind it
+      isWindowOpen: () => Boolean((thoughtsUI && thoughtsUI.isOpen()) || (calllogUI && calllogUI.isOpen())),
       patchParticipants,
       onChange: () => scheduleRender({ ...Store.newDirty(false), board: true, topbar: true, channels: true, feed: true }),
+    });
+  }
+
+  // v0.13.1: the two floating windows below share one stack: the one opened last is on top (on the screen, and for the Escape key, which
+  // closes that one only - the other, and the detail panel behind them, stay)
+  const windowStack = typeof Core.createWindowStack === "function" ? Core.createWindowStack() : null; // (null: each window keeps a stack of its own)
+
+  // v0.13.1 (G21-G26): the thinking record window (thoughts.js) - read on demand from GET /api/agents/{id}/thoughts
+  if (window.ArenaThoughtsUI) {
+    thoughtsUI = window.ArenaThoughtsUI.create({
+      api,
+      Core,
+      Avatar,
+      View,
+      showToast,
+      windows: windowStack,
+      getSession: () => state.session,
+      isReplaying: () => Boolean(state.replay), // (the record is the live game's: while a replay is shown it is closed)
+    });
+  }
+
+  // v0.13.1 (G32-G36): the error log window and the unread badge of the top bar (calllog.js).  The log is the LIVE game's.
+  if (window.ArenaCallLogUI) {
+    calllogUI = window.ArenaCallLogUI.create({
+      api,
+      Core,
+      Store,
+      View,
+      showToast,
+      windows: windowStack,
+      getSession: () => liveSession(),
+    });
+  }
+
+  /** The shared modal of roster.js (confirmations, forms); the browser's confirm() when it is missing. */
+  function openDialog(options) {
+    if (rosterUI && typeof rosterUI.openDialog === "function") return rosterUI.openDialog(options);
+    const ok = typeof window.confirm === "function" ? window.confirm(String((options && options.title) || "确认")) : false;
+    return Promise.resolve({ ok, values: {} });
+  }
+
+  // v0.13 (F1-F5): the viewpoint bar [视角▾][切换][接管], the takeover bar, the reshuffle reminder
+  if (window.ArenaTakeoverUI) {
+    takeoverUI = window.ArenaTakeoverUI.create({
+      api,
+      Core,
+      View,
+      showToast,
+      getSession: () => state.session,
+      getViewpoint: () => state.viewpoint,
+      setViewpoint: (id) => setViewpoint(id),
+      openDialog,
+      adoptSession: (raw, opts) => adoptHttpSession(raw, opts),
+      refreshState: () => reloadState(),
+      isReplaying: () => Boolean(state.replay),
+    });
+  }
+
+  // v0.13 (F11-F17): the input box, the floor, abilities and the answers of request cards
+  if (window.ArenaComposerUI) {
+    composerUI = window.ArenaComposerUI.create({
+      api,
+      Core,
+      View,
+      showToast,
+      getSession: () => state.session,
+      getViewpoint: () => state.viewpoint,
+      getSelectedChannel: () => state.selectedChannel,
+      getClockNow: clockNow,
+      getFeedNode: () => elFeedRecords,
+      openDialog,
+      onSent: () => {
+        state.autoScroll = true; // the player's own message scrolls the feed to the bottom
+      },
+      onChange: () => scheduleRender({ ...Store.newDirty(false), topbar: true, channels: true, feed: true }),
+    });
+  }
+
+  // v0.13 (F34, F35): the history of games - list, delete, continue, replay
+  if (window.ArenaHistoryUI) {
+    historyUI = window.ArenaHistoryUI.create({
+      // v0.13.1 (G19): a deleted game takes the colour marks (they live in this browser) along
+      api: marksUI
+        ? {
+            ...api,
+            del: async (path, ...rest) => {
+              const out = await api.del(path, ...rest);
+              const gone = /^\/?(?:[^?#]*\/)?api\/games\/([^/?#]+)$/.exec(String(path));
+              if (gone) marksUI.forget(decodeURIComponent(gone[1]));
+              return out;
+            },
+          }
+        : api,
+      Core,
+      showToast,
+      getSession: () => liveSession(),
+      openDialog,
+      isReplaying: () => Boolean(state.replay),
+      onLoaded: (session) => handleSessionLoaded(session),
+      onReplay: (data, game) => {
+        if (replayUI) replayUI.start(data, game);
+      },
+    });
+  }
+
+  // v0.13 (F36): the replay player (it works on a session of its own, see enterReplay / leaveReplay)
+  if (window.ArenaReplayUI) {
+    replayUI = window.ArenaReplayUI.create({
+      Core,
+      Store,
+      showToast,
+      enter: enterReplay,
+      leave: () => leaveReplay(),
+      render: (dirty) => scheduleRender(dirty),
+      renderAll: () => renderAll(true),
+      setClock: (gt) => {
+        state.clockSync = { clock: Number(gt) || 0, at: Date.now(), running: false };
+      },
+      onMessage: onMessageSeen,
+      onFlash: flashActor,
     });
   }
 
@@ -1574,21 +1868,32 @@
       Core,
       View,
       showToast,
-      getSession: () => state.session,
+      getSession: () => liveSession(), // the limit is the live game's, also while a replay is on screen
       onBudget: (budget) => {
-        state.session.budget = budget;
+        liveSession().budget = budget;
         scheduleRender({ ...Store.newDirty(false), topbar: true });
       },
     });
   }
 
-  if (window.ArenaWorkspaceUI) {
-    workspaceUI = window.ArenaWorkspaceUI.create({
+  if (window.ArenaArchiveUI) {
+    archiveUI = window.ArenaArchiveUI.create({
       api,
       Core,
       showToast,
-      getSession: () => state.session,
-      onSessionLoaded: handleSessionLoaded,
+      getSession: () => liveSession(), // (a replay on screen must not hide that the live game runs: import needs it paused)
+      getToken,
+      // XHR uploads send the token as a header; a download link cannot, so it carries ?token= (the server accepts it there)
+      buildUrl: (path, options) => {
+        const url = Core.joinUrl(URL_PREFIX, path);
+        const token = options && options.token ? getToken() : "";
+        return token ? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : url;
+      },
+      requestToken: requestAuthToken,
+      reload: () => {
+        if (typeof window.location.reload === "function") window.location.reload();
+      },
+      openDialog,
     });
   }
 
@@ -1790,11 +2095,8 @@
           data.session.restored_from_save = true;
         }
         adoptHttpSession(data.session, { force: true });
-        // v0.11: /api/state carries the workspace summary (name / path withheld
-        // for remote clients); it is the cheapest way to label the top bar.
-        if (workspaceUI) {
-          workspaceUI.onState(data.workspace || (data.session && data.session.workspace));
-        }
+        // v0.13 (F24): "old v0.12.1 data found" (the path is only sent to a client on the server's own machine)
+        if (archiveUI) archiveUI.onState(data.legacy_data);
         renderAll(true);
       }
       return true;
@@ -1812,6 +2114,8 @@
     window.setInterval(() => {
       tickCountdowns();
       if (rosterUI && rosterUI.isOpen()) rosterUI.render({ live: true });
+      // the seconds left of the played seat's floor (the hint under the input box)
+      if (composerUI && View.takeoverSeat(state.session)) composerUI.render();
     }, 1000);
   }
 
@@ -1841,11 +2145,6 @@
       return;
     }
     await reloadState();
-    // v0.11: fetch the workspace summary (name, recent list, native picker
-    // availability) without blocking the first render.
-    if (workspaceUI) {
-      workspaceUI.load().catch(() => {});
-    }
     if (rosterUI) rosterUI.load().catch(() => {});
     if (!SSE_DISABLED) {
       window.setTimeout(connectSSE, 300);
@@ -1876,7 +2175,16 @@
     patchParticipants,
     platform: () => (platformCtl ? platformCtl.info() : null),
     roster: () => rosterUI,
+    thoughts: () => thoughtsUI,
+    calllog: () => calllogUI,
     budget: () => budgetUI,
+    archive: () => archiveUI,
+    takeover: () => takeoverUI,
+    composer: () => composerUI,
+    marks: () => marksUI,
+    history: () => historyUI,
+    replay: () => replayUI,
+    liveSession,
   };
 
   init();

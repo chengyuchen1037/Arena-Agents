@@ -111,6 +111,41 @@ async def test_start_arms_every_agent_and_stop_leaves_no_task_behind():
 
 
 @async_test()
+async def test_stopping_lets_go_of_the_trace_file_and_a_later_write_reopens_it(tmp_path):
+    """v0.13: a paused / replaced game must not keep its log open - on Windows that blocks deleting the game from the
+    history and replacing the data directory with an archive."""
+    from app.runtime.trace_log import TraceLog
+
+    rig = Rig()
+    trace = TraceLog(tmp_path, "g1")
+    rig.trace = trace
+    sup, _agents = make_supervisor(rig)
+    sup.start()
+    trace.write("hello", "a1")
+    assert trace._handle is not None, "a running game keeps its trace file open between writes"
+    await sup.stop()
+    assert trace._handle is None, "stop() closed the file"
+    # the folder can be removed right away (on Windows this fails while a handle is open)
+    import shutil
+
+    shutil.rmtree(tmp_path / "g1")
+    assert not (tmp_path / "g1").exists()
+    trace.write("after", "a1")  # (a straggler never raises: the file is simply opened again)
+    assert trace._handle is not None
+    trace.close()
+
+
+@async_test()
+async def test_stopping_works_with_a_trace_sink_that_cannot_be_closed():
+    rig = Rig()  # RecordingTrace has no close()
+    assert not hasattr(rig.trace, "close")
+    sup, _agents = make_supervisor(rig)
+    sup.start()
+    await sup.stop()
+    assert not sup.running
+
+
+@async_test()
 async def test_a_stopped_supervisor_can_be_started_again_and_the_conversations_continue():
     rig = Rig()
     rig.llm.script("a1", sleep_resp(), sleep_resp())
