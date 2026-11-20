@@ -1,5 +1,164 @@
 # Release Notes
 
+## 0.14.0
+
+0.14.0 replaces the *seat roster with a persona and a diary* by **bots**: a player is a bot with a name, an avatar and a
+**layered memory** that it builds itself, the engine is separated from the bot, and the version ships a **benchmark** so
+that "do the players sound different?" and "do they hold on to the core logic instead of the most fluent speech?" can be
+measured instead of felt. Plan and decisions (H1–H59): [docs/v0.14-plan.md](docs/v0.14-plan.md); contract:
+[docs/v0.12-contracts.md](docs/v0.12-contracts.md) section 13.
+
+Why: in eight real games (249 public speeches) 53 % of the speeches were cut at the 300-character cap, 98 % had several
+paragraphs, about half were numbered lists, 31 % began with the speaker's own seat id, and the same stock phrases
+appeared in almost every seat; agents also preferred the *coherent* story over the blunt, correct one (for example
+distrusting a human seer whose first-night check had "no reason"). The persona had hardly any effect because it was one
+short paragraph in a prompt that taught every agent how to write a work report.
+
+### Bots and four memory layers
+
+- **Bots instead of seats.** `data/bots/<id>/` holds a bot; `data/bots/lineup.json` orders the twelve seats. Names and
+  avatars belong to the bot, not to the seat; seats can be rearranged by dragging a card (before the game starts). The
+  moderator is not a bot.
+- **L0 — core (the user's):** `identity` (who I am), `voice` (how I speak, with sample lines and a length range) and
+  `mind` (how I analyse), plus up to three extra sections. Only the user changes it (the editor, an `.md` import, a
+  default-library import, or by accepting a proposal from a review). It is never truncated in the prompt. Twelve default
+  bots (*Alice … Leo*) ship in `bots/`: distinct voices, no game vocabulary and no play advice.
+- **L1 — architecture:** the *official contract* (`data/contract/contract.md`: how the platform works — a short
+  must-read part that is mounted into every prompt and a reference part read on demand with `read_contract`) and the bot's
+  own *operating notes*.
+- **L2 — rules:** the *scenario* plus the bot's own *digest*, *playbook* (≤ 20 hypotheses, each with a confidence, a
+  support and a counter-example count and a source), *open questions* and its *impressions of the other players* (keyed by
+  name). Study materials can be added per scenario (empty by default; `knowledge/` stays moderator-only).
+- **L3 — the game:** the status board, a hard-facts table (what the rules produced versus what a player *claimed*), the
+  visible history, notes. The prompts **do not teach how to play**: the bot reads the contract and the rules and writes its
+  own understanding as hypotheses to be tested.
+- The system prompt of a game is byte-stable (so provider prefix caching keeps working); event hints (whose turn it is, the
+  playbook entries that match the situation, "settle the one or two things that matter, then say it in full") are appended
+  to the wake-up messages only. Memory is rendered as first-person prose, never as bullet lists, so it is not imitated.
+  In the visible history a bot reads a speech as `N3 Carol 说：…` (its own as `N3 Carol（你）说：…`), so the log no longer shows it the shape
+  `N3：…` to imitate; the status board states the limit of ONE message for a free discussion and no "total" for a floor of a single message.
+
+### Initialization and review
+
+- **Initialization** (⚙ *Initialize all* or per player, 120 s, all-or-nothing): the bot reads the contract, the rules and
+  the materials and writes its operating notes, digest and playbook (and, if it wants, open questions). A bot that is not
+  initialized (○), whose last initialization failed (✖), or whose core / contract / scenario / materials changed afterwards
+  (⚠) **blocks the start** with a per-bot list of what to fix (the start check also covers the contract, the scenario and the
+  model bindings). After initialization the name and avatar are frozen (🔒); changing them asks for confirmation and
+  resets the bot's memory (the core is kept).
+- **Review** (after the game ends, 60 s, what has been written is kept): each bot compares its judgements with the revealed
+  truth and revises its own memory and its impressions of people (style, credibility and habits — never "who they are").
+  A bot can only *propose* changes to its core; the user accepts or rejects them. If a person played a seat, the review
+  can learn that player's style — as a proposal — and the other bots are never told who the human was. Deleting a game
+  does not remove what a review already taught (the dialog says so).
+- Both runs are independent loops (not the game's actors), with a wall-clock limit and a hard cap on rounds. An
+  initialization is paid from a separate *learning usage* ledger (never a game's budget); a review is counted in the game
+  it is about; the call log marks them `init` / `review`.
+- Demo mode (`ARENA_DEMO=1`): the twelve bots start out ✔ and initialization and review are answered by the scripted demo
+  bots with fixed answers, so the whole flow can be tried without a model.
+
+### Speech: nothing is cut, nothing is rewritten
+
+- A player's speech over the limit is **sent back with `TOO_LONG`** (nothing is posted, the floor and quota are kept, the
+  receipt says how many characters it was and what the limit is) instead of being truncated; the person's input box counts
+  characters and keeps what was typed. The per-message limit stays 300.
+- A bot's speech that reads like a report — lines of a list, a heading or bold, a seat id as the first words — is sent back
+  once per speaking turn with `FORMAT`; the bot rewrites it **in its own words** (a voice that really talks in enumerations says
+  so with a line `允许口头列举` in its `voice` and the list check is switched off for it). Nobody rewrites, wraps or "assists" a bot's
+  speech: speech only ever comes from the bot's own worker calling `speak` (tests assert that no code path submits for it).
+- Every bot thinks without a "keep it short" instruction, and a player no longer has `list_documents` / `read_document`
+  (the moderator keeps them) but has `jot` (a clue for the review) and `read_contract`.
+
+### Identities are dealt when the game starts
+
+- Nothing about identities exists before the game starts — not in the state, not in a card, not as a grey "?". The deal
+  is a single step at the start; **re-dealing was removed**. A person who takes over a seat before the start no longer
+  "already knows the role".
+
+### Interface
+
+- **Settings** has five collapsible sections: ① the whole archive (export / import), ② core files (clear all / one, preview,
+  export, import, generate), ③ the official contract (import / export / restore default; a change marks every bot as needing
+  re-initialization), ④ rules and study materials, ⑤ game management (per-game delete with the review-memory warning,
+  single-game `.arenagame` export / import, jump to history).
+- The seat number is a translucent bubble; ✔ ⚠ ✖ ⏳ ○ next to a name show the initialization state; a system status tag
+  (*not initialized / initializing / before the game / in game / paused / finished / reviewing*) and a view tag (*global view /
+  Alice's view / Alice's view (taking over)*) sit at the start of the second row.
+- The start-check dialog, the initialization dialog (with per-bot progress) and the end-of-game review dialog (60 s
+  countdown per bot, "learn the taker-over's style" switch, a summary of what changed and the number of proposals waiting).
+- Downloads of single files (a bot, a core file, the contract, a scenario, a game) send the token as a header and are named well
+  (`<name>-<time>.arenabot`, `<name>.core.md`, `contract-v0.14.0.md`, `game-<id>-<date>.arenagame`, …); only the download of the whole
+  archive (`arena-agents-<time>.arenaagents`) is still a link that carries `?token=`.
+
+### Files, archives and compatibility
+
+- **Archive format 2** (format 1 is still read): contract, rules and materials, all bots with their memories and proposals,
+  the lineup, the learning usage, all games (with their previous copy) and **all** logs, the learning logs included (the "logs
+  optional" step is gone). The API-key handling is the v0.13 design, unchanged. Also new: **`.arenabot`** (one bot, exchanged
+  between users; import overwrites that bot) and **`.arenagame`** (one game with its logs; id conflict → copy / overwrite /
+  cancel).
+- **The engine reads the contract and the scenario from the data directory** (`data/contract/`, `data/rules/<id>/`); the shipped
+  `prompts/contract.md` and the scenario `config.yml` names (`scenario.path`) are only the defaults - copied on the first run and
+  by *restore default*. A default you never changed is refreshed when a newer program ships another one (every bot then shows ⚠);
+  one you imported or edited by hand is never touched.
+- **Upgrading from 0.13.x is automatic**: the first start converts `data/roster/` into twelve bots (names, avatars, the
+  persona mapped onto core files, impressions re-keyed by name, "experience" lines become low-confidence playbook entries,
+  records and per-seat model bindings kept; a bot whose persona was empty and whose name is one of the defaults gets that
+  default's core). `roster/` is **not touched**. Nothing is initialized yet: use *Initialize all* once.
+- **A hand-written persona loses nothing.** One without headings (typed in by hand, not made by the moderator-model template) becomes the
+  identity up to 300 characters, cut where a sentence ends, and goes on - word for word, white space kept - in up to three
+  extra core sections *原有性格（续）*, *（续二）*, *（续三）* (300 characters each). Its voice and way of thinking stay empty
+  and are **not** filled in from the defaults (a default voice does not fit a persona somebody else wrote): the start check
+  names them, and *✨ Complete with the moderator's model* writes them from what is there. A persona with headings whose
+  section is longer than its new limit overflows into the extra sections that are still free before anything is cut; only
+  what does not fit in the four places (about 1200 characters) ends with an ellipsis.
+- **Games saved by 0.13.x (save format 5) still open, replay and continue** — with the old bot behaviour
+  (`LegacyBrain`, byte-identical to 0.13.1, no start check) — but cannot be reviewed. New games are save format 6.
+- Removed: `/api/roster/**`, *re-deal* (`/api/control/shuffle-identities`, `takeover.reshuffle_available`), the persona /
+  memory editors of the player panel (replaced by the bot panel).
+
+### Benchmark
+
+- `bench/` (kept in the repository) measures what v0.14 set out to change, against the v0.13.1 player:
+  - **Metrics and baseline**: loaders for saved games and traces; **R** (runtime health), **S1** (form) and **S3** (homogeneity), computed on
+    saved games (`python -m bench audit | baseline`) and on runs; the v0.13.1 baseline measured on the eight real games
+    (`bench/reports/baseline-v0.13.1.json`); the acceptance gates (`bench/gates.yml`).
+  - **Runner**: a bot (a v0.14 bot, the v0.13.1 player `legacy`, or an ablation with one memory layer taken away) is driven through the **real worker
+    loop** to the decision point of a *situation script* and acts there. A fake model by default; a real one only with `--real --max-calls N`.
+    A situation can be cut from a saved game (`python -m bench replay --emit`).
+  - **Question bank**: 93 situations in 8 suites — R (runtime), S2 (style), L1 (expression invariance, 7 A/B pairs), L2 (trivia traps), L3 (the
+    decisive fact), L4 (real decision points with every word rewritten), M2 (recall of early facts), M3 (rules quiz) — written the way the
+    moderator's manual plays the game and checked on the real engine (`python -m bench situations --check`). `python -m bench suites` lists them
+    with the model calls each tier (smoke / quick / full) would make; the quick tier is about 300.
+  - **Judges** are DSH sub-agents, never the player model: rubric files (`bench/judges/*.md`), `judge-pack` → a DSH `workflow`
+    (`judge.workflow.js`) → `judge-merge`; every verdict is checked against the rubric's schema and the judge never learns which bot, run or
+    question it is looking at. A rubric counts for acceptance only when the judge agrees with **you** (Cohen's κ ≥ 0.6): `calibration-set` draws
+    a blinded sample, `bench/label/index.html` is the offline page to label it, `calibrate` computes κ.
+  - **Report**: `python -m bench report` computes every number with its interval and n (two-level bootstrap), checks every gate (passed / failed /
+    awaiting baseline / awaiting calibration / reference only / not run) and writes `bench/reports/<version>/` together with the raw files.
+  - `bench/fixtures` is out of reach of every learning tool.
+- The tests never touch your data: `tests/conftest.py` points `ARENA_DATA_DIR` at a throw-away directory for the whole test
+  process and warns in the summary if `data/` changed.
+
+### Developer tools
+
+- `tools/real_smoke.py` was rebuilt for bots: in a scratch data directory the bots are initialized first (`--init fixed` commits a
+  fixed initialization without a model, `--init real` lets them really initialize) and then a small game is played; the report shows
+  the speeches the engine sent back (`TOO_LONG` / `FORMAT`), the prompt-cache hit rate and how much memory was mounted.
+- New `tools/init_default_bots.py` runs one real initialization of the default bot library (`--write-library` is what writes the
+  result into `bots/`, `--check` verifies that it is up to date); `tests/test_bots_library_fresh.py` goes red when a shipped bot's
+  initialization no longer matches the contract, the default scenario or its core. Both scripts have a hard call budget, only read
+  your data directory and are never run by a test; see [docs/real-model-runs.md](docs/real-model-runs.md).
+
+### Documentation
+
+- New: [docs/bots.md](docs/bots.md) (writing and editing a bot: core files, the four memory layers, initialization and review),
+  [bots/README.md](bots/README.md) (the default library), [docs/real-model-runs.md](docs/real-model-runs.md),
+  [bench/README.md](bench/README.md), [docs/v0.14-plan.md](docs/v0.14-plan.md) and contract section 13. The READMEs, the
+  architecture pages (a "Bot = Brain + memory" section) and their pictures (bots, the start check, save format 6),
+  `docs/storage.md` and `docs/archive.md` follow v0.14. `tests/test_docs.py` also checks that the numbers the pages quote about
+  bots (limits, the 120 s / 60 s of a learning run, the Composer's budgets) are the constants of the code.
+
 ## 0.13.1
 
 0.13.1 makes taking over a seat practical for a whole game: **soft-pause only the agents**, **take your time on
