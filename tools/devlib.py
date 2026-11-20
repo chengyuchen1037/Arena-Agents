@@ -142,6 +142,15 @@ def scratch_environment(scratch: Path) -> Iterator[None]:
                 os.environ[name] = value
 
 
+def require_scratch(scratch: Path) -> None:
+    """Defense in depth: ``SystemExit`` unless the data directory of this process IS ``scratch`` - a tool that went on with any other directory
+    (the environment was not applied, a store was made too early) would create and change files in somebody's real data."""
+    from app.storage.paths import get_data_dir
+
+    if Path(get_data_dir()).resolve() != Path(scratch).resolve():
+        raise SystemExit(f"refusing to go on: the data directory is {get_data_dir()}, not the scratch directory {scratch}")
+
+
 def source_bindings(source: Path, seats: Sequence[str], *, window: int = 0) -> dict[str, Any]:
     """The default model bindings of the data directory ``source`` as the seats of a table of ``seats`` use them, and the moderator's:
     ``{"moderator": ModelBinding, "N1": ModelBinding, ...}`` (ids and numbers only, no secrets).
@@ -234,35 +243,19 @@ class Meter:
 
 
 class MeteredClient:
-    """``LLMClient`` behind a :class:`Meter`: ``chat_stream`` is counted and capped, every other attribute (``reconfigure``, ``aclose`` ...) is
-    the real client's.  The signature is the real one's, so the model port above it still finds out that retries can be reported."""
+    """``LLMClient`` behind a :class:`Meter`: ``chat_stream`` is counted and capped (one call = one ``chat_stream``: the retries the client makes
+    inside it for a network error do not count again), every other attribute (``reconfigure``, ``aclose`` ...) is the real client's.  The
+    keyword arguments of ``chat_stream`` pass through as they are (``is_moderator``, ``tools``, ``on_chunk``, ``max_tokens_override``,
+    ``binding``, ``on_retry`` ...), and the model port above can still find out that retries can be reported."""
 
     def __init__(self, inner: Any, meter: Meter) -> None:
         self._inner = inner
         self._meter = meter
 
-    async def chat_stream(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        is_moderator: bool = False,
-        tools: list[dict[str, Any]] | None = None,
-        on_chunk: Any = None,
-        max_tokens_override: int | None = None,
-        binding: Any = None,
-        on_retry: Any = None,
-    ) -> Any:
+    async def chat_stream(self, messages: list[dict[str, Any]], **kwargs: Any) -> Any:
         self._meter.reserve()
         try:
-            return await self._inner.chat_stream(
-                messages,
-                is_moderator=is_moderator,
-                tools=tools,
-                on_chunk=on_chunk,
-                max_tokens_override=max_tokens_override,
-                binding=binding,
-                on_retry=on_retry,
-            )
+            return await self._inner.chat_stream(messages, **kwargs)
         except Exception as exc:  # noqa: BLE001 - counted, then re-raised for the caller's own handling (a cancellation is not an error)
             self._meter.errors[type(exc).__name__] += 1
             raise
