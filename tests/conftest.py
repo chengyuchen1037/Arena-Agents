@@ -11,7 +11,7 @@ import app.config
 from app.storage import reset_stores_for_tests
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-_CODE_ASSETS = ("config.yml", "scenarios", "prompts", "knowledge", "static")
+_CODE_ASSETS = ("config.yml", "scenarios", "prompts", "knowledge", "static", "bots")  # v0.14: bots/ = the default bot library
 
 
 # ------------------------------------------------------------------------------ the program directory
@@ -27,8 +27,9 @@ def _copy_asset(name: str, project: Path) -> None:
     source = _REPOSITORY_ROOT / name
     if source.is_dir():
         shutil.copytree(source, project / name)
-    else:
+    elif source.is_file():
         shutil.copy2(source, project / name)
+    # else: the asset is not there (e.g. ``bots/`` before the default library exists): nothing to copy
 
 
 def _snapshot(project: Path) -> dict[str, tuple[int, int]]:
