@@ -37,6 +37,7 @@ import secrets
 import shutil
 import threading
 import time
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -476,7 +477,19 @@ def _short(text: str, limit: int = 60) -> str:
 
 # ---- migrating a v0.13 roster (H45) --------------------------------------------------------------------------------
 LEGACY_EXPERIENCE_SOURCE = "迁移自 v0.13 的经验"
+LEGACY_PERSONA_TITLE = "原有性格"  # the extra sections that carry on a persona without headings: ``原有性格（续）``, ``原有性格（续二）`` ...
 _LEGACY_BAD_NAME_CHARS = re.compile(r"[\x00-\x1f\x7f<>\"'`\\]")
+#: The "carried on" marks of those extra sections: （续）, （续二）, （续三）.  No ASCII letter or digit in them, on purpose: the files of the extras are read back
+#: in the order of their slugs, and the slug of a title is made of its ASCII characters (``x1``, ``x2`` ... for a title that has none), so a title with a digit
+#: in it ("续 2") would be read before "续" and the text of a persona would come back in the wrong order.
+_NUMERALS = "二三四五六七八九十"
+_ELLIPSIS = "…"
+#: Where a sentence ends: these stops (the ASCII ones only when white space, the end of the text or a closing quote follows - not in "3.5") and the quotes
+#: and brackets that close the sentence with them.
+_STOPS = "。！？；"
+_ASCII_STOPS = ".!?;"
+_CLOSERS = "」』”’）)】]》\"'"
+_HASH_LINE_RE = re.compile(r"^[ \t\u3000]*#")
 
 
 def _fit_text(text: str, limit: int) -> str:
@@ -491,14 +504,109 @@ def _unheading(line: str) -> str:
     return re.sub(r"^\s*#+[ \t\u3000]*", "", line).strip()
 
 
-def legacy_persona_to_core(persona: str) -> CoreFiles:
-    """A v0.13 persona -> L0, by its headings: ``【定位】`` -> identity; ``【说话风格】`` and ``【口头禅】`` -> voice; ``【思考方式】``,
-    ``【决策偏好】`` and ``【压力下】`` -> mind (the last two lines are labelled with their heading so they keep their meaning).
-    A persona without any heading (or text in front of the first one) is who the bot is: it goes to identity.  An empty persona
-    gives no L0 at all.  Every section is cut to its limit (with an ellipsis) rather than refused."""
-    sections = parse_legacy_persona(persona)
-    if not any(sections.values()):
-        return CoreFiles()
+def _cut_points(text: str) -> list[int]:
+    """The places where a piece of ``text`` may end, ascending: right after a sentence (a stop and the closing quotes that go with it) and right before a
+    line break (a paragraph, a list item, a line of its own)."""
+    points: list[int] = []
+    size = len(text)
+    index = 0
+    while index < size:
+        char = text[index]
+        if char == "\n":
+            point = index
+            index += 1
+        elif char in _STOPS or (char in _ASCII_STOPS and (index + 1 >= size or text[index + 1].isspace() or text[index + 1] in _CLOSERS)):
+            index += 1
+            while index < size and (text[index] in _STOPS or text[index] in _ASCII_STOPS or text[index] in _CLOSERS):
+                index += 1
+            point = index
+        else:
+            index += 1
+            continue
+        if not points or points[-1] != point:
+            points.append(point)
+    return points
+
+
+def _split_text(text: str, limits: Sequence[int]) -> list[str]:
+    """``text`` cut into at most ``len(limits)`` pieces - the first of at most ``limits[0]`` characters, the next of at most ``limits[1]`` ... - and nothing
+    the user wrote is lost as long as it fits: the pieces are, in order, pieces of ``text`` exactly as it is (only the white space where two pieces meet is
+    left out - a stored text is stripped), and it all fits when ``text`` has at most ``sum(limits) - len(limits) + 1`` characters.
+
+    * A piece ends where a sentence ends (:func:`_cut_points`), at the last such place that leaves it within its limit.  When the whole text fits, that is
+      done only as long as what is left still fits in the pieces that are to follow - the rest of them may all have to be cut in the middle of a sentence.
+    * A sentence that is longer than the limit is cut at the limit: the piece ends with an ellipsis (one of its characters) and the text goes on, from
+      the very next character, in the next piece.
+    * What does not fit in the last piece is lost: that piece ends with an ellipsis.  (A text that cannot fit at all is cut at the end of sentences all
+      the way, not in the middle of them, so that the pieces read well and only its end is lost.)
+    """
+    value = text.strip()
+    size = len(value)
+    points = _cut_points(value)
+    fits = size <= sum(limits) - (len(limits) - 1)  # (with every piece but the last ending in an ellipsis, which takes one place of it)
+    pieces: list[str] = []
+    pos = 0
+    for number, limit in enumerate(limits):
+        while pos < size and value[pos].isspace():
+            pos += 1
+        if pos >= size:
+            break
+        if size - pos <= limit:
+            pieces.append(value[pos:])
+            break
+        follow = limits[number + 1 :]
+        if follow:
+            at = bisect_right(points, pos + limit) - 1
+            end = points[at] if at >= 0 and points[at] > pos else None
+            if end is not None:
+                rest = end
+                while rest < size and value[rest].isspace():
+                    rest += 1
+                if not fits or size - rest <= sum(follow) - (len(follow) - 1):
+                    pieces.append(value[pos:end].rstrip())
+                    pos = end
+                    continue
+        stop = pos + max(1, limit - 1)
+        pieces.append(value[pos:stop].rstrip() + _ELLIPSIS)
+        pos = stop
+    return pieces
+
+
+def _neutral(text: str) -> str:
+    """``text`` without ``#`` marks at the start of a line (a line that starts with one would be read as the heading of a section by the merged L0 file, and
+    ``validate_core`` refuses it); nothing else of it is changed, the white space in it included."""
+    lines: list[str] = []
+    for line in text.split("\n"):
+        while _HASH_LINE_RE.match(line):  # ("# # x" is still "# x" after the first round)
+            line = _unheading(line)
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _persona_pieces(text: str, limits: Sequence[int]) -> list[str]:
+    """:func:`_split_text`, every piece made fit for the L0 files (:func:`_neutral`; a piece that is nothing after that is left out)."""
+    return [piece for piece in (_neutral(part) for part in _split_text(text, limits)) if piece]
+
+
+def _continued(number: int) -> str:
+    """The mark of the ``number``-th (from 0) extra section that carries a section on: ``（续）``, ``（续二）``, ``（续三）`` ..."""
+    if number <= 0:
+        return "（续）"
+    return f"（续{_NUMERALS[number - 1]}）" if number <= len(_NUMERALS) else f"（续{number + 1}）"
+
+
+def _free_persona_to_core(text: str) -> CoreFiles:
+    """A persona without any heading - what a persona typed in by hand usually is: the first 300 characters (cut where a sentence ends) are the identity and
+    the rest goes on, in order, in up to three extra sections (``原有性格（续）``, ``（续二）``, ``（续三）``, 300 characters each), so that - up to about
+    1200 characters - not a word of it is lost.  The white space is kept as it was; voice and way of thinking stay empty (nothing is made up)."""
+    pieces = _persona_pieces(botfiles.normalize_newlines(text), [CORE_LIMITS["identity"]] + [CORE_EXTRA_CHARS] * CORE_EXTRA_MAX)
+    extras = tuple((LEGACY_PERSONA_TITLE + _continued(number), piece) for number, piece in enumerate(pieces[1:]))
+    return CoreFiles(identity=pieces[0] if pieces else "", extras=extras)
+
+
+def _headed_persona_to_core(sections: dict[str, list[str]]) -> CoreFiles:
+    """A persona in the fixed format of v0.13.1 (``【定位】`` ...): what a section holds beyond its limit goes on in the extra sections that are still free
+    (``原有·身份（续）``, ``原有·说话方式（续）`` ...) before it is cut."""
 
     def lines(*pairs: tuple[str, str]) -> str:
         out: list[str] = []
@@ -509,14 +617,40 @@ def legacy_persona_to_core(persona: str) -> CoreFiles:
                     out.append(f"{label}{text}")
         return "\n".join(out)
 
-    identity = lines(("定位", ""), ("", ""))
-    voice = lines(("说话风格", ""), ("口头禅", "口头禅："))
-    mind = lines(("思考方式", ""), ("决策偏好", "决策偏好："), ("压力下", "压力下："))
-    return CoreFiles(
-        identity=_fit_text(identity, CORE_LIMITS["identity"]),
-        voice=_fit_text(voice, CORE_LIMITS["voice"]),
-        mind=_fit_text(mind, CORE_LIMITS["mind"]),
-    )
+    texts = {
+        "identity": lines(("定位", ""), ("", "")),
+        "voice": lines(("说话风格", ""), ("口头禅", "口头禅：")),
+        "mind": lines(("思考方式", ""), ("决策偏好", "决策偏好："), ("压力下", "压力下：")),
+    }
+    kept: dict[str, str] = {}
+    extras: list[tuple[str, str]] = []
+    for key in CORE_SECTIONS:
+        pieces = _persona_pieces(texts[key], [CORE_LIMITS[key]] + [CORE_EXTRA_CHARS] * (CORE_EXTRA_MAX - len(extras)))
+        kept[key] = pieces[0] if pieces else ""
+        title = f"原有·{botfiles.CORE_HEADINGS[key]}"
+        extras.extend((title + _continued(number), piece) for number, piece in enumerate(pieces[1:]))
+    return CoreFiles(identity=kept["identity"], voice=kept["voice"], mind=kept["mind"], extras=tuple(extras))
+
+
+def legacy_persona_to_core(persona: str) -> CoreFiles:
+    """A v0.13 persona -> L0, without losing what the user wrote.
+
+    * **With headings** (the fixed format): ``【定位】`` -> identity; ``【说话风格】`` and ``【口头禅】`` -> voice; ``【思考方式】``, ``【决策偏好】`` and
+      ``【压力下】`` -> mind (the last two lines are labelled with their heading so they keep their meaning); text in front of the first heading is who the
+      bot is, too.  What a section holds beyond its limit goes on in the extra sections that are still free (``原有·<section>（续）``); only what does not
+      fit even there is cut, with an ellipsis (:func:`_headed_persona_to_core`).
+    * **Without any heading** (free text): the first 300 characters, cut where a sentence ends, are the identity and the rest goes on in up to three extra
+      sections ``原有性格（续）``, ``（续二）``, ``（续三）``; the voice and the way of thinking stay empty - the user (or the moderator's model, "complete it")
+      writes them (:func:`_free_persona_to_core`).
+
+    An empty persona gives no L0 at all.  Nothing is refused: what does not fit in the sections (more than about 1200 characters) ends with an ellipsis."""
+    text = str(persona or "").replace("\x00", "")
+    sections = parse_legacy_persona(text)
+    if not any(sections.values()):
+        return CoreFiles()
+    if set(sections) == {""}:
+        return _free_persona_to_core(text)
+    return _headed_persona_to_core(sections)
 
 
 def _legacy_name(value: str, seat: int) -> str:
@@ -1831,7 +1965,10 @@ class BotStore:
 
         * name and avatar are kept (a colon in an old name becomes a space; two seats with one name: the later one gets a number);
           the seats become the line-up in the order N1, N2 ...; the memory switch and the moderator's avatar are kept;
-        * the persona becomes L0 by its headings (:func:`legacy_persona_to_core`); an empty persona leaves L0 missing - except
+        * the persona becomes L0 by its headings (:func:`legacy_persona_to_core`); a persona without headings (free text) is the identity
+          and what goes beyond its 300 characters goes on, word for word, in up to three extra sections "原有性格（续）" ... - the voice
+          and the way of thinking stay empty, so the bot cannot start until the user (or the moderator's model, "complete it") has
+          written them; an empty persona leaves L0 missing - except
           with ``fill_missing_core`` (the default, H59: v0.13 personas were empty by default, so most old tables would have twelve
           bots that cannot start): a bot with no L0 whose name is the name of a default-library bot gets that bot's L0 (name,
           avatar and memory stay the migrated ones); a bot with another name stays without L0;
@@ -1865,6 +2002,10 @@ class BotStore:
             for row in legacy.seats:
                 name = names[row.id]
                 core = legacy_persona_to_core(row.persona)
+                faults = botfiles.validate_core(core)
+                if faults:  # (cannot happen - the mapping keeps to the limits - but one old text must never take the whole table with it: roster/ still has it)
+                    logger.warning("The persona of %s does not fit the core files and is left out: %s", name, " ".join(faults))
+                    core = CoreFiles()
                 entry = library.get(name.casefold())
                 if entry is not None and not (core.identity or core.voice or core.mind):
                     core = botfiles.read_core(entry.path / "core")

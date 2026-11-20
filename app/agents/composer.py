@@ -439,12 +439,13 @@ class Composer:
     ) -> tuple[str, dict[str, Any]]:
         """``(text, manifest)``: what to append to the message of a moment of ``kind`` (``HINT_KINDS``); ``("", {})`` when there
         is nothing to say.  ``tags`` are the situation tags of the moment (:meth:`situation_tags`); ``identity_tags`` - the bot's own
-        tags on the board, without the status ones - only count for an ``act`` (an action asked of some players: what the bot has
-        learned about being who it is).  The manifest has the kind, the tags and the hashes of the entries - no text."""
+        tags on the board, without the status ones - only count for a choice (``act`` / ``choose``: what the bot has learned about
+        being who it is when it has to decide something; a speech or an answer in words is not asked in the name of a role).  The
+        manifest has the kind, the tags and the hashes of the entries - no text."""
         if kind not in HINT_KINDS:
             return "", {}
         unique = list(dict.fromkeys(tag for tag in tags if tag))
-        entries = self.retrieve(unique, identity_tags=identity_tags if kind == "act" else ())
+        entries = self.retrieve(unique, identity_tags=identity_tags if kind in ("act", "choose") else ())
         lines: list[str] = []
         if kind == "speak":
             voice = _voice_line(self.mind.core.voice, self.budgets.hint_sentence)

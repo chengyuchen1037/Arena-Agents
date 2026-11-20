@@ -331,6 +331,24 @@ def test_a_choice_asked_of_some_players_only_recalls_what_the_bot_learned_about_
     assert manifest["entries"] == [sha12(HIGH.text), sha12(MIDDLE_ACT.text)]  # type: ignore[index]
 
 
+def test_a_vote_that_only_some_may_cast_is_still_a_vote() -> None:
+    """Found in a real decision point: the vote for a sheriff is asked of the players who did not run - not of everybody still in the
+    game - and it took the bot for an action: no "what is the hardest fact".  Three players or more make a group choice."""
+    world, brain = make_brain()
+    start_with_board(world, brain, CLOSED, phase="第 1 天 警长竞选")
+    players = [{"id": f"p{n}", "name": f"P{n}", "out": False, "tags": ["存活"]} for n in range(1, 6)]
+    some = {**VOTE, "id": "r11", "to": ["p1", "p3", "p4"]}
+    put_board(world, players=players, requests=[some], phase="第 1 天 警长竞选")
+    text, _ = brain.inject_message(ME, wake(ME, request_opened(some), kind="inject", after=0))  # type: ignore[misc]
+    assert "作答之前先问自己：你认定的最硬的事实是什么？" in text[text.index("【此刻的提醒】"):]
+    assert brain.hint_manifest(ME)["kind"] == "choose"  # type: ignore[index]
+    pair = {**VOTE, "id": "r12", "to": ["p1", "p3"]}  # (two players: a role doing something by itself)
+    put_board(world, players=players, requests=[pair], phase="第 1 天 警长竞选")
+    text, _ = brain.inject_message(ME, wake(ME, request_opened(pair, seq=6), kind="inject", after=0))  # type: ignore[misc]
+    assert "你认定的最硬的事实" not in text
+    assert (brain.hint_manifest(ME) or {}).get("kind", "act") == "act"
+
+
 def test_the_bots_own_status_tags_do_not_pick_entries_but_its_identity_tags_do() -> None:
     entries = (
         PlaybookEntry("活着的时候的想法", "高", 1, 0, "", ("存活",)),

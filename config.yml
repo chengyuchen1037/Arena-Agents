@@ -6,7 +6,7 @@
 
 app:
   title: "Arena-Agents"
-  version: "v0.13.1"
+  version: "v0.14.0"
 
 scenario:
   path: "scenarios/werewolf_12p.md"
@@ -25,9 +25,11 @@ runtime:
   max_watchdog_wakes: 3           # 连续唤醒仍无进展则在界面上显示警告（由用户决定是否暂停）
   compact_at: 0.6                 # 会话输入达到模型上下文窗口的这个比例时，提醒 agent 调用 compact_context
   trim_at: 0.9                    # 达到这个比例仍未压缩时，兜底裁剪最早的完整轮次
+  learning_concurrency: 0         # 初始化 / 复盘时同时有多少个 bot 在工作；0 = 全部同时（实际的上限是上面的 LLM 并发闸门）
+  learning_max_tokens: 12000      # 初始化 / 复盘里每次模型调用最多输出多少 token（0 = 默认的 12000）
 
 # -----------------------------------------------------------------------------
-# 0. 规则与策略经验知识库目录 (供主持人与玩家通过 list_documents / read_document 查阅)
+# 0. 规则与策略经验知识库目录 (只供主持人通过 list_documents / read_document 查阅；v0.14 起玩家 bot 没有这两个工具)
 # -----------------------------------------------------------------------------
 knowledge_base:
   docs_dir: "knowledge"

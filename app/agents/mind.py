@@ -59,6 +59,10 @@ from app.world.types import Code, Envelope, Receipt
 logger = logging.getLogger(__name__)
 
 HINT_HEADER = "【此刻的提醒】"
+#: A choice asked of at least this many players is a collective one - a vote (``choose``) - even when not everybody who is still in
+#: the game may cast it; fewer is a role acting by itself (``act``).  (Found in a real decision point: the vote for a sheriff is
+#: asked of the players who did not run, so "everybody" alone took it for an action and the bot got no "what is the hardest fact".)
+GROUP_CHOICE = 3
 
 
 class BotBrain:
@@ -253,13 +257,15 @@ class BotBrain:
 
     @staticmethod
     def _request_kind(request: Mapping[str, Any], board: Mapping[str, Any]) -> str:
-        """``choose`` = a choice every player still in the game makes (a vote); ``act`` = a choice asked of some players only;
+        """``choose`` = a choice made by a group of players - a vote: every player still in the game, or at least three of them (a vote
+        that only some may cast, such as one without the candidates; H14 "a vote or a choice request");
+        ``act`` = a choice asked of one or two players (what a role does by itself, at night);
         ``answer`` = a question to answer in words."""
         if str(request.get("kind")) == "text":
             return "answer"
         alive = {str(p.get("id")) for p in board.get("players") or [] if not p.get("out")}
         to = {str(i) for i in request.get("to") or []}
-        return "choose" if alive and alive <= to else "act"
+        return "choose" if (alive and alive <= to) or len(to) >= GROUP_CHOICE else "act"
 
     def _moments(
         self, reasons: Sequence[Envelope], board: Mapping[str, Any], baseline: Mapping[str, Any] | None

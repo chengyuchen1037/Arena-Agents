@@ -34,7 +34,7 @@ from app.world.types import MODERATOR_ID
 SESSION_SCHEMA_VERSION = 6
 #: The save formats this engine can open: v6, and v5 (v0.13) - which stays a v5 game while it lives (H58).
 SUPPORTED_SCHEMA_VERSIONS = (5, 6)
-APP_ENGINE_VERSION = "v0.13.1"
+APP_ENGINE_VERSION = "v0.14.0"
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 __all__ = [
