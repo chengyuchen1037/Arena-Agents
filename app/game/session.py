@@ -1,13 +1,21 @@
-"""The session container (save format v5, v0.13).
+"""The session container (save format v6, v0.14; v5 games are still read).
 
 It holds what the *application* persists next to the world: bindings, flags shown to the user, the
-spending limit, the roster snapshot of the game (names, avatars, persona / memory as they were when it
-started), the serialized world / usage, and (v0.13) who - if anybody - plays a seat instead of its agent.
-The live game objects (``World``, ``Supervisor`` ...) are owned by the orchestrator; ``world`` /
+spending limit, the table of the game (the bots in their seats: names, avatars and - once the game has started - the
+snapshot of what each bot carried into it), the serialized world / usage, and (v0.13) who - if anybody - plays a
+seat instead of its agent.  The live game objects (``World``, ``Supervisor`` ...) are owned by the orchestrator; ``world`` /
 ``usage_stats`` here are refreshed right before every save.
 
 v4 -> v5 (docs/v0.13-plan.md F10, F22): ``takeover``, ``human_spans``, ``created_at`` / ``started_at`` /
 ``finished_at``.  Games of v0.12.1 (v4) are converted with ``tools/migrate_v0121_to_archive.py``.
+
+v5 -> v6 (docs/v0.14-plan.md H3, H11, H52, H58; contract section 13.3): a seat is *where a bot sits in this game*.
+``Participant.bot_id`` names the bot, ``Participant.memory_snapshot`` is what it carried into the game
+(``BotMind.to_dict()``, taken when the game started, so a resumed game builds the very same prompts), ``GameSession.lineup``
+is the bot ids in seat order and ``GameSession.contract_snapshot`` the official contract of the game.  Identities are dealt
+when the game starts, so an idle v6 game has none.  A v5 game keeps ``schema_version == 5`` while it lives: its seats have
+no bot (``bot_id == ""``), its ``persona`` / ``memory`` texts are used as they were saved, it plays on with the v0.13.1
+brain and cannot be reviewed (:attr:`GameSession.legacy`).
 """
 
 from __future__ import annotations
@@ -23,7 +31,9 @@ from app.game.budget import BudgetSettings
 from app.providers.models import ModelBinding
 from app.world.types import MODERATOR_ID
 
-SESSION_SCHEMA_VERSION = 5
+SESSION_SCHEMA_VERSION = 6
+#: The save formats this engine can open: v6, and v5 (v0.13) - which stays a v5 game while it lives (H58).
+SUPPORTED_SCHEMA_VERSIONS = (5, 6)
 APP_ENGINE_VERSION = "v0.13.1"
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -32,6 +42,7 @@ __all__ = [
     "MODERATOR_ID",
     "SESSION_ID_PATTERN",
     "SESSION_SCHEMA_VERSION",
+    "SUPPORTED_SCHEMA_VERSIONS",
     "BindingIssue",
     "GameSession",
     "HumanSpan",
@@ -67,15 +78,21 @@ class IncompatibleSessionError(ValueError):
 
 
 class Participant(BaseModel):
-    """A seat of this game: ``config.yml`` lists the seats, the roster fills in name / avatar / persona /
-    memory when the game is created.  Runtime state (tags, roles) lives in the world."""
+    """A seat of this game: ``config.yml`` lists the seats, the bot that sits there (v0.14) gives the name / avatar.
+    Runtime state (tags, roles) lives in the world.
+
+    v6: ``bot_id`` is the bot in the seat (the table is :attr:`GameSession.lineup`), ``memory_snapshot`` what it carries into
+    the game - empty until the game starts.  v5: ``bot_id == ""``; ``persona`` / ``memory`` hold the texts the seat played
+    with (in a v6 game they stay empty: the bot's own layers are in ``memory_snapshot``)."""
 
     id: str
     seat: str
     name: str
     persona: str = ""
-    memory: str = ""  # long-term memory as of the start of this game (empty when memory is off)
+    memory: str = ""  # v5: long-term memory as of the start of this game (empty when memory is off)
     avatar: dict[str, Any] | None = None
+    bot_id: str = ""  # v6 (H3)
+    memory_snapshot: dict[str, Any] = Field(default_factory=dict)  # v6 (H11): ``BotMind.to_dict()`` + the hashes of the contract / scenario
 
 
 class BindingIssue(BaseModel):
@@ -116,6 +133,10 @@ class GameSession(BaseModel):
     started_at: str | None = None  # when it was first started
     finished_at: str | None = None  # when it last ended (cleared when it is continued)
 
+    # v0.14 (H3, H7; contract 13.3)
+    lineup: list[str] = Field(default_factory=list)  # the bot ids in seat order
+    contract_snapshot: dict[str, Any] = Field(default_factory=dict)  # {"version", "sha256", "markdown"}: the contract the game started with
+
     scenario_spec: dict[str, Any] = Field(default_factory=dict)
     world: dict[str, Any] = Field(default_factory=dict)
     usage_stats: dict[str, Any] = Field(default_factory=dict)
@@ -132,12 +153,18 @@ class GameSession(BaseModel):
     @field_validator("schema_version")
     @classmethod
     def _validate_schema(cls, value: int) -> int:
-        if value != SESSION_SCHEMA_VERSION:
+        if value not in SUPPORTED_SCHEMA_VERSIONS:
             raise IncompatibleSessionError(
                 f"该存档来自不同版本的引擎（存档格式 v{value}，当前为 v{SESSION_SCHEMA_VERSION}），"
-                "v0.13 不能直接打开；v0.12.1 的对局请用 tools/migrate_v0121_to_archive.py 转换后导入。"
+                "v0.14 只能打开 v5（v0.13）和 v6 的存档；v0.12.1 的对局请用 tools/migrate_v0121_to_archive.py 转换后导入。"
             )
         return value
+
+    @property
+    def legacy(self) -> bool:
+        """A v5 game (H58): its seats have no bot - it plays on with the persona / memory texts it was saved with and cannot be
+        reviewed.  (A v6 game always has bots.)"""
+        return int(self.schema_version) < 6
 
     def get_model_binding(self, actor_id: str) -> ModelBinding | None:
         """The binding of a participant (or of ``"moderator"``), if one is set."""

@@ -11,12 +11,15 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.archive import router as archive_router
+from app.api.bots import router as bots_router
 from app.api.calls import router as calls_router
+from app.api.contract import router as contract_router
 from app.api.games import router as games_router
+from app.api.learning import router as learning_router
 from app.api.pricing import router as pricing_router
 from app.api.providers import router as providers_router
-from app.api.roster import router as roster_router
 from app.api.routes import router as api_router
+from app.api.rules import router as rules_router
 from app.api.seat import router as seat_router
 from app.api.security import warn_if_exposed
 from app.api.softpause import router as softpause_router
@@ -136,7 +139,10 @@ async def health() -> dict[str, str]:
 app.include_router(api_router)
 app.include_router(providers_router)
 app.include_router(pricing_router)
-app.include_router(roster_router)
+app.include_router(bots_router)  # v0.14 (H1-H9, H30): the bots; /api/roster/** is gone (H55)
+app.include_router(learning_router)  # v0.14 (H19-H24, H31-H34): /api/bots/init(:cancel), /api/game/review
+app.include_router(contract_router)  # v0.14 (H38): the official contract
+app.include_router(rules_router)  # v0.14 (H39): the scenarios and their study materials
 app.include_router(takeover_router)
 app.include_router(seat_router)
 app.include_router(archive_router)

@@ -93,7 +93,9 @@ def test_apply_replaces_the_data_and_keeps_the_old_data_in_a_backup(plain: Path,
     result = _run(plain, target, skip_keys=True, reload=lambda: reloads.append(1))
     after = {name: data for name, data in _data(target).items() if not name.startswith("backups/")}
     keys_file = after.pop("secrets.v1.enc", None)  # the kept local key of the shared provider (see the key tests)
-    assert after == populated
+    bots = {name: data for name in list(after) if name.startswith("bots/") and (data := after.pop(name)) is not None}
+    assert after == populated  # (the v0.13 archive's files are all there, byte for byte ...)
+    assert "bots/lineup.json" in bots and len([n for n in bots if n.endswith("/bot.json")]) == 12  # ... and its roster became the 12 bots
     assert keys_file is not None
     assert reloads == [1]
     backup = target / "backups" / result.backup
@@ -133,7 +135,10 @@ def test_a_round_trip_into_an_empty_data_directory_is_byte_identical(plain: Path
     empty = tmp_path / "fresh"
     empty.mkdir()
     result = _run(plain, empty, secrets=FakeSecrets())
-    assert tree(empty) == {**populated, "tmp/": b""} or {k: v for k, v in tree(empty).items() if k != "tmp/"} == populated
+    after = {k: v for k, v in tree(empty).items() if k != "tmp/"}
+    bots = {k: after.pop(k) for k in list(after) if k.startswith("bots/")}
+    assert after == populated  # (every file of the archive, byte for byte; the roster stays as it came)
+    assert "bots/lineup.json" in bots and len([k for k in bots if k.endswith("/bot.json")]) == 12  # (the roster became the table of bots)
     assert result.backup is None and not (empty / "backups").exists()
 
 
@@ -343,7 +348,7 @@ def test_pruning_only_touches_folders_named_like_backups(tmp_path: Path) -> None
 
 
 # ----------------------------------------------------------------------------------------- rollback
-FORWARD_MOVES = 13  # 7 entries of the old data into the backup + 6 entries of the new data into place
+FORWARD_MOVES = 14  # 7 entries of the old data into the backup + 7 of the new data into place (the 6 of the archive and the bots/ made of its roster)
 
 
 @pytest.mark.parametrize("failing_call", range(1, FORWARD_MOVES + 1))

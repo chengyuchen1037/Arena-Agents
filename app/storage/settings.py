@@ -21,6 +21,21 @@ _SCHEMA_VERSION = 2
 # names are read as the new ones where the game has such a seat (the file itself is only rewritten when the
 # user changes the bindings).
 _LEGACY_ACTOR_ID = re.compile(r"^p(\d{2})$")
+# v0.14 (H4): the model binding follows the *bot*, not the seat.  ``default_bindings`` of ``settings.json`` is keyed by bot id
+# (``b-1a2b3c4d``) and ``moderator``; callers (the orchestrator, ``/api/settings/bindings``) still speak in seats (``N1``..)
+# - :meth:`SettingsStore.get_default_bindings` and :meth:`SettingsStore.save_default_bindings` translate through the line-up
+# of the data directory (``bots/lineup.json``).  A key that is a seat (what v0.13 saved) is moved to the bot by
+# :meth:`SettingsStore.migrate_seat_bindings`; until then it is read as the binding of the bot in that seat.
+_SEAT_KEY = re.compile(r"^(?:N([1-9][0-9]?)|p(\d{2}))$")
+_BOT_ID_KEY = re.compile(r"^b-[0-9a-f]{8}$")
+
+
+def _seat_number(key: str) -> int | None:
+    match = _SEAT_KEY.match(key)
+    if not match:
+        return None
+    number = int(match.group(1) or match.group(2))
+    return number if number >= 1 else None
 
 
 def migrate_legacy_actor_ids(bindings: dict[str, Any], known_ids: Any) -> dict[str, Any]:
@@ -150,9 +165,37 @@ class SettingsStore:
         with self._lock:
             return copy.deepcopy(self._read())
 
+    def _lineup_ids(self) -> list[str]:
+        """The bot ids of the line-up of this data directory by seat, ``[]`` when there are no bots (yet)."""
+        try:
+            from app.storage.bots import read_lineup_ids
+
+            return read_lineup_ids(self._data_dir)
+        except Exception:  # noqa: BLE001 - without a line-up the bindings are read as they are stored
+            return []
+
+    def _seat_view(self, raw_bindings: dict[str, Any]) -> dict[str, Any]:
+        """``default_bindings`` as the callers see it: keyed by seat id (``N1``..) for the bot in that seat, ``moderator`` and any
+        other key as stored.  A bot that has no seat (not in the line-up) is not shown; a binding stored under a bot id wins
+        over a v0.13 entry stored under the seat id."""
+        lineup = self._lineup_ids()
+        if not lineup:
+            return dict(raw_bindings)
+        seat_of_bot = {bot_id: f"N{index}" for index, bot_id in enumerate(lineup, start=1)}
+        view: dict[str, Any] = {}
+        for key, binding in raw_bindings.items():
+            if key not in seat_of_bot and not _BOT_ID_KEY.match(key):
+                view[key] = binding
+        for key, binding in raw_bindings.items():
+            if key in seat_of_bot:
+                view[seat_of_bot[key]] = binding
+        return view
+
     def get_default_bindings(self) -> dict[str, ModelBinding]:
+        """The default model bindings, keyed by the seat they apply to now (``N1``..: the binding of the bot that sits there) and
+        ``moderator``.  They are *stored* by bot id (H4), so moving a bot to another seat moves its binding along."""
         with self._lock:
-            raw_bindings = self._read()["default_bindings"]
+            raw_bindings = self._seat_view(self._read()["default_bindings"])
             try:
                 return {
                     actor_id: ModelBinding.model_validate(binding)
@@ -162,6 +205,8 @@ class SettingsStore:
                 raise StorageError("Invalid model binding in external settings") from exc
 
     def save_default_bindings(self, bindings: dict[str, ModelBinding]) -> None:
+        """Replace the default bindings.  ``bindings`` is keyed by seat (``N1``..) and ``moderator`` like
+        :meth:`get_default_bindings`; a seat is stored under the id of the bot that sits there (without bots: as it is)."""
         if not isinstance(bindings, dict):
             raise TypeError("bindings must be a dict")
         serialized: dict[str, dict] = {}
@@ -174,10 +219,110 @@ class SettingsStore:
                 serialized[actor_id] = binding.model_dump(mode="json")
         except (ValidationError, TypeError, ValueError) as exc:
             raise ValueError("Invalid default model bindings") from exc
+        lineup = self._lineup_ids()
+        if lineup:
+            by_bot: dict[str, dict] = {}
+            for actor_id, value in serialized.items():
+                number = _seat_number(actor_id) if actor_id.startswith("N") else None
+                if number is not None and number <= len(lineup):
+                    by_bot[lineup[number - 1]] = value
+                else:
+                    by_bot[actor_id] = value
+            serialized = by_bot
         with self._lock:
             payload = self._read()
             payload["default_bindings"] = serialized
             self._write(payload)
+
+    # v0.14: the bindings by bot (what the learning runs and the bot store use; the seat view above is for the game).
+    def get_bot_bindings(self) -> dict[str, ModelBinding]:
+        """The stored default bindings as they are: keyed by bot id (and ``moderator``)."""
+        with self._lock:
+            try:
+                return {key: ModelBinding.model_validate(value) for key, value in self._read()["default_bindings"].items()}
+            except ValidationError as exc:
+                raise StorageError("Invalid model binding in external settings") from exc
+
+    def get_bot_binding(self, bot_id: str) -> ModelBinding | None:
+        """The default model binding of one bot (``None`` when it has none) - what its initialization uses (H20)."""
+        with self._lock:
+            raw_bindings = self._read()["default_bindings"]
+            binding = raw_bindings.get(bot_id)
+            if binding is None:
+                lineup = self._lineup_ids()
+                if bot_id in lineup:  # (v0.13 saved it under the seat: not moved to the bot yet)
+                    binding = raw_bindings.get(f"N{lineup.index(bot_id) + 1}")
+            if binding is None:
+                return None
+            try:
+                return ModelBinding.model_validate(binding)
+            except ValidationError as exc:
+                raise StorageError("Invalid model binding in external settings") from exc
+
+    def save_bot_binding(self, bot_id: str, binding: ModelBinding | None) -> None:
+        """Set (or, with ``None``, remove) the default binding of one bot."""
+        if not isinstance(bot_id, str) or not bot_id:
+            raise ValueError("bot id must not be empty")
+        with self._lock:
+            payload = self._read()
+            if binding is None:
+                if bot_id not in payload["default_bindings"]:
+                    return
+                payload["default_bindings"].pop(bot_id)
+            else:
+                if not isinstance(binding, ModelBinding):
+                    binding = ModelBinding.model_validate(binding)
+                payload["default_bindings"][bot_id] = binding.model_dump(mode="json")
+            self._write(payload)
+
+    def rename_binding_key(self, old_id: str, new_id: str) -> bool:
+        """A bot got a new id (it was renamed after it had been initialized): its default binding moves along.  ``True`` when there
+        was one.  Nothing is written when there is none."""
+        with self._lock:
+            payload = self._read()
+            bindings = payload["default_bindings"]
+            if old_id not in bindings:
+                return False
+            bindings[new_id] = bindings.pop(old_id)
+            self._write(payload)
+            return True
+
+    def prune_bot_bindings(self, keep: Any) -> bool:
+        """Forget the default bindings of bots that are gone: every key that is a bot id and not in ``keep`` is removed (seat keys,
+        ``moderator`` and anything else stay).  ``True`` when the file was rewritten."""
+        keep_ids = set(keep)
+        with self._lock:
+            if not self._path.exists():
+                return False
+            payload = self._read()
+            bindings = payload["default_bindings"]
+            gone = [key for key in bindings if _BOT_ID_KEY.match(key) and key not in keep_ids]
+            for key in gone:
+                bindings.pop(key)
+            if gone:
+                self._write(payload)
+            return bool(gone)
+
+    def migrate_seat_bindings(self) -> bool:
+        """Move what v0.13 saved by seat (``N3``, v0.12.0's ``p03``) to the bot that sits there, once the line-up exists (a binding
+        the bot already has wins).  ``True`` when the file was rewritten; without a line-up or without such keys nothing is
+        read twice and nothing is written."""
+        with self._lock:
+            lineup = self._lineup_ids()
+            if not lineup or not self._path.exists():
+                return False
+            payload = self._read()
+            bindings = payload["default_bindings"]
+            changed = False
+            for key in list(bindings):
+                number = _seat_number(key)
+                if number is not None and number <= len(lineup):
+                    value = bindings.pop(key)
+                    bindings.setdefault(lineup[number - 1], value)
+                    changed = True
+            if changed:
+                self._write(payload)
+            return changed
 
     def get_model_templates(self) -> list[ModelTemplate]:
         with self._lock:
@@ -287,6 +432,14 @@ def save_default_bindings(bindings: dict[str, ModelBinding]) -> None:
     get_settings_store().save_default_bindings(bindings)
 
 
+def get_bot_binding(bot_id: str) -> ModelBinding | None:
+    return get_settings_store().get_bot_binding(bot_id)
+
+
+def save_bot_binding(bot_id: str, binding: ModelBinding | None) -> None:
+    get_settings_store().save_bot_binding(bot_id, binding)
+
+
 def get_model_templates() -> list[ModelTemplate]:
     return get_settings_store().get_model_templates()
 
@@ -322,6 +475,7 @@ def set_ui_pref(key: str, value: Any) -> None:
 __all__ = [
     "SettingsStore",
     "migrate_legacy_actor_ids",
+    "get_bot_binding",
     "get_budget_defaults",
     "get_default_bindings",
     "get_last_session_id",
@@ -330,6 +484,7 @@ __all__ = [
     "get_settings_store",
     "get_ui_pref",
     "reset_settings_store",
+    "save_bot_binding",
     "save_budget_defaults",
     "save_default_bindings",
     "save_model_templates",

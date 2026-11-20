@@ -259,7 +259,10 @@ def test_limits_apply_immediately_to_the_hard_limits() -> None:
     assert mod(world, "update_channel", channel_id="c1", limits={"max_messages_per_member": 5}).ok
     assert speak(world, "N1", "c1", "现在可以了").ok
     assert mod(world, "update_channel", channel_id="c1", limits={"max_chars_per_message": 3}).ok
-    assert speak(world, "N2", "c1", "一二三四五").truncated == {"dropped_chars": 2, "kept_chars": 3}
+    refused = speak(world, "N2", "c1", "一二三四五")  # sent back whole (v0.14, H16), not cut to three characters
+    assert refused.code == Code.TOO_LONG and refused.data == {"chars": 5, "limit": 3}
+    assert "N2" not in world.channel("c1").free.counts  # ... and it was not booked as a message
+    assert speak(world, "N2", "c1", "一二三").ok
 
 
 def test_limits_must_not_already_be_exceeded() -> None:

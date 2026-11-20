@@ -40,6 +40,13 @@ Every run gets a new ``gen_id``; a Worker whose generation is no longer current 
 world.  A failing run (model exception, timeout, brain bug) is retried after an exponential back-off (at
 most ``llm_retries`` times, the conversation untouched), then given up with an ``error`` event; other agents
 are never affected.
+
+One ``Agent`` per seat, one ``Brain`` per ``Agent`` (v0.14): the agent only ever talks to the brain it was given (every
+call carries its own ``agent_id``), the supervisor and the :class:`~app.runtime.conversation.ConversationBook` never look
+at brains, so seats may have brains of different kinds or with different memories.  A brain may offer two optional hooks
+the runtime writes to the trace - ``mount_manifest`` after a conversation is created or rebuilt (event ``mounts``) and
+``hint_manifest`` after each message the brain built (the opening one, a delta; event ``hint``); see
+:meth:`Agent._trace_mounts`.
 """
 
 from __future__ import annotations
@@ -50,7 +57,7 @@ import logging
 import math
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -82,10 +89,10 @@ from app.world.types import ENGINE_ID, Envelope, UiEvent
 logger = logging.getLogger(__name__)
 
 #: Sent (once per run) when a call ends because it hit the output-token limit *without* any tool call:
-#: a reasoning model can spend the whole budget on thinking, which would silently end the run.
+#: a reasoning model can spend the whole budget on thinking, which would silently end the run.  (v0.14, H17: the
+#: agent is no longer asked to think *less* - thinking is not capped by prompt, only by the limit itself.)
 CUT_OFF_NUDGE = (
-    "（系统提示）你上一次的输出因长度上限被截断，没有完成任何操作。请大幅缩短思考，"
-    "直接调用工具完成当前待办（例如 speak / respond / sleep）。"
+    "（系统提示）上一次输出因长度上限中断，没有完成任何操作。请直接完成当前待办（例如 speak / respond / sleep）。"
 )
 #: Queued (once per conversation) when the input reaches ``compact_at`` of the model's context window.
 COMPACT_NUDGE = "（系统提示）会话已接近上限，请先调用 compact_context 生成摘要，再继续。"
@@ -170,6 +177,35 @@ def _brief(envelope: Envelope) -> dict[str, Any]:
     if request_id:
         out["request_id"] = request_id
     return out
+
+
+#: Strings of a brain's manifest longer than this are never written to the trace (an id, a layer, a hash are far shorter).
+_MANIFEST_STR_MAX = 64
+_MANIFEST_ITEMS_MAX = 200
+#: Field names the trace line owns (``write(event, agent_id, **fields)`` and the ``gen`` of the event itself).
+_TRACE_RESERVED = frozenset({"gen", "event", "agent_id", "ts"})
+
+
+def _manifest_safe(value: Any, depth: int = 0) -> Any:
+    """``value`` as plain JSON that is safe to trace: numbers, booleans and *short* strings.  A long string - a prompt, a
+    note, any body - becomes a marker that only says how long it was (the trace keeps ids, layers, lengths and hashes,
+    never what a model was told, H15a); containers are copied, bounded in size and depth."""
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return value if len(value) <= _MANIFEST_STR_MAX else f"…[{len(value)} 字，正文不进 trace]"
+    if depth >= 3:
+        return None
+    if isinstance(value, Mapping):
+        return {
+            str(key)[:_MANIFEST_STR_MAX]: _manifest_safe(item, depth + 1)
+            for key, item in list(value.items())[:_MANIFEST_ITEMS_MAX]
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_manifest_safe(item, depth + 1) for item in list(value)[:_MANIFEST_ITEMS_MAX]]
+    return _manifest_safe(str(value), depth + 1)
 
 
 def _now() -> float:
@@ -666,6 +702,8 @@ class Agent:
             self.book.put(conv)
             run.appended = True
             self._trace("conversation", gen=run.gen, epoch=conv.epoch, tools=conv.tools_sig, seen_seq=conv.seen_seq)
+            self._trace_mounts(run, conv)
+            self._trace_hint(run)  # (the opening message may carry the hint of the wake-up that created the conversation)
             return conv
         if run.retry and not run.reasons:
             run.appended = True  # a re-attempt of a call that failed: the same conversation, nothing new
@@ -681,6 +719,7 @@ class Agent:
         conv.seen_seq = max(conv.seen_seq, int(new_seen))
         conv.messages.append(user_message("\n\n".join([text, *conv.take_notes()])))
         self._trace("inject", gen=run.gen, kind="activation", reasons=[_brief(e) for e in run.reasons], seen_seq=conv.seen_seq)
+        self._trace_hint(run)
         return conv
 
     async def _run_rounds(self, run: _Run) -> None:
@@ -866,6 +905,7 @@ class Agent:
         conv.seen_seq = max(conv.seen_seq, int(new_seen))
         self.stats["injections"] += 1
         self._trace("inject", gen=run.gen, kind="merge", reasons=[_brief(e) for e in reasons], seen_seq=conv.seen_seq)
+        self._trace_hint(run)
         return text
 
     def _rebuild(self, run: _Run, conv: Conversation) -> Conversation:
@@ -889,6 +929,8 @@ class Agent:
         )
         self.book.put(fresh)
         self._trace("rebuild", gen=run.gen, epoch=fresh.epoch, seen_seq=fresh.seen_seq, dropped=len(conv.messages))
+        self._trace_mounts(run, fresh)
+        self._trace_hint(run)  # (the new opening message is built like a first one: it may carry a hint, too)
         return fresh
 
     def _maintain(self, conv: Conversation) -> None:
@@ -927,6 +969,55 @@ class Agent:
             logger.exception("brain.%s failed for %s", what, self.agent_id)
             self._trace("error", message=f"brain.{what} failed: {type(exc).__name__}: {exc}")
             return None
+
+    # -------------------------------------------------- what the brain says it put in front of the model (v0.14) ---
+    # Two OPTIONAL hooks of a brain, found with ``getattr`` (the frozen ``Brain`` protocol in ports.py has neither, and a
+    # brain without them works exactly as before):
+    #   ``mount_manifest(agent_id) -> list[dict]``  the blocks of the system prompt (id, layer, length, hash);
+    #   ``hint_manifest(agent_id) -> dict | None``  the hint the brain's last message-building call (``start_message`` /
+    #   ``inject_message``) put into its message; ``None`` when that call added none.
+    # The runtime only writes them to the trace.  A trace never carries a body (an id, a layer, a length, a hash): whatever
+    # the brain returns passes ``_manifest_safe``, which swaps a long string for a marker that only says how long it was.
+    def _trace_mounts(self, run: _Run, conv: Conversation) -> None:
+        """After a conversation was created or rebuilt: trace ``mounts`` ``{gen, epoch, blocks}`` (H15a)."""
+        hook = getattr(self.brain, "mount_manifest", None)
+        if not callable(hook):
+            return
+        blocks = self._brain_call("mount_manifest", hook, self.agent_id)
+        if not isinstance(blocks, (list, tuple)):
+            return
+        rows: list[Any] = []
+        for block in blocks:
+            to_dict = getattr(block, "to_dict", None)  # (a ``MountBlock`` is accepted as well as its dict)
+            try:
+                rows.append(_manifest_safe(to_dict() if callable(to_dict) else block))
+            except Exception:  # noqa: BLE001 - an odd block must not cost the others
+                logger.debug("mount block of %s could not be traced", self.agent_id, exc_info=True)
+        self._trace("mounts", gen=run.gen, epoch=conv.epoch, blocks=rows)
+
+    def _trace_hint(self, run: _Run) -> None:
+        """After a message of the brain was appended to the conversation - the opening one (``start_message``, also the
+        opening of a rebuilt conversation) or a delta (``inject_message``, an activation's or a merge of what arrived
+        meanwhile): trace ``hint`` ``{gen, tags, entries}`` when the brain says it added a hint (nothing is written for a
+        brain without the hook, or when it answers with nothing)."""
+        hook = getattr(self.brain, "hint_manifest", None)
+        if not callable(hook):
+            return
+        manifest = self._brain_call("hint_manifest", hook, self.agent_id)
+        if not manifest or not isinstance(manifest, Mapping):
+            return
+        safe = _manifest_safe(dict(manifest))
+        if not isinstance(safe, dict):
+            return
+        tags, entries = safe.pop("tags", None), safe.pop("entries", None)
+        fields: dict[str, Any] = {
+            "tags": tags if isinstance(tags, list) else ([] if tags is None else [tags]),
+            "entries": entries if isinstance(entries, list) else ([] if entries is None else [entries]),
+        }
+        for key, value in safe.items():  # (whatever else the brain tells, never a name the trace line owns)
+            if key not in _TRACE_RESERVED and key not in fields:
+                fields[key] = value
+        self._trace("hint", gen=run.gen, **fields)
 
     def _run_tool(self, run: _Run, conv: Conversation, call: Any) -> ToolOutcome:
         name = str(call.name or "")

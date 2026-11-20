@@ -83,8 +83,10 @@ def test_a_played_seat_gets_a_public_floor_without_a_deadline_and_an_agent_keeps
 def test_the_limits_of_an_untimed_token_still_hold() -> None:
     world = public_world()
     open_queue(world, "pub", ["N2", "N1"], duration_s=30, max_messages=2, max_chars_per_message=10)
-    receipt = ok(speak(world, "N2", "pub", "字" * 25))
-    assert receipt.truncated == {"dropped_chars": 15, "kept_chars": 10}  # the message cap is unchanged
+    refused = speak(world, "N2", "pub", "字" * 25)
+    assert refused.code == Code.TOO_LONG and refused.data == {"chars": 25, "limit": 10}  # the message cap is unchanged
+    assert token(world, "pub", "N2").messages_used == 0 and token(world, "pub", "N2").status == "active"
+    assert ok(speak(world, "N2", "pub", "字" * 10)).truncated is None  # the first message
     world.clock.advance(5000)
     assert ok(speak(world, "N2", "pub", "第二条"))  # the second (and last) message
     ended = entries(world, "floor.token_ended", channel="pub")

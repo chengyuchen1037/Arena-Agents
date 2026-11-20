@@ -41,6 +41,8 @@ def check_invariants(world: ChatWorld) -> None:
         assert set(entry.visible_to_ids) <= everyone
         if entry.type == "message":
             assert entry.actor_id in entry.visible_to_ids, "an author always sees its own message"
+            if entry.data.get("kind") == "speech" and entry.actor_id != MODERATOR_ID:
+                assert "truncated" not in entry.data, "a player's speech is sent back when it is too long, never cut (H16)"
     now = world.clock.now()
     for channel in world.state.channels:
         assert channel.members[0] == MODERATOR_ID and len(set(channel.members)) == len(channel.members)
@@ -239,10 +241,14 @@ def test_random_sequences_keep_the_world_consistent(seed: int) -> None:
     for step in range(120):
         if rng.random() < 0.01:
             world = reload(world)
+        seq_before = world.seq
         receipt = random_move(rng, world)
         if receipt is not None:
             assert receipt.code != Code.INTERNAL_ERROR, f"seed {seed} step {step}: {receipt.message}"
             codes.add(receipt.code or "OK")
+            if receipt.code == Code.TOO_LONG:  # sent back: nothing written, and it really is longer than the limit
+                assert world.seq == seq_before and receipt.truncated is None, f"seed {seed} step {step}"
+                assert receipt.data["chars"] > receipt.data["limit"] > 0, f"seed {seed} step {step}"
         check_invariants(world)
         check_deliveries(world, world.drain_outbox(), f"seed {seed} step {step}")
         world.drain_events()
@@ -307,5 +313,6 @@ def test_the_fuzz_reaches_most_rejection_codes() -> None:
     expected = {
         "OK", Code.NO_FLOOR, Code.NOT_MEMBER, Code.CHANNEL_CLOSED, Code.QUOTA_EXCEEDED, Code.UNKNOWN_CHANNEL,
         Code.UNKNOWN_PLAYER, Code.INVALID_TARGET, Code.INVALID_PARAMS, Code.FORBIDDEN, Code.UNKNOWN_TEMPLATE,
+        Code.TOO_LONG,
     }
     assert expected <= seen, f"never produced: {sorted(expected - seen)}"

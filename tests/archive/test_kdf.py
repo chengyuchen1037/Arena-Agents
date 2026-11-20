@@ -11,6 +11,7 @@ import pytest
 from app.archive import kdf
 from app.archive.errors import ArchiveFormatError, ArchivePasswordError, ArchivePasswordRuleError
 from app.archive.format import FORMAT_NAME, FORMAT_VERSION
+from app.archive.kdf import SECRETS_FORMAT_VERSION
 
 from .helpers import KEY_1, KEY_2, PASSWORD, PROVIDER_1, PROVIDER_2
 
@@ -63,11 +64,11 @@ def test_the_blob_never_contains_the_password_or_a_key() -> None:
 def test_header_is_plain_json_with_the_documented_fields() -> None:
     header = json.loads(kdf.seal_secrets(KEYS, PASSWORD, ARCHIVE_ID))
     assert set(header) == {"format", "version", "kdf", "n", "r", "p", "salt", "cipher", "nonce", "aad", "ciphertext"}
-    assert (header["format"], header["version"], header["kdf"], header["cipher"]) == (FORMAT_NAME, FORMAT_VERSION, "scrypt", "aes-256-gcm")
+    assert (header["format"], header["version"], header["kdf"], header["cipher"]) == (FORMAT_NAME, SECRETS_FORMAT_VERSION, "scrypt", "aes-256-gcm")
     assert (header["r"], header["p"]) == (8, 1)
     assert len(base64.b64decode(header["salt"])) == 16 and len(base64.b64decode(header["nonce"])) == 12
     aad = json.loads(base64.b64decode(header["aad"]))
-    assert aad == {"archive_id": ARCHIVE_ID, "format": FORMAT_NAME, "format_version": FORMAT_VERSION, "purpose": "secrets"}
+    assert aad == {"archive_id": ARCHIVE_ID, "format": FORMAT_NAME, "format_version": SECRETS_FORMAT_VERSION, "purpose": "secrets"}
 
 
 def test_every_seal_uses_a_fresh_salt_and_nonce() -> None:
@@ -107,7 +108,7 @@ def _flip(value: str) -> str:
         pytest.param(lambda h: h.update(aad=_flip(h["aad"])), id="aad"),
         pytest.param(lambda h: h.update(ciphertext=h["ciphertext"][:-8]), id="truncated"),
         pytest.param(lambda h: h.update(n=2**11), id="cost-parameter"),
-        pytest.param(lambda h: h.update(version=2), id="version"),
+        pytest.param(lambda h: h.update(version=SECRETS_FORMAT_VERSION + 1), id="version"),
         pytest.param(lambda h: h.update(format="other"), id="format-name"),
         pytest.param(lambda h: h.pop("salt"), id="missing-field"),
         pytest.param(lambda h: h.update(extra=1), id="extra-field"),
@@ -197,3 +198,13 @@ def test_unicode_passwords_open_with_either_normalization() -> None:
     decomposed = "Cafe\u0301-Latte-2024"
     blob = kdf.seal_secrets(KEYS, composed, ARCHIVE_ID)
     assert kdf.open_secrets(blob, decomposed, ARCHIVE_ID) == KEYS
+
+
+def test_the_key_blob_does_not_follow_the_version_of_the_archive_format() -> None:
+    """"API Key 沿用 v0.13 规范": the way keys are sealed is the same in a format 1 and a format 2 archive (the blob has its own version)."""
+    assert SECRETS_FORMAT_VERSION == 1 and FORMAT_VERSION == 2
+    header = json.loads(kdf.seal_secrets(KEYS, PASSWORD, ARCHIVE_ID))
+    assert header["version"] == 1
+    # a blob exactly as v0.13 wrote it still opens: its header says version 1 and its associated data binds format_version 1
+    assert json.loads(base64.b64decode(header["aad"]))["format_version"] == 1
+    assert kdf.open_secrets(kdf.seal_secrets(KEYS, PASSWORD, ARCHIVE_ID), PASSWORD, ARCHIVE_ID) == KEYS

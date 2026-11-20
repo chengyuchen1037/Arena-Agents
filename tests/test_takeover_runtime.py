@@ -19,14 +19,14 @@ import pytest
 
 import app.game.takeover_runtime as takeover_module
 import game_fakes
-from app.game.bindings import BindingError
-from app.game.orchestrator import AUTOSAVE_EVENT_TYPES, GameOrchestrator, TakeoverError
+from app.game.orchestrator import AUTOSAVE_EVENT_TYPES, GameOrchestrator, NotReadyError, TakeoverError
 from app.game.session import HumanSpan
 from app.llm.types import LLMResponse
 from app.world.chat import speech_gate
 from app.world.seat import seat_status
 from app.world.types import ENGINE_ID, MODERATOR_ID, Envelope, Receipt, UiEvent
 from game_fakes import BINDING, PLAYERS, all_bound, async_test, real_orch
+from learning_fakes import ScriptedLlm, by_kind
 from v12.bots import BotLlm, Call, simple_player
 
 IDS = [p["id"] for p in PLAYERS]  # p01 .. p04
@@ -144,6 +144,12 @@ async def settle(orch: GameOrchestrator, quiet: float = 0.15) -> None:
 
 def ids_of(orch: GameOrchestrator, role: str) -> list[str]:
     return [p.id for p in orch.world.state.players if p.role == role]
+
+
+async def start_and_pause(orch: GameOrchestrator) -> None:
+    """Start the game (that deals the identities, v0.14 H52) and stop it again: a seat can be taken over by what it holds."""
+    await orch.start_or_resume()
+    await orch.pause("user")
 
 
 def pushes(orch: GameOrchestrator, after: int = 0) -> list[dict[str, Any]]:
@@ -285,10 +291,15 @@ async def test_a_turn_follows_the_engines_limits_for_the_person_as_for_an_agent(
     assert mine["floor"]["mine"] and mine["floor"]["messages_left"] == 2 and mine["floor"]["chars_left"] == 50
     assert state["attention"] == ["public"]
 
-    first = orch.seat_speak("public", "字" * 30)  # over the per-message limit: cut, not refused
-    assert first["accepted"] and first["truncated"] == {"dropped_chars": 10, "kept_chars": 20} and first["code"] is None
+    too_long = orch.seat_speak("public", "字" * 30)  # over the per-message limit: sent back, never cut (v0.14, H16)
+    assert not too_long["accepted"] and too_long["code"] == "TOO_LONG" and too_long["data"] == {"chars": 30, "limit": 20}
+    assert not [e for e in orch.world.ledger if e.type == "message" and e.actor_id == "p02"]  # nothing was written ...
+    still = orch.takeover_payload()["channels"]["public"]
+    assert still["can_write"] and still["floor"]["mine"] and still["floor"]["messages_left"] == 2 and still["floor"]["chars_left"] == 50  # ... or counted
+    first = orch.seat_speak("public", "字" * 20)  # exactly the limit goes through, as it is
+    assert first["accepted"] and first["code"] is None and not first.get("truncated")
     speech = [e for e in orch.world.ledger if e.type == "message" and e.actor_id == "p02"][-1]
-    assert speech.data["content"] == "字" * 20 and speech.data["truncated"] == {"dropped_chars": 10, "kept_chars": 20}
+    assert speech.data["content"] == "字" * 20 and not speech.data.get("truncated")
     await settle(orch, 0.05)
     left = orch.takeover_payload()["channels"]["public"]
     assert left["floor"]["messages_left"] == 1 and left["floor"]["chars_left"] == 30 and left["max_chars"] == 20
@@ -333,7 +344,7 @@ async def test_a_person_can_pass_and_a_token_that_runs_out_ends_like_an_agents(m
 
 
 @async_test
-async def test_a_free_discussion_counts_the_persons_messages_and_cuts_their_length(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_free_discussion_counts_the_persons_messages_and_sends_back_what_is_too_long(monkeypatch: pytest.MonkeyPatch) -> None:
     table = Table(monkeypatch)
     orch = table.orch
     await orch.takeover("p04")
@@ -344,8 +355,11 @@ async def test_a_free_discussion_counts_the_persons_messages_and_cuts_their_leng
     )
     state = orch.takeover_payload()["channels"]["public"]
     assert state["can_write"] and state["max_chars"] == 10 and state["floor"]["kind"] == "free" and state["floor"]["messages_left"] == 2
-    one = orch.seat_speak("public", "字" * 14)
-    assert one["accepted"] and one["truncated"] == {"dropped_chars": 4, "kept_chars": 10}
+    long = orch.seat_speak("public", "字" * 14)  # sent back, not cut and not counted (v0.14, H16)
+    assert not long["accepted"] and long["code"] == "TOO_LONG" and long["data"] == {"chars": 14, "limit": 10}
+    assert orch.takeover_payload()["channels"]["public"]["floor"]["messages_left"] == 2
+    one = orch.seat_speak("public", "字" * 10)
+    assert one["accepted"] and not one.get("truncated")
     assert orch.seat_speak("public", "第二句")["accepted"]
     third = orch.seat_speak("public", "第三句")
     assert not third["accepted"] and third["code"] == "QUOTA_EXCEEDED"
@@ -411,8 +425,8 @@ async def test_requests_are_answered_changed_and_refused_like_an_agents(monkeypa
 async def test_an_enabled_ability_is_offered_used_once_and_validated_by_the_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     table = Table(monkeypatch)
     orch = table.orch
+    await start_and_pause(orch)  # (the identities are dealt when the game starts, H52: a seat is picked by its identity afterwards)
     seat = ids_of(orch, "red")[0]
-    other = next(i for i in ids_of(orch, "red") + ids_of(orch, "blue") if i != seat)
     await orch.takeover(seat)
     await orch.start_or_resume()
     await table.run([*OPEN_PUBLIC])
@@ -446,6 +460,7 @@ async def test_an_enabled_ability_is_offered_used_once_and_validated_by_the_engi
 async def test_a_seat_that_does_not_hold_the_ability_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     table = Table(monkeypatch)
     orch = table.orch
+    await start_and_pause(orch)
     blue = ids_of(orch, "blue")[0]
     await orch.takeover(blue)
     await orch.start_or_resume()
@@ -592,95 +607,62 @@ async def test_taking_over_and_giving_back_are_pushed_at_once_and_saved(monkeypa
     base = orch.bus.last_id
     await orch.takeover("p03")
     [first] = pushes(orch, base)
-    assert first["seat"] == "p03" and first["reshuffle_available"] is True and "dm-p03" in first["channels"]
+    assert first["seat"] == "p03" and "reshuffle_available" not in first and "dm-p03" in first["channels"]
     await orch.release_takeover()
-    assert pushes(orch, base)[-1] == {"seat": None, "reshuffle_available": True}
+    assert pushes(orch, base)[-1] == {"seat": None}
     await orch.flush_autosave("test")
     saved = orch.game_store.data[orch.session.session_id]
     assert saved["takeover"] == {"seat": None} and saved["human_spans"][0]["seat"] == "p03" and saved["human_spans"][0]["to_seq"] is not None
     await orch.shutdown()
 
 
-# --------------------------------------------------------------------------------------------- re-deal
+# ---------------------------------------------------------------------------- the identities are dealt at the start (H52)
 @async_test
-async def test_the_redeal_is_refused_after_the_start_after_a_pause_and_at_the_end(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_identities_are_dealt_when_the_game_starts_and_never_again_even_with_a_seat_taken_over(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.14 replaces the re-deal of v0.13 (F5): nothing is dealt before the start - for the person who plays a seat either - and exactly
+    once at the start, whatever happens to the seat meanwhile."""
     table = Table(monkeypatch)
     orch = table.orch
     await orch.takeover("p02")
-    assert orch.takeover_payload()["reshuffle_available"] is True
-    before = orch.world
-    await orch.shuffle_identities()  # a game that has not started: allowed (and the seat stays played)
-    assert orch.world is not before and orch.takeover_seat == "p02"
-    assert orch.public_session()["takeover"]["reshuffle_available"] is True
+    assert orch.world.state.dealt is False and all(not p.role and not p.faction and not p.tags for p in orch.world.state.players)
+    board = orch.world.board("p02")
+    assert not board["me"].get("role") and not board["me"].get("faction") and not board["me"].get("tags")  # what the person is shown
+    assert "reshuffle_available" not in orch.public_session()["takeover"] and orch.public_session()["dealt"] is False
 
     await orch.start_or_resume()
+    assert orch.world.state.dealt and orch.public_session()["dealt"] is True and all(p.role for p in orch.world.state.players)
     roles = {p.id: p.role for p in orch.world.state.players}
-    for _ in range(2):
-        with pytest.raises(TakeoverError) as err:
-            await orch.shuffle_identities()
-        assert err.value.status == 409 and "已经开始" in str(err.value)
-    assert orch.takeover_payload()["reshuffle_available"] is False
+    deals = [e for e in orch.world.ledger if e.type == "player.updated" and e.data.get("reason") == "deal"]
+    assert len(deals) == len(IDS)
     await orch.pause("user")
-    with pytest.raises(TakeoverError):
-        await orch.shuffle_identities()  # a paused game has started, too
-    await orch.start_or_resume()
-    await table.run([("end_game", {"winner": "测试队", "summary": "结束"})])
-    await wait_for(lambda: orch.session.status == "finished")
-    with pytest.raises(TakeoverError):
-        await orch.shuffle_identities()
-    assert {p.id: p.role for p in orch.world.state.players} == roles  # nothing was dealt again
+    await orch.release_takeover()
+    await orch.takeover("p03")
+    await orch.start_or_resume()  # resumed: the cards stay as they are
+    assert {p.id: p.role for p in orch.world.state.players} == roles
+    assert len([e for e in orch.world.ledger if e.type == "player.updated" and e.data.get("reason") == "deal"]) == len(IDS)
     await orch.shutdown()
 
 
 @async_test
-async def test_a_start_record_blocks_the_redeal_even_when_the_status_says_idle(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_start_record_means_the_game_has_started_even_when_the_status_says_idle(monkeypatch: pytest.MonkeyPatch) -> None:
     table = Table(monkeypatch)
     orch = table.orch
     assert orch.game_has_started() is False
     orch.session.started_at = "2026-11-18T08:00:00+00:00"  # (set when the game starts)
-    assert orch.game_has_started() and orch.reshuffle_available() is False
-    with pytest.raises(TakeoverError):
-        await orch.shuffle_identities()
+    assert orch.game_has_started()
     orch.session.started_at = None
-    assert orch.reshuffle_available() is True
     orch.world.commit("game.status", ENGINE_ID, {"status": "running", "reason": "started"}, visible_to="*")  # a ledger record
-    assert orch.game_has_started() and orch.reshuffle_available() is False
-    with pytest.raises(TakeoverError):
-        await orch.shuffle_identities()
+    assert orch.game_has_started()
 
 
-@pytest.mark.parametrize("order", ["start-first", "shuffle-first"])
-def test_a_start_and_a_redeal_at_the_same_time_never_deal_after_the_start(monkeypatch: pytest.MonkeyPatch, order: str) -> None:
-    async def scenario() -> None:
-        for _round in range(6):
-            table = Table(monkeypatch)
-            orch = table.orch
-            dealt: list[tuple[str, bool]] = []
-            real_new_world = orch._new_world
-
-            def spy(*args: Any, **kwargs: Any) -> Any:
-                dealt.append((orch.session.status, orch.world.running))
-                return real_new_world(*args, **kwargs)
-
-            orch._new_world = spy  # type: ignore[method-assign]
-            jobs = [orch.start_or_resume(), orch.shuffle_identities(), orch.shuffle_identities(), orch.shuffle_identities()]
-            if order == "shuffle-first":
-                jobs = [jobs[1], jobs[0], *jobs[2:]]
-            results = await asyncio.gather(*jobs, return_exceptions=True)
-            assert orch.session.status == "running"
-            assert all(status == "idle" and not running for status, running in dealt), dealt
-            refused = [r for r in results if isinstance(r, TakeoverError)]
-            assert refused and all(r.status == 409 for r in refused)
-            assert any(isinstance(r, Exception) is False for r in results)
-            ledger_deals = [e for e in orch.world.ledger if e.type == "player.updated"]
-            assert len(ledger_deals) == len(IDS)  # one deal in the ledger of the game that is running
-            await orch.shutdown()
-
-    asyncio.run(scenario())
+def test_the_re_deal_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """F5 is deleted (v0.14, H52): no ``shuffle_identities``, no ``reshuffle_available``, no route."""
+    orch = Table(monkeypatch).orch
+    assert not hasattr(orch, "shuffle_identities") and not hasattr(orch, "reshuffle_available") and not hasattr(orch, "_guard_reshuffle")
 
 
 @async_test
-async def test_a_takeover_cannot_slip_in_between_a_start_and_the_redeal(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_takeover_cannot_slip_in_while_the_game_is_starting(monkeypatch: pytest.MonkeyPatch) -> None:
     table = Table(monkeypatch)
     orch = table.orch
     results = await asyncio.gather(orch.start_or_resume(), orch.takeover("p02"), return_exceptions=True)
@@ -697,9 +679,10 @@ async def test_the_seat_of_a_person_still_needs_its_model_binding_to_start(monke
     orch = table.orch
     await orch.takeover("p02")
     orch.session.model_bindings.pop("p02")
-    with pytest.raises(BindingError) as err:
+    with pytest.raises(NotReadyError) as err:  # (v0.14: the start check lists it)
         await orch.start_or_resume()
-    assert "p02" in str(err.value) and orch.session.status == "idle"
+    assert [(p["scope"], p["seat"]) for p in err.value.problems] == [("binding", "p02")]
+    assert orch.session.status == "idle" and not orch.world.state.dealt
     issues = orch.refresh_binding_issues()
     assert [i.actor_id for i in issues] == ["p02"]
     orch.session.model_bindings["p02"] = all_bound()["p02"]
@@ -793,7 +776,7 @@ async def test_continuing_another_game_from_the_history_keeps_the_seat_played_an
 
     await orch.new_game()  # another game is live now; nobody plays in it
     assert orch.session.session_id != first_id and orch.takeover_seat is None
-    assert orch.public_session()["takeover"] == {"seat": None, "reshuffle_available": True}
+    assert orch.public_session()["takeover"] == {"seat": None}
     await orch.takeover("p01")  # ... somebody plays a seat there (it is saved first when the other game is loaded)
     second_id = orch.session.session_id
 
@@ -804,7 +787,7 @@ async def test_continuing_another_game_from_the_history_keeps_the_seat_played_an
     public = orch.public_session()
     assert {p["id"]: p["state"] for p in public["participants"]}["p03"] == "human"
     assert {p["id"]: p["state"] for p in public["participants"]}["p01"] == "sleeping"
-    assert public["takeover"]["seat"] == "p03" and public["takeover"]["reshuffle_available"] is False
+    assert public["takeover"]["seat"] == "p03" and "reshuffle_available" not in public["takeover"]
     assert "dm-p03" in public["takeover"]["channels"] and orch._takeover_signature == ""
     snapshots = [e for e in orch.bus._ring if e.type == "snapshot"]
     assert snapshots[-1].data["session"]["takeover"]["seat"] == "p03"  # the clients were told with the snapshot
@@ -849,24 +832,11 @@ def test_a_save_that_contradicts_itself_is_made_consistent_when_it_is_adopted(mo
     asyncio.run(scenario())
 
 
-class ReviewLlm:
-    """The one-shot port of a review: the impressions JSON the prompt asks for (the same answer for every player: a player's
-    own id is not an impression he writes), and a record of who was asked."""
-
-    ANSWER = json.dumps({"impressions": {f"N{i}": "这一局我学到了很多" for i in range(1, 5)}, "experience": []}, ensure_ascii=False)
-
-    def __init__(self) -> None:
-        self.asked: list[str] = []
-
-    async def complete(self, agent_id: str, messages: list[dict[str, Any]], tools: Any, *, max_tokens: int | None = None) -> LLMResponse:
-        self.asked.append(agent_id)
-        return LLMResponse(content=self.ANSWER, prompt_tokens=30, completion_tokens=10, provider_id="bot", model_id="scripted")
-
-
 @async_test
 async def test_the_seat_a_person_played_is_reviewed_like_any_other_with_its_own_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    """F8: the review and the record work from the world and the model binding, not from an agent of the seat."""
-    ids = ["N1", "N2", "N3", "N4"]  # (the roster of the data directory knows the seats N1, N2, ...)
+    """F8: the review and the record work from the world and the model binding, not from an agent of the seat.  v0.14 (H34): the bot of the
+    seat a person played is told so - and only that one: nobody else is told who the person was."""
+    ids = ["N1", "N2", "N3", "N4"]  # (the bots of the data directory sit at the seats N1, N2, ...)
     table = Table(monkeypatch, agents=simple_player, moderator=sample_moderator(ids, winner="红队"), ids=ids)
     orch = table.orch
     await orch.takeover("N2")
@@ -876,20 +846,24 @@ async def test_the_seat_a_person_played_is_reviewed_like_any_other_with_its_own_
     await person
     assert orch.takeover_seat == "N2" and "N2" not in orch.usage.model_dump(mode="json")["by_actor"]
 
-    port = ReviewLlm()
+    port = ScriptedLlm(by_kind())
     orch.llm_port_factory = lambda o: port
-    started = await orch.start_review()
-    assert sorted(started) == sorted(ids)  # the played seat is part of "review all"
-    await wait_for(lambda: len(orch.session.review_done) == len(ids) and not orch._review_running)
-    assert sorted(port.asked) == sorted(ids)
-    parts = orch._roster().entry("N2")["memory_parts"]
-    assert parts["impressions"]["N1"] == "这一局我学到了很多" and "N2" not in parts["impressions"]  # (the impressions of the others)
+    result = await orch.start_review()
+    assert sorted(result["started"]) == sorted(ids) and result["deadline_s"] == 60  # the played seat is part of "review all"
+    await wait_for(lambda: len(orch.session.review_done) == len(ids) and not orch.review_running_ids())
+    assert sorted(port.counts) == sorted(ids)  # every seat was asked - as the seat, with its own model
+    first = {seat: next(m for who, m in port.requests if who == seat)[1]["content"] for seat in ids}
+    assert "有人代你出场" in first["N2"] and all("有人代你出场" not in first[seat] for seat in ids if seat != "N2")
+    assert "人类" not in "".join(first[seat] for seat in ids if seat != "N2")  # (nobody else learns there was a person)
+    store = orch._bots()
+    bot_id = next(p.bot_id for p in orch.session.participants if p.id == "N2")
+    assert "Bob" in store.read_part(bot_id, "people")  # what the review wrote is in its memory, at once
     won = next(p for p in orch.world.state.players if p.id == "N2").faction == "red"
-    expected = f"场次 1，胜 {1 if won else 0}，负 {0 if won else 1}，胜率 {'100%' if won else '0%'}"
-    assert parts["record"].splitlines()[0] == expected  # the record is kept for it as for everybody
-    assert orch.usage.actor("N2").calls == 1  # the review is the only thing that was ever accounted for the seat
+    assert f"场次 1 · 胜 {1 if won else 0}" in store.summary(bot_id)["memory_stats"]["record"]  # the record is kept for it as for everybody
+    assert orch.usage.actor("N2").calls == 3  # the review is the only thing that was ever accounted for the seat
     states = [e.data["state"] for e in orch.bus._ring if e.type == "review.progress"]
     assert states.count("done") == len(ids) and "error" not in states
+    assert orch.review_view()["done"] == sorted(ids) and orch.review_view()["running"] is False
     await orch.shutdown()
 
 
@@ -906,7 +880,7 @@ async def test_a_seat_state_that_cannot_be_computed_never_breaks_the_snapshot_an
     public = orch.public_session()  # still a whole document: /api/state and the SSE snapshot keep working
     json.dumps(public)
     assert public["takeover"] == {
-        "seat": "p02", "reshuffle_available": True, "seq": orch.world.seq,
+        "seat": "p02", "seq": orch.world.seq,
         "channels": {}, "requests": [], "abilities": [], "attention": [],
     }
     base = orch.bus.last_id
@@ -920,17 +894,17 @@ async def test_a_seat_state_that_cannot_be_computed_never_breaks_the_snapshot_an
 async def test_public_session_says_who_is_played_and_is_json(monkeypatch: pytest.MonkeyPatch) -> None:
     table = Table(monkeypatch)
     orch = table.orch
-    assert orch.public_session()["takeover"] == {"seat": None, "reshuffle_available": True}
+    assert orch.public_session()["takeover"] == {"seat": None}
     await orch.takeover("p04")
     public = orch.public_session()
     json.dumps(public)
     takeover = public["takeover"]
-    assert set(takeover) == {"seat", "reshuffle_available", "seq", "channels", "requests", "abilities", "attention"}
+    assert set(takeover) == {"seat", "seq", "channels", "requests", "abilities", "attention"}
     assert takeover["seat"] == "p04" and takeover["seq"] == orch.world.seq and set(takeover["channels"]) == {"dm-p04"}
     assert {p["id"]: p["state"] for p in public["participants"]}["p04"] == "human"
-    assert strip_clock(takeover) == strip_clock({**seat_status(orch.world, "p04"), "seat": "p04", "reshuffle_available": True})
+    assert strip_clock(takeover) == strip_clock({**seat_status(orch.world, "p04"), "seat": "p04"})
     await orch.release_takeover()
-    assert orch.public_session()["takeover"] == {"seat": None, "reshuffle_available": True}
+    assert orch.public_session()["takeover"] == {"seat": None}
     assert {p["id"]: p["state"] for p in orch.public_session()["participants"]}["p04"] == "sleeping"
     # a new game is nobody's: a person who plays is out of it
     await orch.takeover("p04")

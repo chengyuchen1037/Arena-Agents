@@ -84,6 +84,8 @@ def test_a_person_who_soft_pauses_now_and_then_plays_a_scripted_game_to_the_end(
         # (the deal is random: a seat that is killed in the first night never gets anything to do - then another game is played)
         for _attempt in range(6):
             orch = build(monkeypatch)
+            await orch.start_or_resume()  # (the identities are dealt when the game starts, H52: the seat is picked by its identity afterwards)
+            await orch.pause("user")
             seat = next(p.id for p in orch.world.state.players if p.role == "villager")
             await orch.takeover(seat)
             person = SoftPerson(orch, seat)

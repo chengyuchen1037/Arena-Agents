@@ -98,6 +98,18 @@ class ArchiveStateError(ArchiveError):
     status = 409
 
 
+class ArchiveExistsError(ArchiveError):
+    """A game with the id of the imported ``.arenagame`` is already there and the user has not said what to do with it (``on_conflict="ask"``):
+    the answer names the id, so the dialog can offer "overwrite" / "keep both"."""
+
+    code = "exists"
+    status = 409
+
+    def __init__(self, message: str, *, session_id: str = "") -> None:
+        super().__init__(message)
+        self.session_id = session_id
+
+
 class ArchiveNotFoundError(ArchiveError):
     """No such export file / import session / job."""
 

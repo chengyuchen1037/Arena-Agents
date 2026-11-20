@@ -22,7 +22,7 @@ import app.api.games as games_module
 import app.api.routes as routes_module
 from app.api.games import router as games_router
 from app.api.routes import router as routes_router
-from app.storage.games import get_game_store
+from app.storage.games import DELETE_NOTE, get_game_store
 
 IDS = [p["id"] for p in PLAYERS]
 
@@ -58,6 +58,12 @@ def play_a_little(client: TestClient, table: Table, *, words: str = "欢迎来�
     client.portal.call(scenario)  # type: ignore[union-attr]
 
 
+def bots_snapshot(data_dir: Path) -> dict[str, bytes]:
+    """Every file of the bots (their L0, memory, impressions ...) - deleting a game must not change any of it."""
+    root = data_dir / "bots"
+    return {p.relative_to(root).as_posix(): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()} if root.is_dir() else {}
+
+
 def messages_of(replay: dict) -> list[str]:
     return [ev["data"]["content"] for ev in replay["events"] if ev["type"] == "message.committed"]
 
@@ -77,7 +83,7 @@ def test_a_played_game_is_saved_listed_replayed_replaced_loaded_and_deleted(tabl
         play_a_little(client, table, words="第一局的第一句。")
         game_file = store.data_dir / "games" / first / "game.json"
         saved = json.loads(game_file.read_text(encoding="utf-8"))  # (plain, readable text: nothing encrypted)
-        assert saved["session_id"] == first and saved["schema_version"] == 5 and saved["status"] == "paused"
+        assert saved["session_id"] == first and saved["schema_version"] == 6 and saved["status"] == "paused"
         assert saved["started_at"] and saved["created_at"]
         games = client.get("/api/games").json()["games"]
         assert [g["session_id"] for g in games] == [first]
@@ -113,8 +119,7 @@ def test_a_played_game_is_saved_listed_replayed_replaced_loaded_and_deleted(tabl
         assert listed[second]["current"] is True and listed[first]["current"] is False
         assert client.get("/api/games").json()["current"] == second
 
-        # the live (idle) game cannot be deleted or loaded again; the first game can be replayed from the list
-        assert client.delete(f"/api/games/{second}").status_code == 409
+        # the live (idle) game cannot be loaded again (it is deleted by making a new one: see the test below); the first game can be replayed
         assert client.post(f"/api/games/{second}/load").status_code == 409
         again = client.get(f"/api/games/{first}/replay").json()
         assert messages_of(again) == ["第一局的第一句。"], "the old game replays exactly as before"
@@ -130,18 +135,51 @@ def test_a_played_game_is_saved_listed_replayed_replaced_loaded_and_deleted(tabl
         assert client.get("/api/games").json()["current"] == first
         assert orch.session.status == "paused", "loading never starts a game"
 
-        # ---- delete the other game: its file and its logs go, the live game and the roster stay
+        # ---- delete the other game: its file and its logs go, the live game and the bots (their memory) stay
         logs = store.data_dir / "logs" / second
         logs.mkdir(parents=True, exist_ok=True)
         (logs / "trace-0001.jsonl").write_text("{}\n", encoding="utf-8")
-        roster_before = {p.name for p in (store.data_dir / "roster").glob("*")} if (store.data_dir / "roster").exists() else set()
+        bots_before = bots_snapshot(store.data_dir)
         removed = client.delete(f"/api/games/{second}")
-        assert removed.status_code == 200 and removed.json() == {"ok": True, "session_id": second}
+        assert removed.status_code == 200
+        assert removed.json() == {"ok": True, "session_id": second, "note": DELETE_NOTE, "new_game": False, "new_session_id": None}
         assert not (store.data_dir / "games" / second).exists() and not logs.exists()
         assert [g["session_id"] for g in client.get("/api/games").json()["games"]] == [first]
-        roster_after = {p.name for p in (store.data_dir / "roster").glob("*")} if (store.data_dir / "roster").exists() else set()
-        assert roster_after == roster_before, "deleting a game never touches the roster (persona and memory)"
+        assert bots_snapshot(store.data_dir) == bots_before, "deleting a game never touches what a bot remembers"
         assert client.delete(f"/api/games/{second}").status_code == 404
+        client.portal.call(orch.shutdown)  # type: ignore[union-attr]
+
+
+def test_the_live_game_can_be_deleted_a_new_blank_game_takes_its_place(table: Table) -> None:
+    """H40 with the real orchestrator: a game that is being played cannot be deleted; a paused one can - the new blank game is made first (the
+    orchestrator saves the old one and stops everything), then the old game's files go."""
+    orch = table.orch
+    store = get_game_store()
+    with make_client() as client:
+        play_a_little(client, table, words="要被删除的一局。")
+        live = orch.session.session_id
+        logs = store.data_dir / "logs" / live
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "trace-0001.jsonl").write_text("{}\n", encoding="utf-8")
+        assert store.exists(live)
+        bots_before = bots_snapshot(store.data_dir)
+
+        client.portal.call(orch.start_or_resume)  # type: ignore[union-attr]
+        running = client.delete(f"/api/games/{live}")
+        assert running.status_code == 409 and "暂停" in running.json()["detail"]
+        assert store.exists(live) and orch.session.session_id == live and logs.exists()
+        client.portal.call(orch.pause, "user")  # type: ignore[union-attr]
+
+        removed = client.delete(f"/api/games/{live}")
+        body = removed.json()
+        assert removed.status_code == 200 and body["ok"] is True and body["new_game"] is True and body["note"] == DELETE_NOTE
+        fresh = orch.session.session_id
+        assert fresh != live and body["session_id"] == live and body["new_session_id"] == fresh
+        assert not store.exists(live) and not logs.exists(), "the old game and its logs are gone"
+        assert orch.session.status == "idle" and not any(e.type == "message" for e in orch.world.ledger), "the new game is a blank one"
+        listed = client.get("/api/games").json()
+        assert listed["current"] == fresh and [g["session_id"] for g in listed["games"]] == [fresh]
+        assert bots_snapshot(store.data_dir) == bots_before
         client.portal.call(orch.shutdown)  # type: ignore[union-attr]
 
 

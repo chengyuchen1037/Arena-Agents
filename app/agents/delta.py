@@ -12,6 +12,7 @@ import json
 from typing import Any
 
 from app.agents.context import (
+    CLASSIC,
     STATUS_ZH,
     Namer,
     _ids,
@@ -98,11 +99,13 @@ def _request_changes(old: dict[str, Any], new: dict[str, Any], namer: Namer, *, 
     return changes
 
 
-def diff_board(old: dict[str, Any], new: dict[str, Any], namer: Namer) -> list[str]:
-    """Lines describing what changed from ``old`` to ``new`` (empty when nothing actionable changed)."""
+def diff_board(old: dict[str, Any], new: dict[str, Any], namer: Namer, *, style: str = CLASSIC) -> list[str]:
+    """Lines describing what changed from ``old`` to ``new`` (empty when nothing actionable changed).  ``style`` is the one of
+    ``app.agents.context`` (how the speaking limits of a channel are shown)."""
     lines: list[str] = []
     me_old, me_new = old.get("me") or {}, new.get("me") or {}
     is_mod = bool(me_new.get("is_moderator"))
+    me_id = str(me_new.get("id") or "")
 
     if old.get("status") != new.get("status"):
         lines.append(
@@ -128,13 +131,13 @@ def diff_board(old: dict[str, Any], new: dict[str, Any], namer: Namer) -> list[s
                 f"- 新频道 {channel_id}「{channel.get('name')}」类型 {channel.get('type')}，"
                 f"模式 {channel.get('mode')}；成员：{shown}"
             )
-            lines.extend(_render_floor(channel))
+            lines.extend(_render_floor(channel, style, me_id))
             continue
         changes = _channel_changes(previous, channel)
         floor_changed = _floor_signature(previous) != _floor_signature(channel)
         if changes or floor_changed:
             lines.append(f"- {channel_id}「{channel.get('name')}」" + (("：" + "；".join(changes)) if changes else "："))
-            lines.extend(_render_floor(channel))
+            lines.extend(_render_floor(channel, style, me_id))
     for channel_id in old_channels:
         if channel_id not in new_channels:
             lines.append(f"- 你已不在频道 {channel_id} 中")

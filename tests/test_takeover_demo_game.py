@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 
-import app.game.orchestrator as orchestrator_module
+import game_fakes
 from app.config import load_config
 from app.game.demo import install_demo
 from app.game.orchestrator import GameOrchestrator
@@ -24,9 +24,9 @@ from app.world.types import Receipt
 def build(monkeypatch: pytest.MonkeyPatch) -> GameOrchestrator:
     cfg = load_config()
     cfg["runtime"] = {**cfg["runtime"], "tick_interval": 0.05, "watchdog": 60}
-    monkeypatch.setattr(orchestrator_module, "load_config", lambda *a, **k: copy.deepcopy(cfg))
+    game_fakes.patch_config(monkeypatch, cfg)
     orch = GameOrchestrator()
-    install_demo(orch, delay=0.0, seed=7)
+    install_demo(orch, delay=0.0, seed=7)  # (also gives every default bot its fixed memory: a game starts only with bots that are initialized)
     return orch
 
 
@@ -47,6 +47,9 @@ class Person:
         self.log: list[tuple[str, str, dict[str, Any]]] = []
         self.checked = 0
         self.spoke_free: set[str] = set()
+        # (the game was started and stopped once before the seat was taken over, H52: what the seat's agent did by then is not the person's)
+        self.calls_at_takeover = orch.usage.by_actor[seat].calls if seat in orch.usage.by_actor else 0
+        self.event_at_takeover = orch.bus.last_id
 
     def answer_for(self, request_id: str) -> str:
         request = self.orch.world.state.requests[request_id]
@@ -91,6 +94,10 @@ class Person:
 
 async def play_a_game(monkeypatch: pytest.MonkeyPatch, role: str) -> tuple[GameOrchestrator, str, Person]:
     orch = build(monkeypatch)
+    # (v0.14, H52: the identities are dealt when the game starts - so the game is started and stopped at once, and the person takes over the
+    # seat that holds ``role``, as a person who picked it after the first deal would)
+    await orch.start_or_resume()
+    await orch.pause("user")
     seat = next(p.id for p in orch.world.state.players if p.role == role)
     await orch.takeover(seat)
     assert orch.public_session()["takeover"]["seat"] == seat
@@ -129,9 +136,12 @@ def test_a_scripted_werewolf_game_plays_to_the_end_with_a_person_at_one_seat(mon
         assert person.checked > 20  # the seat state was compared with the gate again and again
         # the seat never had an agent: nothing was called or counted for it
         public = orch.public_session()
-        assert seat not in public["usage_stats"]["by_actor"]
+        assert public["usage_stats"]["by_actor"].get(seat, {}).get("calls", 0) == person.calls_at_takeover
         assert {p["id"]: p["state"] for p in public["participants"]}[seat] == "human"
-        assert not [e for e in orch.bus._ring if e.type in ("agent.status", "agent.metrics") and e.data.get("id") == seat]
+        assert not [
+            e for e in orch.bus._ring
+            if e.type in ("agent.status", "agent.metrics") and e.data.get("id") == seat and e.id > person.event_at_takeover
+        ]
         # everybody else played: the ledger holds the other seats' speeches, votes and the moderator's rulings
         assert {e.actor_id for e in ledger if e.type == "message" and e.data.get("kind") == "speech"} - {seat}
         assert any(e.type == "request.closed" and e.data.get("reason") for e in ledger)

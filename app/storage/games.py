@@ -1,24 +1,40 @@
-"""Saved games (v0.13; decisions F21, F22, F38; contract docs/v0.12-contracts.md section 11.3).
+"""Saved games (v0.13; decisions F21, F22, F38; v0.14: H40, H43; contract docs/v0.12-contracts.md sections 11.3 and 13.7).
 
 Every game lives in its own folder, ``<data>/games/<session_id>/``::
 
-    game.json        the game as plain JSON (UTF-8, not indented; save format v5)
+    game.json        the game as plain JSON (UTF-8, not indented; save format v5 or v6)
     game.prev.json   the previous good copy of ``game.json``
 
 and ``<data>/games/index.json`` keeps one summary per game for the history list.  The index is only a cache:
-it is updated by every save and rebuilt from the game files when it is missing, damaged or no longer matches
-the folders (an imported archive, a hand-copied game, a crash between the two writes).
+it is updated by every save and rebuilt from the game files when it is missing, damaged, of an older index
+version or no longer matches the folders (an imported archive, a hand-copied game, a crash between the two writes).
 
 Nothing is encrypted here: a game holds no secret (the API keys live in ``secrets.v1.enc``, see
 :mod:`app.storage.secrets`).  Writes are atomic (temp file, fsync, replace); the previous good copy is kept so
 that a damaged ``game.json`` costs at most the last save.  Symbolic links are never followed.
+
+v0.14 (the "对局管理" of the settings dialog, H40):
+
+* a summary also says whether the game can be opened (``readable``), who sat at the table (``participants_brief``) and how far
+  its reviews are (``review``); the listing adds the size of the game's logs (``log_bytes``, read from the disk every time: the logs
+  grow while a game is played, the index would be stale);
+* :meth:`GameStore.detail` / :meth:`GameStore.detail_of` describe one game for the expanded row - the seats with the bot, the identity
+  (only once the game is **finished**: nobody learns an identity from the history of a game that is still being played), the review
+  state of each, the sizes of the files and who played a seat;
+* :meth:`GameStore.export_parts` / :meth:`GameStore.install_game` are what ``.arenagame`` files (``app.archive.arenagame``) are made of
+  and installed with: the good copy of the game plus its logs, and an all-or-nothing install with a conflict policy.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import secrets
 import shutil
 import threading
+import time
+from collections.abc import Collection, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,13 +49,60 @@ LOGS_DIRNAME = "logs"
 GAME_FILE = "game.json"
 PREVIOUS_FILE = "game.prev.json"
 INDEX_FILE = "index.json"
-INDEX_SCHEMA_VERSION = 1
+INDEX_SCHEMA_VERSION = 2  # v2 (v0.14): the summaries also have ``readable`` / ``participants_brief`` / ``review``
 #: ``status`` of a summary whose game files cannot be read (it can still be deleted from the history list)
 UNREADABLE_STATUS = "unreadable"
+#: The save formats this version opens (``app.game.session.SUPPORTED_SCHEMA_VERSIONS``; a test keeps the two equal).  v5 is a game of
+#: v0.13, which stays a v5 game while it lives (H58); v6 is the current format.
+READABLE_SCHEMA_VERSIONS = (5, 6)
+FIRST_BOT_SCHEMA = 6  # from this format on a seat has a bot, and a finished game can be reviewed (H58)
+#: What may be said about deleting a game (the API's ``note`` and the confirmation dialog use the same sentence).
+DELETE_NOTE = "bot 已经通过复盘形成的记忆不会被删除，也无法通过删除对局撤销。"
+CONFLICT_POLICIES = ("ask", "overwrite", "copy")
+_LOG_NAME_PREFIX = "trace-"
+_LOG_NAME_SUFFIX = ".jsonl"
 
 
 class GameNotFoundError(StorageError):
     """There is no such game: no folder, or a folder without a game file (the API answers 404)."""
+
+
+class GameExistsError(StorageError):
+    """A game with this id is already there (:meth:`GameStore.install_game` with ``on_conflict="ask"``); the API answers 409 ``exists``."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(f"已经有一局 id 相同的对局：{session_id}")
+        self.session_id = session_id
+
+
+class GameProtectedError(StorageError):
+    """The id is the live game's (:meth:`GameStore.install_game` with ``protected``): a game cannot be overwritten while it is being played;
+    the API answers 409 ``current``."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__("这是当前对局，不能被覆盖：请选择“保留两份”，或先新建 / 载入另一局。")
+        self.session_id = session_id
+
+
+@dataclass(frozen=True)
+class ExportParts:
+    """What a ``.arenagame`` is made of: the good copy of ``game.json`` (the previous copy stands in for a damaged main file) and the
+    trace logs ``[(file name, path)]`` in name order."""
+
+    session_id: str
+    game_bytes: bytes
+    logs: list[tuple[str, Path]] = field(default_factory=list)
+    used_previous: bool = False
+
+
+@dataclass(frozen=True)
+class InstalledGame:
+    """The result of :meth:`GameStore.install_game`: the id the game has now, its status, and what happened to an existing game."""
+
+    session_id: str
+    status: str
+    replaced: bool = False
+    copied: bool = False
 
 
 def _encode(payload: dict[str, Any]) -> bytes:
@@ -61,6 +124,14 @@ def _decode(raw: bytes) -> dict[str, Any]:
 
 def _utc_iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat()
+
+
+def is_log_name(name: object) -> bool:
+    """``trace-NNNN.jsonl`` (four digits or more): the only names a game's log folder may hold."""
+    if not isinstance(name, str) or not (name.startswith(_LOG_NAME_PREFIX) and name.endswith(_LOG_NAME_SUFFIX)):
+        return False
+    digits = name[len(_LOG_NAME_PREFIX) : -len(_LOG_NAME_SUFFIX)]
+    return len(digits) >= 4 and digits.isascii() and digits.isdigit()
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -207,7 +278,8 @@ class GameStore:
 
     # ------------------------------------------------------------------- listing ---
     def list_games(self) -> list[dict]:
-        """One summary per game, newest ``updated_at`` first; the index is rebuilt when it does not match the folders."""
+        """One summary per game, newest ``updated_at`` first; the index is rebuilt when it does not match the folders.  Every summary
+        carries ``log_bytes`` (the size of ``logs/<id>/``), read from the disk now - it is not part of the index."""
         with self._lock:
             if self._games_dir.is_symlink():
                 raise StorageError("拒绝读取符号链接形式的 games 目录。")
@@ -217,7 +289,110 @@ class GameStore:
             entries = self._read_index()
             if entries is None or not self._index_matches(entries, found):
                 entries = {item["session_id"]: item for item in self.rebuild_index()}
-            return self._sorted(entries.values())
+            return [{**item, "log_bytes": self.log_bytes(item["session_id"])} for item in self._sorted(entries.values())]
+
+    # ------------------------------------------------------------------- sizes and detail (H40) ---
+    def log_bytes(self, session_id: str) -> int:
+        """The size of the files in ``logs/<id>/`` (0 when there are none).  Links are not followed and not counted."""
+        validate_session_id(session_id)
+        folder = self._data_dir / LOGS_DIRNAME / session_id
+        total = 0
+        try:
+            if folder.is_symlink():
+                return 0
+            with os.scandir(folder) as handle:
+                for entry in handle:
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            total += entry.stat(follow_symlinks=False).st_size
+                    except OSError:
+                        continue
+        except OSError:
+            return 0
+        return total
+
+    def file_sizes(self, session_id: str) -> dict[str, int]:
+        """``{"game_bytes", "prev_bytes", "log_bytes"}`` of one game (0 for what is not there)."""
+        game_dir = self._game_dir(session_id)
+        sizes: dict[str, int] = {}
+        for key, name in (("game_bytes", GAME_FILE), ("prev_bytes", PREVIOUS_FILE)):
+            try:
+                path = game_dir / name
+                sizes[key] = 0 if path.is_symlink() else path.stat().st_size
+            except OSError:
+                sizes[key] = 0
+        sizes["log_bytes"] = self.log_bytes(session_id)
+        return sizes
+
+    def detail(self, session_id: str) -> dict[str, Any]:
+        """The expanded row of the history list for a saved game (:meth:`detail_of` of its file).  :class:`GameNotFoundError` when there
+        is none, :class:`StorageError` when neither copy of it can be read."""
+        return self.detail_of(self.load(session_id), session_id)
+
+    def detail_of(self, payload: dict[str, Any], session_id: str) -> dict[str, Any]:
+        """Describe a game document: ``{"participants": [{"seat", "bot_id", "name", "avatar", "role", "faction", "review"}], "files":
+        {"game_bytes", "prev_bytes", "log_bytes"}, "human_spans": [{"seat", "from_seq", "to_seq"}]}``.
+
+        ``seat`` is the seat id the game uses (``N1``..), ``bot_id`` is ``""`` in a v5 game.  ``role`` / ``faction`` are the scenario's
+        own names for them and are ``null`` unless the game is **finished** - an identity is never shown for a game that is still
+        being played (or not yet started).  ``review`` is ``"done"`` for a seat whose review is written, ``"na"`` for a game that
+        cannot be reviewed any more (a v5 game, or a seat without a bot), else ``"pending"``."""
+        payload = _as_dict(payload)
+        finished = payload.get("status") == "finished"
+        schema = payload.get("schema_version")
+        bots_in_game = isinstance(schema, int) and not isinstance(schema, bool) and schema >= FIRST_BOT_SCHEMA
+        done = {item for item in payload.get("review_done") or [] if isinstance(item, str)} if isinstance(payload.get("review_done"), list) else set()
+        world_state = _as_dict(_as_dict(payload.get("world")).get("state"))
+        players = {
+            _text(item.get("id")): item for item in (world_state.get("players") if isinstance(world_state.get("players"), list) else []) if isinstance(item, dict)
+        }
+        setup = _as_dict(_as_dict(payload.get("scenario_spec")).get("setup"))
+        roles, faction_names = _as_dict(setup.get("roles")), _as_dict(setup.get("faction_names"))
+        participants: list[dict[str, Any]] = []
+        for item in payload.get("participants") if isinstance(payload.get("participants"), list) else []:
+            if not isinstance(item, dict):
+                continue
+            seat = _text(item.get("id")) or _text(item.get("seat"))
+            bot_id = _text(item.get("bot_id"))
+            role: str | None = None
+            faction: str | None = None
+            player = players.get(seat)
+            if finished and player is not None:
+                role_id, faction_id = _text(player.get("role")), _text(player.get("faction"))
+                role_tags = _as_dict(roles.get(role_id)).get("tags")
+                first_tag = role_tags[0] if isinstance(role_tags, list) and role_tags and isinstance(role_tags[0], str) else ""
+                role = (first_tag or role_id) or None
+                faction = (_text(faction_names.get(faction_id)) or faction_id) or None
+            if seat in done:
+                review = "done"
+            elif not bots_in_game or not bot_id:
+                review = "na"
+            else:
+                review = "pending"
+            avatar = item.get("avatar")
+            participants.append(
+                {
+                    "seat": seat,
+                    "bot_id": bot_id,
+                    "name": _text(item.get("name")),
+                    "avatar": avatar if isinstance(avatar, dict) and avatar else None,
+                    "role": role,
+                    "faction": faction,
+                    "review": review,
+                }
+            )
+        spans: list[dict[str, Any]] = []
+        for span in payload.get("human_spans") if isinstance(payload.get("human_spans"), list) else []:
+            if isinstance(span, dict) and isinstance(span.get("seat"), str):
+                to_seq = span.get("to_seq")
+                spans.append(
+                    {
+                        "seat": span["seat"],
+                        "from_seq": int(_number(span.get("from_seq"))),
+                        "to_seq": int(to_seq) if isinstance(to_seq, (int, float)) and not isinstance(to_seq, bool) else None,
+                    }
+                )
+        return {"participants": participants, "files": self.file_sizes(session_id), "human_spans": spans}
 
     def rebuild_index(self) -> list[dict]:
         """Read every game file again and write ``index.json`` from scratch."""
@@ -231,6 +406,149 @@ class GameStore:
                 entries[session_id] = self._summary_of(session_id, candidate, stat)
             self._write_index(entries)
             return self._sorted(entries.values())
+
+    # -------------------------------------------------------- export / install (.arenagame, H40 / H43) ---
+    def _log_files(self, session_id: str) -> list[tuple[str, Path]]:
+        folder = self._data_dir / LOGS_DIRNAME / session_id
+        try:
+            if folder.is_symlink():
+                return []
+            with os.scandir(folder) as handle:
+                names = sorted(entry.name for entry in handle if entry.is_file(follow_symlinks=False) and is_log_name(entry.name))
+        except OSError:
+            return []
+        return [(name, folder / name) for name in names]
+
+    def export_parts(self, session_id: str) -> ExportParts:
+        """The good copy of a game and its trace logs, for a ``.arenagame``: the main file when it can be read, else the previous copy
+        (``used_previous``).  :class:`GameNotFoundError` when there is no such game, :class:`StorageError` when neither copy can be read."""
+        game_dir = self._game_dir(session_id)
+        with self._lock:
+            self._check_not_symlink(self._games_dir, game_dir)
+            found = False
+            for filename in (GAME_FILE, PREVIOUS_FILE):
+                path = game_dir / filename
+                if not path.exists() and not path.is_symlink():
+                    continue
+                found = True
+                raw = self._good_bytes(path)
+                if raw is not None:
+                    return ExportParts(session_id, raw, self._log_files(session_id), used_previous=filename == PREVIOUS_FILE)
+            if found:
+                raise StorageError("对局文件和它的上一份副本都无法读取。")
+            raise GameNotFoundError("对局不存在。")
+
+    def _fresh_id(self, avoid: Collection[str] = ()) -> str:
+        """An id no game, no log folder and no ``avoid`` has (what a copy of a game gets: 12 random hex digits, like every new game)."""
+        for _ in range(200):
+            candidate = secrets.token_hex(6)
+            if candidate in avoid:
+                continue
+            if not (self._games_dir / candidate).exists() and not (self._data_dir / LOGS_DIRNAME / candidate).exists():
+                return candidate
+        raise StorageError("无法为这局对局找到一个没有被占用的 id。")
+
+    @staticmethod
+    def _rename(source: Path, target: Path) -> None:
+        """``source`` -> ``target`` (a folder), tried a few times: on Windows an indexer or a virus scanner may hold a folder for a moment."""
+        last: OSError | None = None
+        for attempt in range(5):
+            try:
+                os.replace(source, target)
+                return
+            except PermissionError as exc:
+                last = exc
+                time.sleep(0.05 * (attempt + 1))
+        raise StorageError("无法移动对局文件夹（可能被其他程序占用）。") from last
+
+    def install_game(
+        self,
+        session_id: str,
+        game_file: Path,
+        logs: Sequence[tuple[str, Path]] = (),
+        *,
+        on_conflict: str = "ask",
+        protected: Collection[str] = (),
+    ) -> InstalledGame:
+        """Put a game that came from outside (an unpacked ``.arenagame``) into the store: ``game_file`` becomes ``games/<id>/game.json``
+        (read and written again as plain JSON, so a file that is not JSON changes nothing) and ``logs`` - ``[(name, path)]`` with names
+        like ``trace-0001.jsonl`` - become ``logs/<id>/``.
+
+        ``on_conflict`` says what happens when a game with this id exists: ``"ask"`` raises :class:`GameExistsError` (nothing is changed),
+        ``"overwrite"`` replaces the game *and its logs* completely, ``"copy"`` installs it under a new id (the ``session_id`` inside the
+        file is changed to it).  ``protected`` are ids that count as existing even when no file is there - the live game's, which may not
+        have been saved yet - and that can never be overwritten (:class:`GameProtectedError`).  All or nothing: everything is built beside the
+        target and swapped in, so a failure leaves what was there as it was.  The index is updated."""
+        if on_conflict not in CONFLICT_POLICIES:
+            raise ValueError("on_conflict 必须是 ask、overwrite 或 copy。")
+        validate_session_id(session_id)
+        if session_id.lower() == "learning":  # ``logs/learning/`` is where the logs of the initializations and reviews live
+            raise StorageError("这个对局 id 是系统保留名称。")
+        for name, _path in logs:
+            if not is_log_name(name):
+                raise StorageError("日志文件的名字不合法。")
+        try:
+            payload = _decode(Path(game_file).read_bytes())
+        except OSError as exc:
+            raise StorageError("无法读取要导入的对局文件。") from exc
+        with self._lock:
+            self._check_not_symlink(self._games_dir, self._data_dir / LOGS_DIRNAME)
+            target_id, replaced, copied = session_id, False, False
+            on_disk = (self._games_dir / session_id / GAME_FILE).exists() or (self._games_dir / session_id / PREVIOUS_FILE).exists()
+            if session_id in protected or on_disk:
+                if on_conflict == "ask":
+                    raise GameExistsError(session_id)
+                if on_conflict == "overwrite":
+                    if session_id in protected:
+                        raise GameProtectedError(session_id)
+                    replaced = True
+                else:
+                    target_id, copied = self._fresh_id(protected), True
+            payload["session_id"] = target_id  # the folder is the identity: a file that says another id is refused by ``load_game``
+            encoded = _encode(payload)
+            logs_root = self._data_dir / LOGS_DIRNAME
+            self._check_not_symlink(self._games_dir / target_id, logs_root / target_id)
+            token = secrets.token_hex(4)
+            fresh_game, fresh_logs = self._games_dir / f".import-{token}", logs_root / f".import-{token}"
+            old_game, old_logs = self._games_dir / f".old-{token}", logs_root / f".old-{token}"
+            target_game, target_logs = self._games_dir / target_id, logs_root / target_id
+            undo: list[tuple[Path, Path]] = []  # (where it is now, where it was): the renames to take back, newest last
+            try:
+                ensure_private_directory(self._games_dir)
+                ensure_private_directory(fresh_game)
+                atomic_write(fresh_game / GAME_FILE, encoded)
+                if (fresh_game / GAME_FILE).read_bytes() != encoded:
+                    raise StorageError("对局文件写入后校验失败。")
+                if logs:
+                    ensure_private_directory(fresh_logs)
+                    for name, path in logs:
+                        shutil.copyfile(path, fresh_logs / name)
+                if target_logs.exists():
+                    self._rename(target_logs, old_logs)
+                    undo.append((old_logs, target_logs))
+                if logs:
+                    self._rename(fresh_logs, target_logs)
+                    undo.append((target_logs, fresh_logs))
+                if target_game.exists():
+                    self._rename(target_game, old_game)
+                    undo.append((old_game, target_game))
+                self._rename(fresh_game, target_game)
+            except BaseException:
+                for now_at, was_at in reversed(undo):
+                    try:
+                        os.replace(now_at, was_at)
+                    except OSError:
+                        pass
+                for leftover in (fresh_game, fresh_logs):
+                    shutil.rmtree(leftover, ignore_errors=True)
+                raise
+            for leftover in (old_game, old_logs):
+                shutil.rmtree(leftover, ignore_errors=True)
+            for path in [p for p in self._verified if target_game in p.parents]:
+                self._verified.pop(path, None)
+            self._remember(target_game / GAME_FILE)
+            self._record_in_index(target_id, payload, target_game / GAME_FILE)
+            return InstalledGame(target_id, str(self.summarize(payload)["status"]), replaced=replaced, copied=copied)
 
     @staticmethod
     def summarize(payload: dict, *, size_bytes: int = 0, updated_at: str | None = None) -> dict:
@@ -252,6 +570,12 @@ class GameStore:
             )
         participants = payload.get("participants")
         schema = payload.get("schema_version")
+        schema_ok = isinstance(schema, int) and not isinstance(schema, bool)
+        seated = [item for item in participants if isinstance(item, dict)] if isinstance(participants, list) else []
+        review_done = payload.get("review_done")
+        done = len({item for item in review_done if isinstance(item, str)}) if isinstance(review_done, list) else 0
+        # a v5 game (v0.13) cannot be reviewed any more (H58): there is no "total" to reach
+        review_total = len(seated) if schema_ok and schema >= FIRST_BOT_SCHEMA and seated else None
         return {
             "session_id": _text(payload.get("session_id")),
             "title": _text(payload.get("title")),
@@ -268,8 +592,12 @@ class GameStore:
             "tokens": int(tokens),
             "cost_usd": round(_number(usage.get("total_cost_usd")), 6),
             "human_involved": bool(payload.get("human_spans")),
-            "schema_version": schema if isinstance(schema, int) and not isinstance(schema, bool) else None,
+            "schema_version": schema if schema_ok else None,
             "size_bytes": int(size_bytes),
+            # v0.14 (H40): can this version open it / who sat at the table / how far are the reviews
+            "readable": bool(schema_ok and schema in READABLE_SCHEMA_VERSIONS),
+            "participants_brief": [_text(item.get("name")) for item in seated],
+            "review": {"done": done if review_total is None else min(done, review_total), "total": review_total},
         }
 
     # ------------------------------------------------------------ index internals ---
@@ -414,15 +742,23 @@ def delete(session_id: str) -> None:
 
 
 __all__ = [
+    "CONFLICT_POLICIES",
+    "DELETE_NOTE",
     "GAME_FILE",
     "INDEX_FILE",
     "PREVIOUS_FILE",
+    "READABLE_SCHEMA_VERSIONS",
     "UNREADABLE_STATUS",
+    "ExportParts",
+    "GameExistsError",
     "GameNotFoundError",
+    "GameProtectedError",
     "GameStore",
+    "InstalledGame",
     "delete",
     "exists",
     "get_game_store",
+    "is_log_name",
     "list_games",
     "load",
     "reset_game_store",

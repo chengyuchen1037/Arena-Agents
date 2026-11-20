@@ -1,5 +1,5 @@
 """The HTTP side of playing a seat (v0.13, docs/v0.12-contracts.md §11.7): ``/api/takeover*``, ``/api/seat/*`` and the
-re-deal's 409.  A small FastAPI app with just these routers over a real orchestrator with scripted agents."""
+(v0.14: no re-deal any more) the start check's 409.  A small FastAPI app with just these routers over a real orchestrator with scripted agents."""
 
 from __future__ import annotations
 
@@ -49,13 +49,13 @@ def test_takeover_and_release_over_http_with_their_statuses(table: Table) -> Non
         taken = client.post("/api/takeover", json={"seat": "p02"})
         assert taken.status_code == 200 and taken.json()["ok"] is True
         session = taken.json()["session"]
-        assert session["takeover"]["seat"] == "p02" and session["takeover"]["reshuffle_available"] is True
+        assert session["takeover"]["seat"] == "p02" and "reshuffle_available" not in session["takeover"]
         assert {p["id"]: p["state"] for p in session["participants"]}["p02"] == "human"
         busy = client.post("/api/takeover", json={"seat": "p03"})
         assert busy.status_code == 409 and "请先退出" in busy.json()["detail"]
 
         released = client.post("/api/takeover/release")
-        assert released.status_code == 200 and released.json()["session"]["takeover"] == {"seat": None, "reshuffle_available": True}
+        assert released.status_code == 200 and released.json()["session"]["takeover"] == {"seat": None}
         assert client.post("/api/takeover/release").status_code == 200  # nobody is played: nothing happens
 
 
@@ -104,10 +104,15 @@ def test_a_game_is_played_over_http_and_the_actor_is_always_the_taken_over_seat(
         stale = client.post("/api/seat/speak", json={"channel_id": "public", "content": "旧草稿", "based_on_seq": 0})
         assert stale.status_code == 200 and stale.json()["accepted"] is False and stale.json()["code"] == "STALE"
         seq = orch.takeover_payload()["seq"]
-        spoken = client.post("/api/seat/speak", json={"channel_id": "public", "content": "字" * 20, "based_on_seq": seq})
+        too_long = client.post("/api/seat/speak", json={"channel_id": "public", "content": "字" * 20, "based_on_seq": seq})
+        assert too_long.status_code == 200  # (v0.14, H16: an over-long speech is sent back, never cut: the floor is still the person's)
+        assert too_long.json()["accepted"] is False and too_long.json()["code"] == "TOO_LONG"
+        assert too_long.json()["data"] == {"chars": 20, "limit": 12}
+        assert not [e for e in orch.world.ledger if e.type == "message" and e.channel_id == "public"]
+        spoken = client.post("/api/seat/speak", json={"channel_id": "public", "content": "字" * 12, "based_on_seq": seq})
         assert spoken.status_code == 200
         body = spoken.json()
-        assert body["accepted"] is True and body["code"] is None and body["truncated"] == {"dropped_chars": 8, "kept_chars": 12}
+        assert body["accepted"] is True and body["code"] is None and not body.get("truncated")
         assert [e.actor_id for e in orch.world.ledger if e.type == "message" and e.channel_id == "public"] == ["p02"]
 
         # nothing in the body can name another actor
@@ -135,18 +140,22 @@ def test_a_game_is_played_over_http_and_the_actor_is_always_the_taken_over_seat(
         client.portal.call(orch.shutdown)  # type: ignore[union-attr]
 
 
-def test_the_redeal_route_answers_409_after_the_start_and_200_before(table: Table) -> None:
+def test_the_re_deal_route_is_gone_and_a_game_that_is_not_ready_is_not_started(table: Table) -> None:
+    """v0.14 (H52): the identities are dealt when the game starts; ``POST /api/control/shuffle-identities`` does not exist any more, and a start
+    that does not pass the check answers 409 NOT_READY with its problems - and deals nothing."""
     orch = table.orch
     with make_client() as client:
         assert client.post("/api/takeover", json={"seat": "p03"}).status_code == 200
-        before = client.post("/api/control/shuffle-identities")
-        assert before.status_code == 200 and before.json()["session"]["takeover"]["seat"] == "p03"
-
-        client.portal.call(orch.start_or_resume)  # type: ignore[union-attr]
-        late = client.post("/api/control/shuffle-identities")
-        assert late.status_code == 409 and "已经开始" in late.json()["detail"]
-        client.portal.call(orch.pause, "user")  # type: ignore[union-attr]
-        assert client.post("/api/control/shuffle-identities").status_code == 409  # a paused game has started, too
+        assert client.post("/api/control/shuffle-identities").status_code == 404
+        orch.session.model_bindings.pop("p04")  # one model is gone
+        refused = client.post("/api/control/start")
+        assert refused.status_code == 409 and refused.json()["code"] == "NOT_READY"
+        assert [(p["scope"], p["seat"]) for p in refused.json()["problems"]] == [("binding", "p04")]
+        assert "不能开局" in refused.json()["detail"]
+        assert orch.session.status == "idle" and not orch.world.state.dealt
+        orch.session.model_bindings["p04"] = table.orch.session.model_bindings["p01"]
+        started = client.post("/api/control/start")
+        assert started.status_code == 200 and started.json()["session"]["dealt"] is True
         client.portal.call(orch.shutdown)  # type: ignore[union-attr]
 
 

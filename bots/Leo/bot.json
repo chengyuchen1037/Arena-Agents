@@ -1,0 +1,15 @@
+{
+ "format": 1,
+ "name": "Leo",
+ "avatar": {
+  "v": 1,
+  "face": "f08",
+  "skin": "s05",
+  "hair": "h08",
+  "hair_color": "c19",
+  "eyes": "e22",
+  "mouth": "m16",
+  "accessory": "a46",
+  "accessory_color": "k05"
+ }
+}

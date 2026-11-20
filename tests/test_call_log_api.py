@@ -24,9 +24,9 @@ from app.main import app as real_app
 from app.runtime.bus import ORDINARY_TYPES
 from app.runtime.call_log import CallLog
 from app.runtime.trace_log import TraceLog, trace_dir
-from app.storage.roster import RosterError
 from app.world.types import MODERATOR_ID, UiEvent
-from game_fakes import CFG, PROVIDER, FakeGames, FakeProviders, FakeSettings, async_test, bound
+from game_fakes import CFG, PROVIDER, FakeProviders, async_test, make_table_orch
+from learning_fakes import ScriptedLlm, by_kind
 from v12.bots import BotLlm, Call, simple_player
 
 IDS = ["N1", "N2", "N3", "N4"]
@@ -45,15 +45,7 @@ TOKEN = {"X-Arena-Token": "test-token"}
 
 # ------------------------------------------------------------------------------------------------ helpers
 def make_orch(monkeypatch: pytest.MonkeyPatch) -> GameOrchestrator:
-    monkeypatch.setattr(orchestrator_module, "load_config", lambda *a, **k: copy.deepcopy(CFG4))
-    orch = GameOrchestrator()
-    orch.provider_store = FakeProviders(PROVIDER)
-    orch.settings_store = FakeSettings({a: bound() for a in [MODERATOR_ID, *IDS]})
-    orch.game_store = FakeGames()
-    orch._autosave_delay = 0.01
-    orch._reset_game(default_bindings=orch._load_defaults())
-    orch.refresh_binding_issues()
-    return orch
+    return make_table_orch(monkeypatch)  # (v0.14: the bots of the table are initialized, so that a game can start)
 
 
 @pytest.fixture(autouse=True)
@@ -389,6 +381,9 @@ def end_at_once(world: Any, me: str) -> list[Call]:
     return [("end_game", {"winner": "红队", "summary": "测试"})] if world.state.status != "finished" else []
 
 
+REFINE_MESSAGES = [{"role": "system", "content": "【整理底层设定】…"}, {"role": "user", "content": "【要点】\n爱说冷笑话"}]
+
+
 @async_test
 async def test_completing_a_text_and_reviewing_a_game_are_lines_of_the_log_with_their_own_purposes(monkeypatch):
     orch = make_orch(monkeypatch)
@@ -397,20 +392,23 @@ async def test_completing_a_text_and_reviewing_a_game_are_lines_of_the_log_with_
     await wait_for(lambda: orch.session.status == "finished")
     before = orch.call_log().last_id
 
-    orch.llm_port_factory = lambda o: TextLlm("【定位】慢条斯理的冷笑话爱好者。\n【说话风格】\n- 句子短，爱讲冷笑话。")
-    await orch.refine_text("N1", "persona", "爱说冷笑话")
+    orch.llm_port_factory = lambda o: TextLlm("---\nformat: arena-core\n---\n# 身份\n慢条斯理的冷笑话爱好者。")
+    await orch.complete_oneshot("moderator", REFINE_MESSAGES, max_tokens=6000, purpose="refine")  # "complete this L0 for me" (core:refine)
     (refine,) = [c for c in orch.call_log().entries() if c["id"] > before]
     assert (refine["purpose"], refine["actor_id"], refine["actor_name"], refine["status"]) == ("refine", "roster", "名册", "ok")
     assert (refine["provider_id"], refine["model_id"], refine["prompt_tokens"]) == ("bot", "scripted", 50)
 
-    orch.llm_port_factory = lambda o: TextLlm("我的复盘", fail_for=("N2",))
+    orch.llm_port_factory = lambda o: ScriptedLlm(by_kind(), fail_for=("N2",))
     mark = orch.call_log().last_id
     await orch.start_review()
-    await wait_for(lambda: not orch._review_running)
-    reviews = {c["actor_id"]: c for c in orch.call_log().entries() if c["id"] > mark}
-    assert set(reviews) == set(IDS) and {c["purpose"] for c in reviews.values()} == {"review"}
-    assert reviews["N1"]["status"] == "ok" and reviews["N1"]["actor_name"] == "Alice"
-    failed = reviews["N2"]
+    await wait_for(lambda: not orch.review_running_ids())
+    reviews: dict[str, list[dict[str, Any]]] = {}
+    for c in orch.call_log().entries():
+        if c["id"] > mark:
+            reviews.setdefault(c["actor_id"], []).append(c)
+    assert set(reviews) == set(IDS) and {c["purpose"] for lines in reviews.values() for c in lines} == {"review"}
+    assert len(reviews["N1"]) == 3 and {c["status"] for c in reviews["N1"]} == {"ok"} and reviews["N1"][0]["actor_name"] == "Alice"  # (one line per round)
+    (failed,) = reviews["N2"]  # (the model of this seat is down: one failed call, and the run is over)
     assert (failed["status"], failed["error_class"]) == ("error", "RuntimeError") and "sk-secret" not in failed["message"]
     assert (failed["provider_id"], failed["model_id"]) == ("prov", "big")  # nothing answered: the seat's own binding
     # the one-shot lines are written to the trace of the game (the agents wrote nothing for them) and survive a rebuild
@@ -424,8 +422,7 @@ async def test_completing_a_text_and_reviewing_a_game_are_lines_of_the_log_with_
 async def test_a_call_log_line_is_never_a_prompt_or_an_answer(monkeypatch):
     orch = make_orch(monkeypatch)
     orch.llm_port_factory = lambda o: TextLlm("GEHEIME ANTWORT")
-    with contextlib.suppress(RosterError):  # (the answer is not in the format of a persona: no draft - the call was made all the same)
-        await orch.refine_text("N1", "persona", "GEHEIMER PROMPT-INHALT")
+    await orch.complete_oneshot("moderator", [{"role": "user", "content": "GEHEIMER PROMPT-INHALT"}], purpose="refine")
     payload = json.dumps(orch.call_log_payload(), ensure_ascii=False)
     assert "GEHEIM" not in payload and orch.call_log().last_id == 1
 
@@ -449,7 +446,7 @@ def assert_logs_folder_can_be_moved(orch: GameOrchestrator) -> None:
 async def test_a_refine_in_an_idle_game_holds_no_trace_file_open_and_the_logs_folder_can_be_moved(monkeypatch):
     orch = make_orch(monkeypatch)
     orch.llm_port_factory = lambda o: TextLlm(PERSONA)
-    await orch.refine_text("N1", "persona", "x")
+    await orch.complete_oneshot("moderator", REFINE_MESSAGES, purpose="refine")
     log = orch.call_log()
     assert len(log) == 1 and log.trace is not None and log.trace.is_open is False  # (the trace was made for this one line)
     assert (trace_dir(orch._logs_root(), orch.session.session_id) / "trace-0001.jsonl").is_file()  # the line is on disk ...
@@ -466,7 +463,7 @@ async def test_after_a_pause_a_refine_does_not_leave_the_game_trace_open_again(m
     trace = orch.call_log().trace
     assert isinstance(trace, TraceLog) and trace.is_open is False  # (``Supervisor.stop()`` let go of it)
     orch.llm_port_factory = lambda o: TextLlm(PERSONA)
-    await orch.refine_text("N1", "persona", "x")
+    await orch.complete_oneshot("moderator", REFINE_MESSAGES, purpose="refine")
     assert orch.call_log().trace is trace and trace.is_open is False  # one line later it is closed again
     assert orch.call_log().entries()[-1]["purpose"] == "refine"
     assert_logs_folder_can_be_moved(orch)
@@ -480,12 +477,12 @@ async def test_a_review_of_a_finished_game_leaves_no_trace_file_open_either(monk
     await wait_for(lambda: orch.session.status == "finished")
     trace = orch.call_log().trace
     assert isinstance(trace, TraceLog) and trace.is_open is False
-    orch.llm_port_factory = lambda o: TextLlm("我的复盘", fail_for=("N2",))  # (three reviews succeed as calls, one fails)
+    orch.llm_port_factory = lambda o: ScriptedLlm(by_kind(), fail_for=("N2",))  # (three reviews succeed as calls, one fails)
     mark = orch.call_log().last_id
     await orch.start_review()
-    await wait_for(lambda: not orch._review_running)
+    await wait_for(lambda: not orch.review_running_ids())
     lines = [c for c in orch.call_log().entries() if c["id"] > mark and c["purpose"] == "review"]
-    assert sorted(c["status"] for c in lines) == ["error", "ok", "ok", "ok"]
+    assert sorted(c["status"] for c in lines) == ["error"] + ["ok"] * 9  # (N2: one failed call; the others: three rounds each)
     assert orch.call_log().trace is trace and trace.is_open is False
     assert_logs_folder_can_be_moved(orch)
 

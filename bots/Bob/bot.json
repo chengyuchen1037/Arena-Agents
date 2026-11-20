@@ -1,0 +1,15 @@
+{
+ "format": 1,
+ "name": "Bob",
+ "avatar": {
+  "v": 1,
+  "face": "f03",
+  "skin": "s01",
+  "hair": "h32",
+  "hair_color": "c16",
+  "eyes": "e01",
+  "mouth": "m14",
+  "accessory": "a31",
+  "accessory_color": "k00"
+ }
+}

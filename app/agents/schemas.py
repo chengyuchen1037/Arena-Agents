@@ -7,10 +7,12 @@ Tool name = intent type without the ``mod.`` prefix; the only exception is the p
 from __future__ import annotations
 
 import copy
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel
 
+from app.bots.types import JOT_CHARS, JOT_MAX
 from app.world.intents import MODERATOR_INTENTS, PLAYER_INTENTS
 from app.world.spec import ParamSpec, ScenarioSpec
 
@@ -34,6 +36,13 @@ LEGACY_WAIT_TOOL = "wait"
 SLEEP_MIN_SECONDS = 1.0
 SLEEP_MAX_SECONDS = 3600.0
 SHARED_TOOL_NAMES = ("list_documents", "read_document", "write_note", "read_notes", "compact_context")
+
+#: v0.14 (H53): what a bot has besides the world tools and ``sleep``.  Notes and compaction as before, plus ``jot`` (a clue for
+#: the review after the game) and ``read_contract`` (the "reference" part of the official contract); the reference-document
+#: tools (``list_documents`` / ``read_document``) are gone - what a bot studies it studies when it is initialized.
+JOT_TOOL = "jot"
+READ_CONTRACT_TOOL = "read_contract"
+BOT_SHARED_TOOL_NAMES = ("write_note", "read_notes", "compact_context", JOT_TOOL, READ_CONTRACT_TOOL)
 
 TOOL_HELP: dict[str, str] = {
     # ---- player ---------------------------------------------------------------
@@ -158,9 +167,13 @@ FIELD_HELP: dict[str, str] = {
 }
 
 
-def clean_schema(model: type[BaseModel]) -> dict[str, Any]:
+def clean_schema(model: type[BaseModel], *, strip: Sequence[str] = ()) -> dict[str, Any]:
     """Provider-friendly JSON schema of ``model``: inline ``$defs``, no titles, ``anyOf`` with null
-    collapsed, no ``additionalProperties`` / ``default: null`` noise."""
+    collapsed, no ``additionalProperties`` / ``default: null`` noise.
+
+    ``strip`` names schema keywords to leave out wherever they occur (v0.14: the bot's ``speak`` has no ``maxLength``, the
+    limit of a speech is the floor's, which the state board states and the gate enforces; the model's own validation - the
+    ``max_length`` of ``Speak.content`` - is not touched)."""
     raw = model.model_json_schema()
     defs = raw.pop("$defs", {})
 
@@ -183,7 +196,7 @@ def clean_schema(model: type[BaseModel]) -> dict[str, Any]:
             return resolve({**rest, "anyOf": options})
         out: dict[str, Any] = {}
         for key, value in node.items():
-            if key in ("title", "additionalProperties"):
+            if key in ("title", "additionalProperties") or key in strip:
                 continue
             if key == "default" and value is None:
                 continue
@@ -220,6 +233,20 @@ def player_templates(spec: ScenarioSpec) -> dict[str, Any]:
 
 def moderator_templates(spec: ScenarioSpec) -> dict[str, Any]:
     return {tid: t for tid, t in spec.templates.items() if t.users in ("moderator", "any")}
+
+
+def bot_tool_names(spec: ScenarioSpec | None = None) -> list[str]:
+    """The tools of a v0.14 bot in the order the model sees them.  Without a ``spec`` every tool a bot can have is listed;
+    with one, ``speak_template`` is left out when the scenario has no template for players and ``use_ability`` when it
+    has no ability (the same rule ``bot_tool_schemas`` follows)."""
+    names: list[str] = []
+    for name in PLAYER_TOOL_INTENTS:
+        if spec is not None and name == "speak_template" and not player_templates(spec):
+            continue
+        if spec is not None and name == "use_ability" and not spec.abilities:
+            continue
+        names.append(name)
+    return [*names, SLEEP_TOOL, *BOT_SHARED_TOOL_NAMES]
 
 
 def _tool(name: str, description: str, parameters: dict[str, Any]) -> dict[str, Any]:
@@ -286,33 +313,113 @@ def shared_tool_schemas() -> list[dict[str, Any]]:
     ]
 
 
-def _intent_tool(tool_name: str, model: type[BaseModel], extra_description: str = "") -> dict[str, Any]:
-    description = TOOL_HELP[tool_name] + (("\n" + extra_description) if extra_description else "")
-    return _tool(tool_name, description, clean_schema(model))
+def _intent_tool(
+    tool_name: str,
+    model: type[BaseModel],
+    extra_description: str = "",
+    *,
+    help_text: str | None = None,
+    strip: Sequence[str] = (),
+) -> dict[str, Any]:
+    description = (TOOL_HELP[tool_name] if help_text is None else help_text) + (
+        ("\n" + extra_description) if extra_description else ""
+    )
+    return _tool(tool_name, description, clean_schema(model, strip=strip))
+
+
+def _player_extra(tool_name: str, spec: ScenarioSpec) -> str | None:
+    """The scenario part of the description of ``speak_template`` / ``use_ability``; ``None`` = the scenario has none of it,
+    so the tool is not offered at all."""
+    if tool_name == "speak_template":
+        templates = player_templates(spec)
+        if not templates:
+            return None
+        return "可用模板：" + "；".join(f"{tid}（{describe_params(t.params)}）：{t.text}" for tid, t in templates.items())
+    if tool_name == "use_ability":
+        if not spec.abilities:
+            return None
+        return "能力：" + "；".join(
+            f"{aid}（{describe_params(a.params)}）{('：' + a.description) if a.description else ''}"
+            for aid, a in spec.abilities.items()
+        )
+    return ""
 
 
 def player_tool_schemas(spec: ScenarioSpec) -> list[dict[str, Any]]:
     tools: list[dict[str, Any]] = []
-    templates = player_templates(spec)
     for tool_name, intent_type in PLAYER_TOOL_INTENTS.items():
-        model = PLAYER_INTENTS[intent_type]
-        extra = ""
-        if tool_name == "speak_template":
-            if not templates:
-                continue
-            extra = "可用模板：" + "；".join(
-                f"{tid}（{describe_params(t.params)}）：{t.text}" for tid, t in templates.items()
-            )
-        elif tool_name == "use_ability":
-            if not spec.abilities:
-                continue
-            extra = "能力：" + "；".join(
-                f"{aid}（{describe_params(a.params)}）{('：' + a.description) if a.description else ''}"
-                for aid, a in spec.abilities.items()
-            )
-        tools.append(_intent_tool(tool_name, model, extra))
+        extra = _player_extra(tool_name, spec)
+        if extra is None:
+            continue
+        tools.append(_intent_tool(tool_name, PLAYER_INTENTS[intent_type], extra))
     tools.append(sleep_tool_schema())
     tools.extend(shared_tool_schemas())
+    return tools
+
+
+# --------------------------------------------------------------------------- the v0.14 bot (H53)
+
+#: Where the help of a bot's tool differs from the classic one.  ``speak`` no longer promises that a long text is cut (it is sent
+#: back, ``TOO_LONG``) and no longer advises to "put the conclusion first" (that taught report-shaped speech); a reading that is
+#: not a speech but a report is sent back too (``FORMAT``).  ``jot`` and ``read_contract`` are new.
+BOT_TOOL_HELP: dict[str, str] = {
+    "speak": "在指定频道当众发言，内容会原样发给频道里所有看得到的人。只有你在该频道拥有发言权时才会成功（状态板会告诉你现在能不能写）。"
+    "超过单条字数上限，或者读起来像书面报告（分条列项、标题、加粗、以自己的编号或名字开头），会被退回（回执码 TOO_LONG / FORMAT）："
+    "这一条没有发出，发言权还在，改好再发一次即可。",
+    "write_note": "写入你的私人笔记（只有你自己看得到，随对局保存）。对话被压缩或从存档恢复之后，较早的对话只剩笔记和摘要，"
+    "需要跨次记住的要点请写在这里。",
+    JOT_TOOL: f"记一条留到赛后再想的线索：一句话，最多 {JOT_CHARS} 字，每局最多 {JOT_MAX} 条。它不会发给任何人，复盘时才会用到。",
+    READ_CONTRACT_TOOL: "读取平台契约的“参考”部分（工具、回执码、发言权、请求等的详细说明）。part 可选：填一个小标题（如“回执码”）只读那一节；"
+    "不填就读全部。",
+}
+
+
+def bot_shared_tool_schemas() -> list[dict[str, Any]]:
+    """Notes and compaction as before, then ``jot`` and ``read_contract``; no reference documents."""
+    keep = {"write_note", "read_notes", "compact_context"}
+    tools = [tool for tool in shared_tool_schemas() if tool["function"]["name"] in keep]
+    for tool in tools:
+        function = tool["function"]
+        function["description"] = BOT_TOOL_HELP.get(function["name"], function["description"])
+    tools.append(
+        _tool(
+            JOT_TOOL,
+            BOT_TOOL_HELP[JOT_TOOL],
+            _object(
+                {"text": {"type": "string", "description": f"要记下的线索，一句话，最多 {JOT_CHARS} 字"}},
+                ["text"],
+            ),
+        )
+    )
+    tools.append(
+        _tool(
+            READ_CONTRACT_TOOL,
+            BOT_TOOL_HELP[READ_CONTRACT_TOOL],
+            _object({"part": {"type": "string", "description": "契约“参考”部分的小标题（可选），例如 回执码；不填读全部"}}),
+        )
+    )
+    return tools
+
+
+def bot_tool_schemas(spec: ScenarioSpec) -> list[dict[str, Any]]:
+    """The tools of a v0.14 bot: the world tools (``speak`` without a ``maxLength``), ``sleep``, notes, ``jot`` and
+    ``read_contract``.  Same order as :func:`bot_tool_names`."""
+    tools: list[dict[str, Any]] = []
+    for tool_name, intent_type in PLAYER_TOOL_INTENTS.items():
+        extra = _player_extra(tool_name, spec)
+        if extra is None:
+            continue
+        tools.append(
+            _intent_tool(
+                tool_name,
+                PLAYER_INTENTS[intent_type],
+                extra,
+                help_text=BOT_TOOL_HELP.get(tool_name),
+                strip=("maxLength",) if tool_name == "speak" else (),
+            )
+        )
+    tools.append(sleep_tool_schema())
+    tools.extend(bot_shared_tool_schemas())
     return tools
 
 

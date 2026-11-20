@@ -15,6 +15,7 @@ from app.game.bindings import (
     normalized_binding,
     required_actors,
 )
+from app.game.orchestrator import GameOrchestrator, NotReadyError
 from app.game.session import GameSession, Participant
 from app.providers.models import ModelBinding, ModelEntry, ModelNotFound, ProviderConfig, ProviderNotFound
 from app.world.types import MODERATOR_ID
@@ -117,13 +118,33 @@ async def test_new_games_start_from_the_saved_defaults(monkeypatch: pytest.Monke
 
 @async_test
 async def test_start_refuses_while_any_agent_lacks_a_binding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """v0.14 (H25): a missing model is one of the problems of the start check (409 NOT_READY, scope ``binding``); nothing is dealt."""
     orch = real_orch(monkeypatch, defaults={"p01": BINDING})
+    with pytest.raises(NotReadyError) as info:
+        await orch.start_or_resume()
+    assert isinstance(info.value, RuntimeError) and info.value.status == 409 and info.value.code == "NOT_READY"
+    problems = info.value.problems
+    assert {p["scope"] for p in problems} == {"binding"}
+    assert {p["seat"] or p["name"] for p in problems} == {"主持人", "p02", "p03", "p04"}
+    assert all(p["items"][0]["code"] == "no_binding" and p["items"][0]["fix"] == "bind_model" for p in problems)
+    assert "不能开局" in str(info.value) and "主持人" in str(info.value)
+    assert orch.session.status == "idle" and orch._supervisor is None and not orch.world.running
+    assert not orch.world.state.dealt and all(not p.role for p in orch.world.state.players)  # (nothing was dealt)
+
+
+@async_test
+async def test_a_resumed_game_whose_model_is_gone_is_a_binding_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the start of a game has the start check; resuming one keeps the old, plain refusal."""
+    orch = real_orch(monkeypatch, defaults=all_bound())
+    bots_for(orch, idle_moderator)
+    await orch.start_or_resume()
+    await orch.pause()
+    orch.provider_store = FakeProviders()  # the provider is gone
+    orch.ensure_bindings_ready = GameOrchestrator.ensure_bindings_ready.__get__(orch)  # type: ignore[method-assign]
     with pytest.raises(BindingError) as info:
         await orch.start_or_resume()
-    assert isinstance(info.value, RuntimeError)
-    assert {i.actor_id for i in info.value.issues} == {MODERATOR_ID, "p02", "p03", "p04"}
-    assert "需要重新绑定" in str(info.value) and "主持人" in str(info.value)
-    assert orch.session.status == "idle" and orch._supervisor is None and not orch.world.running
+    assert {i.actor_id for i in info.value.issues} == {MODERATOR_ID, *(p["id"] for p in PLAYERS)}
+    assert orch.session.status == "paused" and orch._supervisor is None
 
 
 @async_test

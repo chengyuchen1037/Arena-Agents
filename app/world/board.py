@@ -14,14 +14,20 @@ same order of checks as the ``speak`` commit gate (contracts §2.3):
 ``why_not`` is the string ``"<CODE>：<one-sentence reason>"`` (``None`` when the agent can write).
 
 ``max_chars`` (v0.13) is the length cap of ONE free-text message the agent could write there right now
-(longer text is truncated by the gate, D19): the token's per-message cap clipped to what is left of its
-total (turn / queue), ``max_chars_per_message`` of the discussion (free), the ``dm`` default (system DM).
+(longer text is sent back by the gate with ``TOO_LONG``, v0.14 H16 - it used to be cut, D19): the token's
+per-message cap clipped to what is left of its total (turn / queue), ``max_chars_per_message`` of the
+discussion (free), the ``dm`` default (system DM).  A free discussion's ``floor.free`` also carries
+``max_chars_per_message`` (v0.14, H17), so a model can read the cap of one message next to the other numbers.
 ``None`` when the agent cannot write or the moderator writes (no cap).  ``seat_status`` (``seat.py``) and
 ``speech_gate`` (``chat.py``) say the same; ``tests/v12/world`` locks the three together.
 
 The board never reveals that a person plays a seat (v0.13.1, G15): a floor the person holds in a public channel has
 no deadline, yet the board shows the nominal length of the turn for it like for any other holder - there is no
 "untimed" anywhere in it.
+
+``facts`` (v0.14, H10) is the *hard-fact desk*: the messages of the ledger the scenario marked with ``record`` (a template's
+``fact`` / ``claim``) and the public declarations of abilities, as the agent can read them (see :func:`_facts_block`).
+It lets an agent tell what happened by the rules from what somebody merely said.
 """
 
 from __future__ import annotations
@@ -34,9 +40,10 @@ from app.world.game import ability_holders
 from app.world.projection import seat_sorted
 from app.world.spec import ParamSpec
 from app.world.state import ChannelState
-from app.world.types import MODERATOR_ID, Code
+from app.world.types import ENGINE_ID, MODERATOR_ID, Code
 
 MAX_RESOLVED_TICKETS = 20  # resolved tickets kept on the board (open ones are always listed)
+MAX_FACTS = 300  # recorded messages kept on the board's hard-fact desk (the newest ones)
 
 
 def _secs(value: float | None) -> float | None:
@@ -199,6 +206,7 @@ def _floor_block(world: Any, channel: ChannelState, agent_id: str, is_moderator:
                 else max(0, free.max_messages_per_member - int(free.counts.get(agent_id, 0)))
             ),
             "max_messages_per_member": free.max_messages_per_member,
+            "max_chars_per_message": free.max_chars_per_message,  # v0.14 (H17): the cap of ONE message (longer: TOO_LONG)
             "chars_used": free.chars_used,
             "max_chars_total": free.max_chars_total,
             "elapsed_s": _secs(now - free.started_gt),
@@ -335,6 +343,50 @@ def _tickets_block(world: Any, agent_id: str, is_moderator: bool) -> list[dict[s
     ]
 
 
+def _facts_block(world: Any, agent_id: str) -> list[dict[str, Any]]:
+    """The hard-fact desk of ``agent_id`` (v0.14, H10): the messages of the ledger that carry a *record* mark, oldest first.
+
+    What counts: a message built from a template whose ``record`` is ``fact`` / ``claim`` (the scenario marks them: what
+    the rules announced vs. what a player said), and every public declaration of an ability (``kind == "ability"``), which
+    is always a ``fact``.  Who sees what is what the agent could read in the ledger anyway (``entries_visible``): a fact
+    announced into a private channel is on the board of its members only.  At most the newest ``MAX_FACTS``.
+
+    One row: ``{"seq", "phase", "kind", "actor_id", "text", "template_id"}`` - ``phase`` is the phase text of the world when
+    the message was committed (the ``phase.changed`` entry before it; ``""`` before the first one), ``actor_id`` is the
+    player who said it and ``None`` for what the moderator announced, ``template_id`` is ``None`` for an ability
+    declaration."""
+    templates = world.spec.templates
+    phase = ""
+    rows: list[dict[str, Any]] = []
+    for entry in world.ledger:
+        if entry.type == "phase.changed":
+            phase = str(entry.data.get("text") or "")
+            continue
+        if entry.type != "message" or agent_id not in entry.visible_to_ids:
+            continue
+        data = entry.data
+        template_id = data.get("template_id") or None
+        kind: str | None = None
+        if data.get("kind") == "ability":
+            kind, template_id = "fact", None
+        elif template_id is not None:
+            template = templates.get(str(template_id))
+            kind = template.record if template is not None else None
+        if kind is None:
+            continue
+        rows.append(
+            {
+                "seq": entry.seq,
+                "phase": phase,
+                "kind": kind,
+                "actor_id": None if entry.actor_id in (MODERATOR_ID, ENGINE_ID) else entry.actor_id,
+                "text": str(data.get("content") or ""),
+                "template_id": None if template_id is None else str(template_id),
+            }
+        )
+    return rows[-MAX_FACTS:]
+
+
 def build_board(world: Any, agent_id: str) -> dict[str, Any]:
     """The state board of ``agent_id`` (a player id or ``moderator``); JSON-serializable.
 
@@ -399,6 +451,9 @@ def build_board(world: Any, agent_id: str) -> dict[str, Any]:
         "requests": _requests_block(world, agent_id, is_moderator),
         "abilities": _abilities_block(world, agent_id, is_moderator),
         "tickets": _tickets_block(world, agent_id, is_moderator),
+        # v0.14 (H10): the hard-fact desk - the recorded messages (facts the rules announced, claims players made) this
+        # agent can read, newest ``MAX_FACTS``, oldest first.
+        "facts": _facts_block(world, agent_id),
         # Spectator panel: only the moderator sees it.  For a player it would leak hidden information
         # (faction statistics), so the key stays (stable shape) but is always empty.
         "dashboard": {

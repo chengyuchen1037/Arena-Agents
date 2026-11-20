@@ -612,3 +612,71 @@ def test_the_manager_singleton_can_be_replaced() -> None:
 def test_populate_and_the_other_helpers_stay_consistent(tmp_path: Path) -> None:
     expected = populate(tmp_path)
     assert f"games/{GAME_A}/game.json" in expected and f"games/{GAME_B}/game.json" in expected
+
+
+# ------------------------------------------------------------------------------------------ names (H42) and the shared slot
+def test_the_export_result_names_the_file_the_browser_saves(manager: ArchiveManager, engine: FakeEngine) -> None:
+    """H42: ``arena-agents-<time>.arenaagents`` is what the user gets; the file in ``exports/`` keeps its fixed internal name."""
+
+    async def go() -> ArchiveJob:
+        return await finished(await manager.start_export(ExportOptions()))
+
+    job = run(go())
+    result = engine.archive_events()[-1]["result"]
+    assert result["name"].startswith("arena-") and not result["name"].startswith("arena-agents-")
+    assert result["download_name"] == "arena-agents-" + result["name"][len("arena-") :]
+    assert job.result["download_name"] == result["download_name"]  # type: ignore[index]
+
+
+def test_the_exclusive_slot_is_the_one_of_the_exports_and_imports(manager: ArchiveManager) -> None:
+    """A ``.arenagame`` that is being imported must not overlap an export or an import (the data directory is swapped as a whole): it takes the
+    same slot."""
+    with manager.exclusive("game-import"):
+        with pytest.raises(ArchiveBusyError) as excinfo:
+            with manager.exclusive("another"):
+                pass
+        assert excinfo.value.status == 409 and excinfo.value.code == "busy"
+
+        async def start() -> None:
+            await manager.start_export(ExportOptions())
+
+        with pytest.raises(ArchiveBusyError):
+            run(start())
+    with manager.exclusive("free-again"):
+        pass
+
+
+def test_the_slot_is_released_when_the_work_inside_fails(manager: ArchiveManager) -> None:
+    with pytest.raises(RuntimeError, match="boom"):
+        with manager.exclusive("game-import"):
+            raise RuntimeError("boom")
+    with manager.exclusive("free-again"):
+        pass
+
+
+def test_a_running_export_holds_the_slot_against_a_game_import(manager: ArchiveManager) -> None:
+    async def go() -> None:
+        job = await manager.start_export(ExportOptions())
+        with pytest.raises(ArchiveBusyError):
+            with manager.exclusive("game-import"):
+                pass
+        await finished(job)
+        with manager.exclusive("game-import"):
+            pass
+
+    run(go())
+
+
+def test_what_a_previous_run_left_behind_is_cleaned_before_the_slot_is_taken(manager: ArchiveManager, data_dir: Path) -> None:
+    """The cleanup must not meet the temporary files of the operation that holds the slot: it runs first, once."""
+    leftover = data_dir / "tmp" / "import-leftover"
+    leftover.mkdir(parents=True)
+    (leftover / "stage.bin").write_bytes(b"x")
+    stray = data_dir / "tmp" / "import-game-aaaa.upload"
+    stray.write_bytes(b"x")
+    with manager.exclusive("game-import"):
+        assert not leftover.exists() and not stray.exists()
+        mine = data_dir / "tmp" / "import-game-bbbb.upload"
+        mine.write_bytes(b"in use")
+        manager._ensure_clean()  # (the cleanup of this process is done: another call - by an archive operation - does nothing)
+        assert mine.exists()

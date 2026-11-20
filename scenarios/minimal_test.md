@@ -35,10 +35,12 @@ templates:
     params: {players: player_ids}
     users: moderator
     sensitive: true
+    record: fact  # 规则产生的事实：进状态板的硬事实台
   say_vote:
     text: "我投 {{target}}。"
     params: {target: player_id}
     users: players
+    record: claim  # 玩家自己说的话：也进硬事实台，但只是他的一面之词
 
 abilities:
   shout:
@@ -55,6 +57,11 @@ checks:
 
 invalidates_drafts: [player.updated, phase.changed]
 
+# 情境标签：轮到发言 / 投票请求（条件为空 = 不限，全部满足才命中）
+situations:
+  - {tag: 发言, channel_type: public, events: [floor.granted]}
+  - {tag: 投票, phase_contains: 投票, events: [request.opened], request_kind: choice}
+
 ui:
   out_tags: [出局]
   highlight_tags: [红队, 蓝队]
@@ -67,7 +74,7 @@ ui:
 
 # 主持人手册
 
-1. 开局：创建公共频道 `public`（成员为全部玩家），`set_phase` 写明阶段。
+1. 开局：创建公共频道 `public`（成员为全部玩家），`set_phase` 写明阶段（发言阶段写“第 N 轮 · 发言”，投票阶段写“第 N 轮 · 投票”）。
 2. 发言：用 `set_floor_queue` 按座位顺序让每人发言一次。
 3. 投票：用 `open_request(sealed=true)` 收集投票，关闭后用 `announce` 发布出局公告并 `update_player` 标记出局。
 4. 每次出局后用 `evaluate` 检查胜负，达成条件就 `end_game`（winner 填阵营的显示名：红队或蓝队）。

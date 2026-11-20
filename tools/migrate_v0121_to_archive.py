@@ -41,13 +41,16 @@ from app.archive import kdf  # noqa: E402
 from app.archive.errors import ArchiveError  # noqa: E402
 from app.archive.export import ExportOptions, export_archive  # noqa: E402
 from app.archive.legacy import detect_legacy_workspace  # noqa: E402
-from app.game.session import SESSION_SCHEMA_VERSION, GameSession  # noqa: E402
+from app.game.session import SUPPORTED_SCHEMA_VERSIONS, GameSession  # noqa: E402
 from app.storage.crypto import decrypt_json  # noqa: E402
 from app.storage.errors import StorageError  # noqa: E402
 
 MARKER = ".arena-workspace.json"
 DATA_DIRNAME = ".arena"
 SOURCE_SCHEMA = 4
+#: What a v0.12.1 game becomes: a game of format 5 (v0.13).  v0.14 plays it on as it is - with the persona and memory texts it was saved with and the
+#: v0.13.1 brain (H58) - so the tool keeps producing format 5, whatever format the current engine writes.
+TARGET_SCHEMA = 5
 _SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _ROSTER_FILE = re.compile(r"^(?:roster\.json|N(?:[1-9]|[1-9][0-9])\.(?:persona|memory)\.md)$")
 _TRACE_FILE = re.compile(r"^trace-[0-9]{4,}\.jsonl$")
@@ -236,7 +239,7 @@ def convert_game(payload: dict[str, Any], *, fallback_ts: str | None = None) -> 
     ``started_at`` and ``finished_at`` are added (taken from the ledger's timestamps).  Raises ``ValueError`` (with a
     message for the report) when the game cannot be converted."""
     schema = payload.get("schema_version")
-    if schema == SESSION_SCHEMA_VERSION:
+    if schema in SUPPORTED_SCHEMA_VERSIONS:  # (v0.14 reads v5 and v6: nothing to convert)
         return dict(payload)
     if schema != SOURCE_SCHEMA:
         raise ValueError(f"存档格式 v{schema}，只能转换 v{SOURCE_SCHEMA}（v0.12.1）的对局")
@@ -262,7 +265,7 @@ def convert_game(payload: dict[str, Any], *, fallback_ts: str | None = None) -> 
             finished = ts
     converted = dict(payload)
     converted.update(
-        schema_version=SESSION_SCHEMA_VERSION,
+        schema_version=TARGET_SCHEMA,
         takeover={"seat": None},
         human_spans=[],
         created_at=created or fallback_ts,

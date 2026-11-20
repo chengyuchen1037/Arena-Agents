@@ -1,0 +1,15 @@
+{
+ "format": 1,
+ "name": "Henry",
+ "avatar": {
+  "v": 1,
+  "face": "f04",
+  "skin": "s04",
+  "hair": "h39",
+  "hair_color": "c20",
+  "eyes": "e23",
+  "mouth": "m01",
+  "accessory": "a38",
+  "accessory_color": "k05"
+ }
+}

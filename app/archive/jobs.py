@@ -22,7 +22,7 @@ import shutil
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -40,7 +40,7 @@ from app.archive.errors import (
     ArchiveStateError,
 )
 from app.archive.export import ExportOptions, export_archive
-from app.archive.format import DEFAULT_LIMITS, EXPORT_NAME_RE, ArchiveLimits
+from app.archive.format import DEFAULT_LIMITS, EXPORT_NAME_RE, ArchiveLimits, download_name
 from app.archive.ports import EnginePort, OrchestratorAdapter, SecretsPort, default_secrets
 
 logger = logging.getLogger(__name__)
@@ -302,6 +302,19 @@ class ArchiveManager:
             raise ArchiveNotFoundError("找不到这个导出文件。") from None
         return path
 
+    @contextlib.contextmanager
+    def exclusive(self, token: str) -> Iterator[None]:
+        """Hold the one-operation-at-a-time slot for something else that must not overlap an export or an import (a ``.arenagame`` being
+        imported: while the data directory is swapped, the games folder must not be written to, and the other way round).  Raises
+        :class:`ArchiveBusyError` (409 ``busy``) when an export or import is running.  The leftovers of a previous run are cleaned up
+        first, so the cleanup cannot meet the temporary files of this operation."""
+        self._ensure_clean()
+        self._require_free(token)
+        try:
+            yield
+        finally:
+            self._release(token)
+
     # ------------------------------------------------------------------------------------------ export
     async def start_export(self, options: ExportOptions) -> ArchiveJob:
         if options.include_keys:
@@ -334,6 +347,7 @@ class ArchiveManager:
             )
             payload = {
                 "name": result.name,
+                "download_name": download_name(result.name),
                 "path": str(result.path),
                 "display_path": f"{data_dir.name}/exports/{result.name}",
                 "size_bytes": result.size_bytes,

@@ -60,6 +60,12 @@ def test_minimal_scenario_loads_and_splits() -> None:
     assert spec.id == "minimal_test" and spec.schema_version == 2
     assert "开局" in spec.manual_text and "开局" not in spec.rules_text
     assert set(spec.templates) == {"out_notice", "say_vote"} and "shout" in spec.abilities
+    # v0.14: the moderator's announcement is a fact, the player's words are his claim; two situation tags
+    assert (spec.templates["out_notice"].record, spec.templates["say_vote"].record) == ("fact", "claim")
+    assert [(r.tag, r.phase_contains, r.channel_type, r.events, r.request_kind) for r in spec.situations] == [
+        ("发言", "", "public", ["floor.granted"], ""),
+        ("投票", "投票", "", ["request.opened"], "choice"),
+    ]
 
 
 def test_minimal_scenario_expressions_work_on_a_world() -> None:
@@ -105,6 +111,76 @@ def test_templates_render_with_the_shared_helpers() -> None:
 def test_bad_scenarios_raise_scenario_error_with_context(source: str, fragment: str) -> None:
     with pytest.raises(ScenarioError) as info:
         parse_scenario_v2(source, where="bad.md")
+    assert fragment in str(info.value) and "bad.md" in str(info.value)
+
+
+# ----------------------------------------------------------------------------- v0.14: record marks and situations
+
+
+def test_templates_and_situations_declare_nothing_unless_the_scenario_does() -> None:
+    spec = parse_scenario_v2(GOOD_HEAD.format(extra="templates: {x: {text: a}}\n"))
+    assert spec.templates["x"].record is None and spec.situations == []
+    assert parse_scenario_v2(GOOD_HEAD.format(extra="")).situations == []
+
+
+def test_record_and_situations_are_parsed_with_their_defaults() -> None:
+    extra = (
+        "templates:\n"
+        "  told: {text: a, users: moderator, record: fact}\n"
+        "  said: {text: b, users: players, record: claim}\n"
+        "  both: {text: c, users: any, record: claim}\n"
+        "  open: {text: d, users: any, record: fact}\n"
+        "  plain: {text: e}\n"
+        "situations:\n"
+        "  - {tag: 投票}\n"
+        "  - {tag: 发言, phase_contains: 白天, channel_type: public, channel_id: pub, events: [floor.granted, request.opened], request_kind: choice}\n"
+        "  - tag: ' 夜晚 '\n"
+        "    phase_contains: 夜\n"
+        "  - {tag: 夜晚, channel_type: dm, request_kind: text}\n"
+    )
+    spec = parse_scenario_v2(GOOD_HEAD.format(extra=extra))
+    assert {k: v.record for k, v in spec.templates.items()} == {
+        "told": "fact", "said": "claim", "both": "claim", "open": "fact", "plain": None,
+    }
+    blank = {"phase_contains": "", "channel_type": "", "channel_id": "", "events": [], "request_kind": ""}
+    assert [r.model_dump() for r in spec.situations] == [
+        {"tag": "投票", **blank},
+        {
+            "tag": "发言", "phase_contains": "白天", "channel_type": "public", "channel_id": "pub",
+            "events": ["floor.granted", "request.opened"], "request_kind": "choice",
+        },
+        {"tag": "夜晚", **{**blank, "phase_contains": "夜"}},  # (the blanks around the tag are dropped)
+        {"tag": "夜晚", **{**blank, "channel_type": "dm", "request_kind": "text"}},  # (one tag may have several rules)
+    ]
+
+
+@pytest.mark.parametrize(
+    "extra, fragment",
+    [
+        ("templates: {x: {text: a, record: rumor}}\n", "templates.x.record"),
+        ("templates: {x: {text: a, users: players, record: fact}}\n", "玩家专用"),
+        ("templates: {x: {text: a, users: moderator, record: claim}}\n", "主持人专用"),
+        ("situations: [{tag: ''}]\n", "不能为空"),
+        ("situations: [{tag: '   '}]\n", "不能为空"),
+        ("situations: [{phase_contains: 夜}]\n", "situations.0.tag"),
+        ("situations: [{tag: a b}]\n", "不能含空白"),
+        ("situations: [{tag: 'a|b'}]\n", "# | [ ]"),
+        ("situations: [{tag: '#a'}]\n", "# | [ ]"),
+        ("situations: [{tag: '[a]'}]\n", "# | [ ]"),
+        ("situations: [{tag: t, channel_type: secret}]\n", "situations.0.channel_type"),
+        ("situations: [{tag: t, request_kind: vote}]\n", "situations.0.request_kind"),
+        ("situations: [{tag: t, events: ['Floor Granted']}]\n", "事件名"),
+        ("situations: [{tag: t, events: [floor..granted]}]\n", "事件名"),
+        ("situations: [{tag: t, events: floor.granted}]\n", "situations.0.events"),
+        ("situations: [{tag: t, nope: 1}]\n", "situations.0.nope"),
+        ("situations: {tag: t}\n", "situations"),
+        ("situations: [fire]\n", "situations.0"),
+        ("situations: [{tag: ok}, {tag: ''}]\n", "situations.1.tag"),
+    ],
+)
+def test_bad_record_and_situation_declarations_are_refused_naming_the_place(extra: str, fragment: str) -> None:
+    with pytest.raises(ScenarioError) as info:
+        parse_scenario_v2(GOOD_HEAD.format(extra=extra), where="bad.md")
     assert fragment in str(info.value) and "bad.md" in str(info.value)
 
 
@@ -187,7 +263,7 @@ GODS = ["N9", "N10", "N11", "N12"]
 
 
 def test_werewolf_scenario_loads_with_the_expected_setup(ww: ScenarioSpec) -> None:
-    assert (ww.id, ww.schema_version, ww.version) == ("werewolf_12p", 2, "2.1.0")
+    assert (ww.id, ww.schema_version, ww.version) == ("werewolf_12p", 2, "2.2.0")  # 2.2.0: record marks, situations, PK phases
     assert sum(item.count for item in ww.setup.identity_pool) == 12
     assert {i.role: i.count for i in ww.setup.identity_pool} == {
         "werewolf": 3, "white_wolf": 1, "villager": 4, "seer": 1, "witch": 1, "hunter": 1, "guard": 1,
@@ -243,6 +319,144 @@ def test_tags_agree_with_the_ui_and_the_tag_styles_of_the_config(ww: ScenarioSpe
     shown = identity_tags | set(ww.setup.public_tags) | set(ww.ui.out_tags) | set(ww.ui.status_tags) | set(ww.ui.highlight_tags)
     assert shown <= styles, f"missing tag_styles: {sorted(shown - styles)}"
     assert set(ww.ui.out_tags) <= set(ww.setup.public_tags)  # everybody must see who is out
+
+
+# ----------------------------------------------------------------------------- v0.14: the hard-fact desk and the situations
+
+FACT_TEMPLATES = {
+    "death_notice", "peaceful_night", "vote_result", "no_exile", "tie_pk", "seer_result", "wolf_target", "wolf_empty",
+    "sheriff_candidates", "sheriff", "no_sheriff", "speech_direction", "hunter_shot", "game_over",
+}
+CLAIM_TEMPLATES = {"vote_declare", "check_report"}
+#: The situation table of ``werewolf_12p`` (tag -> conditions; empty = any).  The agent layer turns the wake-up of a bot into
+#: these tags and searches the bot's playbook with them; the bots' own playbooks use the same words after ``#``.
+WEREWOLF_SITUATIONS = [
+    {"tag": "警上", "phase_contains": "警长竞选"},
+    {"tag": "发言", "channel_type": "public", "events": ["floor.granted"]},
+    {"tag": "投票", "phase_contains": "放逐投票", "events": ["request.opened"], "request_kind": "choice"},
+    {"tag": "投票", "phase_contains": "平票", "events": ["request.opened"], "request_kind": "choice"},
+    {"tag": "夜晚", "phase_contains": "夜"},
+    {"tag": "遗言", "phase_contains": "遗言"},
+    {"tag": "狼队", "channel_id": "wolf-team"},
+    {"tag": "平票", "phase_contains": "平票"},
+]
+#: Every phase text the manual tells the moderator to set (``N`` is the number of the day / night).
+MANUAL_PHASES = {
+    "准备阶段 · 建立频道", "第 N 夜", "第 1 天 · 警长竞选", "第 1 天 · 警长竞选演说", "第 1 天 · 警长竞选 · 平票 PK",
+    "第 N 天 · 公布死讯", "第 N 天 · 白天发言", "第 N 天 · 放逐投票", "第 N 天 · 平票 PK", "第 N 天 · 遗言",
+}
+
+
+def situation_tags(
+    spec: ScenarioSpec, *, phase: str = "", channel_type: str = "", channel_id: str = "", events: tuple[str, ...] = (),
+    request_kind: str = "",
+) -> list[str]:
+    """The reference reading of ``SituationRule`` (contracts §13.4): every non-empty condition must hold, ``events`` is
+    "any of these", several rules may carry one tag; the tags come out in the order of the rules, each once."""
+    found: list[str] = []
+    for rule in spec.situations:
+        if rule.phase_contains and rule.phase_contains not in phase:
+            continue
+        if rule.channel_type and rule.channel_type != channel_type:
+            continue
+        if rule.channel_id and rule.channel_id != channel_id:
+            continue
+        if rule.events and not set(rule.events) & set(events):
+            continue
+        if rule.request_kind and rule.request_kind != request_kind:
+            continue
+        if rule.tag not in found:
+            found.append(rule.tag)
+    return found
+
+
+def test_werewolf_marks_every_template_for_the_hard_fact_desk(ww: ScenarioSpec) -> None:
+    marks = {tid: template.record for tid, template in ww.templates.items()}
+    assert None not in marks.values(), "every template of the scenario is recorded"
+    assert {tid for tid, mark in marks.items() if mark == "fact"} == FACT_TEMPLATES
+    assert {tid for tid, mark in marks.items() if mark == "claim"} == CLAIM_TEMPLATES
+    assert all(ww.templates[tid].users == "moderator" for tid in FACT_TEMPLATES)  # what the rules announce
+    assert all(ww.templates[tid].users == "players" for tid in CLAIM_TEMPLATES)  # what a player says is his word only
+    # the announce templates in the manual's quick reference (the moderator's own) are exactly the facts of the scenario
+    listed = set(re.findall(r"^\| `(\w+)` \| .*\|$", ww.manual_text.split("**模板**", 1)[1].split("**检查项**", 1)[0], re.M))
+    assert listed == FACT_TEMPLATES
+
+
+def test_werewolf_declares_the_situation_tags(ww: ScenarioSpec) -> None:
+    blank = {"phase_contains": "", "channel_type": "", "channel_id": "", "events": [], "request_kind": ""}
+    assert [r.model_dump() for r in ww.situations] == [{**blank, **rule} for rule in WEREWOLF_SITUATIONS]
+    assert {r.tag for r in ww.situations} == {"警上", "发言", "投票", "夜晚", "遗言", "狼队", "平票"}
+
+
+@pytest.mark.parametrize(
+    "what, phase, wake, expected",
+    [
+        ("sheriff: run or not", "第 1 天 · 警长竞选", {"events": ("request.opened",), "request_kind": "choice"}, {"警上"}),
+        ("sheriff: campaign speech", "第 1 天 · 警长竞选演说", {"events": ("floor.granted",), "channel_type": "public", "channel_id": "public"}, {"警上", "发言"}),
+        ("sheriff: step down", "第 1 天 · 警长竞选演说", {"events": ("request.opened",), "request_kind": "choice"}, {"警上"}),
+        ("sheriff: tie PK speech", "第 1 天 · 警长竞选 · 平票 PK", {"events": ("floor.granted",), "channel_type": "public", "channel_id": "public"}, {"警上", "发言", "平票"}),
+        ("sheriff: tie PK revote", "第 1 天 · 警长竞选 · 平票 PK", {"events": ("request.opened",), "request_kind": "choice"}, {"警上", "投票", "平票"}),
+        ("day speech", "第 3 天 · 白天发言", {"events": ("floor.granted",), "channel_type": "public", "channel_id": "public"}, {"发言"}),
+        ("day vote", "第 3 天 · 放逐投票", {"events": ("request.opened",), "request_kind": "choice"}, {"投票"}),
+        ("tie PK speech", "第 3 天 · 平票 PK", {"events": ("floor.granted",), "channel_type": "public", "channel_id": "public"}, {"发言", "平票"}),
+        ("tie PK revote", "第 3 天 · 平票 PK", {"events": ("request.opened",), "request_kind": "choice"}, {"投票", "平票"}),
+        ("last words", "第 3 天 · 遗言", {"events": ("floor.granted",), "channel_type": "public", "channel_id": "public"}, {"发言", "遗言"}),
+        ("night action request", "第 2 夜", {"events": ("request.opened",), "request_kind": "choice"}, {"夜晚"}),
+        ("wolves talk at night", "第 2 夜", {"events": ("message.new",), "channel_type": "group", "channel_id": "wolf-team"}, {"夜晚", "狼队"}),
+        ("a private message at night", "第 2 夜", {"events": ("message.new",), "channel_type": "dm", "channel_id": "dm-N3"}, {"夜晚"}),
+        ("hunter shoots (any day phase)", "第 1 天 · 公布死讯", {"events": ("request.opened",), "request_kind": "choice"}, set()),
+        ("the death announcement", "第 1 天 · 公布死讯", {"events": ("message.new",), "channel_type": "public", "channel_id": "public"}, set()),
+        ("before the game", "准备阶段 · 建立频道", {}, set()),
+        ("no phase yet", "", {"events": ("request.opened",), "request_kind": "choice"}, set()),
+    ],
+)
+def test_the_situation_table_gives_the_wake_ups_of_the_manual_their_tags(
+    ww: ScenarioSpec, what: str, phase: str, wake: dict, expected: set[str]
+) -> None:
+    tags = situation_tags(ww, phase=phase, **wake)
+    assert len(tags) == len(set(tags)), what  # each tag once
+    assert set(tags) == expected, what
+
+
+def test_the_manual_sets_exactly_the_phases_the_situation_table_relies_on(ww: ScenarioSpec) -> None:
+    used = set(re.findall(r'set_phase\(text="([^"]+)"\)', ww.manual_text))
+    assert used == MANUAL_PHASES  # a phase added to / dropped from the manual means the table has to be looked at again
+    note = next(line for line in ww.manual_text.splitlines() if line.startswith("- **阶段文字照原文写**"))
+    for phase in MANUAL_PHASES:
+        assert phase in note, phase
+    # every phase text maps to what the manual says it is (the digit stands in for N)
+    for phase in MANUAL_PHASES:
+        concrete = phase.replace("N", "4")
+        tags = set(situation_tags(ww, phase=concrete, events=("request.opened",), request_kind="choice"))
+        expected_by_phase = {
+            "准备阶段 · 建立频道": set(),
+            "第 N 夜": {"夜晚"},
+            "第 1 天 · 警长竞选": {"警上"},
+            "第 1 天 · 警长竞选演说": {"警上"},
+            "第 1 天 · 警长竞选 · 平票 PK": {"警上", "投票", "平票"},
+            "第 N 天 · 公布死讯": set(),
+            "第 N 天 · 白天发言": set(),
+            "第 N 天 · 放逐投票": {"投票"},
+            "第 N 天 · 平票 PK": {"投票", "平票"},
+            "第 N 天 · 遗言": {"遗言"},
+        }
+        assert tags == expected_by_phase[phase], phase
+
+
+def test_every_condition_of_the_situation_table_is_something_the_world_can_produce(ww: ScenarioSpec) -> None:
+    producible_events = {  # the ``payload["event"]`` names of docs section 2.6 (what an agent can be woken by)
+        "message.new", "challenge.opened", "challenge.resolved", "floor.granted", "floor.revoked", "floor.paused", "floor.frozen",
+        "floor.completed", "free.advisory", "request.opened", "request.cancelled", "request.answer", "request.closed",
+        "ability.used", "channel.created", "channel.updated", "player.updated", "phase.changed", "hold_game", "end_game",
+        "game.started", "game.resumed", "game.continued", "watchdog", "timer.elapsed",
+    }
+    channels_the_manual_creates = set(re.findall(r'create_channel\(channel_id="([\w-]+)"', ww.manual_text))
+    assert channels_the_manual_creates == {"public", "wolf-team"}
+    for rule in ww.situations:
+        assert set(rule.events) <= producible_events, rule
+        if rule.channel_id:
+            assert rule.channel_id in channels_the_manual_creates, rule
+    assert len({r.tag for r in ww.situations}) == 7  # a small vocabulary: the bots' playbooks are written in it
 
 
 # ----------------------------------------------------------------------------- the checks
@@ -1202,6 +1416,65 @@ def test_the_manual_plays_a_night_the_sheriff_campaign_and_a_white_wolf_explosio
     assert not any(role in text for text in announcements for role in ("猎人", "白狼王", "预言家", "被毒"))  # a dark-card game
     assert t.world.state.status == "running"
 
+    # ---- the hard-fact desk (v0.14): what the rules announced, each player reads what was announced to him - and the
+    #      phase text is the one the moderator had set when it happened (the manual's own wording)
+    def desk(agent: str) -> list[tuple[str, str | None, str | None, str]]:
+        return [(f["phase"], f["template_id"], f["actor_id"], f["kind"]) for f in t.world.board(agent)["facts"]]
+
+    public_desk = [
+        ("第 1 天 · 警长竞选", "sheriff_candidates", None, "fact"),
+        ("第 1 天 · 警长竞选演说", "sheriff_candidates", None, "fact"),
+        ("第 1 天 · 警长竞选演说", "vote_result", None, "fact"),
+        ("第 1 天 · 警长竞选演说", "sheriff", None, "fact"),
+        ("第 1 天 · 公布死讯", "death_notice", None, "fact"),
+        ("第 1 天 · 遗言", "speech_direction", None, "fact"),
+        ("第 1 天 · 白天发言", None, white, "fact"),  # the white wolf's public declaration: an ability's, never a template
+        ("第 1 天 · 白天发言", "death_notice", None, "fact"),
+    ]
+    bystander = villagers[3]
+    assert desk(bystander) == public_desk and desk(guard) == public_desk
+    assert desk(seer) == [("第 1 夜", "seer_result", None, "fact"), *public_desk]  # his own check, read in his private chat
+    assert desk(plain_wolves[0]) == [("第 1 夜", "wolf_target", None, "fact"), *public_desk]  # the target, read in the wolves' channel
+    assert desk(MODERATOR_ID) == [
+        ("第 1 夜", "wolf_target", None, "fact"), ("第 1 夜", "seer_result", None, "fact"), *public_desk,
+    ]
+    texts = {f["template_id"]: f["text"] for f in t.world.board(MODERATOR_ID)["facts"] if f["template_id"]}
+    assert texts["wolf_target"] == f"【刀口】今晚刀口：{player_label(t.world, victim)}。"
+    assert [f["text"] for f in t.world.board(bystander)["facts"] if f["template_id"] is None] == [
+        f"【自爆】{player_label(t.world, white)} 亮明白狼王身份并自爆，带走 {player_label(t.world, seer)}。我是白狼王。"
+    ]
+    assert all("狼人阵营" not in f["text"] for f in t.world.board(bystander)["facts"])  # no check result in the public desk
+
+
+def test_a_players_claim_and_a_fact_of_the_rules_sit_side_by_side_on_the_desk(ww: ScenarioSpec) -> None:
+    t = _Table(ww)
+    ids = [p.id for p in t.world.state.players]
+    seer, wolf = t.one("seer"), t.with_role("werewolf")[0]
+    t.mod("create_channel", channel_id="public", name="公共频道", type="public", mode="closed", members=ids)
+    t.mod("set_phase", text="第 2 天 · 白天发言")
+    t.mod("announce", channel_id="public", template_id="peaceful_night", params={})
+    t.mod("set_floor_queue", channel_id="public", order=[seer, wolf], limits={"max_messages": 2, "max_chars_total": 600})
+    t.ok(seer, "speak", channel_id="public", content="我是预言家，昨晚验了一个人。")  # free speech: not on the desk
+    t.ok(seer, "speak_template", channel_id="public", template_id="check_report", params={"target": wolf, "side": "狼人阵营"})
+    # a wolf lies about his check and names the seer: the desk keeps what each of them SAID, apart from what the rules announced
+    t.ok(wolf, "speak_template", channel_id="public", template_id="check_report", params={"target": seer, "side": "狼人阵营"})
+    t.ok(wolf, "speak_template", channel_id="public", template_id="vote_declare", params={"target": seer, "reason": "他在撒谎"})
+    t.mod("announce", channel_id="public", template_id="death_notice", params={"players": [seer]})
+    for agent in (MODERATOR_ID, *ids):
+        rows = t.world.board(agent)["facts"]
+        assert [(f["kind"], f["actor_id"], f["template_id"]) for f in rows] == [
+            ("fact", None, "peaceful_night"),
+            ("claim", seer, "check_report"),
+            ("claim", wolf, "check_report"),
+            ("claim", wolf, "vote_declare"),
+            ("fact", None, "death_notice"),
+        ], agent
+        assert {f["phase"] for f in rows} == {"第 2 天 · 白天发言"}
+    rows = t.world.board(ids[0])["facts"]
+    assert rows[1]["text"] == f"我报查验：{player_label(t.world, wolf)} 是狼人阵营。"
+    assert rows[3]["text"] == f"我投 {player_label(t.world, seer)}。他在撒谎"
+    assert "预言家，昨晚验了一个人" not in json.dumps(rows, ensure_ascii=False)
+
 
 def test_the_manual_plays_the_vote_the_pk_the_hunter_the_badge_and_the_ending(ww: ScenarioSpec) -> None:
     t = _Table(ww)
@@ -1239,6 +1512,7 @@ def test_the_manual_plays_the_vote_the_pk_the_hunter_the_badge_and_the_ending(ww
     # ---- D6: a (forced) tie goes to PK speeches, then the others vote again
     tied = sorted([hunter, rival], key=lambda pid: int(pid[1:]))
     t.mod("announce", channel_id="public", template_id="tie_pk", params={"players": tied})
+    t.mod("set_phase", text="第 2 天 · 平票 PK")  # (v0.14: the manual names the PK phase, before the floor is opened)
     t.mod("enable_ability", ability_id="white_wolf_explode")
     order = t.ev("order_of", members=tied)
     assert order == tied
@@ -1292,6 +1566,19 @@ def test_the_manual_plays_the_vote_the_pk_the_hunter_the_badge_and_the_ending(ww
     t.mod("announce", channel_id="public", template_id="game_over", params={"winner": winner, "summary": "所有狼人阵营成员出局。"})
     t.mod("end_game", winner=winner, summary="所有狼人阵营成员出局。")
     assert t.world.state.status == "finished" and t.world.state.winner == "好人阵营" and not t.world.running
+
+    # the desk of everybody who reads the public channel: the tie, the result, the deaths, the shot, the badge, the end - each
+    # with the phase the moderator had set (the tie was announced before the PK phase was set, the rest during it)
+    expected = [
+        ("第 2 天 · 放逐投票", "tie_pk"), ("第 2 天 · 平票 PK", "vote_result"), ("第 2 天 · 平票 PK", "death_notice"),
+        ("第 2 天 · 平票 PK", "hunter_shot"), ("第 2 天 · 平票 PK", "death_notice"), ("第 2 天 · 平票 PK", "sheriff"),
+        ("第 2 天 · 遗言", "game_over"),
+    ]
+    for agent in (MODERATOR_ID, *ids):
+        assert [(f["phase"], f["template_id"]) for f in t.world.board(agent)["facts"]] == expected, agent
+    assert [f["kind"] for f in t.world.board(ids[1])["facts"]] == ["fact"] * 7
+    # the PK phase is a tie PK for the situation table: speech and revote carry the tag the bots' playbooks use
+    assert {"平票", "发言"} == set(situation_tags(ww, phase="第 2 天 · 平票 PK", events=("floor.granted",), channel_type="public"))
 
 
 # ----------------------------------------------------------------------------- the wolves' round, variants

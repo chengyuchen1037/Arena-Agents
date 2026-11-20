@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 import app.game.orchestrator as orchestrator_module
+import game_fakes
 from app.game.orchestrator import GameOrchestrator
 from app.world.types import MODERATOR_ID
 
@@ -67,8 +68,10 @@ def moderator_policy() -> Any:
 
 
 def build(monkeypatch: pytest.MonkeyPatch) -> GameOrchestrator:
-    monkeypatch.setattr(orchestrator_module, "load_config", lambda *a, **k: dict(BASE_CFG))
+    # (v0.14) a game starts only when its bots are initialized (H25): the four bots of this table are made ready without a model
+    game_fakes.patch_config(monkeypatch, BASE_CFG)
     orch = GameOrchestrator()
+    game_fakes.ready_bots(orch)
     orch.ensure_bindings_ready = lambda: None  # type: ignore[method-assign]  # no providers in this test
     orch.llm_port_factory = lambda o: BotLlm(
         o.world, {MODERATOR_ID: moderator_policy(), **{p["id"]: simple_player for p in PLAYERS}}
@@ -88,10 +91,16 @@ def test_a_whole_game_runs_to_the_end(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         orch = build(monkeypatch)
         assert orch.session.status == "idle" and len(orch.world.state.players) == 4
-        # dealing happened at creation: every player has a role, the public snapshot hides nothing yet
-        assert all(p.role for p in orch.world.state.players)
+        # (v0.14, H52) the identities are dealt when the game starts: the world says whether that has happened, and a game
+        # that has not dealt yet has no identity at all - neither role nor faction nor tag - in any view
+        dealt_before = orch.world.state.dealt
+        assert all(bool(p.role) == dealt_before for p in orch.world.state.players)
+        if not dealt_before:
+            assert all(not p.faction and not p.tags for p in orch.world.state.players)
+            assert all(not p["tags"] for p in orch.world.snapshot()["players"])
         await orch.start_or_resume()
         assert orch.session.status == "running"
+        assert orch.world.state.dealt and all(p.role for p in orch.world.state.players)  # once it runs everybody has one
         await wait_for(lambda: orch.session.status == "finished")
 
         types = [e.type for e in orch.world.ledger]

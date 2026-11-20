@@ -10,7 +10,7 @@ from app.storage.paths import get_data_dir
 import conftest as project_conftest
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-ASSETS = {"config.yml", "scenarios", "prompts", "knowledge", "static"}
+ASSETS = {"config.yml", "scenarios", "prompts", "knowledge", "static", "bots"}  # v0.14: bots/ = the default bot library
 RETIRED_SWITCHES = ("ARENA_DISABLE_WORKSPACE", "ARENA_WORKSPACE_DIR", "ARENA_DISABLE_LEGACY_MIGRATION")
 
 

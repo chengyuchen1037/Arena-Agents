@@ -162,7 +162,7 @@ def test_an_empty_ledger_falls_back_to_the_file_time() -> None:
     assert converted["created_at"] == "2026-01-02T03:04:05+00:00" and converted["started_at"] is None
 
 
-@pytest.mark.parametrize("schema", [1, 2, 3, 6, None, "4"])
+@pytest.mark.parametrize("schema", [1, 2, 3, 7, None, "4"])
 def test_other_save_formats_are_not_converted(schema: Any) -> None:
     payload = v4_game("g1", [])
     payload["schema_version"] = schema

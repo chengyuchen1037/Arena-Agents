@@ -1,4 +1,5 @@
-"""``speak`` / ``pass`` / ``mod.send_message``: permissions, rejection codes, truncation (D19), system DMs."""
+"""``speak`` / ``pass`` / ``mod.send_message``: permissions, rejection codes, a too-long speech sent back (v0.14, H16;
+the moderator's free text is still cut, D19), system DMs."""
 
 from __future__ import annotations
 
@@ -130,41 +131,49 @@ def test_free_receipt_reports_the_personal_quota() -> None:
     assert receipt.floor_left == {"messages": 2, "chars": 95, "seconds": 100.0}
 
 
-# --------------------------------------------------------------------------- truncation (D19)
+# --------------------------------------------------------------------------- too long: sent back, never cut (v0.14, H16)
+# (the whole behaviour - every cap, every channel kind, nothing booked - is in test_too_long.py)
 
 
-def test_overlong_messages_are_truncated_not_rejected() -> None:
+def test_an_overlong_message_is_sent_back_whole_and_the_token_is_untouched() -> None:
     world = make_world()
     new_channel(world, "c1")
     open_queue(world, "c1", ["N1"])  # 20 chars per message
-    text = "甲" * 27
-    receipt = speak(world, "N1", "c1", text)
-    assert receipt.ok
-    assert receipt.truncated == {"dropped_chars": 7, "kept_chars": 20}
-    assert "7" in receipt.message and "20" in receipt.message
-    [entry] = msgs(world, "c1")
-    assert entry.data["content"] == "甲" * 20
-    assert entry.data["truncated"] == {"dropped_chars": 7, "kept_chars": 20}
-    assert receipt.floor_left["chars"] == 30  # only what was kept counts
+    seq = world.seq
+    receipt = speak(world, "N1", "c1", "甲" * 27)
+    assert not receipt.ok and receipt.code == Code.TOO_LONG
+    assert receipt.data == {"chars": 27, "limit": 20} and receipt.truncated is None
+    assert "27" in receipt.message and "20" in receipt.message and "发言权还在" in receipt.message
+    assert world.seq == seq and not msgs(world, "c1")  # nothing was written
+    token = world.channel("c1").group.tokens[0]
+    assert (token.status, token.messages_used, token.chars_used) == ("active", 0, 0)  # nothing was booked
+    retry = speak(world, "N1", "c1", "甲" * 20)  # the same player rewrites it, the floor is still his
+    assert retry.ok and retry.truncated is None
+    assert msgs(world, "c1")[0].data["content"] == "甲" * 20 and "truncated" not in msgs(world, "c1")[0].data
+    assert retry.floor_left["chars"] == 30
 
 
-def test_a_message_of_exactly_the_limit_is_not_truncated() -> None:
+def test_a_message_of_exactly_the_limit_goes_out_and_one_more_character_does_not() -> None:
     world = make_world()
     new_channel(world, "c1")
     open_queue(world, "c1", ["N1"])
-    receipt = speak(world, "N1", "c1", "乙" * 20)
+    assert speak(world, "N1", "c1", "乙" * 21).code == Code.TOO_LONG
+    receipt = speak(world, "N1", "c1", "  " + "乙" * 20 + " \n")  # the limit counts the text without its outer blanks
     assert receipt.ok and receipt.truncated is None
+    assert msgs(world, "c1")[0].data["content"] == "乙" * 20
     assert "truncated" not in msgs(world, "c1")[0].data
 
 
-def test_the_remaining_total_also_truncates_and_then_the_floor_is_gone() -> None:
+def test_the_remaining_total_also_bounds_one_message_and_then_the_floor_is_gone() -> None:
     world = make_world()
     new_channel(world, "c1")
     open_queue(world, "c1", ["N1", "N2"], max_messages=5, max_chars_per_message=20, max_chars_total=30)
     assert speak(world, "N1", "c1", "甲" * 20).ok
-    receipt = speak(world, "N1", "c1", "乙" * 20)  # only 10 chars of the total are left
-    assert receipt.ok and receipt.truncated == {"dropped_chars": 10, "kept_chars": 10}
-    assert receipt.floor_left["chars"] == 0
+    too_long = speak(world, "N1", "c1", "乙" * 20)  # only 10 chars of the total are left: that is the limit now
+    assert too_long.code == Code.TOO_LONG and too_long.data == {"chars": 20, "limit": 10}
+    assert world.channel("c1").group.tokens[0].chars_used == 20  # (still 20: the refusal booked nothing)
+    receipt = speak(world, "N1", "c1", "乙" * 10)
+    assert receipt.ok and receipt.truncated is None and receipt.floor_left["chars"] == 0
     assert "用尽" in receipt.message
     # the token ended by itself (reason: used) although messages were left ...
     ended = entries(world, "floor.token_ended")[0]
@@ -182,22 +191,27 @@ def test_a_zero_char_budget_is_no_floor() -> None:
     token.chars_used = token.max_chars_total  # an exhausted token that somehow stayed active
     receipt = speak(world, "N1", "c1", "还能说吗")
     assert receipt.code == Code.NO_FLOOR and "用尽" in receipt.message
+    assert speak(world, "N1", "c1", "字" * 500).code == Code.NO_FLOOR  # (a zero limit is "no floor", not "too long")
 
 
-def test_free_messages_are_truncated_to_the_discussion_limit() -> None:
+def test_free_messages_over_the_discussion_limit_are_sent_back_and_cost_no_quota() -> None:
     world = make_world()
     new_channel(world, "c1", mode="free")  # defaults.free.max_chars_per_message = 30
     receipt = speak(world, "N1", "c1", "丁" * 45)
-    assert receipt.truncated == {"dropped_chars": 15, "kept_chars": 30}
-    assert world.channel("c1").free.chars_used == 30  # the advisory total counts kept chars
+    assert receipt.code == Code.TOO_LONG and receipt.data == {"chars": 45, "limit": 30}
+    free = world.channel("c1").free
+    assert free.chars_used == 0 and free.counts == {}  # nothing is booked: not a message, not a character
+    assert speak(world, "N1", "c1", "丁" * 30).ok
+    assert free.chars_used == 30 and free.counts == {"N1": 1}  # the total counts what was sent
 
 
-def test_moderator_free_text_is_truncated_to_its_own_limit() -> None:
+def test_moderator_free_text_is_still_truncated_to_its_own_limit() -> None:
     world = make_world()
     new_channel(world, "c1")
     receipt = mod(world, "send_message", channel_id="c1", content="戊" * 55)
     assert receipt.ok and receipt.truncated == {"dropped_chars": 15, "kept_chars": 40}
     assert len(msgs(world, "c1")[0].data["content"]) == 40
+    assert msgs(world, "c1")[0].data["truncated"] == {"dropped_chars": 15, "kept_chars": 40}
     empty = mod(world, "send_message", channel_id="c1", content="  ")
     assert empty.code == Code.INVALID_PARAMS
 
@@ -252,11 +266,14 @@ def test_players_talk_to_the_moderator_in_their_dm_without_a_token() -> None:
     assert len(msgs(world, "dm-N1")) == 10
 
 
-def test_dm_messages_are_cut_to_the_dm_limit() -> None:
+def test_dm_messages_over_the_dm_limit_are_sent_back() -> None:
     world = make_world()
     receipt = speak(world, "N1", "dm-N1", "己" * 40)  # defaults.dm = 25
-    assert receipt.truncated == {"dropped_chars": 15, "kept_chars": 25}
-    assert receipt.floor_left is None  # no token, nothing to report
+    assert receipt.code == Code.TOO_LONG and receipt.data == {"chars": 40, "limit": 25}
+    assert receipt.truncated is None and receipt.floor_left is None
+    assert not msgs(world, "dm-N1")
+    ok = speak(world, "N1", "dm-N1", "己" * 25)
+    assert ok.ok and ok.truncated is None and ok.floor_left is None  # no token, nothing to report
 
 
 def test_a_closed_system_dm_refuses_the_player_but_not_the_moderator() -> None:

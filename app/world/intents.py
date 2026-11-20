@@ -36,7 +36,7 @@ class FreeLimits(_Payload):
 
     duration_s: float | None = Field(None, gt=0, le=7200)  # advisory (D20)
     max_messages_per_member: int | None = Field(None, ge=1, le=200)  # hard
-    max_chars_per_message: int | None = Field(None, ge=1, le=5000)  # hard, truncating
+    max_chars_per_message: int | None = Field(None, ge=1, le=5000)  # hard: a longer message is sent back (TOO_LONG)
     max_chars_total: int | None = Field(None, ge=1, le=200000)  # advisory (D20)
     silence_s: float | None = Field(None, gt=0, le=3600)  # advisory
 
@@ -87,7 +87,8 @@ class Option(_Payload):
 
 class Speak(_Payload):
     channel_id: str
-    content: str = Field(min_length=1, max_length=20000)  # over-long text is *truncated* by the gate (D19)
+    # Over the limit of the moment the gate sends the text back (``TOO_LONG``, v0.14 H16); 20000 is only a transport guard.
+    content: str = Field(min_length=1, max_length=20000)
 
 
 class SpeakTemplate(_Payload):

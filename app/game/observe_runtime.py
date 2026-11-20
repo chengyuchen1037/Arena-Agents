@@ -21,6 +21,7 @@ import asyncio
 import logging
 from typing import Any
 
+from app.bots.types import BOT_ID_RE
 from app.runtime.call_log import CallLog, LoggingTrace
 from app.runtime.trace_log import TraceLog, read_thoughts, trace_dir
 from app.world.types import MODERATOR_ID, UiEvent
@@ -42,9 +43,12 @@ class ObserveError(RuntimeError):
 
 def oneshot_label(agent_id: str) -> tuple[str, str]:
     """``(purpose, actor_id)`` of a one-shot model call for ``agent_id``: the moderator's model completing a text is a
-    ``refine`` (nobody's turn: the actor is the roster), a player's own model writing the review of a game is a ``review``."""
+    ``refine`` (nobody's turn: the actor is the roster), a bot's own model studying the contract and the rules is an ``init``
+    (v0.14: the actor is the bot, ``agent_id`` is its id), a player's own model writing the review of a game is a ``review``."""
     if agent_id == MODERATOR_ID:
         return "refine", ROSTER_ACTOR_ID
+    if BOT_ID_RE.match(agent_id or ""):
+        return "init", agent_id
     return "review", agent_id
 
 
@@ -94,6 +98,11 @@ class ObserveRuntimeMixin:
     def _call_log_name(self, actor_id: str) -> str:
         if actor_id == ROSTER_ACTOR_ID:
             return ROSTER_ACTOR_NAME
+        if BOT_ID_RE.match(actor_id or ""):  # (v0.14) the lines of an initialization are the bot's own: its name, not its id
+            try:
+                return str(self._bots().name_of(actor_id))  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001 - a bot that is gone has no name any more: the id says who it was
+                return actor_id
         return str(self.world.display_name(actor_id))  # type: ignore[attr-defined]
 
     def _make_call_trace(self, session_id: str) -> TraceLog:

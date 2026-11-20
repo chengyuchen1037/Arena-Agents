@@ -271,7 +271,7 @@ def test_pydantic_422_is_a_plain_string_without_input_echo(client):
     assert "protocol" in detail
     assert "sk-leak" not in detail
 
-    response = client.put("/api/roster/N1", content=b"[]", headers={"content-type": "application/json"})
+    response = client.put("/api/bots/lineup", content=b"[]", headers={"content-type": "application/json"})  # (v0.14: /api/roster/** is gone)
     assert response.status_code == 422
     assert_string_detail(response)
 

@@ -119,7 +119,9 @@ class Receipt(BaseModel):
     code: str | None = None  # a Code.* value when ``ok`` is false
     message: str = ""
     data: dict[str, Any] = Field(default_factory=dict)  # intent-specific result
-    truncated: dict[str, int] | None = None  # {"dropped_chars": n, "kept_chars": m}  (D19)
+    # {"dropped_chars": n, "kept_chars": m}  (D19).  v0.14 (H16): never set for a player's speech - that is sent back
+    # (``TOO_LONG``) instead; still set for the moderator's free text, a challenge and a text answer.
+    truncated: dict[str, int] | None = None
     floor_left: dict[str, float | int | None] | None = None  # {"messages", "chars", "seconds"}
 
     @classmethod

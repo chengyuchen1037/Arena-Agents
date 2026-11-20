@@ -222,7 +222,7 @@ async def test_an_empty_answer_adds_no_blank_assistant_message_to_the_conversati
 
 
 @async_test()
-async def test_a_cut_off_answer_without_tools_is_told_once_to_think_less_and_act():
+async def test_a_cut_off_answer_without_tools_is_told_once_to_finish_what_is_pending():
     rig = Rig()
     rig.brain.nudge_text = None
     rig.llm.script("a1", llm_resp(content="", finish_reason="length"), llm_resp(content="", finish_reason="length"), sleep_resp())
@@ -234,6 +234,16 @@ async def test_a_cut_off_answer_without_tools_is_told_once_to_think_less_and_act
     second = rig.llm.calls[1].messages
     assert roles(second) == ["system", "user", "user"] and second[2]["content"] == CUT_OFF_NUDGE
     assert "sleep" in CUT_OFF_NUDGE and rig.trace.of("nudge", "a1")[0]["why"] == "length"
+
+
+def test_the_cut_off_nudge_no_longer_asks_the_model_to_think_less():
+    """v0.14 (H17): thinking is not capped by the prompt; the nudge only says the output was interrupted by the length limit
+    and that nothing was done, and asks for the pending business to be finished."""
+    assert CUT_OFF_NUDGE == (
+        "（系统提示）上一次输出因长度上限中断，没有完成任何操作。请直接完成当前待办（例如 speak / respond / sleep）。"
+    )
+    for shorter in ("缩短", "简短", "精简", "少想"):
+        assert shorter not in CUT_OFF_NUDGE
 
 
 @async_test()

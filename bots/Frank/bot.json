@@ -1,0 +1,15 @@
+{
+ "format": 1,
+ "name": "Frank",
+ "avatar": {
+  "v": 1,
+  "face": "f09",
+  "skin": "s11",
+  "hair": "h21",
+  "hair_color": "c11",
+  "eyes": "e17",
+  "mouth": "m10",
+  "accessory": "a35",
+  "accessory_color": "k03"
+ }
+}

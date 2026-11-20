@@ -79,20 +79,28 @@ def test_new_game_without_body_passes_none_to_orchestrator(env) -> None:
     asyncio.run(run_test())
 
 
-def test_start_refuses_when_any_actor_lacks_a_binding(env) -> None:
-    async def run_test() -> None:
-        provider = env.providers.seed(models=("m1",))
-        env.session.model_bindings = {"moderator": bind(provider.id)}
-        with pytest.raises(HTTPException) as excinfo:
-            await routes.control_start()
-        assert excinfo.value.status_code == 409
-        assert "p01" in excinfo.value.detail
-        env.orch.start_or_resume.assert_not_awaited()
+def test_start_answers_409_with_the_problems_when_the_game_is_not_ready(env) -> None:
+    """v0.14 (H25): the start check - the bots, the contract, the scenario AND the models - is the orchestrator's; the route turns its refusal into
+    ``409 {"detail", "code": "NOT_READY", "problems"}`` and a start that passes into the plain answer."""
+    from app.game.orchestrator import NotReadyError
 
-        env.session.model_bindings = {
-            actor: bind(provider.id) for actor in ("moderator", "p01", "p02")
-        }
-        await routes.control_start()
+    async def run_test() -> None:
+        problems = [
+            {
+                "scope": "binding", "bot_id": None, "seat": "p01", "name": "Alice",
+                "items": [{"code": "no_binding", "message": "Alice（p01） 尚未选择模型", "fix": "bind_model"}],
+            }
+        ]
+        env.orch.start_or_resume.side_effect = NotReadyError(problems)
+        refused = await routes.control_start()
+        body = json.loads(refused.body)
+        assert refused.status_code == 409 and body["code"] == "NOT_READY" and body["problems"] == problems
+        assert "Alice" in body["detail"] and "不能开局" in body["detail"]
+
+        env.orch.start_or_resume.side_effect = None
+        env.orch.start_or_resume.reset_mock()
+        answer = await routes.control_start()
+        assert answer["ok"] is True
         env.orch.start_or_resume.assert_awaited_once()
 
     asyncio.run(run_test())

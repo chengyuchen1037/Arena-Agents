@@ -6,13 +6,14 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ValidationError
 
 from app.api import providers as provider_api
 from app.api.security import is_trusted_request, require_trusted_client, verify_api_access
 from app.config import APP_VERSION
-from app.game.orchestrator import TakeoverError, orchestrator
+from app.game.learning_runtime import LearningBusyError
+from app.game.orchestrator import BindingError, NotReadyError, orchestrator
 from app.game.session import GameSession
 from app.providers.models import ModelBinding, ProviderError
 from app.providers.store import get_provider_store
@@ -195,51 +196,43 @@ def _snapshot_message() -> str:
 
 @router.post("/control/new")
 async def control_new_game(req: NewGameRequest | None = None) -> dict[str, Any]:
-    # None -> orchestrator falls back to the scenario's shuffle_on_new_game.
+    # (v0.14, H52) ``randomize_identities`` is accepted and ignored: the identities are dealt when the game starts, every time.
     randomize = req.randomize_identities if req else None
     try:
         session = await orchestrator.new_game(randomize_identities=randomize)
-    except (RuntimeError, ValueError) as exc:  # ConfigReloadError / ScenarioError
+    except LearningBusyError as exc:  # a review is still being written
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except RuntimeError as exc:  # ConfigReloadError
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:  # ScenarioError
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True, "session": _public_session(session)}
 
 
-@router.post("/control/shuffle-identities")
-async def control_shuffle_identities() -> dict[str, Any]:
-    try:
-        session = await orchestrator.shuffle_identities()
-        return {"ok": True, "session": _public_session(session)}
-    except TakeoverError as exc:  # v0.13 (F5): the game has started - never re-dealt again
-        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-
-def _require_complete_bindings() -> None:
-    """Refuse to start/resume while any actor lacks a usable model binding."""
-
-    if getattr(orchestrator, "get_model_binding", None) is None:
-        return  # engine without binding support (legacy/unit tests)
-    if getattr(orchestrator, "demo_mode", False):
-        return  # scripted bots call no model
-    issues = _safe_binding_issues()
-    if issues:
-        shown = "；".join(f"{i['actor_id']}：{i['message']}" for i in issues[:6])
-        if len(issues) > 6:
-            shown += f"…（共 {len(issues)} 项）"
-        raise HTTPException(
-            status_code=409,
-            detail=f"无法开始：需要先为所有角色绑定可用的模型（{shown}）。请在 Provider/模型绑定中重新选择。",
-        )
+def _binding_problem_text(issues: list[Any]) -> str:
+    shown = "；".join(f"{i.actor_id}：{i.message}" for i in issues[:6])
+    if len(issues) > 6:
+        shown += f"…（共 {len(issues)} 项）"
+    return f"无法开始：需要先为所有角色绑定可用的模型（{shown}）。请在 Provider/模型绑定中重新选择。"
 
 
 @router.post("/control/start")
-async def control_start() -> dict[str, Any]:
-    _require_complete_bindings()
+async def control_start() -> Any:
+    """Start, resume or continue the game.  A game that has not started goes through the start check first (H25): when it does not
+    pass, nothing is dealt and the answer is 409 ``{"detail", "code": "NOT_READY", "problems": [Problem…]}`` (contract 13.7); a
+    resumed / continued game whose models are gone is a plain 409."""
     try:
         session = await orchestrator.start_or_resume()
         return {"ok": True, "session": _public_session(session)}
-    except (RuntimeError, ValueError) as exc:
+    except NotReadyError as exc:
+        return JSONResponse(status_code=409, content={"detail": str(exc), "code": exc.code, "problems": exc.problems})
+    except BindingError as exc:
+        raise HTTPException(status_code=409, detail=_binding_problem_text(exc.issues)) from exc
+    except LearningBusyError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -253,3 +246,26 @@ async def control_pause() -> dict[str, Any]:
 async def control_force_pause() -> dict[str, Any]:
     session = await orchestrator.force_pause()
     return {"ok": True, "session": _public_session(session)}
+
+
+# ---------------------------------------------------------------------------------------- budget
+@router.get("/budget")
+async def get_budget() -> dict[str, Any]:
+    return orchestrator.budget_payload()
+
+
+@router.put("/budget", dependencies=[Depends(require_trusted_client)])
+async def put_budget(request: Request) -> dict[str, Any]:
+    try:
+        raw = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象。") from None
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="请求体必须是 JSON 对象。")
+    try:
+        return await orchestrator.set_budget(raw)
+    except ValidationError as exc:
+        detail = "；".join(
+            f"{'.'.join(str(p) for p in err['loc'])}：{err['msg']}" for err in exc.errors(include_input=False, include_url=False)[:4]
+        )
+        raise HTTPException(status_code=422, detail=f"预算设置无效：{detail}") from exc

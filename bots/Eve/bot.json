@@ -1,0 +1,15 @@
+{
+ "format": 1,
+ "name": "Eve",
+ "avatar": {
+  "v": 1,
+  "face": "f03",
+  "skin": "s10",
+  "hair": "h14",
+  "hair_color": "c03",
+  "eyes": "e16",
+  "mouth": "m03",
+  "accessory": "a27",
+  "accessory_color": "k01"
+ }
+}

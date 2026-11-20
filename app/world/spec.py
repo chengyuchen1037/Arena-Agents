@@ -109,7 +109,7 @@ class FreeDefaults(BaseModel):
 
     duration_s: float = 300.0  # advisory: reaching it only notifies the moderator (D20)
     max_messages_per_member: int = 6  # hard
-    max_chars_per_message: int = 300  # hard (truncating)
+    max_chars_per_message: int = 300  # hard: a longer player's message is sent back (TOO_LONG, v0.14), never cut
     max_chars_total: int = 2000  # advisory
     silence_s: float = 30.0  # advisory: no message for this long -> notify the moderator
 
@@ -162,7 +162,13 @@ class DefaultsSpec(BaseModel):
 
 class TemplateSpec(BaseModel):
     """A structured message.  ``text`` uses ``{{param}}`` placeholders; a ``player_id`` renders as
-    ``<name>（<id>）``, ``player_ids`` as those joined by ``、``."""
+    ``<name>（<id>）``, ``player_ids`` as those joined by ``、``.
+
+    ``record`` (v0.14, H10) marks the messages of this template for the *hard-fact desk* of the state board
+    (``world.board(agent)["facts"]``): ``fact`` = something the rules produced (an announcement of the moderator:
+    what happened, who voted for whom ...), ``claim`` = something a player publicly *said* (true or false, the
+    player's word only).  ``None`` = not recorded.  The engine does not know what the facts are about; the scenario
+    marks its templates."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -171,6 +177,58 @@ class TemplateSpec(BaseModel):
     users: Literal["moderator", "players", "any"] = "moderator"
     sensitive: bool = False  # documentation + prompt hint; enforcement is ``users``
     description: str = ""
+    record: Literal["fact", "claim"] | None = None
+
+    @model_validator(mode="after")
+    def _record_fits_its_users(self) -> "TemplateSpec":
+        # What a player says is only ever his claim - never a fact; what the moderator announces is never a claim.
+        if self.record == "fact" and self.users == "players":
+            raise ValueError("record: fact 的模板不能是玩家专用的（users: players）：玩家说的话只能是 claim")
+        if self.record == "claim" and self.users == "moderator":
+            raise ValueError("record: claim 的模板不能是主持人专用的（users: moderator）：主持人的公告是 fact")
+        return self
+
+
+_SITUATION_TAG_FORBIDDEN = re.compile(r"[\s#|\[\]]")
+_SITUATION_EVENT = re.compile(r"^[a-z][a-z_]*(\.[a-z_]+)*$")
+
+
+class SituationRule(BaseModel):
+    """One rule of ``ScenarioSpec.situations`` (v0.14, H14): in the situation described by the conditions the agent's
+    memory is searched for entries carrying ``tag``.
+
+    Every condition is "empty = any", all non-empty ones must hold: ``phase_contains`` is a substring of the phase text
+    of the state board, ``channel_type`` / ``channel_id`` say which channel the wake-up is about, ``events`` are the
+    ``payload["event"]`` names of the wake-up (any one of them), ``request_kind`` is the kind of the request that
+    woke the agent.  The engine only parses and validates the rules; matching them is the agent layer's job.  Several
+    rules may carry the same tag (then any of them is enough)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tag: str
+    phase_contains: str = ""
+    channel_type: Literal["", "public", "group", "dm"] = ""
+    channel_id: str = ""
+    events: list[str] = Field(default_factory=list)
+    request_kind: Literal["", "choice", "text"] = ""
+
+    @field_validator("tag")
+    @classmethod
+    def _tag_is_usable(cls, value: str) -> str:
+        tag = value.strip()
+        if not tag:
+            raise ValueError("情境标签（tag）不能为空")
+        if _SITUATION_TAG_FORBIDDEN.search(tag):
+            raise ValueError(f"情境标签「{tag}」不能含空白或 # | [ ]（它要写进记忆文件的打法条目里）")
+        return tag
+
+    @field_validator("events")
+    @classmethod
+    def _events_are_names(cls, value: list[str]) -> list[str]:
+        for name in value:
+            if not isinstance(name, str) or not _SITUATION_EVENT.match(name):
+                raise ValueError(f"events 里的事件名「{name}」不合法（形如 floor.granted、request.opened）")
+        return value
 
 
 class RevealSpec(BaseModel):
@@ -229,6 +287,8 @@ class ScenarioSpec(BaseModel):
     checks: dict[str, str] = Field(default_factory=dict)  # advisory expressions for ``mod.evaluate``
     constraints: list[ConstraintSpec] = Field(default_factory=list)
     invalidates_drafts: list[str] = Field(default_factory=list)  # ledger entry types that make drafts STALE
+    # v0.14 (H14): situation tags - which phase / channel / wake-up event / request kind is "a vote", "a night action" ...
+    situations: list[SituationRule] = Field(default_factory=list)
     ui: UiSpec = Field(default_factory=UiSpec)
     # Markdown body split by the loader: everything players may read vs. the moderator-only manual.
     rules_text: str = ""

@@ -47,7 +47,9 @@ def test_export_contains_exactly_the_documented_files_and_they_are_byte_identica
     assert not list((data_dir / "exports").glob("*.part"))
     parsed = parse_manifest(manifest)
     assert parsed.created_at == "2026-11-18T00:42:07-08:00" and parsed.app_version.startswith("v")
-    assert parsed.contents.model_dump() == {"games": 2, "providers": 2, "roster_seats": 2, "has_secrets": False, "has_logs": True}
+    assert parsed.format_version == 1  # (a v0.13 data directory - a roster and no bots - is written as a format 1 archive)
+    assert parsed.contents.to_manifest() == {"games": 2, "providers": 2, "roster_seats": 2, "has_secrets": False, "has_logs": True}
+    assert json.loads(manifest)["contents"] == {"games": 2, "providers": 2, "roster_seats": 2, "has_secrets": False, "has_logs": True}
     assert {f.path: f.sha256 for f in parsed.files} == {n: hashlib.sha256(d).hexdigest() for n, d in populated.items()}
     assert {f.path: f.size for f in parsed.files} == {n: len(d) for n, d in populated.items()}
     assert parsed.files_sha256 == files_digest(parsed.files)

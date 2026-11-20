@@ -44,7 +44,7 @@ def test_something_that_is_not_an_object_is_refused(monkeypatch: pytest.MonkeyPa
         orch._validate_session_data(raw)
 
 
-@pytest.mark.parametrize("schema", [1, 2, 3, 4, 6, 99, None, "5"])
+@pytest.mark.parametrize("schema", [1, 2, 3, 4, 7, 99, None, "5", "6"])
 def test_a_game_of_another_save_format_is_refused_with_the_way_to_bring_it_over(monkeypatch: pytest.MonkeyPatch, schema: Any) -> None:
     orch = real_orch(monkeypatch)
     payload = good_game(monkeypatch)
@@ -52,6 +52,24 @@ def test_a_game_of_another_save_format_is_refused_with_the_way_to_bring_it_over(
     with pytest.raises(SessionLoadError, match="migrate_v0121_to_archive") as raised:
         orch._validate_session_data(payload)
     assert "旧版本" in str(raised.value)
+
+
+@pytest.mark.parametrize("schema", [5, 6])
+def test_v5_and_v6_games_are_both_accepted_and_keep_their_format(monkeypatch: pytest.MonkeyPatch, schema: int) -> None:
+    """v0.14 reads v5 (v0.13) saves as well as v6; a v5 game stays a v5 game while it lives (H58): its seats have no bot."""
+    orch = real_orch(monkeypatch)
+    payload = good_game(monkeypatch)
+    payload["schema_version"] = schema
+    loaded = orch._validate_session_data(payload)
+    assert loaded.schema_version == schema and loaded.legacy is (schema == 5)
+    for field in ("lineup", "contract_snapshot"):  # (a v5 save has neither: the defaults are filled in)
+        payload.pop(field, None)
+    for participant in payload["participants"]:
+        participant.pop("bot_id", None)
+        participant.pop("memory_snapshot", None)
+    old = orch._validate_session_data(payload)
+    assert old.lineup == [] and old.contract_snapshot == {}
+    assert all(p.bot_id == "" and p.memory_snapshot == {} for p in old.participants)
 
 
 @pytest.mark.parametrize(

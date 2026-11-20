@@ -12,7 +12,9 @@ from app.world.types import MODERATOR_ID
 
 from .test_game_kit import ask, choice_options, make_world, mod, player, role_holder
 
-BOARD_KEYS = {"me", "phase", "status", "now", "players", "channels", "requests", "abilities", "tickets", "dashboard"}
+BOARD_KEYS = {
+    "me", "phase", "status", "now", "players", "channels", "requests", "abilities", "tickets", "facts", "dashboard",
+}
 
 
 def by_id(items, item_id):
@@ -296,6 +298,7 @@ def test_free_block_reports_counters_and_clocks():
     assert mine["free"] == {
         "my_messages_left": 2,
         "max_messages_per_member": 3,
+        "max_chars_per_message": 100,  # v0.14 (H17): the cap of one message is on the board of a free discussion
         "chars_used": 77,
         "max_chars_total": 500,
         "elapsed_s": 30.0,

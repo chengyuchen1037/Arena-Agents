@@ -10,7 +10,7 @@ from collections import Counter
 
 import pytest
 
-import app.game.orchestrator as orchestrator_module
+import game_fakes
 from app.config import load_config
 from app.game.demo import install_demo
 from app.game.orchestrator import GameOrchestrator
@@ -27,9 +27,9 @@ async def wait_for(predicate, timeout: float = 150.0) -> None:
 def build(monkeypatch: pytest.MonkeyPatch) -> GameOrchestrator:
     cfg = load_config()
     cfg["runtime"] = {**cfg["runtime"], "tick_interval": 0.05, "watchdog": 60}
-    monkeypatch.setattr(orchestrator_module, "load_config", lambda *a, **k: copy.deepcopy(cfg))
+    game_fakes.patch_config(monkeypatch, cfg)
     orch = GameOrchestrator()
-    install_demo(orch, delay=0.0, seed=7)
+    install_demo(orch, delay=0.0, seed=7)  # (also gives every default bot its fixed memory: a game starts only with bots that are initialized)
     return orch
 
 
@@ -83,45 +83,73 @@ def test_a_scripted_werewolf_game_plays_to_the_end(monkeypatch: pytest.MonkeyPat
         assert {p["state"] for p in public["participants"]} == {"sleeping"} and public["moderator"]["state"] == "sleeping"
         assert all(a["rejections"] == 0 for a in usage["by_actor"].values())  # the bots play by the rules
 
-        # ---- the demo can also review the game and complete a persona / memory -----------------------------
-        started = await orch.start_review()
-        assert sorted(started) == sorted(p["id"] for p in public["participants"])
-        await wait_for(lambda: len(orch.session.review_done) == len(started) and not orch._review_running, timeout=30)
-        assert "（演示）" in orch._roster().entry("N1")["memory"] and "场次 1" in orch._roster().entry("N1")["memory"]
-        # v0.13.1 (G39): the review revised an impression of every other seat (the bots answer the JSON the prompt asks for)
-        parts = orch._roster().entry("N1")["memory_parts"]
-        assert set(parts["impressions"]) == {f"N{i}" for i in range(2, 13)} and all(t.startswith("（演示）") for t in parts["impressions"].values())
-        assert parts["experience"] == ["（演示）先听后说，别在信息不足时站队。"] and parts["legacy"] == "" and "场次 1" in parts["record"]
+        # ---- the demo can also review the game (v0.14: the learning protocol - read, write, propose, finish - with fixed answers) ------
+        result = await orch.start_review()
+        started = result["started"]
+        assert sorted(started) == sorted(p["id"] for p in public["participants"]) and result["deadline_s"] == 60
+        await wait_for(lambda: len(orch.session.review_done) == len(started) and not orch.review_running_ids(), timeout=30)
+        store = orch._bots()
+        first = orch.session.participants[0]
+        others = {p.name for p in orch.session.participants if p.id != first.id}
+        people = store.read_part(first.bot_id, "people")
+        assert {line.split("：")[0].lstrip("- ") for line in people.splitlines()} == others and "（演示）" in people  # an impression of everybody else
+        assert "场次 1" in store.summary(first.bot_id)["memory_stats"]["record"]  # the game is counted in its record
+        assert "来源:复盘" in store.read_part(first.bot_id, "playbook", orch.spec.id)  # ... and a new hypothesis is in its playbook
         done = [e.data for e in orch.bus._ring if e.type == "review.progress" and e.data["state"] == "done"]
-        assert len(done) == len(started) and all(len(d["changes"]["impressions"]) == 11 for d in done)  # (the first review: eleven new impressions)
-        # ... "complete the persona" answers in the fixed format, "complete the memory" in impressions and lessons (G42, G43)
-        draft = await orch.refine_text("N1", "persona", "沉着冷静")
-        assert draft.startswith("【定位】（演示）沉着冷静") and "【说话风格】\n- " in draft and draft.endswith("【口头禅】我们再看看。")
-        assert orch._roster().entry("N1")["persona"] == ""  # a draft only
-        memory = await orch.refine_entry("N1", "memory", "N5 爱悍跳")
-        assert memory["memory_parts"]["impressions"]["N2"] == "（演示）N5 爱悍跳" and memory["draft"].startswith("## 印象\n- N2 Bob：（演示）N5 爱悍跳")
-        assert orch._roster().entry("N1")["memory_parts"]["impressions"]["N2"].startswith("（演示）Bob")  # a draft only
+        assert len(done) == len(started) and all({c["file"] for c in d["changes"]["files"]} >= {"people", "playbook"} for d in done)
+        assert orch.review_view() == {
+            "available": True, "done": sorted(started), "running": False, "supported": True, "deadline_s": 60, "seconds_left": None,
+        } or set(orch.review_view()["done"]) == set(started)
+        # ... and "complete this L0 for me" (the moderator's model) answers with a valid L0 file
+        from app.bots.refine import build_core_refine_messages
+        from app.storage import botfiles
+
+        draft = await orch.complete_oneshot("moderator", build_core_refine_messages("Alice", "沉着冷静"), max_tokens=6000, purpose="refine")
+        parsed = botfiles.parse_core_markdown(draft, require_complete=True)
+        assert parsed.core.complete and "沉着冷静" in parsed.core.identity
         await orch.shutdown()
 
     asyncio.run(scenario())
 
 
-def test_the_demo_bot_answers_each_one_shot_prompt_with_what_it_asks_for() -> None:
-    """The bot tells the calls apart by the sections ``app.agents.review`` builds (it used to look for the words "复盘" and
-    "性格设定"): a change of a prompt that breaks this shows up here, not as a demo game that cannot be reviewed."""
-    import json
-
-    from app.agents.review import build_refine_messages, build_review_messages
+def test_the_demo_model_completes_an_l0_and_the_demo_bots_start_with_every_card_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The demo model recognises "complete this L0" by the marker of its prompt (``app.bots.refine.REFINE_MARKER``), and a demo starts with every
+    default bot initialized (fixed memory, the hashes of the contract and the scenario in force): nothing for the user to do but start."""
+    from app.bots.refine import build_core_refine_messages
     from app.game.demo import DemoLlm
-    from app.storage.roster import normalize_persona
+    from app.storage import botfiles
 
-    from .agents.fakes import FakeWorld
+    text = DemoLlm._text(object(), build_core_refine_messages("Alex", "沉着冷静"))
+    assert botfiles.parse_core_markdown(text, require_complete=True).core.complete and "name: Alex" in text
 
-    answer = lambda messages: DemoLlm._text(object(), messages)  # noqa: E731 - (the text of an answer needs nothing of the bot)
-    review = json.loads(answer(build_review_messages(FakeWorld(), "p1", outcome_text="x", role_text="y")))
-    assert list(review["impressions"]) == ["p2"] and review["impressions"]["p2"].startswith("（演示）Blair") and review["experience"]
-    persona = answer(build_refine_messages("persona", "沉着冷静", name="Alex"))
-    assert persona == normalize_persona(persona) and persona.startswith("【定位】（演示）沉着冷静")  # (already the fixed format)
-    memory = json.loads(answer(build_refine_messages("memory", "p2 爱悍跳", others=[("p2", "Blair"), ("p3", "Cleo")])))
-    assert memory["impressions"] == {"p2": "（演示）p2 爱悍跳"} and memory["experience"]
-    assert json.loads(answer(build_refine_messages("memory", "x")))["impressions"] == {}  # (no other seat to write about)
+    orch = build(monkeypatch)
+    orch.sync_idle_game()  # (what ``startup()`` does: the game takes the table - the bots and their seats - as it is now)
+    table = orch.read_table()
+    assert [row["init"]["status"] for row in table.summaries] == ["ready"] * 12
+    assert orch.check_ready() == [] and orch.system_status()["code"] == "before_game"
+    assert {row["init"]["model"] for row in table.summaries} == {"演示模式"}
+
+
+def test_the_demo_prepares_its_bots_at_startup_and_every_card_is_ready_before_the_first_click(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``get_orchestrator()`` installs the demo before the data directory is locked (it cannot touch the bots yet): ``startup()`` gives every default
+    bot its fixed memory.  A bot the user made - or cleared - afterwards is not touched again by a restart of the demo."""
+    async def scenario() -> None:
+        cfg = load_config()
+        cfg["runtime"] = {**cfg["runtime"], "tick_interval": 0.05, "watchdog": 60}
+        game_fakes.patch_config(monkeypatch, cfg)
+        orch = GameOrchestrator()
+        install_demo(orch, delay=0.0, seed=7, prepare=False)
+        assert not (orch.session.participants[0].bot_id)  # (the first game was built without the table)
+        report = await orch.startup()
+        assert report["recovery_error"] is None
+        public = orch.public_session()
+        assert public["system_status"]["code"] == "before_game" and public["bots"]["ready"] == {"ok": True, "problems": []}
+        assert {p["init_status"] for p in public["participants"]} == {"ready"} and len(public["participants"]) == 12
+        assert public["demo"] is True and {b["binding"]["label"] for b in public["bots"]["bots"]} == {"演示模式"}
+        store = orch._bots()
+        cleared = store.lineup()[3]
+        store.clear_memory([cleared])
+        assert orch.demo_prepare() == [cleared]  # (what was cleared is prepared again; the others were left alone)
+        await orch.shutdown()
+
+    asyncio.run(scenario())

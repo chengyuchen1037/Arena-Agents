@@ -11,6 +11,7 @@ from app.archive.errors import ArchiveFormatError, ArchiveVersionError
 from app.archive.format import (
     EXPORT_NAME_RE,
     FORMAT_VERSION,
+    LEGACY_VERSION,
     KIND_GAME,
     KIND_GAME_PREV,
     KIND_GAMES_INDEX,
@@ -141,6 +142,7 @@ def _manifest(**changes: object) -> dict:
         app_version="v0.13.0",
         contents=Contents(games=1, providers=0, roster_seats=0, has_secrets=False, has_logs=False),
         files=_entries(),
+        format_version=LEGACY_VERSION,
     )
     data = json.loads(manifest_bytes(manifest))
     data.update(changes)
@@ -158,10 +160,11 @@ def test_a_manifest_round_trips_and_lists_files_sorted() -> None:
         app_version="v0.13.0",
         contents=Contents(games=1, providers=0, roster_seats=0, has_secrets=False, has_logs=False),
         files=_entries(),
+        format_version=LEGACY_VERSION,
     )
     parsed = parse_manifest(manifest_bytes(manifest))
     assert [f.path for f in parsed.files] == ["games/g1/game.json", "settings.json"]
-    assert parsed.format == "arenaagents" and parsed.format_version == FORMAT_VERSION
+    assert parsed.format == "arenaagents" and parsed.format_version == LEGACY_VERSION
     assert parsed.files_sha256 == files_digest(_entries())
 
 

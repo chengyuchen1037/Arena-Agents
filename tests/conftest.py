@@ -1,16 +1,81 @@
 from __future__ import annotations
 
+import atexit
 import base64
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
 
-import app.config
-from app.storage import reset_stores_for_tests
-
 _REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
+
+
+# ------------------------------------------------------------------------------------ the real data directory
+# The REAL data directory (``<repository>/data``: the user's providers, API keys, games and bots) must never be touched by
+# a test.  The autouse fixture below gives every test its own data directory, but a MODULE-scoped fixture (or an import-time
+# singleton) is set up BEFORE it - in v0.14 such a fixture ran a demo game against the real directory, which made the app
+# migrate the real roster to bots, rewrite the real ``settings.json`` and leave trace logs behind.  So the whole test
+# process gets a throw-away ``ARENA_DATA_DIR`` here, before ``app`` is imported or any test module is collected; a test that
+# wants another directory still sets its own (monkeypatch) - nothing resolves to ``<repository>/data`` any more.
+def _install_process_data_dir() -> Path:
+    scratch = _REPOSITORY_ROOT / ".pytest_tmp"  # (git-ignored scratch space)
+    system_tmp = Path(tempfile.gettempdir()).resolve()
+    # (a sandbox may point TMP / TEMP into the repository itself: never litter the repository root with it)
+    in_repository = system_tmp == _REPOSITORY_ROOT or _REPOSITORY_ROOT in system_tmp.parents
+    try:
+        if in_repository:
+            scratch.mkdir(parents=True, exist_ok=True)
+        root = Path(tempfile.mkdtemp(prefix="arena-tests-data-", dir=str(scratch) if in_repository else None))
+    except OSError:  # (an unwritable temp directory)
+        root = scratch / f"process-data-{os.getpid()}"
+        root.mkdir(parents=True, exist_ok=True)
+    os.environ["ARENA_DATA_DIR"] = str(root / "data")
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
+    return root
+
+
+_PROCESS_DATA_ROOT = _install_process_data_dir()
+_REAL_DATA_DIR = _REPOSITORY_ROOT / "data"
+
+
+def _tree_signature(root: Path) -> dict[str, tuple[int, int]]:
+    """``{relative path: (size, mtime_ns)}`` of everything below ``root`` (empty when it does not exist)."""
+    state: dict[str, tuple[int, int]] = {}
+    if root.is_dir():
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for filename in filenames:
+                path = Path(dirpath) / filename
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                state[path.relative_to(root).as_posix()] = (stat.st_size, stat.st_mtime_ns)
+    return state
+
+
+_REAL_DATA_BEFORE = _tree_signature(_REAL_DATA_DIR)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:  # noqa: ANN001 - pytest hook
+    """A loud notice when something changed the real ``data/`` while the tests ran (the user may also be running the app, so this is
+    a warning, not a failure)."""
+    after = _tree_signature(_REAL_DATA_DIR)
+    if after != _REAL_DATA_BEFORE:
+        changed = sorted({*after, *_REAL_DATA_BEFORE} - {k for k in after if after[k] == _REAL_DATA_BEFORE.get(k)})
+        terminalreporter.write_sep("!", "the real data directory changed during this test run", red=True)
+        terminalreporter.write_line(
+            f"{_REAL_DATA_DIR} - {len(changed)} file(s) differ, e.g. {', '.join(changed[:5])}.  "
+            "If you were not using the app meanwhile, a test touches the real data: find it (a module-scoped fixture "
+            "that runs before the autouse isolation) and isolate it.",
+            red=True,
+        )
+
+
+import app.config  # noqa: E402 - after ARENA_DATA_DIR is set (see above)
+from app.storage import reset_stores_for_tests  # noqa: E402
+
 _CODE_ASSETS = ("config.yml", "scenarios", "prompts", "knowledge", "static", "bots")  # v0.14: bots/ = the default bot library
 
 

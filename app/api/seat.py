@@ -4,7 +4,8 @@
 no field for another one, and unknown fields are refused - and every action goes through the world's commit gate
 exactly like an agent's tool call, so the turn, the length limits, the number of messages, the deadlines and
 ``STALE`` drafts are the engine's rules.  The engine's answer (accepted or refused, with its code and message)
-is the response body, HTTP 200; the HTTP errors are for "nobody is played" / "the game is not running" (409) and
+is the response body, HTTP 200 - an over-long speech is one of the refusals (``TOO_LONG``, with ``data = {"chars", "limit"}``: nothing was
+written, the floor is still the person's; v0.14, H16); the HTTP errors are for "nobody is played" / "the game is not running" (409) and
 malformed bodies (422).
 """
 
@@ -28,7 +29,7 @@ class _Body(BaseModel):
 
 class SpeakRequest(_Body):
     channel_id: str = Field(min_length=1, max_length=64)
-    content: str = Field(min_length=1, max_length=20000)  # over-long text is cut by the gate, not refused
+    content: str = Field(min_length=1, max_length=20000)  # only a transport bound: a text over the channel's limit is sent back by the engine (TOO_LONG)
     based_on_seq: int | None = Field(None, ge=0)  # what the person had seen when the draft began; omitted: now
 
 

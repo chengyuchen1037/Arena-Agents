@@ -211,7 +211,8 @@ def _script() -> list[Callable[[ChatWorld], Any]]:
         lambda w: open_queue(w, "talk", ["N1", "N2", "N3"], keep_queues=True),
         lambda w: speak(w, "N1", "talk", "我先说一句"),
         advance(12),
-        lambda w: speak(w, "N1", "talk", "字" * 30),  # truncated, the token is used up
+        # 30 chars: too long, sent back (nothing changes); 20 chars: fits the cap exactly, the token is used up
+        lambda w: (speak(w, "N1", "talk", "字" * 30), speak(w, "N1", "talk", "字" * 20)),
         lambda w: speak(w, "N2", "talk", "轮到我"),
         lambda w: mod(w, "pause_queue", channel_id="talk"),
         advance(300),  # the free discussion goes quiet and runs out of time meanwhile

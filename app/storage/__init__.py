@@ -6,14 +6,18 @@ def clear_store_caches() -> None:
     """Clear data-dir singletons without changing crypto test key providers."""
     from app.providers.pricing import reset_price_store
     from app.providers.store import reset_provider_store
+    from app.storage.bots import reset_bot_store
+    from app.storage.contract import reset_contract_store
     from app.storage.games import reset_game_store
-    from app.storage.roster import reset_roster_store
+    from app.storage.rules import reset_rules_store
     from app.storage.secrets import reset_secret_store
     from app.storage.settings import reset_settings_store
 
     reset_provider_store()
     reset_price_store()
-    reset_roster_store()
+    reset_bot_store()
+    reset_contract_store()
+    reset_rules_store()
     reset_game_store()
     reset_secret_store()
     reset_settings_store()
