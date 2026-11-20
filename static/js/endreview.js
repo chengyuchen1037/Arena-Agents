@@ -187,15 +187,15 @@
           ? `改动了 ${esc(Core.numText(names.length))} 个文件：${names.map(esc).join("、")}`
           : "这次没有改动记忆"
       );
+      let button = "";
       if (ch.proposals) {
-        parts.push(
-          `<span class="rv-proposals">有 ${esc(Core.numText(ch.proposals))} 条对底层设定的修改建议，等你确认</span>` +
-            `<button type="button" class="btn btn-xs" data-rv-open="${esc(id)}" title="打开这个玩家的面板，在里面确认或拒绝建议、查看记忆的改动">去看看</button>`
-        );
+        parts.push(`<span class="rv-proposals">有 ${esc(Core.numText(ch.proposals))} 条对底层设定的修改建议，等你确认</span>`);
+        button = `<button type="button" class="btn btn-xs" data-rv-open="${esc(id)}" title="打开这个玩家的面板，在里面确认或拒绝建议、查看记忆的改动">去看看</button>`;
       } else if (names.length) {
-        parts.push(`<button type="button" class="btn btn-xs" data-rv-open="${esc(id)}" title="打开这个玩家的面板，查看记忆的改动">去看看</button>`);
+        button = `<button type="button" class="btn btn-xs" data-rv-open="${esc(id)}" title="打开这个玩家的面板，查看记忆的改动">去看看</button>`;
       }
-      return `<div class="rv-result">${parts.join(" · ")}</div>`;
+      // (the button follows the sentence, it is not one more part of it: no "·" in front of it)
+      return `<div class="rv-result">${parts.join(" · ")}${button ? " " + button : ""}</div>`;
     }
 
     function progressHtml(s) {
