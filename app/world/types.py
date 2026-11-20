@@ -50,6 +50,10 @@ class Code:
     GAME_NOT_RUNNING = "GAME_NOT_RUNNING"
     ALREADY_EXISTS = "ALREADY_EXISTS"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # v0.14 (H15, H16): a speech that is too long is sent back, never cut; a bot's speech that reads like a report
+    # (lists, headings, its own seat id as a prefix) is sent back once.  Both are refusals: nothing is written, the floor is kept.
+    TOO_LONG = "TOO_LONG"
+    FORMAT = "FORMAT"
 
     ALL = frozenset(
         {
@@ -57,7 +61,7 @@ class Code:
             "INVALID_PARAMS", "REQUEST_CLOSED", "UNKNOWN_CHANNEL",
             "UNKNOWN_TEMPLATE", "UNKNOWN_ABILITY", "UNKNOWN_REQUEST", "UNKNOWN_TICKET",
             "UNKNOWN_PLAYER", "ABILITY_DISABLED", "FORBIDDEN", "CONSTRAINT", "GAME_NOT_RUNNING",
-            "ALREADY_EXISTS", "INTERNAL_ERROR",
+            "ALREADY_EXISTS", "INTERNAL_ERROR", "TOO_LONG", "FORMAT",
         }
     )
 
