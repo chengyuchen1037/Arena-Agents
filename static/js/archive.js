@@ -1,10 +1,12 @@
 /* ==========================================================================
-   Arena-Agents v0.13 — settings dialog: export / import an archive (decisions F24, F26-F32)
-   Loaded after roster.js / budget.js and before app.js. Exposes window.ArenaArchiveUI.create(ctx).
+   Arena-Agents v0.13 — settings dialog: export / import an archive (decisions F24, F26-F32; v0.14: column ① of five, H35-H36)
+   Loaded after bots.js / budget.js and before app.js. Exposes window.ArenaArchiveUI.create(ctx).
 
    Owns
-     - the "⚙ 设置" dialog (#settings-modal): only two things, 导出存档 and 导入存档, each a small wizard
-         export: API key? -> password (typed twice, the rule is shown live) -> thinking logs? -> progress -> result + download
+     - the "⚙ 设置" dialog (#settings-modal): since v0.14 it has five columns (settings.js draws them; this file draws the home
+       view's column ① 总存档 inside them, through `ctx.wrapHome`): 导出存档 and 导入存档, each a small wizard
+         export: API key? -> password (typed twice, the rule is shown live) -> progress -> result + download
+                 (the logs are always in the archive: v0.14 dropped the "logs?" step)
          import: pick a .arenaagents -> upload (XHR: the fetch client has no upload progress) + check -> summary
                  -> password / skip the keys -> "整体替换" warning -> progress -> page reload
      - the "old data found" notice bar (#legacy-notice): 查看说明 / 忽略 (F24)
@@ -18,6 +20,8 @@
    SSE: archive.progress {job_id, kind, phase, done, total, status, message?, code?, result?}
 
    ctx: { api, Core, showToast, getSession(), getToken(), buildUrl(path), requestToken(info), reload(), openDialog(o),
+          wrapHome?(columnOneHtml) -> the HTML of the whole home view (settings.js), onHomeRendered?() (the columns fill themselves),
+          onOpened?() (the dialog was opened),
           document?, window?, XMLHttpRequest? }
    ========================================================================== */
 
@@ -134,6 +138,9 @@
     const buildUrl = opts.buildUrl || ((path) => path);
     const requestToken = opts.requestToken || (async () => null);
     const openDialog = opts.openDialog || null;
+    const wrapHome = typeof opts.wrapHome === "function" ? opts.wrapHome : null; // v0.14: settings.js puts the home view into its five columns
+    const onHomeRendered = typeof opts.onHomeRendered === "function" ? opts.onHomeRendered : null;
+    const onOpened = typeof opts.onOpened === "function" ? opts.onOpened : null; // v0.14: settings.js reads what its columns show again
     const doReload =
       opts.reload ||
       (() => {
@@ -170,7 +177,6 @@
         includeKeys: false,
         password: "",
         confirm: "",
-        includeLogs: true,
         starting: false,
         finished: false,
         early: [], // events that arrive before the HTTP answer names the job
@@ -275,12 +281,10 @@
           )}）。${button("继续导入", "pending-continue", { cls: "btn-xs" })} ${button("丢弃", "pending-discard", { cls: "btn-xs" })}</div>`
         : "";
       const busyNote = busy ? `<div class="form-hint archive-busy" id="archive-busy">另一个导出 / 导入任务正在进行，请等它结束。</div>` : "";
-      return {
-        title: "设置",
-        body:
+      const columnOne =
           `<div class="settings-section" id="settings-export">` +
           `<div class="settings-section-title">导出存档</div>` +
-          `<p class="form-hint">把全部数据（对局、名册与记忆、Provider、设置，可选思考日志和 API Key）打包成一个 <code>.arenaagents</code> 文件，用来备份或搬到另一台电脑。` +
+          `<p class="form-hint">把数据目录里的全部内容（设置、Provider、价格表、官方契约、规则与学习材料、全部 bot 和它们的记忆与待确认提案、对局和全部日志；API Key 可选）打包成一个 <code>.arenaagents</code> 文件，用来备份或搬到另一台电脑。` +
           `对局进行中也可以导出。</p>` +
           button("导出存档…", "export-start", { cls: "btn-primary-outline", id: "btn-archive-export", disabled: busy }) +
           `</div>` +
@@ -291,7 +295,10 @@
           (running ? `<div class="form-hint archive-running" id="archive-running-hint">对局正在运行：请先点击「暂停」，再导入存档。</div>` : "") +
           pendingBlock +
           `</div>` +
-          busyNote,
+          busyNote;
+      return {
+        title: "设置",
+        body: wrapHome ? wrapHome(columnOne) : columnOne,
         footer: button("关闭", "close", { id: "btn-archive-close" }),
       };
     }
@@ -299,7 +306,7 @@
     // ---- export -------------------------------------------------------------
     function exportKeysView() {
       return {
-        title: "导出存档 · 1/3 API Key",
+        title: "导出存档 · 1/2 API Key",
         body:
           `<p>要把 <strong>API Key</strong> 一起导出吗？</p>` +
           `<p class="form-hint">选「导出」后，Key 会用你下一步设置的密码加密再放进存档（AES-256-GCM）；忘记密码就无法恢复 Key，但其余内容不受影响。` +
@@ -314,7 +321,7 @@
     function exportPasswordView() {
       const e = st.export;
       return {
-        title: "导出存档 · 2/3 设置密码",
+        title: "导出存档 · 2/2 设置密码",
         body:
           `<p>设置存档密码。导入存档时需要它才能解开 API Key。</p>` +
           `<div class="form-group"><label class="form-label" for="input-archive-password">密码</label>` +
@@ -324,21 +331,7 @@
           `<div class="archive-rules" id="archive-pw-rules"></div>` +
           `<div class="form-error" id="archive-pw-error" ${e.passwordError ? "" : "hidden"}>${esc(e.passwordError)}</div>`,
         footer:
-          button("上一步", "export-to-keys") + button("下一步", "export-to-logs", { cls: "btn-primary-outline", id: "btn-archive-next", disabled: true }),
-      };
-    }
-
-    function exportLogsView() {
-      const e = st.export;
-      const back = e.includeKeys ? "export-to-password" : "export-to-keys";
-      return {
-        title: `导出存档 · ${e.includeKeys ? "3/3" : "2/2"} 思考日志`,
-        body:
-          `<label class="checkbox-label" for="chk-archive-logs"><input type="checkbox" id="chk-archive-logs" ${e.includeLogs ? "checked" : ""} />` +
-          `<span>包含思考日志（默认包含）</span></label>` +
-          `<p class="form-hint">思考日志记录了每个 agent 的思考和工具调用，用来复盘和排错，可能很大（每局几十 MB）。` +
-          `不勾选可以让存档小很多；对局本身不受影响。</p>`,
-        footer: button("上一步", back) + button("开始导出", "export-run", { cls: "btn-primary-outline", id: "btn-archive-run" }),
+          button("上一步", "export-to-keys") + button("开始导出", "export-run", { cls: "btn-primary-outline", id: "btn-archive-next", disabled: true }),
       };
     }
 
@@ -353,9 +346,15 @@
       };
     }
 
+    /** What an archive holds, in one line.  v2 (v0.14): bots, the contract, the rules; an older server's roster_seats is still understood. */
     function contentsLine(result) {
       const c = (result && result.contents) || {};
-      const parts = [`${c.games || 0} 局对局`, `${c.providers || 0} 个 Provider`];
+      const parts = [`${c.games || 0} 局对局`];
+      if (c.bots !== undefined || c.roster_seats === undefined) parts.push(`${c.bots || 0} 个 bot`);
+      else parts.push(`${c.roster_seats || 0} 个座位（旧版名册）`);
+      parts.push(`${c.providers || 0} 个 Provider`);
+      if (c.contract !== undefined) parts.push(c.contract ? "含官方契约" : "不含官方契约");
+      if (c.rules !== undefined) parts.push(`${c.rules || 0} 个剧本`);
       parts.push(c.has_secrets ? "含 API Key（已加密）" : "不含 API Key");
       parts.push(c.has_logs ? "含思考日志" : "不含思考日志");
       return parts.join(" · ");
@@ -375,6 +374,7 @@
         body:
           `<p class="archive-ok">✅ 存档已生成。</p>` +
           `<div class="archive-result"><div>保存位置：<code id="archive-saved-path">${esc(where)}</code></div>` +
+          (r.download_name ? `<div>下载时的文件名：<code id="archive-download-name">${esc(r.download_name)}</code></div>` : "") +
           `<div>大小：${esc(formatBytes(r.size_bytes))} · ${esc(contentsLine(r))}</div></div>` +
           `<p class="form-hint">文件保存在运行 Arena-Agents 的电脑上（<code>data/exports/</code>）。点「下载」可以把它保存到你正在用的这台电脑。</p>` +
           warningsHtml(r.warnings),
@@ -440,7 +440,11 @@
         factRow("应用版本", esc(s.app_version || "—"), "archive-fact-version") +
         factRow("对局", `${esc(String(s.games ?? 0))} 局`, "archive-fact-games") +
         factRow("Provider", `${esc(String(s.providers ?? 0))} 个${names}`, "archive-fact-providers") +
-        factRow("名册", `${esc(String(s.roster_seats ?? 0))} 个座位`, "archive-fact-roster") +
+        (s.roster_seats !== undefined && s.bots === undefined
+          ? factRow("名册", `${esc(String(s.roster_seats ?? 0))} 个座位（旧格式：导入时迁移成 bot）`, "archive-fact-roster")
+          : factRow("玩家（bot）", `${esc(String(s.bots ?? 0))} 个`, "archive-fact-bots") +
+            factRow("官方契约", s.contract ? "含" : "不含", "archive-fact-contract") +
+            factRow("规则", `${esc(String(s.rules ?? 0))} 个剧本`, "archive-fact-rules")) +
         factRow("API Key", s.has_secrets ? "含（用密码加密）" : "不含", "archive-fact-secrets") +
         factRow("思考日志", s.has_logs ? "含" : "不含", "archive-fact-logs");
       const running = isRunning();
@@ -461,7 +465,7 @@
         body:
           `<dl class="archive-facts" id="archive-facts">${facts}</dl>` +
           warningsHtml(s.warnings) +
-          `<p class="archive-replace-warning" id="archive-replace-warning">⚠ 将<strong>整体替换当前数据</strong>（对局、名册与记忆、Provider、设置、日志）。旧数据会先备份到 ` +
+          `<p class="archive-replace-warning" id="archive-replace-warning">⚠ 将<strong>整体替换当前数据</strong>（对局、bot 与它们的记忆、官方契约与规则、Provider、设置、日志）。旧数据会先备份到 ` +
           `<code>data/backups/</code>（保留最近 3 份），导入失败会自动恢复。</p>` +
           passwordBlock +
           (running ? `<p class="form-error" id="archive-running-hint">对局正在运行：请先点击「暂停」，再导入存档。</p>` : ""),
@@ -504,8 +508,6 @@
           return exportKeysView();
         case "export-password":
           return exportPasswordView();
-        case "export-logs":
-          return exportLogsView();
         case "export-progress":
           return exportProgressView();
         case "export-done":
@@ -536,6 +538,7 @@
       el.body.innerHTML = view.body;
       if (el.footer) el.footer.innerHTML = view.footer;
       if (st.view === "export-password") updatePasswordState();
+      if (st.view === "home" && onHomeRendered) onHomeRendered();
     }
 
     function setView(view) {
@@ -592,8 +595,6 @@
             box.textContent = "";
           }
         }
-      } else if (id === "chk-archive-logs") {
-        st.export.includeLogs = Boolean(target.checked);
       }
     }
 
@@ -782,7 +783,7 @@
       e.starting = true;
       e.error = "";
       setView("export-progress");
-      const body = { include_keys: e.includeKeys, include_logs: e.includeLogs };
+      const body = { include_keys: e.includeKeys, include_logs: true }; // (v2 servers ignore include_logs: the logs are always in)
       if (e.includeKeys) body.password = e.password;
       try {
         const res = await api.post("api/archive/export", body);
@@ -812,7 +813,7 @@
       try {
         const a = doc.createElement("a");
         a.href = url;
-        a.download = r.name;
+        a.download = r.download_name || r.name; // (H42: the name the user keeps; the URL has the fixed internal one)
         if (doc.body && typeof doc.body.appendChild === "function") doc.body.appendChild(a);
         a.click();
         if (typeof a.remove === "function") a.remove();
@@ -1073,7 +1074,16 @@
         st.view = "home";
       }
       render();
+      if (onOpened) onOpened();
       return refreshStatus();
+    }
+
+    /** Back to the home view (the five columns) - unless an import is running or has just finished (that must be seen out). */
+    function goHome() {
+      if (st.view === "import-progress" || st.view === "import-done" || st.view === "home") return st.view === "home";
+      if (st.view === "import-upload" || st.view === "import-summary") resetImport({ discard: true });
+      setView("home");
+      return true;
     }
 
     function closeSettings() {
@@ -1103,7 +1113,7 @@
           st.export.includeKeys = false;
           st.export.password = "";
           st.export.confirm = "";
-          setView("export-logs");
+          runExport(); // (v0.14: there is no third step any more - the logs are always in the archive)
           break;
         case "export-keys-yes":
           st.export.includeKeys = true;
@@ -1112,17 +1122,15 @@
         case "export-to-keys":
           setView("export-keys");
           break;
-        case "export-to-password":
-          setView("export-password");
-          break;
-        case "export-to-logs": {
-          const { problem, matches } = updatePasswordState();
-          if (problem === null && matches) setView("export-logs");
-          break;
-        }
-        case "export-run":
+        case "export-run": {
+          // (the password step's own button: only with a password that follows the rule, typed twice)
+          if (st.export.includeKeys) {
+            const { problem, matches } = updatePasswordState();
+            if (!(problem === null && matches)) break;
+          }
           runExport();
           break;
+        }
         case "export-download":
           downloadExport();
           break;
@@ -1244,6 +1252,7 @@
     return {
       openSettings,
       closeSettings,
+      goHome,
       isOpen: modalOpen,
       onSession: () => {
         // the game started / stopped: the import entries follow

@@ -4,7 +4,9 @@
    Loaded after takeover.js and before app.js. Exposes window.ArenaComposerUI.create(ctx).
 
    The input box (#composer, under the feed) follows the selected channel; every channel keeps its own draft.
-     Enter sends, Shift+Enter breaks the line; the counter "23/300" uses the server's `max_chars`.
+     Enter sends, Shift+Enter breaks the line; the counter "23/300" uses the server's `max_chars` and counts live (v0.14, H16): over the
+     limit the counter turns red and the send button is off.  A speech that reaches the server too long is refused whole (`TOO_LONG`, a
+     receipt with `data: {chars, limit}`): nothing is sent, nothing is cut, the draft stays in the box and the server's sentence is shown.
      The send button says 发送 / 禁言中 (hover: why) / 已暂停 / 未开始 / 已结束 - the text box itself can always be
      typed in.  结束发言 only while the seat holds the floor of that channel; 技能 opens the list of the abilities
      that are enabled for the seat -> a form generated from the scenario's `params` -> a second confirmation.
@@ -22,7 +24,7 @@
      POST api/seat/speak {channel_id, content, based_on_seq}   POST api/seat/pass {channel_id}
      POST api/seat/respond {request_id, value}                  POST api/seat/ability {ability_id, params}
 
-   and shows the answer (a refusal keeps the draft; STALE asks to confirm and send again).  What is allowed
+   and shows the answer (a refusal keeps the draft; STALE asks to confirm and send again; TOO_LONG says how much to shorten).  What is allowed
    comes from `session.takeover` (view.js composerModel / requestAction); nothing is derived here.
 
    ctx: { api, Core, View, showToast, getSession, getViewpoint, getSelectedChannel, getClockNow,
@@ -250,9 +252,12 @@
         el.btnSend.disabled = !model.sendEnabled || st.sending;
         setTitle(el.btnSend, model.reason);
       }
+      // (H16) the live count against the limit of the channel; over it the counter turns red and the send button is off - a speech that is
+      // too long is sent back whole (TOO_LONG), never cut, so it has to be shortened first
       setText(el.count, model.max ? `${model.count}/${model.max}` : `${model.count} 字`);
       toggleClass(el.count, "over", model.over > 0);
-      setTitle(el.count, model.over > 0 ? `超出 ${model.over} 字：发送时末尾会被截掉` : "字数（以发送时的上限为准）");
+      toggleClass(el.composer, "is-over", model.over > 0);
+      setTitle(el.count, model.over > 0 ? model.overText : "字数 / 这个频道单条发言的上限（超过上限不能发送，需要先删减）");
       setText(el.hint, model.hint);
       if (el.btnPass) {
         el.btnPass.hidden = !model.showPass;
@@ -298,6 +303,14 @@
     // speak / pass
     // -----------------------------------------------------------------------
 
+    /** The sentence for a `TOO_LONG` refusal whose own `message` is missing: `data` = {chars, limit} of the receipt. */
+    function tooLongText(data) {
+      const d = data || {};
+      return Number.isFinite(Number(d.chars)) && Number.isFinite(Number(d.limit))
+        ? `这条发言 ${d.chars} 个字，超过了单条上限 ${d.limit} 字，没有发出，发言权还在。请删减后重发。`
+        : "这条发言太长，没有发出，发言权还在。请删减后重发。";
+    }
+
     /** POST a seat action; the server's answer, or null when the request itself failed (a toast says why). */
     async function act(path, body) {
       try {
@@ -314,6 +327,10 @@
       if (!model.visible) return false;
       if (model.mode !== "send") {
         showNotice(model.reason);
+        return false;
+      }
+      if (model.over > 0) {
+        showNotice(model.overText); // (H16) Enter over the limit: nothing is sent - the sentence says how much to shorten
         return false;
       }
       if (!model.sendEnabled) return false;
@@ -339,15 +356,15 @@
         d.seq = 0;
         if (st.key === key && el.input) el.input.value = "";
         st.notice = "";
-        if (res.truncated && res.truncated.dropped_chars) {
-          showToast(`发言超出字数上限，末尾 ${res.truncated.dropped_chars} 个字被截掉了`);
-        }
         onSent();
       } else if (res) {
-        // refused: the draft stays.  STALE: the world changed while it was being written - read on, then send again
+        // refused: the draft stays.  STALE: the world changed while it was being written - read on, then send again.
+        // TOO_LONG (H16): nothing was sent and nothing was cut - the floor is still yours; the server's sentence says how long it was and the limit
         if (res.code === "STALE") {
           draftOf(key).seq = currentSeq();
           showNotice("局面刚刚发生了重要变化（例如阶段或身份变更），草稿已保留。请确认内容后，再点一次「发送」。");
+        } else if (res.code === "TOO_LONG") {
+          showNotice(res.message || tooLongText(res.data));
         } else {
           showNotice(res.message || "发送失败");
         }

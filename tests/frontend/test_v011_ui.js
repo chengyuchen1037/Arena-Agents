@@ -523,7 +523,7 @@ test("index.html ships every v0.11 control that survives (the right-hand column 
   const c = HTML_SRC.indexOf("static/js/core.js");
   const l = HTML_SRC.indexOf("static/js/layout.js");
   const p = HTML_SRC.indexOf("static/js/providers.js");
-  const r = HTML_SRC.indexOf("static/js/roster.js");
+  const r = HTML_SRC.indexOf("static/js/bots.js"); // (v0.14: roster.js became botlib.js -> botedit.js -> bots.js)
   const b = HTML_SRC.indexOf("static/js/budget.js");
   const w = HTML_SRC.indexOf("static/js/archive.js");
   const a = HTML_SRC.indexOf("static/js/app.js");

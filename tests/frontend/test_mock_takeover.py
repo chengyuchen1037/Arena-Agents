@@ -1,9 +1,10 @@
 """The UI mock plays the person who takes over a seat (v0.13, contract §11.7).
 
 The mock re-implements the seat rules of ``app/world/seat.py`` for its scripted world so that the front end can be
-developed and shown without the engine: this file checks that (1) the takeover / release / re-deal rules are the
-ones of the plan (F2, F4, F5), (2) the scripted game waits for the person where their seat would act and goes on
-when they act (or when the deadline passes), (3) every event it publishes matches the contract and the real client
+developed and shown without the engine: this file checks that (1) the takeover / release rules are the ones of the
+plan (F2, F4; v0.14: the re-deal of F5 is gone, H52), (2) the scripted game waits for the person where their seat
+would act and goes on when they act (or when the deadline passes), (3) a speech over the limit is sent back whole
+(``TOO_LONG``, H16 - the mock never cuts it), (4) every event it publishes matches the contract and the real client
 store reduces the log of such a game to the session the mock holds.
 """
 
@@ -131,7 +132,7 @@ def test_takeover_rules_follow_the_plan() -> None:
     async def scenario() -> None:
         bus, game = make_game()
         s = game.session
-        assert s["takeover"] == {"seat": None, "reshuffle_available": True}
+        assert s["takeover"] == {"seat": None}  # (v0.14: no "reshuffle_available" - the identities are dealt when the game starts, F5 is gone)
         with pytest.raises(mock.TakeoverError) as err:
             game.take_over("moderator")
         assert err.value.status == 422
@@ -148,7 +149,7 @@ def test_takeover_rules_follow_the_plan() -> None:
         events = [e for e in bus.ring if e["type"] == "takeover.updated"]
         assert len(events) == 1 and mock.validate_event(events[0]) == []
         payload = events[0]["data"]["takeover"]
-        assert payload["seat"] == "N3" and payload["reshuffle_available"] is True
+        assert payload["seat"] == "N3" and "reshuffle_available" not in payload
         assert set(payload["channels"]) == {"dm-N3"}  # nothing but the private chat exists before the game starts
         assert payload["channels"]["dm-N3"]["can_write"] is True and payload["channels"]["dm-N3"]["max_chars"] == mock.DM_MAX_CHARS
         assert payload["attention"] == [] and payload["requests"] == [] and payload["abilities"] == []
@@ -167,7 +168,7 @@ def test_takeover_rules_follow_the_plan() -> None:
         game.release_seat()
         assert game.takeover_seat is None and game.player("N3")["state"] == "sleeping"
         last = [e for e in bus.ring if e["type"] == "takeover.updated"][-1]
-        assert last["data"]["takeover"] == {"seat": None, "reshuffle_available": False}  # (the game has started)
+        assert last["data"]["takeover"] == {"seat": None}
         game.release_seat()  # nobody is played: nothing happens
         with pytest.raises(mock.TakeoverError) as err:
             game.seat_pass("public")
@@ -182,27 +183,25 @@ def test_takeover_rules_follow_the_plan() -> None:
     run(scenario)
 
 
-def test_the_redeal_is_only_possible_before_the_game_has_started() -> None:
+def test_there_is_no_redeal_any_more_the_identities_are_dealt_once_when_the_game_starts() -> None:
+    """H52 (replaces F5): a person who takes a seat over before the start sees NO identity - on any card, in the played seat's own view too - and
+    the deal happens once, when the game starts (``dealt``); there is no re-deal in the mock (``game.reshuffle`` and the endpoint are gone)."""
     async def scenario() -> None:
         bus, game = make_game()
+        assert not hasattr(game, "reshuffle")
         game.take_over("N2")
-        before = [p["tags"][0] for p in game.session["participants"]]
-        game.reshuffle()
-        after = [p["tags"][0] for p in game.session["participants"]]
-        assert sorted(before) == sorted(after)  # the same cards, dealt again
-        snapshot = [e for e in bus.ring if e["type"] == "snapshot"][-1]
-        assert mock.validate_session(snapshot["data"]["session"]) == []
-        assert snapshot["data"]["session"]["takeover"]["seat"] == "N2"
-        assert snapshot["data"]["session"]["takeover"]["reshuffle_available"] is True
+        assert game.session["dealt"] is False and all(p["tags"] == [] for p in game.session["participants"])
+        assert game.compute_takeover()["seat"] == "N2" and "reshuffle_available" not in game.compute_takeover()
         game.gate.set()
         game.set_status("running", reason="started")
-        with pytest.raises(mock.TakeoverError) as err:
-            game.reshuffle()
-        assert err.value.status == 409 and "已经开始" in err.value.detail
+        assert game.session["dealt"] is True
+        assert [p["tags"][0] for p in game.session["participants"]] == [mock.ROLES[p] for p in mock.PLAYER_IDS]
+        dealt = [e for e in bus.ring if e["type"] == "player.updated" and e["data"]["tags"][:1] == [mock.ROLES[e["data"]["player_id"]]]]
+        assert [e["data"]["player_id"] for e in dealt] == mock.PLAYER_IDS and all(mock.validate_event(e) == [] for e in dealt)
         game.gate.clear()
         game.set_status("paused", reason="user", pause_reason="user")
-        with pytest.raises(mock.TakeoverError):
-            game.reshuffle()  # not idle any more, and it has started
+        game.set_status("running", reason="resumed")
+        assert len([e for e in bus.ring if e["type"] == "player.updated" and e["data"]["tags"][:1] == [mock.ROLES[e["data"]["player_id"]]]]) == 12, "dealt once"
 
     run(scenario)
 
@@ -258,10 +257,24 @@ def test_the_seat_actions_are_checked_like_the_engine_checks_them() -> None:
         game.set_status("running", reason="started")
         game.create_channel("public", "公共频道", mock.EVERYONE, mode="free")
         game.open_free("public")
+        # v0.14 (H16): a speech over the limit is sent back WHOLE - never cut: nothing is written, nothing is booked, the receipt says how long
+        # it was and what the limit is (the page shows the sentence and keeps the draft)
         long_text = "字" * (mock.FREE_MAX_CHARS + 25)
-        rc = game.seat_speak("public", long_text, None)
-        assert rc["accepted"] and rc["truncated"] == {"dropped_chars": 25, "kept_chars": mock.FREE_MAX_CHARS}
+        free = game.channel("public")["floor"]["free"]
+        before = (len(game.session["messages"]), game.session["seq"], free["chars_used"], dict(free["message_counts"]))
+        refused = game.seat_speak("public", long_text, None)
+        assert refused == {
+            "accepted": False, "seq": None, "code": "TOO_LONG",
+            "message": f"这条发言 {mock.FREE_MAX_CHARS + 25} 个字，超过了单条上限 {mock.FREE_MAX_CHARS} 字，没有发出，发言权还在。请删减后重发。",
+            "data": {"chars": mock.FREE_MAX_CHARS + 25, "limit": mock.FREE_MAX_CHARS},
+        }
+        assert (len(game.session["messages"]), game.session["seq"], free["chars_used"], dict(free["message_counts"])) == before, "nothing written, nothing booked"
+        assert game.compute_takeover()["channels"]["public"]["can_write"], "the floor is still the person's"
+        # exactly the limit goes through whole (and the ends of the text are trimmed before it is counted, like the engine does)
+        rc = game.seat_speak("public", "  " + "字" * mock.FREE_MAX_CHARS + "  ", None)
+        assert rc["accepted"] and "truncated" not in rc
         assert _msgs(game.session, "N4")[-1]["content"] == "字" * mock.FREE_MAX_CHARS
+        assert _msgs(game.session, "N4")[-1]["truncated"] is None
         assert game.seat_speak("public", "   ", None)["code"] == "INVALID_PARAMS"
         assert game.seat_speak("nowhere", "hi", None)["code"] == "UNKNOWN_CHANNEL"
         assert game.seat_speak("dm-N5", "hi", None)["code"] == "UNKNOWN_CHANNEL"  # somebody else's chat
@@ -271,10 +284,11 @@ def test_the_seat_actions_are_checked_like_the_engine_checks_them() -> None:
         stale = game.seat_speak("public", "写了很久的草稿", seen)
         assert stale["accepted"] is False and stale["code"] == "STALE" and stale["data"]["latest_seq"] == game.session["seq"]
         assert game.seat_speak("public", "确认后重发", game.session["seq"])["accepted"]
-        # a closed channel refuses with the gate's reason
+        # a closed channel refuses with the gate's reason (the rules of the floor come before the length check, like in the engine)
         game.close_floor("public")
         closed = game.seat_speak("public", "hi", None)
         assert closed["code"] == "CHANNEL_CLOSED" and closed["accepted"] is False
+        assert game.seat_speak("public", long_text, None)["code"] == "CHANNEL_CLOSED"
         # requests: unknown / not a recipient / invalid option
         rid = game.open_request("投谁？", ["N1", "N2"], ["N4", "N5"], sealed=True)
         assert game.seat_respond("r99", "N1")["code"] == "UNKNOWN_REQUEST"
@@ -393,7 +407,7 @@ def test_the_white_wolf_king_who_does_not_explode_just_plays_on() -> None:
 def test_a_seat_handed_back_mid_game_is_played_by_the_script_again() -> None:
     out = run(lambda: play_with_human("N6", {"prefer": "N5"}, release_at=6.0))
     final, events = out["final"], out["events"]
-    assert final["status"] == "finished" and final["takeover"] == {"seat": None, "reshuffle_available": False}
+    assert final["status"] == "finished" and final["takeover"] == {"seat": None}
     assert [p["state"] for p in final["participants"] if p["id"] == "N6"] == ["sleeping"]
     assert any(e["type"] == "takeover.updated" and e["data"]["takeover"]["seat"] is None for e in events)
     # after the hand-over the script's agent N6 speaks again (its queue speech) and changes its mind in the night request
@@ -439,7 +453,7 @@ def test_http_takeover_and_seat_endpoints_answer_with_the_documented_statuses() 
     app, c = _client()
     with c as client:
         state = client.get("/api/state").json()["session"]
-        assert state["takeover"] == {"seat": None, "reshuffle_available": True}
+        assert state["takeover"] == {"seat": None}
         assert client.post("/api/takeover", json={"seat": "moderator"}).status_code == 422
         assert client.post("/api/takeover", json={"seat": "N99"}).status_code == 404
         assert client.post("/api/takeover", json={}).status_code == 422
@@ -453,20 +467,50 @@ def test_http_takeover_and_seat_endpoints_answer_with_the_documented_statuses() 
         refused = client.post("/api/seat/speak", json={"channel_id": "dm-N3", "content": "hi"})
         assert refused.status_code == 409 and "还没有开始" in refused.json()["detail"], "the game has not started"
         assert client.post("/api/seat/speak", json={"channel_id": 7, "content": "hi"}).status_code == 422
-        # the re-deal works before the start, with a snapshot to every client ...
-        redeal = client.post("/api/control/shuffle-identities")
-        assert redeal.status_code == 200 and redeal.json()["session"]["takeover"]["reshuffle_available"] is True
-        # ... a release works while the game is idle ...
+        # (v0.14: there is no re-deal any more - POST /api/control/shuffle-identities does not exist, H52 replaces F5)
+        assert client.post("/api/control/shuffle-identities").status_code in (404, 405)
+        # a release works while the game is idle ...
         released = client.post("/api/takeover/release")
         assert released.status_code == 200 and released.json()["session"]["takeover"]["seat"] is None
         assert client.post("/api/takeover/release").status_code == 200  # nobody is played: nothing happens
-        # ... and once the game runs: no takeover, no re-deal
-        assert client.post("/api/control/start").status_code == 200
+        # ... and once the game runs: no takeover (the identities were dealt by the start)
+        started = client.post("/api/control/start")
+        assert started.status_code == 200 and started.json()["session"]["dealt"] is True
         busy = client.post("/api/takeover", json={"seat": "N3"})
         assert busy.status_code == 409 and "暂停" in busy.json()["detail"]
-        late = client.post("/api/control/shuffle-identities")
-        assert late.status_code == 409 and "已经开始" in late.json()["detail"]
         assert client.post("/api/control/pause").status_code == 200
-        assert client.post("/api/control/shuffle-identities").status_code == 409, "a paused game has started, too"
         again = client.post("/api/takeover", json={"seat": "N3"})
-        assert again.status_code == 200 and again.json()["session"]["takeover"]["reshuffle_available"] is False
+        assert again.status_code == 200 and again.json()["session"]["takeover"] == {**again.json()["session"]["takeover"], "seat": "N3"}
+
+
+def test_http_a_speech_over_the_limit_is_an_ordinary_answer_with_too_long_and_nothing_is_written() -> None:
+    """v0.14 (H16, contract §13.10): HTTP 200 with the receipt ``{accepted: false, code: "TOO_LONG", message, data: {chars, limit}}`` - the page keeps
+    the draft and shows the sentence; the mock never cuts a speech (an exact fit goes through whole)."""
+    app, c = _client()
+    with c as client:
+        assert client.post("/api/takeover", json={"seat": "N3"}).status_code == 200  # (the game has not started: allowed)
+        assert client.post("/api/control/start").status_code == 200
+
+        def mine() -> list[dict]:
+            messages = client.get("/api/state").json()["session"]["messages"]
+            return [m for m in messages if m["from"] == "N3" and m["channel_id"] == "dm-N3"]
+
+        before = mine()
+        limit = mock.DM_MAX_CHARS
+        refused = client.post("/api/seat/speak", json={"channel_id": "dm-N3", "content": "字" * (limit + 1)})
+        assert refused.status_code == 200
+        assert refused.json() == {
+            "accepted": False, "seq": None, "code": "TOO_LONG",
+            "message": f"这条发言 {limit + 1} 个字，超过了单条上限 {limit} 字，没有发出，发言权还在。请删减后重发。",
+            "data": {"chars": limit + 1, "limit": limit},
+        }
+        assert mine() == before, "nothing was written"
+        # the length is counted on the trimmed text, in characters (the page counts the same way)
+        padded = client.post("/api/seat/speak", json={"channel_id": "dm-N3", "content": "\n" + "字" * limit + "  "})
+        assert padded.status_code == 200 and padded.json()["accepted"] is True and "truncated" not in padded.json()
+        sent = mine()[len(before):]
+        assert [m["content"] for m in sent] == ["字" * limit] and sent[0]["truncated"] is None
+        # a refusal of the floor wins over the length: the person is not told about a text that could not be sent anyway
+        assert client.post("/api/control/pause").status_code == 200
+        paused = client.post("/api/seat/speak", json={"channel_id": "dm-N3", "content": "字" * (limit + 1)})
+        assert paused.status_code == 409, "the game is not running: the HTTP refusal comes first"

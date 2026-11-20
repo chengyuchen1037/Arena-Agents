@@ -157,6 +157,57 @@ test("a line names its role the way the plan says: 'N3 Carol' (the live nickname
   assert.equal(info({ ...F.makeCall(1), status: "mystery" }).cls, "error", "a status nobody knows must not look like a success");
 });
 
+test("an initialization is the BOT's own line (v0.14, H24): '初始化 · Carol' - its name, never its id (b-xxxxxxxx); the purpose says 初始化, not 'init'", () => {
+  const s = F.makeSession();
+  const line = (over) => Store.normalizeCall(F.makeCall(7, { purpose: "init", ...over }));
+  const bot = { actor_id: F.botId(3), actor_name: "Carol" };
+  assert.equal(CallLog.roleLabel(line(bot), s, View), "初始化 · Carol");
+  assert.equal(CallLog.actorLabel(line(bot), s, View), "Carol");
+  // the name at the table NOW wins over the one frozen into the line (a rename shows at once)
+  const renamed = { ...s, bots: { ...s.bots, bots: s.bots.bots.map((b) => (b.id === F.botId(3) ? { ...b, name: "Caroline" } : b)) } };
+  assert.equal(CallLog.roleLabel(line(bot), renamed, View), "初始化 · Caroline");
+  // a bot that is not at the table (replaced by a new identity, or gone): the name frozen into the line; with none - the server then writes the id as the name - "玩家"
+  assert.equal(CallLog.roleLabel(line({ actor_id: "b-0000beef", actor_name: "Zed" }), s, View), "初始化 · Zed");
+  assert.equal(CallLog.roleLabel(line({ actor_id: "b-0000beef", actor_name: "b-0000beef" }), s, View), "初始化 · 玩家");
+  assert.equal(CallLog.roleLabel(line({ actor_id: "b-0000beef", actor_name: "" }), s, View), "初始化 · 玩家");
+  assert.equal(CallLog.roleLabel(line({ actor_id: "b-0000beef", actor_name: "b-0000cafe" }), s, View), "初始化 · 玩家", "another id as the name is no name");
+  for (const over of [bot, { actor_id: "b-0000beef", actor_name: "b-0000beef" }, { actor_id: "b-0000beef", actor_name: "" }]) {
+    const label = CallLog.roleLabel(line(over), s, View);
+    assert.ok(!/b-[0-9a-f]{8}/.test(label), `no id in "${label}"`);
+  }
+  // what the opened line says: the role and the purpose in words
+  const pairs = Object.fromEntries(CallLog.detailPairs(line(bot), s, View, Core));
+  assert.equal(pairs["角色"], "初始化 · Carol");
+  assert.equal(pairs["用途"], "初始化");
+  assert.ok(!JSON.stringify(pairs).includes("b-0000100"), "no id anywhere in the opened line");
+  // the row: the role cell (and the tooltip with the purpose); no id, no raw `init`
+  const row = CallLog.rowHtml(line(bot), { Core, View, session: s, expanded: true, unread: false });
+  assert.match(row, /<span class="cl-role" title="初始化">初始化 · Carol<\/span>/);
+  assert.ok(!/b-0000100|>init</.test(row), "neither the id nor the raw word");
+  // the other purposes are as they were
+  assert.equal(CallLog.roleLabel(line({ actor_id: "N4", purpose: "review" }), s, View), "复盘 · N4 David");
+  assert.equal(CallLog.roleLabel(line({ actor_id: "N4", purpose: "turn" }), s, View), "N4 David");
+  assert.equal(Store.normalizeCall(F.makeCall(1, { purpose: "init" })).purpose, "init", "the store keeps the purpose");
+});
+
+test("the role filter lists a bot's own lines by NAME after the helpers: 'Carol' - not by its id, and not under the seats", () => {
+  const s = F.makeSession();
+  const calls = [
+    F.makeCall(1, { actor_id: F.botId(9), actor_name: "Ivy", purpose: "init" }),
+    F.makeCall(2, { actor_id: "roster", purpose: "refine" }),
+    F.makeCall(3, { actor_id: F.botId(3), actor_name: "Carol", purpose: "init" }),
+    F.makeCall(4, { actor_id: "N3" }),
+    F.makeCall(5, { actor_id: "moderator" }),
+    F.makeCall(6, { actor_id: "b-0000beef", actor_name: "b-0000beef", purpose: "init" }),
+  ].map(Store.normalizeCall);
+  const opts = CallLog.actorOptions(calls, s, View);
+  assert.deepEqual(opts.map((o) => o.label), ["主持人", "N3 Carol", "名册", "Carol", "Ivy", "玩家"], "by name (Carol before Ivy: the ids would say the opposite), the one without a name last");
+  assert.deepEqual(opts.map((o) => o.id), ["moderator", "N3", "roster", F.botId(3), F.botId(9), "b-0000beef"], "(the filter works on the id; only the label is a name)");
+  assert.ok(opts.every((o) => !/b-[0-9a-f]{8}/.test(o.label)));
+  // and the filter itself: one bot's initialization lines
+  assert.deepEqual(CallLog.filterCalls(calls, { actor: F.botId(3) }).map((c) => c.id), [3]);
+});
+
 test("the actors in the role filter: the moderator, the players by seat, then the moderator's helpers; models, tokens and the reason column", () => {
   const s = F.makeSession();
   const opts = CallLog.actorOptions([F.makeCall(1, { actor_id: "roster" }), F.makeCall(2, { actor_id: "N12" }), F.makeCall(3, { actor_id: "N3" }), F.makeCall(4, { actor_id: "moderator" }), F.makeCall(5, { actor_id: "N3" })].map(Store.normalizeCall), s, View);

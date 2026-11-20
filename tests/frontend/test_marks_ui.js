@@ -288,7 +288,7 @@ test("an open palette goes when the seat is given back or the page shows a repla
   const { env } = await livePlayed("N3", { status: "paused" });
   openPalette(env, "N4");
   assert.equal(env.el("mark-pop").hidden, false);
-  env.sse("takeover.updated", { takeover: { seat: null, reshuffle_available: false } });
+  env.sse("takeover.updated", { takeover: { seat: null } });
   assert.equal(env.el("mark-pop").hidden, true, "closed by the next paint");
   assert.equal(env.app().marks().openPalette("N4", null), false);
   assert.equal(env.app().marks().set("N4", 1), false, "and nothing can be marked");
@@ -345,7 +345,7 @@ test("a request card's rows show the recipients' marks; a private chat of the go
 
   // after the game: the seat is given back and the same game shows the mark in the private chat with that player
   env.sse("game.status", { status: "paused", reason: "user", winner: null });
-  env.sse("takeover.updated", { takeover: { seat: null, reshuffle_available: false } });
+  env.sse("takeover.updated", { takeover: { seat: null } });
   env.flushRaf();
   assert.equal(env.app().state.viewpoint, "god");
   env.el("channels-list").dispatch("click", { target: target({ "[data-dm-toggle]": {} }) }); // unfold the private chats
@@ -376,7 +376,7 @@ test("the marks of the detail panel's head: the palette while a seat is played, 
   assert.deepEqual(marksOfGame(env), { N4: 3 });
   // after the seat is given back: only the dot
   env.sse("game.status", { status: "paused", reason: "user", winner: null });
-  env.sse("takeover.updated", { takeover: { seat: null, reshuffle_available: false } });
+  env.sse("takeover.updated", { takeover: { seat: null } });
   assert.equal(marks.headHtml("N4"), '<div class="detail-marks readonly" data-actor="N4"><span class="mark-dot mark-c3" role="img" aria-label="绿色标记" title="绿"></span></div>');
   assert.equal(marks.headHtml("N5"), "", "unmarked and not editable: nothing");
 });
@@ -410,7 +410,7 @@ test("the open detail panel carries the palette in its head and follows a mark m
   assert.match(head(), /class="mark-swatch selected" data-mark-set="1" data-mark-actor="N5"/);
   // after the seat is given back the panel shows the colour only
   env.sse("game.status", { status: "paused", reason: "user", winner: null });
-  env.sse("takeover.updated", { takeover: { seat: null, reshuffle_available: false } });
+  env.sse("takeover.updated", { takeover: { seat: null } });
   env.flushRaf();
   assert.match(head(), /<div class="detail-marks readonly" data-actor="N5"><span class="mark-dot mark-c1"/);
   assert.doesNotMatch(head(), /mark-palette/);
@@ -423,7 +423,7 @@ test("after the seat is given back the same game still shows its marks - read-on
   const { env } = await livePlayed("N3", { status: "paused" });
   mark(env, "N1", 2);
   mark(env, "N7", 5);
-  env.sse("takeover.updated", { takeover: { seat: null, reshuffle_available: false } });
+  env.sse("takeover.updated", { takeover: { seat: null } });
   env.flushRaf();
   // read-only: the stripe and the dot stay, but nothing is a button
   assert.match(card(env, "N1"), /has-mark mark-c2/);
@@ -617,7 +617,7 @@ test("a marked player who is out keeps the colour of the mark: the grey-out of t
   assert.match(css, /\.pcard\.out\.has-mark > :not\(\.pcard-mark\) \{\s*opacity: 0\.55;\s*filter: grayscale\(1\);\s*\}/);
   // ... and it is still so after the game, when the seat is given back (read-only)
   env.sse("game.status", { status: "paused", reason: "user", winner: null });
-  env.sse("takeover.updated", { takeover: { seat: null, reshuffle_available: false } });
+  env.sse("takeover.updated", { takeover: { seat: null } });
   env.flushRaf();
   assert.match(card(env, "N4"), /class="pcard out[^"]* has-mark mark-c5/);
   assert.match(card(env, "N4"), /<span class="pcard-mark readonly"><span class="mark-dot mark-c5"/);
@@ -646,7 +646,7 @@ test("every class the marks markup puts on the page has a rule in style.css (a m
   collect(html(env, "detail-head"));
   // the seat is given back: read-only dots, and the god view's list of private chats shows them
   env.sse("game.status", { status: "paused", reason: "user", winner: null });
-  env.sse("takeover.updated", { takeover: { seat: null, reshuffle_available: false } });
+  env.sse("takeover.updated", { takeover: { seat: null } });
   env.el("channels-list").dispatch("click", { target: target({ "[data-dm-toggle]": {} }) });
   env.flushRaf();
   collect(html(env, "channels-list"));

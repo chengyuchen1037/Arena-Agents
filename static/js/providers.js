@@ -1398,6 +1398,18 @@
     // Session-driven UI: restore notice, lock state
     // -----------------------------------------------------------------------
 
+    /**
+     * One binding issue as the notice bar says it.  The server's sentence usually names the actor already ("Alice（N1）尚未选择模型", "主持人尚未选择模型"): then it
+     * stands alone - the name in front of it, in a bracket, would say it twice.  A bare reason ("Provider 已被删除") gets the name in front of it.  Either way the full
+     * stop at its end goes: the bar puts its own punctuation (a bracket, "；") after it.
+     */
+    function issueText(issue) {
+      const name = actorName(issue.actor_id);
+      const message = Core.stripEndPunct(issue.message);
+      if (!message) return name;
+      return !name || message.includes(name) ? message : `${name}（${message}）`;
+    }
+
     function noticeFor(s) {
       if (!s) return "";
       const parts = [];
@@ -1407,14 +1419,7 @@
       if (restoreText) parts.push(restoreText);
       const issues = Array.isArray(s.binding_issues) ? s.binding_issues : [];
       if (issues.length) {
-        parts.push(
-          `有 ${issues.length} 项模型绑定需要处理：` +
-            issues
-              .slice(0, 3)
-              .map((i) => `${actorName(i.actor_id)}（${i.message}）`)
-              .join("；") +
-            (issues.length > 3 ? "…" : "")
-        );
+        parts.push(`有 ${issues.length} 项模型绑定需要处理：` + issues.slice(0, 3).map(issueText).join("；") + (issues.length > 3 ? "…" : ""));
       }
       return parts.join(" ");
     }

@@ -1,15 +1,20 @@
 # UI Guide
 
-This guide describes the **v0.13.1** web UI. The UI itself is in Chinese; the Chinese label of a
+This guide describes the **v0.14.0** web UI. The UI itself is in Chinese; the Chinese label of a
 control is given in italics where it helps you find it. Everything below can be tried without an API
 key: start the server with `ARENA_DEMO=1` (scripted bots) or run the UI mock (see
 [Working on the UI](#working-on-the-ui)).
 
-![The main view in the god view](images/v0121-main-view.png)
+![The main view in the god view](images/v014-main-view.png)
 
-On a phone the same game looks like this (mini cards, bottom tab bar, the moderator's own random avatar):
+On a phone the same game looks like this (the viewpoint label and the take-over bar on top, mini cards, bottom tab bar; seat 3 is taken over here):
 
-<img src="images/v0121-phone.png" alt="Phone portrait" width="260">
+<img src="images/v014-phone.png" alt="Phone portrait" width="260">
+
+> **About the pictures.** The pictures of the main view, the phone, the limit dialog, the provider and the bindings dialogs were taken with v0.14.0 from the UI
+> mock. The pictures in the take-over sections (`v013-takeover-*`) were taken with v0.13 and have not been taken again: where v0.14 looks different the text says so
+> and the text is right — a card has a seat bubble and an initialization mark (✔ ⚠ ✖ ⏳ ○) and no identity tag before the start; the viewpoint is **one label**
+> (not `[视角 ▾] [切换] [接管]`); there is no *重新发牌* bar. The layouts themselves are the same.
 
 ## Platforms and layouts
 
@@ -34,7 +39,7 @@ your own clicks refresh it).
 |---|---|---|
 | **wide** | desktop ≥ 1024 px (touch tablets wider than 1024 px) | the 12 player cards sit in one row with a summary strip below; the channel column shows names and floor status; the detail card floats next to the clicked player |
 | **compact** | touch tablets up to 1024 px, narrow windows (768 – 1023 px) | the cards are 6 × 2; the channel column shrinks to an **avatar rail** (names appear on hover / long-press; the rail is always on, so the **◀** fold button is hidden); everything else as wide |
-| **phone** | < 768 px | the top bar only keeps the title (the 🎮 takeover bar takes its place while a [seat is played](#playing-a-seat)), the game status, the usage pill and the moderator chip, the one enabled **Start / Pause / Resume** button and a **⋯** menu; a bottom **tab bar** switches between *信息流* (feed, with 6 × 2 mini cards above it and — for a played seat — its input box below), *频道* (channels, full-width list with names) and *玩家* (players: the full cards, 3 per row, with the roster controls); the player details open as a **bottom drawer**; dialogs are full screen; every tap target is at least 40 px |
+| **phone** | < 768 px | the first row of the top bar only keeps the title and the [viewpoint label](#the-viewpoint-label-and-taking-a-seat-over) (while a [seat is played](#playing-a-seat) the label and the 🎮 bar take the title's place), the one enabled **Start / Pause / Resume** button and a **⋯** menu, the second row the [status label](#top-bar), the usage pill and the moderator chip; a bottom **tab bar** switches between *信息流* (feed, with 6 × 2 mini cards above it and — for a played seat — its input box below), *频道* (channels, full-width list with names) and *玩家* (players: the full cards, 3 per row, with the controls of the participant bar: *⚙ 全局初始化*, *名册 ▾*, *复盘全部*); the player details open as a **bottom drawer**; dialogs are full screen; every tap target is at least 40 px |
 
 On touch devices (`data-input="touch"`) buttons, inputs and check boxes get a 40 px (check box rows
 44 px) hit area.
@@ -46,17 +51,19 @@ On touch devices (`data-input="touch"`) buttons, inputs and check boxes get a 40
 The first row (desktop / tablet):
 
 1. **Title and version** — in demo mode the version badge gets a *· 演示模式* suffix.
-2. **⚙ Settings** (*设置*) — opens the [settings dialog](#settings-dialog-export-and-import-an-archive):
-   export and import an archive, nothing else. (v0.12.1's *工作文件夹* button is gone: the data lives in
+2. **⚙ Settings** (*设置*) — opens the [settings dialog](#settings-dialog-archive-l0s-contract-rules-games): five
+   columns — the archive (export / import everything), the L0s of the bots, the official contract, the rules (with
+   their study materials) and the games (delete, export, import). (v0.12.1's *工作文件夹* button is gone: the data lives in
    `data/` next to the program and there is no folder to choose.)
 3. **Collapse board** (*折叠看板*, then *展开看板*) — hides the whole participant bar, including the
    buttons in its header (see [Player cards](#player-cards)), to give the feed more room.
 4. **Theme** (◐) — light / dark; the choice is not remembered after a reload.
-5. **Viewpoint bar** `[视角 ▾] [切换] [接管]` — pick *上帝视角* (god view) or a single player
-   ("3 · Carol") in the drop-down and press *切换* to apply it (see [Spectating](#spectating)); *接管*
-   plays the picked player's seat (see [Playing a seat](#playing-a-seat)). While a seat is played the
-   bar is replaced by **🎮 正在扮演 3 · Carol**, *⏸ 暂停 agent* (the
-   [soft pause](#thinking-time-the-soft-pause)) and *退出接管*.
+5. **Viewpoint label** (v0.14) `[👁 全局视角 ▾]` · `[👁 Alice视角 ▾]` · `[🎮 Alice视角（接管） ▾]` — one label instead of v0.13's
+   `[视角 ▾] [切换] [接管]`. Click it to open a menu: *全局视角*, *以 X 的视角观看* and *接管 X* for each of the twelve players, and *退出接管*
+   (see [Spectating](#spectating) and [the viewpoint label and taking a seat over](#the-viewpoint-label-and-taking-a-seat-over)). The label
+   is pure front-end state — worked out from the viewpoint you chose and the seat you play; the server has no such field. While a seat is
+   played the label carries the 🎮 and is locked, and the **takeover bar** `正在扮演 3 · Carol`, *⏸ 暂停 agent* (the
+   [soft pause](#thinking-time-the-soft-pause)) and *退出接管* sits next to it.
 6. **📋 日志** (*日志*) — the [error log](#error-log): every model call and runtime error of the game. A
    red badge counts the **unread** timeouts and errors (below 1320 px wide the button shows the icon alone;
    the badge stays).
@@ -64,25 +71,49 @@ The first row (desktop / tablet):
 8. **New** (*新建*) — starts a fresh game at once. There is no *Save* button any more: every change of
    the game is written to `data/` half a second later, so the game is always saved.
 9. **Start / Pause / Resume** (*开始* / *暂停* / *继续*) — game lifecycle. **Start** is only enabled
-   for a fresh game (and, outside demo mode, is refused until the moderator and every player are
-   bound to a model), **Pause** while the game runs, **Resume** when it is paused — and after the
+   for a fresh game and runs the [start check](#the-start-check): every bot must be ready, and the contract, the scenario and the
+   models must be in place - otherwise a dialog lists what is missing and nothing starts; the identities are dealt only when it
+   passes. **Pause** while the game runs, **Resume** when it is paused — and after the
    end. Timers (speaking time, request deadlines) freeze while the game is paused. A **finished**
    game can still be resumed: the moderator is told that the game was continued after the end.
 
-The second row shows the **status** (*对局进行中* / *已暂停* / *对局已结束 …*; a pause says why: the
-moderator's `hold` reason, or *因预算上限暂停* for the budget), the **phase** text written by the
+The second row starts with the **status label** (v0.14, `session.system_status`; it replaces the old status text): *未初始化* (some bot
+is not initialized: ○ ⚠ ✖ on its card), *初始化中*, *对局前* (everything is ready, the game has not started), *对局中*, *已暂停 · 手动暂停* (a pause says why:
+*主持人暂停了对局：…* for the moderator's `hold`, *已达到预算上限* for the budget, *对局长时间没有进展*, *运行出错*), *已结束* and *复盘中*. While a
+[soft pause](#thinking-time-the-soft-pause) holds the agents it says *对局中 · agent 已暂停* (*对局中 · 收尾中（还有 N 个回答）* while the calls in flight
+are still being finished). The order of priority is the server's: initializing / reviewing, then running / paused / finished, then uninitialized, then
+*对局前*; a replay on screen says *重放中 · 0:41 / 0:41* instead. The dot is blue (pulsing while the system works), amber (uninitialized, paused),
+grey, or green; **hover** it for the whole sentence (what the state means and what to do, the full reason of a pause, who won). After it come the **phase** text written by the
 moderator, small **progress chips** for open requests (*🗳 投票中 7/12*, *🗳 商议中 3/4*,
 *✍ 作答中 1/1*; at most three, then *+N*) and the **moderator chip** at the end of the row. The
 moderator is not a player card: it is a small chip with its own random pixel avatar, its name and
 its state icon; click it to open its details.
 
-On a **phone** the first row only holds the title and version, the one enabled lifecycle button and
-the **⋯** menu; the status row below keeps the status, the usage pill and the moderator chip.
-Settings, theme, the viewpoint bar, limit, the error log (*日志*, with its badge, which then also sits
+On a **phone** the first row holds the title and version, the **viewpoint label**, the one enabled lifecycle button and
+the **⋯** menu (the label wraps into a line of its own when the title and the buttons leave no room; while a seat is played it takes the title's
+place and the takeover bar goes into a line under it); the status row below keeps the status label, the usage pill and the moderator chip.
+Settings, theme, limit, the error log (*日志*, with its badge, which then also sits
 on the **⋯** button itself), new, history, bindings and Provider live in the
 **⋯** menu (the very same buttons, moved there while the layout is `phone`; **Collapse board** is
-not offered on a phone). The one exception is the takeover bar of a played seat: it takes the title's
-place in the first row instead of moving into the menu.
+not offered on a phone). The viewpoint label and the takeover bar of a played seat are the exceptions: they stay in the first row instead of moving into the menu.
+
+### The start check
+
+**Start** first checks that the game can be played. The server checks (and answers `409`), the page shows the answer: every one of the twelve
+bots has a complete L0 and an initialization that is ✔ (⚠ does not count), the official contract and the scenario can be read, and the
+moderator and every player have a model. When something is missing the server answers `409 {"detail", "code": "NOT_READY", "problems": [Problem…]}`,
+**nothing is dealt and nothing starts**, and the page opens the dialog **还不能开局**:
+
+- the problems are **grouped by what is not ready**: *官方契约*, *剧本*, then the players in seat order (*3 号 Carol* — a player's own problems and the missing
+  model of its seat are one group), *主持人*;
+- every item is the server's own sentence with a button that takes you to the place that fixes it, by the item's `fix`: *去初始化*, *去编辑底层设定* /
+  *去导入底层设定*, *去绑定模型*, *去导入契约*, *去导入规则*. The button closes the dialog and calls `window.Bots.focus(botId, fix)` (see
+  [the Bots interface](#interface-for-scripts-1): the player's details at the L0 editor or the initialization row, the bindings of that seat, the settings dialog at that
+  column); an item whose `fix` the page does not know just shows its sentence, and without `window.Bots` the button closes the dialog and does nothing;
+- when two or more players only need their initialization the dialog's own button is **⚙ 全局初始化** (`Bots.initAll()`), otherwise it says *知道了*;
+- a refusal that carries no list is shown as a toast with the server's sentence.
+
+The cards still have no identity tag afterwards (nothing was dealt) and **Start** works again as soon as the problems are fixed.
 
 ### Banners
 
@@ -95,8 +126,28 @@ A banner appears under the top bar when something needs attention (a phone shows
 | **Stall warning** | the watchdog saw no progress (`session.stall_notice`); the game keeps running, and the warning goes away by itself when the game moves again |
 | **Game over** | winner and summary, plus the hints *continue after the end* and *review all* |
 | **Autosave error / connection lost** | the save failed (*自动保存失败*); the event stream is reconnecting (*连接断开，正在重连…*, a separate bar at the top of the window) |
-| **Old data found** | a bar under the top bar while `data/` is still empty and a v0.12.1 workspace exists at its default place: *检测到旧版（v0.12.1）的数据：请先运行转换脚本，再到「设置」里导入存档*; buttons *查看说明* (the command and the steps, see [Settings dialog](#settings-dialog-export-and-import-an-archive)) and *忽略* (remembered: it never comes back) |
+| **Old data found** | a bar under the top bar while `data/` is still empty and a v0.12.1 workspace exists at its default place: *检测到旧版（v0.12.1）的数据：请先运行转换脚本，再到「设置」里导入存档*; buttons *查看说明* (the command and the steps, see [Settings dialog](#settings-dialog-archive-l0s-contract-rules-games)) and *忽略* (remembered: it never comes back) |
 | **Restore notice** | a bar under the banner whenever the server has something to say about the game it started with: *已恢复上次对局（已暂停）* after a restart, *已导入存档（…）* after an import or loading a stored game, or why a fresh game was created instead (an old save that was kept, a save that could not be read, a data folder that could not be used); it also lists the actors that still need a model; buttons *查看模型绑定* and *知道了* |
+
+### The question at the end of a game
+
+When the game is **over** (*已结束*), can be reviewed (it has bots: a game of the old format cannot), nothing is being reviewed and **nobody
+has been reviewed yet**, a window asks — once — **这局结束了，是否让 bot 复盘？**
+
+- All twelve bots are listed in seat order, all of them selected (*全选* / *全不选*; *已选 12 / 12* counts what is ticked; *复盘* is off with nothing ticked).
+- A seat a **person played** in this game is marked **有人类代打** and has the switch **学习接管者的风格** (on by default): then the bot may also learn how the person
+  played its seat — a change of its voice is only *proposed* for its L0 and waits for you. The seats come from the game's `human_spans`
+  (`GET /api/games/{id}/detail`) and from the seat that is played right now.
+- **复盘** sends `POST /api/game/review {"ids": ["N1", …], "learn_style": {"N3": true}}` (only the seats a person played carry a switch) and gets
+  `{"started": […], "deadline_s": 60}`. The same window then shows **every bot**: *排队中…*, then *⏳ 复盘中 · 还剩 43 秒* with a bar (the seconds of each
+  `review.progress` event, counted down in the page between two events), and when it is done *✔ 已复盘* with what it changed — *改动了 2 个文件：打法、印象* —
+  and *有 2 条对底层设定的修改建议，等你确认* with a button **去看看** that opens the player's details (the section *待确认*; the window goes first). A review that
+  ran into its 60 seconds says *⏱ 时间到，已保存写好的部分*, a failed one *✖ 复盘失败：…*. Closing the window leaves the reviews running: the participant bar and each player's details show them.
+  A refusal (`409`) is shown as a toast and the window stays a question.
+- **暂不** (also the ✕ and Esc) is remembered **per game** in `localStorage["arena_review_dismissed_v1"]` = `{"<session id>": true}` (the last 100 games): the question does not
+  come again for that game, not after a reload either. *Review all* (*复盘全部*) in the participant bar and *Review this player* in the details still work
+  (see [Review](#review)).
+- The question comes when the *live* game ends: while a [replay](#replay) is on screen it waits.
 
 ### Usage and budget
 
@@ -117,24 +168,30 @@ model price later does not rewrite history. Clicking the pill opens the model bi
   hit rate. The pill turns **yellow from 80 %** of a limit and **red at 100 %** (and pulses); the
   dialog updates live.
 
-![The limit dialog at 81 % of the token limit](images/v0121-budget-dialog.png)
+![The limit dialog at 82 % of the token limit](images/v014-budget-dialog.png)
 
 ### Player cards
 
 Every player is a card in the participant bar (wide layout):
 
 ```
-(3)                     [警]    <- round seat number · small badges (sheriff …)
+(3)                     [警]    <- seat bubble over the corner · small badges (sheriff …)
         [ pixel avatar ]💤      <- agent state, on the avatar's lower-right corner
-          Carol                 <- nickname (never the internal id)
-        [ 狼人 ]                <- identity tag
+          Carol ✔               <- nickname (never the internal id) · initialization mark
+        [ 狼人 ]                <- identity tag (none before the deal)
 ```
 
-- **Seat number** in a circle, top-left (the ids of the game are `N1`…`N12`; the UI only shows the
-  seat number and the nickname — default nicknames are Alice, Bob, Carol …).
+- **Seat bubble** (v0.14): the seat is a translucent round bubble with its number, laid over the card's
+  top-left corner — the card is the bot, the bubble is the seat (the ids of the game are `N1`…`N12`; the UI only
+  shows the seat number and the nickname — default nicknames are Alice, Bob, Carol …). It has one set of colours for
+  the light and one for the dark theme and never takes a click (the card behind it does).
 - **The identity is always the main tag.** The sheriff and other highlighted tags are small badges
   (the first character of the tag, e.g. *警*) in the top-right corner and never replace it. When
   the current viewpoint may not see the identity, the tag is a grey **`?`**.
+- **No identity before the deal** (v0.14, H52): the identities are dealt when the game starts. While `session.dealt` is
+  false a card has **no identity tag at all — not an identity, and not even the grey `?`** (whatever the viewpoint, the
+  global one included) — no badges either, and the god view has no summary strip: there is nothing to count. A seat you take
+  over before the start sees no identity either; it is dealt by *Start*. After the start the cards are as they always were.
 - **Pixel avatar**: a 20 × 20 sprite composed from the avatar library (`static/avatar/parts.json`,
   generated by `tools/avatar_lab.py`), drawn with `image-rendering: pixelated`. Without the library
   the page falls back to a flat circle with the seat number.
@@ -167,20 +224,49 @@ Every player is a card in the participant bar (wide layout):
   in a player's viewpoint.
 
 The **header of the participant bar** (*参与者*) holds the bar's own controls. On the left, above the
-cards: **Regenerate all avatars** (*重新生成全部头像*, only before the game starts), the **Roster**
-menu (*名册*, see [Roster, memory and review](#roster-memory-and-review)) and, after the game ended,
-**Review all** (*复盘全部*). On the right: **Sessions** (*会话*: the stored games, see
-[Sessions and recovery](#sessions-and-recovery)), the **model bindings** button (*模型绑定*: it shows the
+cards: **Initialize all** (*⚙ 全局初始化*, with the counts of the states next to it: `✔ 9 · ⚠ 1 · ✖ 1 · ○ 1`), the
+**名册 ▾** menu (what a game loads of the bots' memory, new avatars, clearing what they learned; see
+[Bots](#bots-initialization-editors-memory-and-review)) and, after the game ended,
+**Review all** (*复盘全部*). On the right: **History** (*📜 历史对局*: the stored games - replay, continue; see
+[History of games and replay](#history-of-games-and-replay)), the **model bindings** button (*模型绑定*: it shows the
 moderator's Provider / model, *未绑定模型* when there is none, or *演示模式 · 脚本机器人* in demo mode)
 and **Provider** (see [Provider and model setup](#provider-and-model-setup)). On a phone the
 right-hand buttons live in the **⋯** menu and the left-hand ones in the *玩家* tab.
+
+A card shows the state of the player's **initialization** next to its name: `✔` ready, `⚠` needs a new
+initialization (the L0, the contract, the scenario or its materials changed), `✖` failed, `⏳` running (the
+tooltip counts the seconds left and says which files are written), `○` never initialized. The tooltip of `⚠` / `✖`
+says why. A game of the old format (v5) has no bots and no marks.
+
+#### Moving the cards
+
+While the game has **not started** — and nobody plays a seat, and no [replay](#replay) is on screen — the cards can be moved: the
+seating *is* the line-up of the bots, so a bot's name, avatar, memory, initialization and model binding move with its card (the
+seat numbers stay where they are). The cursor over the cards is a hand.
+
+- **Mouse / pen**: press a card and move it. A movement of more than 6 px starts the drag (a press that does not move opens the
+  card on its click, as before); the card follows the hand, the seat it would take is outlined with a dashed line, and on release the
+  bot takes that seat and the bots in between move up (or down) by one. Released over no card, or on its own seat: nothing happens.
+  **Esc** puts the card back.
+- **Touch**: hold the card for about 0.4 s, then move it; a swipe before that scrolls the page as usual, and the page does not scroll
+  while a card is carried.
+- **Keyboard**: with the focus on a card (**Tab**), **Alt+←** / **Alt+→** moves it one seat; the focus goes with the card, so the keys
+  can be pressed again. At the ends nothing moves, but the browser does not "go back". After the start the keys are not taken.
+- The page shows the new seating **at once** and sends `PUT /api/bots/lineup {"order": [the twelve bot ids in seat order]}`; the answer
+  (the table, as in the `bots.updated` event) is adopted. A refusal (`409 game_active` as the game has started in another tab, `422`) or a
+  failed request **puts the cards back** and says why (*座位没有调整成功，已恢复原来的座位：…*). One move at a time: a second one while the
+  first is on its way says *正在保存上一次的座位调整*.
+- While a card is pressed or carried the cards are **not repainted** (an initialization's progress arrives every second and would replace
+  the card under the finger); they are drawn when it is let go.
+- After the start, while a seat is played and in a replay, the cards cannot be moved: the cursor is a plain pointer and a press opens the card on
+  the mouse-down, as in v0.13.
 
 ### Player details
 
 Click a card (or focus it and press Enter or Space) to open the details: a floating card just below
 the player on desktop and tablet (Esc, the ✕ or a click outside close it), a **bottom drawer** with a
 backdrop on a phone (drag the handle down, tap the backdrop or press Esc to close). The moderator
-chip opens a reduced panel: the moderator's name is fixed and it has no persona, memory or review,
+chip opens a reduced panel: the moderator is not a bot - its name is fixed and it has no L0, memory, initialization or review,
 but it shows its random avatar with its [code](#avatar-code-and-the-dice-panel) (and the 🎲 panel before
 the game starts), its state, its model, its metrics and a **🧠 思考记录** button (the
 [thinking record](#thinking-record) of the moderator).
@@ -189,10 +275,14 @@ the game starts), its state, its model, its metrics and a **🧠 思考记录** 
   backslashes or angle brackets, unique among the players ignoring case; saved with *保存名字* or Enter).
   The page checks a *new* name before it sends it and says what is wrong in the server's own words (*名字不能包含冒号（: 或 ：）。*:
   the name is the label in front of an impression); a name that is already stored with a colon, from an older version, is shown
-  as it is and saving it unchanged does nothing. During a game the name is plain text.
+  as it is and saving it unchanged does nothing. During a game the name is plain text. A **🔒** before the name says that the
+  bot is *frozen*: see [Frozen bots](#frozen-bots-and-the-question-before-a-new-name-or-avatar).
 - **Avatar and its code** — under the avatar: *头像编号* (`f03s05h12c07e04m02a09k03`) and *复制*. Before the
   game starts a **🎲** button opens a small panel: *随机生成* rolls a new avatar, *按编号生成* makes the avatar
   of a code you type. See [Avatar code and the dice panel](#avatar-code-and-the-dice-panel).
+- **Initialization** — a row with the state (`✔ 已初始化`, model, how long it took, when; `⚠ 需重新初始化（底层设定变了）`; `✖ 初始化失败`
+  with the reason; `⏳ 初始化中` with a bar, the seconds left and the files written) and the button **初始化** / **重新初始化** /
+  **重试初始化** (**取消初始化** while it runs). See [Initialization](#initialization).
 - **🧠 思考记录** — opens the [thinking record](#thinking-record) of this player in a window of its own.
 - **View as this player** (*以 Carol 的视角观看*) — switches the spectator viewpoint (not offered
   while you are already viewing that player; disabled, with a tooltip, while a seat is
@@ -202,16 +292,11 @@ the game starts), its state, its model, its metrics and a **🧠 思考记录** 
   cost, and the four token kinds (uncached input, cache read, cache write, output). These are
   statistics only — tool-call details are never shown, and the model's own thinking is in the
   [thinking record](#thinking-record), not here; everything is also in the plaintext trace log in
-  `data/logs/`.
-- **Persona** (*性格设定*) and **memory** (*记忆*) — two expandable editors, empty by default, saved with
-  *保存* in `data/roster/` and loaded into the player's prompt (what you change while a game is running
-  applies from the next game). The persona is a text under a limit with a fixed format; the memory is
-  *what this player thinks of the others* plus a few lessons, one box per other player. Both have **Refine
-  with the moderator model** (*用主持人模型完善*; it needs a few notes in the box and a model bound to the
-  moderator): the model's *draft is shown first* (*尚未保存*) and nothing is saved until you press
-  *采用并保存*; *放弃草稿* throws it away. See [Memory and persona](#memory-and-persona).
+  `data/logs/`. Before the game starts there are no tags (the identities are dealt at the start).
+- **Four editors** (below the metrics, closed at first; each shows a line of what is in it): **底层设定**, **记忆**, **待确认**
+  and **导入 / 导出**. See [The editors](#the-editors).
 - **Review this player** (*复盘此玩家*) after the game ended; the panel then lists what the review
-  changed (*本次改动*, old → new). See [Roster, memory and review](#roster-memory-and-review).
+  changed (*本次改动*, old → new). See [Review](#review).
 
 ### Channels and the feed
 
@@ -220,7 +305,8 @@ the game starts), its state, its model, its metrics and a **🧠 思考记录** 
   (*质询*) and their replies (*质询回复*), system notices (*系统*) and **request cards**. Every
   message carries the sender's avatar (a player's pixel avatar, the moderator's own random one, a
   gear for system notices) and **nickname**. Messages arrive whole — there is no streaming.
-  Truncated messages (over the character limit) end with an ellipsis.
+  A moderator's message or a text answer that was over its limit is cut and ends with an ellipsis; **a player's speech never is** (v0.14, H16: over
+  the limit it is sent back whole, see [The input box](#the-input-box)).
 - A player id in a message — the moderator's text or a player's (`N3`, `N10` …) — keeps its
   characters but gets a dotted underline and a tooltip with the nickname (*N3 Carol*); the text
   itself is not rewritten.
@@ -322,7 +408,7 @@ codes and an error text that the server scrubbed (at most 500 characters).
 
 - **The badge** counts the **unread** lines whose result is *超时* or *失败*; a retry and a cancelled request are no error.
   It reads *99+* beyond that. On a phone the button lives in the **⋯** menu and the badge also sits on **⋯**.
-- **A line** shows the local time and the game time, who (*N3 Carol*, *主持人*, *复盘 · N4 David*, *完善*, *系统*), the
+- **A line** shows the local time and the game time, who (*N3 Carol*, *主持人*, *复盘 · N4 David*, *初始化 · Carol* - a bot's own initialization, by its name: its id is never shown -, *完善*, *系统*), the
   Provider / model, the result (*成功* / *重试* / *超时* / *失败* / *取消*, *运行错误* / *将重试* for a line that is no model
   request), how long that attempt took, the tokens (input including cache / output) and why it ended (the finish reason,
   the HTTP status, the error class, *已取消*). Newest first; the first 300 are drawn, *显示更多* adds more.
@@ -360,10 +446,10 @@ codes and an error text that the server scrubbed (at most 500 characters).
 
 ## Spectating
 
-The viewpoint selector is a pure front-end filter (nothing is requested from the server): choose in
-the drop-down, then press *切换* — the drop-down alone changes nothing (the bar also holds *接管*, see
-[Playing a seat](#playing-a-seat), which locks the viewpoint to the seat you play). In a
-player's viewpoint you only see what that player may see:
+The viewpoint is a pure front-end filter (nothing is requested from the server): click the
+[viewpoint label](#the-viewpoint-label-and-taking-a-seat-over) and choose *全局视角* or *以 X 的视角观看* — a choice applies at once (v0.14: no drop-down,
+no *切换*; the menu also holds *接管 X*, see [Playing a seat](#playing-a-seat), which locks the viewpoint to the seat you play). The choice is
+remembered in this browser. In a player's viewpoint you only see what that player may see:
 
 - messages written while the player was a member of the channel, and request cards addressed to the
   player (shared answers of their group, their own sealed answer);
@@ -386,37 +472,42 @@ is not told afterwards either).
 
 ![Right after taking a seat over, before the game starts](images/v013-takeover-start.png)
 
-### The viewpoint bar and taking a seat over
+*(A v0.13 screenshot: in v0.14 the green bar with its *重新发牌* button is gone, the *重新生成全部头像* button has moved into the *名册 ▾* menu, the identity tags are not
+there before the start, and the viewpoint is one label. See [Identities are dealt when the game starts](#identities-are-dealt-when-the-game-starts).)*
 
-The viewpoint selector is a small bar, `[视角 ▾] [切换] [接管]`. The drop-down only *picks*; nothing
-changes until you press a button:
+### The viewpoint label and taking a seat over
 
-| Control | What it does |
+The viewpoint is **one label** in the first row of the top bar (v0.14, replacing v0.13's `[视角 ▾] [切换] [接管]`): **全局视角**, **Alice视角** or
+**Alice视角（接管）**. It is worked out in the page from the viewpoint you chose and the seat you play (nothing of it is sent to or read from the server). A click opens
+the menu; a choice applies at once and closes it (a click anywhere else, or Esc, closes it too):
+
+| Menu item | What it does |
 |---|---|
-| **Viewpoint** drop-down (*视角*) | picks *上帝视角* or a player — a draft, nothing is applied yet |
-| **Switch** (*切换*) | applies the draft as the spectator [viewpoint](#spectating); disabled while the draft is the viewpoint already shown |
-| **Take over** (*接管*) | plays the picked player's seat, after a confirmation; disabled for the god view |
+| **全局视角** | the god view: everything, and (after the deal) every identity; the current one is marked ✓ and cannot be chosen again |
+| **以 X 的视角观看**, one row per player (*3 · Carol* — twelve rows, in seat order) | applies that player's [viewpoint](#spectating); only looking, nothing is taken over |
+| **接管 X**, the second button of the same row | plays that player's seat, after a confirmation |
+| **退出接管（3 · Carol）** | gives the seat back (only while a seat is played; see [Giving the seat back](#giving-the-seat-back)) |
 
 *接管* is available only when
 
-- a **player** is picked (the moderator cannot be played, the god view has no seat);
+- a **player** is chosen (the moderator cannot be played; the global view has no seat);
 - the game has **not started** or is **paused** — not while it runs and not after it ended (the
-  tooltip says what to do first, e.g. *请先点「暂停」*);
+  tooltip of the button says what to do first, e.g. *请先点「暂停」*, and when no seat can be taken over the menu says it once in a sentence, for a phone);
 - no other seat is played (one seat at a time) and no [replay](#replay) is on screen.
 
 The server checks the same conditions and answers `409` otherwise. The confirmation (*接管 3 · Carol？*)
 says what happens: the seat's agent pauses (no model calls, no tokens), the viewpoint is locked to
 the seat, nobody is told, and speaking times and deadlines stay the moderator's decision; before the
-start it adds that you will see your identity first and may re-deal.
+start it adds that the identity is dealt by *开始* (you will see yours then) and that the seats cannot be moved while you play.
 
 ### While you play
 
-- The bar is replaced by **🎮 正在扮演 3 · Carol**, **⏸ 暂停 agent** and **退出接管** (on a phone it takes
-  the title's place in the first row and is not moved into the **⋯** menu; the soft-pause part wraps
-  into a second line there).
+- The label says **🎮 Carol视角（接管）** (green, locked) and next to it is the **takeover bar**: **正在扮演 3 · Carol**, **⏸ 暂停 agent** and **退出接管**
+  (on a phone the label stays in the first row — it takes the title's place — and the bar is a line of its own under it, without the name the label already says;
+  neither is moved into the **⋯** menu; the soft-pause part wraps into a second line there if it must).
 - The **viewpoint is locked** to the seat: the page shows exactly what that player may see (its own
-  identity, its channels and requests, the others' public tags). The drop-down, *切换* and *View as this
-  player* in the player details are disabled. *Known limit:* the lock is a filter in the page, like
+  identity, its channels and requests, the others' public tags). Every viewpoint of the menu — the global one included — and *View as this
+  player* in the player details are disabled (the reason is the hover text); only *退出接管* works. *Known limit:* the lock is a filter in the page, like
   the whole [viewpoint](#spectating) — the server still sends the god view's data, so the browser's
   developer tools would show everything.
 - The seat's card says **🎮 人类操作中** (for every spectator). No agent exists for it, nothing is
@@ -432,21 +523,16 @@ start it adds that you will see your identity first and may re-deal.
   [history](#history-of-games-and-replay) or import an archive that holds it, the game comes back
   **paused and still played**. Every open browser tab follows: the state is the server's.
 
-### Re-dealing the identities
+### Identities are dealt when the game starts
 
-Taking a seat over *before the game starts* shows you your identity, which spoils the game. A green
-bar under the top bar says so (*你已经知道自己的身份，建议点击「重新发牌」*) with a **Re-deal** button
-(*重新发牌*): it deals every seat's identity anew (names, avatars and the roster stay) — as often as
-you like.
-
-**After the start there is no re-deal, ever.** The bar and the button are gone, and the server answers
-`409` as soon as the game is not fresh any more (its status is not *idle*, or the ledger holds a
-start record). *Start* and *re-deal* run under one lock, so a double click or a second tab cannot
-re-deal a game that has begun.
+v0.13 had a *重新发牌* (re-deal) button for a seat taken over before the start, because taking it showed you your identity. In v0.14 **the identities are
+dealt when the game starts** (H52): before that nothing shows an identity — on any viewpoint, in any answer of the server — so a seat taken over
+before the start spoils nothing, and the green bar, its button and `POST /api/control/shuffle-identities` are gone (the server answers `404`). The page asks for no re-deal and
+`takeover.reshuffle_available` is not read any more (an old server's field is ignored).
 
 ### Giving the seat back
 
-**退出接管** is enabled only while the game does **not run** (before the start, paused or finished);
+**退出接管** (the button of the takeover bar, or the last item of the viewpoint menu) is enabled only while the game does **not run** (before the start, paused or finished);
 while it runs the tooltip says to pause first. A confirmation follows. Afterwards the viewpoint is the
 one you had chosen before, and when the game continues the seat's agent is built again: its
 conversation starts over from the full board and the whole visible history, in which what you said
@@ -462,10 +548,13 @@ Selecting another channel switches to that channel's box, and **every channel ke
 
 - **Enter** sends, **Shift+Enter** breaks the line (confirming an IME candidate never sends); the box
   grows with the text.
-- The counter shows `23/300`: the characters typed and the limit of *one message* **as the server
+- The counter shows `23/300`: the characters typed (live, counted like the server counts them: the trimmed text, in characters) and the limit of *one message* **as the server
   computes it for the seat right now** (the floor's token, the free discussion's or the private
-  chat's limit). A longer text is **not refused**: the engine cuts it, and a toast says how many
-  characters went (*发言超出字数上限，末尾 N 个字被截掉了*; the message ends with an ellipsis in the feed).
+  chat's limit). **A speech over the limit is never cut** (v0.14, H16): over it the counter and the box turn **red**, the line under the box says
+  *这条发言 312 个字，超过了单条上限 300 字：请删减 12 字后再发送*, and the **send button is off** (Enter does not send either, it shows the same sentence).
+  The server checks as well: a text that still arrives too long — the page's count and the server's can differ, or the limit changed meanwhile — is **sent back whole**
+  as the receipt `{"accepted": false, "code": "TOO_LONG", "message", "data": {"chars", "limit"}}`: nothing was sent, nothing was booked, **the floor is
+  still yours**, your **draft stays in the box** and the server's sentence (*…没有发出，发言权还在。请删减后重发。*) is shown under it until you type again.
 - The line under the box says where you stand: *轮到你发言 · 还可发 2 条 · 单条 ≤ 300 字 · 剩余 1:42*
   (a turn), *这次讨论你还可发 6 条* (a free discussion), or why you cannot write.
 - You can **always type**, whatever the state. The **send button** shows the state:
@@ -609,7 +698,7 @@ just type. There is no challenge button either — write to the moderator in you
 
 ![The played seat on a phone](images/v013-takeover-phone.png)
 
-The takeover bar takes the title's place in the first row. The input box sits at the bottom of the
+The viewpoint label (*🎮 Carol视角（接管）*) takes the title's place in the first row and the takeover bar is a line of its own under it. The input box sits at the bottom of the
 *信息流* page above the tab bar, one line high and growing with the text; its placeholder is short (a
 touch screen has no Shift+Enter). When the soft keyboard opens, the page shrinks to what is left and
 the tab bar, the status pills and the mini cards make room for the feed; they come back when the
@@ -630,8 +719,9 @@ keyboard closes.
 
 The actor is always the seat that is played — there is no field to name another one (unknown fields
 are `422`). A refusal by the engine is **not** an HTTP error: the receipt `{"accepted": false, "code",
-"message"}` comes back with status 200, and the receipt of an accepted message says in `truncated`
-how much of it was cut. HTTP errors mean *no seat is played* / *the game does not run* (`409`) or a
+"message"}` comes back with status 200 - a speech over the limit is one of them, `TOO_LONG` with `"data": {"chars", "limit"}`
+(v0.14, H16: it is never cut, so a receipt of a speech carries no `truncated`; the answer to a *text* request still may: *truncated* says how much of it was cut).
+HTTP errors mean *no seat is played* / *the game does not run* (`409`) or a
 malformed body (`422`). All of them are writes: they need a token (`ARENA_API_TOKEN`) or a local client. The
 `takeover` field of the session and the `takeover.updated` event carry the state of the seat — what
 it may write where, the open requests, the usable abilities; see the contract
@@ -641,98 +731,105 @@ it may write where, the open requests, the usable abilities; see the contract
 seat's `floor`) are section 12.2 of the same contract. During a soft pause `/api/seat/*` keeps working; the
 soft-pause and soft-resume endpoints are writes like the others.
 
-## Roster, memory and review
+## Bots: initialization, editors, memory and review
 
-The roster is the list of the 12 seats: nickname, avatar, persona and memory. It lives in the
-data folder (plain files in `data/roster/`, so persona and memory can also be edited
-outside the app), so names and avatars survive a restart. A game takes the roster as it is when it
-is created and the persona / memory texts as they are when it starts.
+A player is a **bot** (v0.14): a name, an avatar, a **底层设定** (the *L0*: *身份*, *说话方式*, *分析方式* and up to three *附加*
+sections — only you change it) and what the bot learns by itself: its own notes (*操作笔记*), the *规则要点* and the *打法* it writes
+about a scenario, its open questions (*待解问题*), an impression of every other player (*印象*) and its record (*战绩*). Bots are plain
+files in the data folder (so they can also be edited outside the app) and travel as `.arenabot` files or inside the archive. A bot's
+internal id (`b-xxxxxxxx`) is never shown; the **seat** is the number of the card, and the identities are dealt when the game starts
+(not before). The default library has twelve bots (Alice … Leo) with an L0 each; `data/` keeps what you made of them.
 
-- **Names and avatars** can be changed before the game starts (player details, or *Regenerate all
-  avatars* in the participant bar). An avatar can be rolled again or made from a
-  [code](#avatar-code-and-the-dice-panel).
-- **The moderator** is not a seat: its name, persona and memory are fixed. It does have a random
+- **The moderator** is not a bot: its name is fixed and it has no L0, no memory, no initialization and no review. It does have a random
   pixel avatar of its own, shown on its chip, on its messages in the feed and in its details panel.
-  The avatar is re-rolled together with the twelve players (*重新生成全部头像*; all thirteen look
-  different) or alone in its own panel (the 🎲 panel) or made from a code — all only before the game
-  starts — and it stays the same for the whole game. The fixed top-hat icon is only a fallback for a server that
-  sent no avatar or a missing sprite library.
-- **Roster menu** (*名册 ▾*):
-  - **Clear all memory** (*清除全部记忆…*) — asks for confirmation (it clears the record, the impressions
-    of the other players, the lessons and any old memory that is waiting to be tidied up), with a check
-    box to clear the personas too (*同时清除性格设定*); it cannot be undone, so export an archive first
-    (the memory is part of it);
+  The avatar is re-rolled alone in its own panel (the 🎲 panel) or made from a code — only before the game
+  starts — and it stays the same for the whole game (*重新生成全部头像* below leaves it alone, and picks the players' avatars so that none looks like it).
+  The fixed top-hat icon is only a fallback for a server that sent no avatar or a missing sprite library.
+- **The 名册 ▾ menu** (participant bar):
   - **Load memory in this game** (*本局加载记忆*) — a switch; off means the players' prompts of
-    this game contain no memory section (the files are untouched). The setting is remembered in the
-    data folder for the next games.
+    this game contain no memory (the files are untouched). The setting is remembered in the data folder.
+  - **Regenerate all avatars** (*🎲 重新生成全部头像*) — one roll for the twelve players, except the frozen ones (the toast says how many
+    kept theirs);
+  - **Clear all learned memory** (*清除全部学到的记忆…*) — asks first (*将清空全部 12 名玩家学到的记忆…，初始化结果一并清空，底层设定保留*);
+    it clears the notes, the rules, the playbook, the questions, the impressions and the records, and every bot becomes *not initialized*.
+    It cannot be undone, so export an archive first;
+  - **Learning use** (*学习用量*) — the calls, tokens and cost of the initializations (they belong to no game; the review is counted in the
+    game it reviewed).
 
-  Clear and the switch are only available before the game starts (press **New** after a
-  finished game). *Regenerate all avatars* is idle-only as well. (The v0.12.1 memory pack — a zip of the
-  persona and memory files — is gone: the personas and memories travel inside the archive of the
-  [settings dialog](#settings-dialog-export-and-import-an-archive).)
-- **Review** is manual: nothing is written to the memory after a game by itself. When the game is
-  **finished**, *Review all* (*复盘全部*, participant bar) or *Review this player* (player details)
-  asks the players to review the game with their own models; the win / loss record (*战绩*) is
-  counted, and the player **revises its impressions of the other players and its lessons** — the
-  file is overwritten, no recap is appended any more. A player is
-  reviewed once per game, and the review's tokens and cost count towards the game's usage. The
-  button shows the progress (*复盘中 3/12…*) and ends as *✓ 已复盘*; the player details show the
-  same, a [list of what changed](#what-a-review-changed) and a *查看写入的记忆* button that opens the
-  memory editor.
+  The switch, *clear* and *regenerate* are only available before the game starts and while no initialization runs.
+- **Mock server**: `POST /api/mock/bots {"preset": "mixed"}` shows all of the states below at once.
 
-### Memory and persona
+### Initialization
 
-What a player remembers is a file with four parts (`data/roster/N<k>.memory.md`; the page edits it as parts,
-you can still edit the file outside the app):
+A bot has to be **initialized** before a game can start: it reads the official contract and the rules with its own L0 and model and
+writes its notes, the key points of the rules and a first playbook — hypotheses, never rules (*用你自己的话写下你的理解、你打算怎么玩、你还不确定什么*).
+Every bot gets at most **120 seconds**; up to four run in parallel; nothing else can start meanwhile.
 
-| Part | What it is | Limit (`limits` of `GET /api/roster`) |
-|---|---|---|
-| **战绩** record | the win / loss record: the engine counts it, the page only shows it | – |
-| **印象** impressions | one line about **each other** player, keyed by seat id (`N5`; the name is only a label, so a renamed player keeps its impression). Style, habits, how far to trust — never "he is a wolf" (the identities are dealt anew every game) | 80 characters each |
-| **经验** lessons | what this player learnt, a few lines | 3 lessons, 300 characters together |
-| **旧记忆（待整理）** old memory | a text written by v0.13.0 that nobody has tidied up yet; the next review turns it into impressions and lessons and deletes it | 600 characters |
+- **⚙ 全局初始化** (participant bar) opens a question with the fixed sentence (*bot 会根据自己的底层设定阅读官方契约和规则，写出操作笔记、规则要点和打法。每个最多 120 秒，期间不能开局。*)
+  and the list of the players it takes: by default those that are `○`, `⚠` or `✖`; **全部重新初始化** also takes the `✔` ones (their
+  files are *revised*, never wiped). With nobody to take the confirm button is off.
+- **初始化** in a player's details does the same for that one player.
+- Available before the game starts and after it ended; **not** while a game runs or is paused (the buttons say why), and not when a
+  player has no model bound (*还不能初始化…*, with a button to the bindings) or no complete L0.
+- While a job runs the button of the bar is **■ 取消初始化 3/12** and the bar shows *初始化中 3/12 · 还剩 80 秒*. Each card is `⏳`
+  with the countdown and the files written in its tooltip; the player's details show the same with a bar. Cancelling keeps what the
+  bots had written before (nothing half-written) — a bot is committed only when all its files are valid.
+- When the job ends **one toast** says how it went (*初始化完成：12 个玩家都写好了自己的笔记 ✔* or *初始化结束：10 个成功，2 个没成功
+  （Carol：…；Dave：…）*: at most three reasons, each in the server's words but without the full stop that ends its sentence, so that the bracket closes cleanly).
+  A `✖` card says why and has **重试初始化**; a timeout says *超过 120 秒，已经停止*.
+- A change of the L0, of the official contract, of the scenario or of its study materials makes a bot `⚠` (its memory stays): the next
+  initialization revises its files.
+- The **start check** of the *开始* button (it refuses to start while a bot is not ready) lists its reasons per player with buttons that
+  call `window.Bots.focus(botId, fix)` — see [Interface for scripts](#interface-for-scripts-1).
 
-The two parts the model writes (impressions and lessons) together may not be longer than **1500 characters** as the
-file holds them (`## 印象` + one `- N5 Eve：…` line per player + `## 经验` + the lessons: the prefixes, bullets and headings
-count). A persona may have at most **500 characters** (`limits.persona_chars`); an older, longer one is shown but cannot be
-saved until it is shortened. Characters are counted the way the server counts them (an emoji is one).
+### Frozen bots and the question before a new name or avatar
 
-**The memory editor** (*记忆*) has
+A bot that is initialized (or has learned anything) is **frozen** (**🔒**): changing its name or its avatar makes it *another bot*
+that remembers nothing. The page therefore asks first — *修改名字或头像会清空这个玩家的初始化结果和全部记忆（操作笔记、规则要点、打法、待解问题、印象、战绩），底层设定保留。修改后需要重新初始化才能开局。是否确认？* —
+and only a *yes* sends `confirm_reset`. The bot then has a **new id** (the seat and its panel stay), is `○`, and keeps its L0. A bot that
+is not frozen changes without a question. (If the server knows better than the page — the bot got frozen in another tab —
+it answers `409 needs_confirm` with the same sentence and the page asks then.) Other bots' impressions of the old name stay in their
+files.
 
-- the record (read-only), then **对其他玩家的印象**: a row per *other* player in seat order — the avatar, *5 号 Eve*, a counter
-  (*12 / 80*) and a box (an impression is one line: Enter does nothing, a pasted line break becomes a space);
-- **我的经验**: a box with one lesson per line (bullet marks and numbering are dropped, empty lines are not lessons) and its
-  counters (*1 / 3 条 · 19 / 300 字*), and the whole file's (*整份 490 / 1500 字*);
-- *保存*, which sends **only the parts that changed** (`PUT /api/roster/{id}` with `memory_parts`; the record is never sent).
-  A text over a limit turns its counter red, says what is too long in the server's own words (*N5 Eve 的印象最多 80 字（现在 81
-  字），请精简。*) and keeps *保存* off; if the server refuses anyway its `detail` is shown and what you typed stays;
-- **让主持人模型帮忙**: write a few notes (free text), *用主持人模型完善* has the moderator's model merge them into the
-  impressions and lessons. The draft comes back **with its structure** and is shown first; *采用并保存* replaces the impressions
-  and the lessons (typed-but-unsaved edits are overwritten, the notes box is emptied), *放弃草稿* throws it away;
-- when there is an old memory, a block **⚠ 旧记忆（待整理）** with the old text and two buttons: *✨ 用主持人模型整理* sends that
-  text through the same refinement (adopting the draft saves the impressions and lessons *and deletes the old text*) and *删除旧记忆*
-  (asks first; only that part is removed). Left alone it is tidied up by the player's next review.
+### The editors
 
-Text typed but not saved is kept per player while the panel stays open (not across a page reload); a review that overwrote the
-memory, and *清除全部记忆*, drop it. A server that does not send `memory_parts` (an older one) shows the text as an old memory.
+Below the metrics of a player's details (closed at first):
 
-**While a request is on its way** (the page cannot know what the server will say, so these rules keep what you did):
+- **底层设定** — a box per required section with its counter (*26 / 300*; the limits are 300 / 600 / 400 and 300 for each extra, from
+  `limits` of `GET /api/bots`), up to three extras (*＋ 添加附加分区*: a title of at most 20 characters and a text), *保存*, *还原*,
+  *导出 .md* / *导入 .md…* (the merged file `<name>.core.md`: a header, then `# 身份`, `# 说话方式`, `# 分析方式`, `# 附加：<标题>`),
+  *清除* (asks first). While you type, the counters, the list of faults and the buttons follow **without a repaint** (the cursor stays); *保存* is
+  off while a section is over its limit or empty (*还缺：分析方式*). If the bot is initialized a question comes first — *将变为需重新初始化，记忆保留。* —
+  and afterwards it is `⚠`.
+  **✨ 用主持人模型完善**: the notes box (or, when it is empty, the L0 as it is) goes to the moderator's model; the **draft is shown first**
+  (*尚未保存，请先看一遍*, with its faults), and nothing is saved until *采用并保存* (off for a draft the server would refuse);
+  *放进编辑框修改* puts it into the boxes to be corrected; *放弃草稿* throws it away. A draft that comes back after the text it was made from changed
+  (a save, a new game) is dropped.
+- **记忆** — the five parts (*操作笔记*, *规则要点*, *打法*, *待解问题*, *印象*) as texts with a counter each (*3 / 20 条* for the playbook, *2 / 30 人*
+  for the impressions), the playbook also as a list (confidence, `+support / −counter`, tags), the record (read-only), *保存* / *还原* / *清除*
+  per part and *清除 X 的全部记忆…*. The playbook is one line per entry (`- [把握:中|支持:3|反例:1|来源:复盘|#警上] 一句话`), the impressions one line per
+  person (`- Bob：…`); a text that gives nothing is refused with the server's words. **Your edits take effect at once** and do not change the
+  initialization state; the same is true of what a review writes — there is no rollback.
+- **待确认** — the proposals of a review for the L0 (for instance the way a person played a seat): the section, why, where from, and the old text
+  against the new one as a line diff. **采纳** writes it into the L0 (the question of an initialized bot first), **拒绝** drops it; one the server cannot
+  apply says why and stays.
+- **导入 / 导出** — **导出 .arenabot** downloads the whole bot (name, avatar, L0, memory, record, proposals); **导入 .arenabot…** replaces this bot by a
+  file (the question names the file and the bot; refused: a name another player has, a file over 20 MiB, a file with faults — they are listed);
+  **从默认库导入** replaces it by one of the library's bots. Importing is only possible before the game starts.
 
-- *Typing after Save.* What is typed **after** *保存* was pressed and before the answer comes is a later edit: when the answer arrives
-  what was sent is the saved text, and what was typed since stays in the boxes as an unsaved change (*保存* is on again, the next
-  save sends only that difference). The same for the persona and for the name. If the cursor is in one of the boxes when the
-  answer comes, nothing is repainted (a repaint would take the cursor away): the counters and *保存* just follow.
-- *A refinement that arrives too late.* *用主持人模型完善* can take a while. If the text it was made from stops being the text meanwhile
-  — you saved, a **review** overwrote the memory, a **new game** began, or the memory was cleared — its answer is dropped: no draft
-  comes back (adopting it would overwrite what came after), and a failure of such an old request says nothing and does not wipe the
-  *完善中…* of a request you started afterwards. A failed *采用并保存* gives the draft back unless one of those happened meanwhile.
-- *Answers that cross.* Every request to the roster is numbered when it is sent. When two answers come in the wrong order, the one
-  of the **later** request wins for what both wrote (a seat; the limits): an older read of the roster that arrives after a save does
-  not turn the saved persona or name back, while what it says about seats nobody wrote since is taken.
+What you typed is kept per bot while the panel stays open, also when a section is closed and opened, or while another player's panel is open;
+a new game, a review that rewrote a memory part and *清除全部记忆* drop it. **While a request is on its way**: what is typed after *保存* was pressed
+stays as an unsaved later edit (the answer saves what was sent); an answer that comes while the cursor is in a box repaints nothing (the repaint comes when
+the cursor leaves it); an older answer does not roll a newer one back; while a bot is being initialized every write is off (*正在初始化这个玩家…*).
 
-**The persona editor** (*性格设定*) shows the fixed format as its placeholder — **【定位】**, **【说话风格】**, **【思考方式】**,
-**【决策偏好】**, **【压力下】**, **【口头禅】** — with a counter (*0 / 500*). Above the limit the counter is red, the hint says
-*超出上限，请精简或用主持人模型整理* and *保存* is off; a refined draft is in the same format and is also refused above the limit.
+### Review
+
+Review is manual: when the game is **finished** the end-of-game question (*这局结束了，是否让 bot 复盘？*) asks, or *Review all* (*复盘全部*,
+participant bar) / *Review this player* (player details) does it later. Each bot reviews **in parallel, for at most 60 seconds** with its own
+model: it reads the record, the true identities and the result, and revises its memory (impressions, playbook, questions, notes); a
+person's way of speaking can only be *proposed* for the L0 (see 待确认). The record (*战绩*) is counted. A bot is reviewed once per game; the tokens
+count towards that game. The bar shows *复盘中 3/12…*, the details *⏳ 复盘中…（还剩 41 秒）* and then *✓ 已复盘* — also for a review that ran into its 60
+seconds (it keeps what it had written). A game of the old format cannot be reviewed (the buttons say so).
 
 ### Avatar code and the dice panel
 
@@ -743,12 +840,12 @@ time, also after the game started. Copying uses the clipboard (*头像编号已�
 
 Before the game starts the **🎲** button opens a small panel:
 
-- **🎲 随机生成** — the usual roll: at least 3 parts different from every other avatar.
+- **🎲 随机生成** — the usual roll (`POST /api/bots/{id}/avatar:regenerate`): at least 3 parts different from every other avatar.
 - **按编号生成** — type a code (not case-sensitive; spaces, `-`, `_`, `:` and full-width characters are fine, in any order of
   segments) and press the button or Enter. While you type the panel says *编号有效。* or what is wrong: a missing segment (*缺少「配饰颜色」
   一段（以 k 开头，如 k03）*), a field twice, a part the sprite library does not have, a character that cannot be part of a code. The page
-  sends the decoded description with `PUT /api/roster/{id}` (`PUT /api/roster/moderator` for the moderator) — there is no extra endpoint —
-  and shows the server's refusal in the panel if it has one.
+  sends the decoded description with `PUT /api/bots/{id}` (`PUT /api/moderator` for the moderator) — there is no extra endpoint —
+  and shows the server's refusal in the panel if it has one. A frozen bot asks first (see above).
 - A code that gives the same look as another player's (the moderator included) is **allowed**: the panel says *和 5 号 Eve 的头像完全
   相同：可以生成，但看起来会是同款*, and after it was made the toast says so too.
 
@@ -757,56 +854,88 @@ Once the game has started the 🎲 and its panel are gone. The encoder and decod
 
 ### What a review changed
 
-When a review ends, its `review.progress` event (`state: done`) carries `changes`: the impressions that differ from before and the
-lessons if they do. The player's details then show **本次改动：2 条印象，经验已更新（旧 → 新）** and a list — for each seat *5 号
-Eve*, *旧* and *新* (*（暂无）* for an empty one, *（已清空）* for one the review cleared) and *我的经验*. The list folds; *本次复盘没有改动印
-象和经验（战绩已计入）。* says so when nothing changed. The list only exists for a review that ran while the page was open (the
-memory itself is saved either way: *查看写入的记忆* opens it).
+When a review ends (or runs into its 60 seconds), its `review.progress` event carries `changes`: `{"files": [{"file", "before", "after"}…], "proposals": n}` —
+the memory files that differ from before and the number of proposals for the L0 that now wait. The player's details then show **本次改动：印象、打法；2 条底层设定提案待确认（旧 → 新）**
+and a list — for each file its name and a line diff, *旧* lines in red with `−`, *新* lines in green with `+` — and a button *去看提案* that
+opens the section *待确认*. The list folds; *本次复盘没有改动记忆（战绩已计入）。* says so when nothing changed. The list only exists for a review that
+ran while the page was open (the memory itself is saved either way).
 
 ### Interface for scripts
 
+**In the page**: `window.Bots.focus(botId, fix)` takes the user to the place that fixes a problem of the start check (`fix` of a `Problem` item):
+`edit_core` / `import_core` open the player's details at the L0 editor (the first empty box / the *导入 .md…* button), `init` at the initialization row,
+`bind_model` the model bindings of that seat, `import_contract` / `import_rules` the settings dialog at that column (`botId` is ignored then). It returns
+`false` for a bot that is not at the table and for an unknown `fix`. `Bots.initAll()`, `Bots.initOne(botId)`, `Bots.review(ids, {learn_style})` and
+`Bots.open(seat)` do what their buttons do.
+
+**Over HTTP**:
+
 | Endpoint | Body / query | Answers |
 |---|---|---|
-| `GET /api/roster` | – | the seats with `memory` (the whole file as text) and `memory_parts` (`record`, `impressions` of the others, `experience`, `legacy`), and `limits` |
-| `PUT /api/roster/{id}` | `name`, `avatar`, `persona`, `memory_parts` (`impressions`, `experience`, `legacy`; only what is sent changes), or `memory` (free text: it becomes the old memory) | the seat; `400` a limit is exceeded (the message names the part), `422` `memory` together with `memory_parts` / an impression of oneself or of an unknown seat |
-| `PUT /api/roster/moderator` | `avatar` | the moderator |
-| `POST /api/roster/{id}/refine` | `{"kind": "persona" \| "memory", "text"}` | `{"draft"}`; for the memory also `memory_parts` (the impressions of all others and the lessons) |
+| `GET /api/bots` | – | `BotsPayload`: `lineup`, `bots` (a `BotSummary` each: name, avatar, `core` counts, `init`, `frozen`, `memory_stats`, `staging`, `binding`), `memory_enabled`, `init_job`, `ready` (the start check), `learning_usage`, and `limits`, `defaults` (the library) |
+| `PUT /api/bots/lineup` | `{"order": [bot id × 12]}` | `BotsPayload`; the seating of an idle game ([moving the cards](#moving-the-cards)): a permutation of the twelve bots, else `422 bad_lineup`; `409 game_active` once the game has started |
+| `POST /api/control/start` | – | the session; `409 {"detail", "code": "NOT_READY", "problems": [Problem…]}` when the [start check](#the-start-check) fails — nothing is dealt |
+| `GET /api/bots/{id}` | `?scenario=` | `BotDetail`: the summary + `core` (`markdown`, `sections`, `extras`), `memory` (`arch_notes`, `digest`, `playbook`, `questions`, `people`, `record`) and `staging` |
+| `PUT /api/bots/{id}` | `name`, `avatar`, `confirm_reset` | `BotDetail` (a new `id` after a reset); `409 needs_confirm` for a frozen bot, `400 name_taken`, `409 game_active` / `init_busy` |
+| `PUT /api/bots/{id}/core` · `DELETE` · `POST .../core:refine` | `{"markdown"}` · – · `{"text"}` | `BotDetail` · `BotDetail` · `{"draft", "problems"?}`; `400` with `problems` |
+| `PUT /api/bots/{id}/memory/{part}` · `DELETE .../memory?part=` | `{"content", "scenario_id"?}` | `BotDetail`; `400` with `problems` |
+| `POST .../staging/{id}:accept` · `:reject` | – | `BotDetail` |
+| `GET .../export` · `POST .../import?name=` · `POST .../import-default` | the file as the body · `{"name"}` | a `.arenabot` · `BotDetail` |
+| `POST /api/bots/init` · `init:cancel` | `{"ids"?, "rebuild"?}` | `202 {"job_id", "ids", "deadline_s"}`; `409 game_active` / `init_busy` / `no_binding` (with `problems`) |
+| `POST /api/bots/memory:clear` · `avatars:regenerate` · `PUT /api/bots/memory-enabled` | `{"ids"?}` · – · `{"enabled"}` | `BotsPayload` · `{"bots", "skipped"}` |
+| `PUT /api/moderator` · `POST /api/moderator/avatar:regenerate` | `{"avatar"}` | the moderator |
+| `POST /api/game/review` | `{"ids"?, "learn_style"?: {"N3": true}}` | `{"started", "deadline_s": 60}`; the [question at the end of a game](#the-question-at-the-end-of-a-game) sends the seats a person played in `learn_style` |
+| SSE `bots.updated` · `bot.init.progress` · `review.progress` | – | the live `BotsPayload` · one bot's initialization (`state`, `seconds_left`, `files_written`, `error`) · one seat's review (`state`, `seconds_left`, `changes`) |
 | `GET /api/llm/calls` | `after`, `limit` (1–2000), `errors_only` | `{"calls", "last_id", "total", "errors", "retries"}`; the SSE event `llm.call` is `{"call", "errors"}` |
 | `GET /api/agents/{id}/thoughts` | `before` (a cursor), `limit` (1–200) | `{"agent_id", "name", "items", "next_before", "has_more"}`; `409` while another seat is played |
 
-The fields, the limits and the refusals are section 12.3 – 12.6 of the contract ([`docs/v0.12-contracts.md`](v0.12-contracts.md)).
+The fields, the limits and the refusals are section 12.3 – 12.6 and 13.7 of the contract ([`docs/v0.12-contracts.md`](v0.12-contracts.md)).
 
-## Settings dialog: export and import an archive
+## Settings dialog: archive, L0s, contract, rules, games
 
-**⚙ Settings** (*设置*, first row of the top bar; in the **⋯** menu on a phone) has exactly two things. Both
-work on **one file**, an archive (`.arenaagents`), that holds everything: the games, the roster with the
-personas and memories, the Providers (without their keys), the settings, the price table and — if you
-want — the thinking logs and the API keys. Use it as a backup or to move to another computer. The format
-and its checks are described in [archive.md](archive.md).
+**⚙ Settings** (*设置*, first row of the top bar; in the **⋯** menu on a phone) is one dialog with **five collapsible
+columns** (v0.14, H35): **① 总存档**, **② 底层设定**, **③ 官方契约**, **④ 规则**, **⑤ 对局管理**. Click a column's head to open or
+close it; ① is open the first time, and which columns are open is kept in `localStorage["arena_settings_open_v1"]` (the browser, not the
+archive). The line next to a head says what is in it (*11/12 完整*, *默认 · v0.14.0*, *1 个剧本 · 2 份材料*, *3 局*). The dialog reads what the
+columns show every time it is opened. The start check of *开始* jumps into it: `Bots.focus(_, "import_contract")` opens column ③,
+`"import_rules"` column ④ (see [Interface for scripts](#interface-for-scripts-1)).
+
+Every **file** the columns save or send — the L0 as `.md`, the contract, a scenario, a study material, a game as `.arenagame`, a bot as `.arenabot` — comes
+through the API client: the GET carries the access token as a **header** (a link cannot send one), and the page saves the bytes under the name the
+server gives (`Content-Disposition`). Only the archive's own download (column ①) still uses a link with `?token=`.
+
+### ① 总存档 — export and import an archive
+
+Column ① holds the two wizards. Both
+work on **one file**, an archive (`.arenaagents`), that holds everything in the data folder: the settings, the Providers (without their keys), the
+price table, the official contract, the rules (scenarios and study materials), the bots (with their memory and pending proposals), the games **and all
+their logs** (v0.14: the logs are always in — there is no longer a question about them) and — if you
+want — the API keys. Use it as a backup or to move to another computer. The format
+and its checks are described in [archive.md](archive.md). A v0.13 archive (format 1) is still read: its roster of seats becomes bots on import
+(the summary says so).
 
 While a game runs, **import** is disabled (*对局正在运行：请先点击「暂停」，再导入存档*); export is
 always possible (the running game is saved first). Only one export or import runs at a time.
 
-### Export (*导出存档*)
+#### Export (*导出存档*)
 
-1. **API Key?** — *导出 Key（需要密码）* or *不导出 Key*. Without keys nothing secret is in the file; the
+1. **API Key?** (1/2) — *导出 Key（需要密码）* or *不导出 Key*. Without keys nothing secret is in the file and the export starts at once; the
    Providers come back without a key and you enter it again.
-2. **Password** (only with keys) — typed twice. The three rules are shown live with ✓ / ✗ and the next
-   button stays disabled until they hold: **at least 12 characters, at least three of upper case /
+2. **Password** (2/2, only with keys) — typed twice. The three rules are shown live with ✓ / ✗ and *开始导出*
+   stays disabled until they hold: **at least 12 characters, at least three of upper case /
    lower case / digit / symbol, both entries equal**. The password encrypts the keys (AES-256-GCM, key
    derived with scrypt); it is not stored anywhere — forget it and the keys of that archive are lost
    (the rest of the archive can still be imported by skipping the keys).
-3. **Thinking logs** — a check box, on by default. The logs show what each agent thought and did and can
-   be large; the games themselves do not depend on them.
-4. **Progress** — a bar with the phase (*正在保存当前对局…* → *正在收集文件…* → *正在加密 API Key…* →
+3. **Progress** — a bar with the phase (*正在保存当前对局…* → *正在收集文件…* → *正在加密 API Key…* →
    *正在打包…* → *正在写入文件…*). It runs on the server: closing the dialog does not stop it, and the
    result opens by itself when it is done.
-5. **Result** — the path of the file (`data/exports/arena-<date>-<time>.arenaagents`; a browser on another
-   machine than the server only sees `data/exports/…`), its size, what is inside, any warnings (a damaged
-   game that was left out, for example) and a **Download** button (*下载*) that saves the file through
-   the browser.
+4. **Result** — where the file is (`data/exports/arena-<date>-<time>.arenaagents`; a browser on another
+   machine than the server only sees `data/exports/…`), the **name it is saved under** when you download it
+   (*下载时的文件名*: `arena-agents-<date>-<time>.arenaagents`, H42), its size, what is inside (games, bots, Providers, the contract,
+   the scenarios, keys, logs), any warnings (a damaged game that was left out, for example) and a **Download** button (*下载*) that saves the
+   file through the browser.
 
-### Import (*导入存档*)
+#### Import (*导入存档*)
 
 1. **Choose the file** — *选择文件…* opens the file picker. The browser sends the file to the server
    (the bar shows the upload; the server writes it to `data/tmp/`, it is never read into memory). The
@@ -814,9 +943,9 @@ always possible (the running game is saved first). Only one export or import run
 2. **Check** — the server verifies the whole file: that it is an archive of this program, that its
    format is not newer than this program understands (*请先把 Arena-Agents 升级到较新的版本再导入*),
    that nothing is missing or added, every file's SHA-256, safe paths and sizes, and that every game is
-   a valid v0.13 game. A file that fails says why and nothing is changed.
-3. **Summary** — file, creation time, app version, how many games, Providers (with their names) and
-   roster seats, whether keys and logs are inside.
+   a valid game of the current save format. A file that fails says why and nothing is changed.
+3. **Summary** — file, creation time, app version, how many games, Providers (with their names), bots, the contract and the
+   scenarios (a v0.13 archive: the roster of seats, *导入时迁移成 bot*), whether keys and logs are inside.
 4. **Keys** — if the archive holds keys: type its password, or press **跳过 API Key并导入** (skip the
    keys). A wrong password is reported at once (*密码错误或 API Key 部分已损坏* — it also appears when the
    key part was changed) and you can try again; nothing has been replaced yet. If the password is right
@@ -836,9 +965,50 @@ offered again (*继续导入* / *丢弃*) if you reload the page; it expires aft
 
 There is no button to restore a backup: the steps are in [archive.md](archive.md#53-手动恢复).
 
+### ② 底层设定 — the L0 of every bot
+
+One row per bot: its avatar, name, seat, the mark of its initialization, whether its L0 is complete (*完整* / *缺少：身份、说话方式、分析方式*), the
+characters of each section and extras, and when it was last changed. **全部清除…** clears every L0 (it asks; the fixed sentence: *清除后需要重新生成，否则无法开始对局；已有的初始化会变为需重新初始化。*;
+names, avatars and memory stay). A row opens to a **preview** of the merged file and the buttons *导出 .md*, *导入 .md…* (a file is read and checked, the
+question names it, then the L0 is replaced — a file that is no L0 lists its faults in the row), *✨ 生成 / 完善…* (closes the dialog and opens the player's
+details at the L0 editor, where the notes box and the draft that is read first are) and *清除* (this bot only). While a bot is being initialized its
+import and clear are off.
+
+### ③ 官方契约 — the contract the bots read
+
+*来源* (default, or the file you imported and when), *版本*, characters (and the must-read part against its limit of 1200), the first digits of its SHA-256,
+and either *契约检查通过…* or the **faults** the server found (the tools and receipt codes the text does not mention, a must-read part that is too long) — it
+also lists them for a contract that was edited by hand in the data folder. *预览* shows the text; *导出* saves it; *导入…* replaces it after a question
+(*所有 bot 将变为需重新初始化。*) — a file with faults is refused, its faults are listed and the old contract stays; *恢复默认* is available only for an
+imported contract (it asks the same). Every bot that was initialized becomes `⚠` (the contract changed).
+
+### ④ 规则 — scenarios and their study materials
+
+One block per scenario: title, id, version, default or imported (when), characters, hash, a *problem* line when the loader cannot read it, and
+*导出* / *导入…* / *恢复默认* (a file with another `id` than the scenario is refused; the default can be restored only for a scenario that has one; the
+sentence *所有 bot 将变为需重新初始化。* is in every question). Under it its **study materials** (*学习材料*): title, slug, characters, hash, *导出* and *删除*, and
+*＋ 添加学习材料…*: choose a file, then the dialog asks for a **slug** (lower case letters, digits and hyphens, at most 32 — made from the file name when it can be) and an
+optional title (else the file's first heading). At most 20 per scenario and 100 KB each. Any change makes every bot `⚠`.
+
+### ⑤ 对局管理 — the games
+
+One row per game, the current one first: title, *当前*, 🎮 (a person played a seat), when, status and winner, game time, cost, **复盘 x/12** (the review of that
+game; *—* for a game that is not over or of the old format), the size of the game and of its logs. A row opens to the **players** (seat, name, and identity and
+faction once the game is over, whether the bot reviewed it), the files (the save, the previous save point, the logs) and the stretches a person played.
+
+- **删除** asks with the fixed sentence (*删除这局的存档和日志。bot 已经通过复盘形成的记忆不会被删除，也无法通过删除对局撤销。*) and the game's name. The **current game** can be deleted
+  unless it runs (*进行中的对局不能删除，请先暂停。*): the server then makes an empty new game and the page follows it; if a file cannot be removed for the moment
+  (`409 in_use`) the server's words are shown and the game stays - for the current game the empty new game exists all the same and the page follows it. An unreadable save (an old format, damaged) stays in the list, can be deleted and cannot be exported.
+- **导出** saves the game as `game-<id>-<date>.arenagame` — not for the current game while it runs or a seat is played (the file holds every identity: *对局进行中或正在接管一个座位…*).
+- **导入对局…** reads an `.arenagame` (a game of save format 5 or 6; at most 2 GiB). A **new** id is simply added. An id that exists already - the current game's too - asks:
+  **作为副本导入**（default: both are kept), **覆盖已有的那一局**, or cancel; the current game cannot be overwritten (*这是当前对局，不能被覆盖*). A file that is none,
+  another import or archive job that is running, and a file that is too big are refused in the server's words. When the id is the current game's, the question says so
+  and the overwrite option is shown off (the server would refuse it with *409 current* anyway, and does if the game became the current one in the meantime).
+- **历史对局…** closes this dialog and opens the [history dialog](#history-of-games-and-replay) (replay / continue); that dialog has **对局管理…** to come back here.
+
 ### Coming from v0.12.1
 
-v0.13 has no workspace folder and never reads the old one. When `data/` is empty and the old default
+Since v0.13 there is no workspace folder and the old one is never read. When `data/` is empty and the old default
 folder exists, the **old data found** bar appears under the top bar. *查看说明* shows the command to run in the
 program folder (as the Windows user who owns the old workspace):
 
@@ -846,7 +1016,8 @@ program folder (as the Windows user who owns the old workspace):
 python tools/migrate_v0121_to_archive.py                  # add --include-keys to take the API keys along (asks for a password)
 ```
 
-then open **⚙ Settings → Import** and choose the `.arenaagents` file it wrote. *忽略* hides the bar for good.
+then open **⚙ Settings → ① 总存档 → Import** and choose the `.arenaagents` file it wrote - a v0.13 archive (format 1): the import turns its roster of
+seats into bots (the personality becomes the L0, the memory is tidied into impressions; the summary says so) and the bots start as *not initialized*. *忽略* hides the bar for good.
 The script only reads the old folder; games of v0.12.0 and earlier are skipped and listed in its report.
 
 ## Provider and model setup
@@ -930,13 +1101,13 @@ seat (*有人类参与*). The game on screen is marked *当前*.
 |---|---|---|
 | **▶ Replay** (*重放*) | plays the game back on its game clock (see below) | any saved game; the *current* game only while it is not running and nobody plays a seat (a replay shows everything, which would spoil it for the person at the table) |
 | **Continue** (*继续*) | makes the game the live one — it comes back **paused**, like after a restart; the game on screen is saved first | unfinished games only; never while a game runs or a replay is shown |
-| **Delete** (*删除*) | removes the game and its logs after a confirmation | every game except the current one |
+| **Delete** (*删除*) | removes the game and its logs after a confirmation | every game except the current one (the current game is deleted in [⑤ 对局管理](#-对局管理--the-games) of the settings: an empty new game takes its place) |
 
-The delete confirmation says *删除对局不会影响当前 agent 的记忆*, and that is literally true: a player's
-persona and memory belong to the **roster** (`roster/N1.memory.md` …), not to a game, so deleting a game
-never touches them. A game whose file cannot be read stays in the list as *无法读取* and can still be
+The delete confirmation says *bot 已经通过复盘形成的记忆不会被删除，也无法通过删除对局撤销*, and that is literally true: a player's
+L0 and memory belong to the **bot** (`bots/<id>/…`), not to a game, so deleting a game never touches them. A game whose file cannot be read stays in the list as *无法读取* and can still be
 deleted. The buttons re-check their condition when they are clicked, so a game that was started while the
-list was open cannot be replaced by accident.
+list was open cannot be replaced by accident. The dialog's footer has **对局管理…**, which closes it and opens the games column of the settings
+(delete, export and import games); that column has **历史对局…** to come back.
 
 ### Replay
 
@@ -963,7 +1134,7 @@ line reads *重放中 · 0:41 / 2:30*), but the **viewpoint can still be switche
 single player's point of view. A replay only starts from the history list; the server refuses to replay the
 live game while it runs or while a seat is played (409).
 
-## Sessions and recovery
+## Loading, restoring and reconnecting
 
 - Loading a game (**Continue**) never starts it: a game that was in progress comes back paused (a
   finished game stays finished, a fresh one stays fresh). Review model bindings, then click
@@ -973,9 +1144,9 @@ live game while it runs or while a seat is played (409).
   be restored (corrupt file), the files are kept untouched, you get a blank game,
   the notice bar says why, and nothing is saved automatically until you start, create or continue a
   game.
-- **Games written by v0.12.1 or earlier cannot be opened directly** (the save format is now v5). Convert
-  them with `tools/migrate_v0121_to_archive.py` and import the resulting `.arenaagents` file in the
-  settings. A game of an older format that is found in the data folder stays where it is, untouched.
+- **Games written by v0.12.1 or earlier cannot be opened directly** (the save format is now v6; a game of format 5, v0.13's, still loads and replays, but has no
+  bots and cannot be reviewed). Convert the old ones with `tools/migrate_v0121_to_archive.py` and import the resulting `.arenaagents` file in the
+  settings. A game of an older format that is found in the data folder stays where it is, untouched, and shows as *无法读取* in the history.
 - If the API is protected with `ARENA_API_TOKEN`, a token dialog appears only after a 401. The
   token is stored in browser localStorage.
 - The event stream is resumable: after a dropped connection the page reconnects (the bar at the top
@@ -988,15 +1159,18 @@ live game while it runs or while a seat is played (409).
 2. Add a Provider and its models (use **Refresh price table** and **Fetch
    models** to fill the prices).
 3. Create or apply model bindings for the moderator **and** the players.
-4. Optional: rename the players, re-roll avatars or make them from a code, write personas and what each
-   player thinks of the others (**Refine** helps), decide whether this game loads memory, and set a
-   token / cost limit with **Limit**.
-5. Click **Start**; the moderator opens the game by following the scenario's manual.
+4. **Initialize the players** (**⚙ 全局初始化**: each bot reads the contract and the rules and writes its notes; a few
+   minutes at most). Optional: rename the players (before they are initialized, or confirm the reset), re-roll avatars or
+   make them from a code, edit a player's **底层设定** (**Refine** helps) and what it remembers, decide whether this game loads
+   memory, and set a token / cost limit with **Limit**.
+5. Click **Start**; the start check says what is missing (a bot that is not ready, a missing model), the moderator
+   opens the game by following the scenario's manual and the identities are dealt.
 6. Use **Pause** at any time; do not change the model bindings while running. If something goes wrong with a
    model (a timeout, a rate limit), the **📋 日志** badge counts it and the log says which call and why.
 7. After the verdict you can **Resume** (continue after the end) or **Review all**, which counts the
-   record and lets every player update its impressions of the others (the player's details list what changed).
-8. Rely on autosave (there is no save button); use the history to load an earlier game, and **⚙ Settings → Export** for a backup.
+   record and lets every player revise its memory (the player's details list what changed; a person's way of
+   speaking is proposed for the L0 and waits for your *采纳*).
+8. Rely on autosave (there is no save button); use the history to load an earlier game, and **⚙ Settings → ① 总存档 → Export** for a backup.
 9. What the agents thought is in each player's **🧠 思考记录**; thoughts, tool calls and receipts are also in
    `data/logs/<session>/trace-*.jsonl`.
 
@@ -1004,10 +1178,14 @@ live game while it runs or while a seat is played (409).
 
 The front end is plain JavaScript without a build step: `static/index.html`, `static/css/style.css`
 and `static/js/` (`core` · `avatar` · `platform` · `store` · `view` · `layout` · `providers` ·
-`roster` · `budget` · `archive` · `marks` · `thoughts` · `calllog` · `takeover` · `composer` · `app`). `core`, `store` and `view` are pure and have no DOM
+`botlib` · `botedit` · `bots` · `budget` · `archive` · `history` · `settings` · `replay` · `marks` · `thoughts` · `calllog` · `takeover` · `composer` · `endreview` · `app`; v0.14 replaced
+`roster.js` by the three bot files and added `settings.js`, which draws the five columns of the settings dialog around the archive wizards of `archive.js`, and
+`endreview.js`, the question at the end of a game; `layout.js` also holds the seat drag, `createSeatDrag`: it only works out *what* moved, `app.js` saves it).
+`core`, `store`, `view` and `botlib` are pure and have no DOM
 access; `avatar` and `platform` only reach the browser through an optional `<canvas>` (PNG
-encoding) and the `window` / `<html>` they are given, so all five run under node in the tests. All v0.13.1
-styles (soft pause, *held*, colour marks, thinking record, error log, avatar code and memory / persona editors)
+encoding) and the `window` / `<html>` they are given, so all five run under node in the tests. The styles of each
+version (soft pause, *held*, colour marks, thinking record, error log, avatar code; v0.14: the bots and their editors, the five columns of the settings, the
+cards, the start check, the end-of-game window)
 are appended to `static/css/style.css` in their original cascade order; there are no temporary per-feature
 stylesheets. `thoughts` and `calllog` each draw one window of the page and export their pure
 helpers too (`blockedReason`, `buildRows`, `rebaseMark` …), which the tests use.
@@ -1023,7 +1201,8 @@ To try the **real** server and UI with scripted bots without touching your own d
 `tools/mock_ui_server.py` serves the real `static/` directory and a scripted 12-player game (about
 a minute at speed 1: N1…N12 with the nicknames Alice …, the wolves' shared kill with a changed
 answer, a sealed vote, challenge tickets, the white wolf king's explosion, a token budget that warns
-at 80 % and pauses at 100 %, the end, the review) behind the v0.12.1 API shapes. Press **开始** in
+at 80 % and pauses at 100 %, the end, the review) behind the API shapes of
+[contract §13](v0.12-contracts.md) (v0.14). Press **开始** in
 the page (or `POST /api/control/start`) to play the script; **暂停** / **继续** stop and continue it,
 and after the end **继续** replays a short epilogue:
 
@@ -1032,8 +1211,18 @@ and after the end **继续** replays a short epilogue:
   --host 127.0.0.1   bind address                 --speed 2       replay speed multiplier
   --seed 7           another random run           --demo          show the 演示模式 badge
   --budget-tokens N  demo limit with force stop (default 150000, 0 = none)
+  --bots ready       the state of the twelve bots: ready (every one ✔, the way the default library comes) /
+                     fresh (L0 only, nobody initialized) / mixed (✔ ⚠ ✖, a bot without an L0 …) / empty (no L0 at all)
   --selfcheck        replay offline and validate every event against the contract
 ```
+
+The mock is three files: `tools/mock_ui_server.py` (the page, the scripted game, the event validators),
+`tools/mock_ui_bots.py` (the model of the bot store, the contract and the rules: the merged L0 file, the
+playbook / impressions formats, the freezing rules, the proposals, `.arenabot`; pure Python, in memory, with the limits and the Chinese
+refusals of `app/storage/botfiles.py`) and `tools/mock_ui_hub.py` (what ties the bots to the game: `BotsPayload`, the start check,
+the status label, the initialization jobs and the reviews, the games of *对局管理*, and the HTTP routes). The tests of these parts are
+`tests/frontend/test_mock_bots.py` and `test_mock_files.py`; the fake backend of the node tests (`tests/frontend/bots_fake.js`, used by
+`harness.js`) mirrors them.
 
 Helper endpoints for driving it from a script or a browser tool:
 
@@ -1050,7 +1239,10 @@ Helper endpoints for driving it from a script or a browser tool:
 | `POST /api/mock/archive {"legacy", "max_bytes", "tick"}` | show / hide the *old data found* bar (`--legacy` does it at start-up), change the upload limit, change the time between two progress events of an export / import |
 | `POST /api/mock/llm-fail {"actor_id", "status", "retries", "http_status", "error_class", "message", "give_up", "purpose"}` | inject ONE failed model request into the [error log](#error-log): `retries` lines (`retry`), then the request ends as `error` / `timeout` / `cancelled`; with `give_up` (the default) the agent gives its action up too (a runtime line and the *重试用尽* toast). Everything is optional: `{}` is a rate-limited call of N3 that fails after 2 retries |
 | `POST /api/mock/llm-rebuild {"drop_every", "jitter_ms"}` | rebuild the error log the way the real backend does after a restart, a load or an import: numbered **from 1 again**, every 4th successful turn gone, the failed lines 3 ms off, nothing announced. To see the page keep what you read: press *全部标为已读* (the badge goes), call this, reload the page, then `llm-fail` — the new error has a low id and the badge shows it |
-| `POST /api/mock/legacy-memory {"id", "text"}` | put a v0.13.0-style memory text into a seat (default N3): it shows as *⚠ 旧记忆（待整理）* in the [memory editor](#memory-and-persona) |
+| `POST /api/mock/bots {"preset", "memory_enabled"}` | put the twelve bots into a state - `preset` is `ready` / `fresh` / `mixed` / `empty` (see `--bots`); new bots, new ids. Only before the game starts (`409 game_active`) |
+| `POST /api/mock/files {"contract", "scenario"}` | break the official contract / the scenario for the **start check**: `ok` / `missing` / `invalid` each (the answer lists the `problems`) |
+| `POST /api/mock/games {"locked": [ids], "importing": bool}` | the games of ⑤ 对局管理: the files of these games are *in use* (`DELETE` answers `409 in_use`); another game import is running (`POST /api/games/import` answers `409 busy`) |
+| `POST /api/mock/learning {"init", "review", "sim_rate", "refine"}` | how the next initializations and reviews go: `init` = `{"<bot id, seat or name>": "failed" \| "timeout" \| "slow" \| "invalid"}`, `review` = `{"N3": "error" \| "timeout" \| "slow"}`, `sim_rate` = simulated seconds per tick (a tick is a second at speed 1; the default 12 plays an initialization of a minute in 5 s), `refine` = why *用主持人模型完善* cannot work (`unbound` / `model` / `format` / `null`) |
 | `GET /api/mock/info` | speed, latest event id, game clock, budget … |
 | `GET /api/mock/frame?w=390&h=844&q=platform%3Dphone%26input%3Dtouch` | the page inside an iframe of exactly `w × h` CSS pixels (own viewport), for layout checks at any size on a desktop browser |
 
@@ -1058,27 +1250,46 @@ Helper endpoints for driving it from a script or a browser tool:
 
 The scripted game writes the **error log** as it goes (one line per model call, now and then a retried rate limit; `GET
 /api/llm/calls` and the `llm.call` event, a ring of the last 2000 lines) and the **thinking record** of every agent (`GET
-/api/agents/{id}/thoughts`, paged from the newest, `409` while another seat is played). The roster has the new limits,
-`memory_parts` and the `PUT` / `refine` rules of the real server, and a finished review revises the impressions and sends
-`changes`. The text a refinement writes is a simple imitation, not a model.
+/api/agents/{id}/thoughts`, paged from the newest, `409` while another seat is played).
+
+**The bots** (v0.14) are the twelve players: `GET /api/bots` (`BotsPayload` with `limits` and the `defaults` library),
+`/api/bots/{id}` (`BotDetail`), the L0 as a merged file (`core`, `core:refine`), the memory parts, the proposals of a review, `.arenabot`
+export / import, the line-up, names and avatars (idle only; a bot that has learned something answers `409 needs_confirm`, and
+a confirmed change gives it a **new id**) - the answers, the limits and the refusals are those of `app/api/bots.py`.
+The identities are **dealt when the game starts**: `session.dealt` is false and no card has a tag before; **开始** is refused with
+`409 NOT_READY` and the `problems` while a bot has no L0, is not initialized (or ⚠ stale / ✖ failed), a model is missing or the contract / scenario
+is broken (`/api/mock/files`) - the page's dialog then lists them by player. `PUT /api/bots/lineup` seats the bots (the cards can be dragged before the start). A **speech over
+the limit** is refused whole: `POST /api/seat/speak` answers `200 {"accepted": false, "code": "TOO_LONG", "data": {"chars", "limit"}}` and writes nothing - the mock never
+cuts what a player says (only the answer to a *text* request is still cut, like the engine does). At the end of the scripted game nobody is reviewed yet, so the
+question *这局结束了，是否让 bot 复盘？* comes up (**暂不** is remembered in the browser; clear `arena_review_dismissed_v1` to see it again); a seat a person played is
+marked in it (`GET /api/games/{id}/detail` → `human_spans`). An **initialization** (`POST /api/bots/init`) is a job: one `bot.init.progress` per bot and tick (queued →
+running with `seconds_left` of the 120 and the `files_written` → done / failed / timeout / cancelled), `bots.updated` at the end of
+each bot, the cost in `learning_usage` and as `init` lines of the error log; the bots of a running job answer `409 init_busy` to every
+write. A **review** is one per seat and game, in parallel, 60 simulated seconds each (queued → running → done / timeout / error, `changes =
+{files, proposals}`): it writes impressions, playbook, questions and the record into the bots at once, and for a seat a person played it
+proposes a change of the voice (`learn_style`) that waits in the bot's `staging`. The text a refinement or a review writes is a simple
+imitation, not a model. `/api/contract`, `/api/rules/{id}` (+ materials) and the games routes of *对局管理* (`/api/games/{id}/detail`, `export`,
+`/api/games/import`) follow §13.7; a change of the contract, the scenario or its materials makes every initialization ⚠ *stale* (the mock
+keeps the four hashes of the real store).
 
 The mock also implements the archive API (`/api/archive/*`): exports and imports are jobs that really take
 a couple of seconds and send `archive.progress` events. Nothing touches the disk. To try the import, the
-**name of the file you pick** decides what happens: `…demo….arenaagents` is accepted, `…keys….arenaagents`
+**name of the file you pick** decides what happens: `…demo….arenaagents` is accepted, `…v1….arenaagents` is a
+v0.13 archive (format 1: a roster of seats that becomes bots on import), `…keys….arenaagents`
 holds API keys (password `Correct-Horse-9`), `…mismatch…` has keys that no longer match the Provider
 addresses, `…fail…` breaks half way through the replacement (and is
 rolled back), `…newer…` is "a newer format", `…corrupt…` fails its checksum, `…huge…` is over the size
 limit. A file you exported from the mock itself is read through its manifest.
 
 **Playing a seat** works in the mock like on the real server — `POST /api/takeover`,
-`/api/takeover/release`, `/api/seat/*` and the re-deal follow the same rules and answer with the same
+`/api/takeover/release` and `/api/seat/*` follow the same rules and answer with the same
 shapes, `GET /api/state` carries `takeover` and every change of the seat state is pushed as
 `takeover.updated` — and the script **waits for the person** instead of acting for the seat: at its
 turn in a speaking queue, at the requests addressed to it (the wolves' kill, the votes, last words) and,
 for N12, the white wolf king, at the explosion. A silent person is handled like the engine does it: the
 time runs out and the default applies - except at a turn in the *public* channel, which has no deadline
 ([untimed](#your-turn-in-the-public-channel-has-no-deadline): the script waits as long as it takes). To try it:
-pick *3 · Carol* in the drop-down → *接管* → *重新发牌* → *开始*; the page then waits for you at Carol's turns.
+click the viewpoint label → *接管* on the row *3 · Carol* → *开始* (the identities are dealt by the start); the page then waits for you at Carol's turns.
 
 **The soft pause** works too (`POST /api/control/soft-pause` / `soft-resume`, the same refusals and sentences as
 the real server). The script is not an agent runtime, so it plays the same picture: at the click the script and
@@ -1097,7 +1308,7 @@ PYTHONUTF8=1 .venv/Scripts/python.exe -m pytest tests/test_frontend_js.py tests/
 
 `tests/test_frontend_js.py` syntax-checks every `static/js/*.js` and runs every
 `tests/frontend/test_*.js` (fake DOM harness: `tests/frontend/harness.js`, fixtures:
-`tests/frontend/fixtures.js`, a minimal sprite library: `tests/frontend/fixtures/parts.min.json`).
+`tests/frontend/fixtures.js` (v0.14: `makeBots`, `makeBotSummary`, `makeBotDetail`, `makeProposal`, `makeProblem`, `undealt`), a minimal sprite library: `tests/frontend/fixtures/parts.min.json`).
 To test a race, `backend.hold(test)` of the harness parks the answers of the requests `test(key, url)` accepts: an answer is
 computed when the request is made and delivered when the test lets it go (`gate.release(i)`), so an older answer can arrive
 after a newer one.
@@ -1107,15 +1318,37 @@ event log with the **real** client store (`replay_check.js`) to the session the 
 `tools/dev_server.py --demo --port 8135` instance: it plays a whole demo game (token limit, pause,
 review included) and checks that the SSE events add up to exactly the session the server reports.
 
+The fake DOM keeps markup as a string and never parses it, so `tests/frontend/markup.js` checks what the page has drawn (`envProblems`): tags that are not closed or
+close nothing, a `<div>` inside a `<p>`, an `<li>` outside a list, a link inside a button, a raw `<` in the text, and an id that occurs twice in the page (together with the ids of
+`index.html`). `test_settings_ui.js`, `test_bots_ui.js`, `test_botedit_ui.js`, `test_archive_ui.js`, `test_avatar_pop_ui.js` and `test_replay_ui.js` run it at the end of every test;
+`tests/frontend/test_markup.js` tests the check itself and that `index.html` is well formed.
+
+The **phone walk-through** has no browser either. `tests/frontend/cssprobe.js` is a small CSS engine - the cascade (specificity, order, `!important`), inheritance,
+`var()`, `@media` for a given window, the shorthands that matter and lengths (`calc()`, `min()`, `vw` …) - that reads the real `static/css/style.css`, and
+`tests/frontend/test_phone_layout.js` builds the screens of v0.14 from the HTML the scripts really drew (the settings dialog with its five columns, the wizards of ①
+and the questions that open from it; the panel of a bot with its four editors, a draft, proposals, every state of an initialization and a review; the dialogs of the
+initialization; the start check; the window at the end of a game; the participant bar with the *名册 ▾* menu; and the questions that print a file with a very long name or the id
+of a game) at **360, 390 and 430 px on a touch screen** and asks the style sheet: is every control at least 40 px tall (a check box through its label); is a row of controls
+that does not wrap one that somebody looked at (`ONE_LINE` lists each of them with the reason it is safe); is anything fixed to more than the screen is wide; may a long word
+break. It cannot measure text, so it does not replace looking at the page on a phone (see the [browser matrix](#browser-matrix)); a second test takes rules of the style
+sheet away one by one and checks that the audit then reports them. `tests/frontend/test_cssprobe.js` tests the engine.
+
 Playing a seat has its own tests: `tests/frontend/test_takeover_view.js` (the store and the pure view
-model: viewpoint bar, takeover bar, re-deal reminder, input box states, request actions),
-`tests/frontend/test_takeover_ui.js` (the page: confirmations, the lock, drafts, Enter / Shift+Enter,
-the send button's states, `STALE`, abilities, request cards, the phone rules) and
+model: the viewpoint label and its menu, the takeover bar, input box states and the length limit, request actions),
+`tests/frontend/test_takeover_ui.js` (the page: the menu, confirmations, the lock, drafts, Enter / Shift+Enter,
+the send button's states, `STALE`, abilities, request cards, the phone rules, that nothing of the re-deal is left) and
 `tests/frontend/test_mock_takeover.py` (the mock plays a whole game with a person at a seat, and its
 event log is reduced with the real store: `node tests/frontend/replay_check.js --human`); on the server
 side `tests/test_takeover_runtime.py`, `tests/test_takeover_api.py`, `tests/test_takeover_demo_game.py`
 (a whole scripted 12-player game with a person at a seat) and `tests/v12/world/test_seat.py` (the seat
 state against `speech_gate`, the state board and a real `speak`, channel by channel).
+
+The **v0.14 play features** (the seat bubble and the cards before the deal, moving the cards, the status and viewpoint labels, the start check, the length of a
+speech, the question at the end of a game) have `tests/frontend/test_v014_play_view.js` (the pure parts: `isDealt`, `seatDragState`, `moveInLineup`, `seatIndexAt`,
+`seatKeyTarget`, `Store.applyLineup` and its undo, `systemStatus`, `startCheckModel`, `reviewPrompt`, `reviewRows`) and `tests/frontend/test_v014_play_ui.js` (the page, with the real
+`tileHtml` / `renderBoard`: twelve cards and no identity tag before the deal; the drag by mouse, touch and keyboard, the rollback, one move at a time, nothing after the start; every code of the
+status label; the start check dialog and `window.Bots.focus`; the red counter, the send button and `TOO_LONG`; the review question, its `localStorage` key, `learn_style`, the countdown, the
+changes and proposals). On the server side `tests/frontend/test_mock_takeover.py` holds the mock's `TOO_LONG` to the engine's receipt.
 
 The v0.13.1 play features have theirs: `tests/frontend/test_softpause_ui.js` (the store and the view model
 of `soft_pause` / `clock_running` / `held` / `untimed`, the takeover bar's state machine, the local clock that
@@ -1137,14 +1370,26 @@ start over, the re-basing by time, a new error with a low id, SSE lines that mus
 appends never resetting anything; **reads that overlap** - only the newest answer counts -, a rebuilt log that is *longer*, late
 copies from below the ring, and the bounded recoveries), `tests/frontend/test_avatar_code.js` (the encoder / decoder against the vectors shared with Python,
 `tests/avatar_code_cases.json`), `tests/frontend/test_avatar_pop_ui.js` (the code row, the copy button, the 🎲 panel, twins, the
-server's refusals), `tests/frontend/test_memory_ui.js` (the limits and counters, the editor, the old memory, refinement, the review's
-*本次改动*; and the requests on their way: a refinement that arrives after a review / a new game / a save, typing after *保存*, answers
-that cross) and `tests/frontend/test_mock_v0131.py` (the mock's log, thoughts, limits, `PUT` / `refine` and `changes` against the
-contract, and its rebuilt log). `tests/frontend/test_roster_drift.py` keeps the page and the backend saying the same thing: it runs
-the helpers of `static/js/roster.js` and `static/js/core.js` under node and compares them with `app/storage/roster.py` — the limits,
-how characters are counted, how a persona, an impression and the lessons are cleaned, which new names are refused (a colon among
-them) and the words of every refusal. On the server side:
-`tests/test_call_log_api.py`, `tests/test_thoughts_api.py` and the roster / memory tests.
+server's refusals, and the question a frozen bot asks first) and `tests/frontend/test_mock_v0131.py` (the mock's log, thoughts and its
+rebuilt log against the contract). On the server side: `tests/test_call_log_api.py` and `tests/test_thoughts_api.py`.
+
+The **settings dialog** (v0.14) has `tests/frontend/test_settings_ui.js` (the five columns and their open state in `localStorage`; ② the rows, the preview, `.md` out and
+in, clear one / all; ③ the contract with its faults, import and back to the default; ④ the scenarios and the study materials; ⑤ the games: the list, the detail, delete (also the
+current game and a file in use), `.arenagame` out and in with the three-way choice, the way to the history dialog and back; every file fetched with the token header) and, for the wizards of
+column ①, `tests/frontend/test_archive_ui.js` (the export now has two steps - the key, then the password - and the logs are always in; the result shows the *download_name*; a v1 archive's
+summary says it has a roster). Server side, `tests/frontend/test_mock_files.py` and `test_mock_archive.py` hold the mock to the real API (`app/api/games.py`, `contract.py`, `rules.py`).
+
+The **bots** (v0.14) have theirs: `tests/frontend/test_botlib.js` (the pure helpers: the states of an initialization, the progress of a job, line diffs,
+fingerprints), `tests/frontend/test_bots_ui.js` (the panel: names, the 🔒 and the question, avatars, the marks on the cards, the initialization of one
+bot / of all, progress by events, failure, cancel, the refusals, the 名册 menu, review, `Bots.focus`), `tests/frontend/test_botedit_ui.js` (the
+editors: the L0 with its counters and faults, refinement - draft first -, the question of an initialized bot, the memory parts, proposals, `.arenabot`
+and the library; typing after *保存*, answers on their way, no repaint under the cursor) and `tests/frontend/test_bots_drift.py`, which keeps the page
+and the backend saying the same thing: it runs the helpers of `static/js/botlib.js` under node and compares them with `app/storage/botfiles.py` and
+`limits_payload()` — the limits, the faults of an L0 (words and order), the merged L0 file (rendered and read), the playbook and the impressions, the
+faults of a text for each memory part and of a name. (It replaced `test_memory_ui.js` and `test_roster_drift.py` of v0.13.1: the persona and memory texts they
+tested no longer exist.) The fake backend of these tests is `tests/frontend/bots_fake.js`, which mirrors `tools/mock_ui_bots.py` / `mock_ui_hub.py`.
+Where the page puts a sentence of the server into its own punctuation (the summary toast of an initialization, the note of a deleted game, the banner of a hold) it drops the
+full stop at the end of that sentence first: `Core.stripEndPunct`, tested in `test_core.js` and where it is used.
 
 ### Browser matrix
 
@@ -1159,21 +1404,28 @@ e.g. `/api/mock/frame?w=1024&h=768&q=platform%3Dtablet%26input%3Dtouch`):
 | 1280 × 800 | desktop | smaller cards, truncated names |
 | 1024 × 768 | tablet (touch) | 6 × 2 cards, avatar rail |
 | 820 × 1180 | tablet portrait | the same, re-laid out on rotation |
-| 390 × 844 | phone (iPhone) | tab bar, mini cards, drawer, full-screen dialogs, **⋯** menu |
-| 360 × 800 | phone (Android) | the same, no text overflow |
+| 390 × 844 | phone (iPhone) | tab bar, mini cards, drawer, full-screen dialogs, **⋯** menu; the settings dialog with its five columns, the bot panel and its editors, the initialization dialogs, the start check, the end-of-game window |
+| 360 × 800 | phone (Android) | the same, no text overflow (`test_phone_layout.js` asks the style sheet the same at 360, 390 and 430 px; the text itself it cannot measure) |
 
 Walk through each size: new game → rename and re-roll avatars (the moderator's too), make one from a code
-(a bad code, a twin of another player) and copy a code → write a persona (the template, the counter, over
-the limit), the impressions and lessons (the counters, over a limit), refine with notes, tidy up an old memory
-(`POST /api/mock/legacy-memory`) → start → watch 💭 / ⚡ / 💤 → read a player's 🧠 思考记录 (dividers, load earlier,
+(a bad code, a twin of another player) and copy a code → `POST /api/mock/bots {"preset": "mixed"}` for the marks ✔ ⚠ ✖ ○, the
+**start check** (*开始* is refused until every bot is ✔), *⚙ 全局初始化* (the list, *全部重新初始化*, progress, `POST /api/mock/learning`
+for a failure or a timeout, cancel), a 🔒 rename (the question) → write an L0 (the counters, over the limit, refine with notes, the question of an
+initialized bot), edit the memory parts and read a proposal (*待确认*) → start → watch 💭 / ⚡ / 💤 → read a player's 🧠 思考记录 (dividers, load earlier,
 scroll up while new bubbles come) → inject a failed call (`POST /api/mock/llm-fail`): the 📋 badge appears (on **⋯** on a
 phone), open the log, open a line, filter, *全部标为已读*, reload the page (still read), `POST /api/mock/llm-rebuild`
 and inject again (the new error shows) → the wolves' request card → switch viewpoint → budget
 limit with force stop pauses the game → raise the limit and continue → continue after the end →
-take a seat over before the start (3 · Carol; then N12 for the explosion) → re-deal → start → write in
-your turn and end it (no countdown in the public channel), see *禁言中* with its reason when it is not
+drag the cards before the start (mouse; on a touch screen hold, then move; **Alt+←/→**; the cards must have no identity tag and the status label says *对局前*) → *开始* with
+a bot that is not ready (`--bots mixed`: the dialog lists it by player, its buttons take you to the editor / the bindings) → take a seat over before the start (3 · Carol, from the viewpoint
+label's menu; then N12 for the explosion) → start → write in
+your turn and end it (no countdown in the public channel; a text over the limit turns the counter red and cannot be sent), see *禁言中* with its reason when it is not
 your turn → mark some players with colours (card, feed, private chats, request rows, details) → soft-pause
 the agents while they think (*收尾中* → *已暂停*, ⏸ on the cards, the clock stands still), write meanwhile,
 continue → vote and change the vote
 on the card → use the explosion (form, second confirmation) → pause → give the seat back → continue →
-review all and read what changed in the memory (*本次改动*, old → new) → New game, then clear the memory; ⚙ Settings → export an archive (with and without keys, with and without logs) → import it (right password, wrong password, skip the keys) → the page reloads.
+the end of the game: the question *这局结束了，是否让 bot 复盘？* (the played seat is marked *有人类代打*; *复盘*: the countdowns and the changes; *暂不* and reload: it stays away) → review all (the countdown, *本次改动*, old → new, the proposals) → New game, then clear the memory (名册 ▾); ⚙ Settings, in each of the five columns (open and close them, reload: they stay as left): ① export an archive (with and without keys; the
+file is saved as `arena-agents-…`) → import it (right password, wrong password, skip the keys) → the page reloads; ② preview, export and import an L0 (a file with faults), clear one and all; ③ import
+a contract (a good one, one without a tool name), restore the default, see every bot turn ⚠; ④ import a scenario (another id), add / export / delete a study material (a bad slug), restore the
+default; ⑤ expand a game, delete one (`POST /api/mock/games {"locked": ["mock-old-2"]}` for a file in use), delete the current game, export one and import it back (copy / overwrite / cancel; the
+current game's id), jump to the history dialog and back.

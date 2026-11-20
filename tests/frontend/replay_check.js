@@ -58,9 +58,23 @@ const project = (s) => ({
   soft_pause: s.soft_pause,
   clock_running: s.clock_running,
   budget: s.budget,
-  review: { available: s.review.available, done: s.review.done, running: s.review.running },
+  review: {
+    available: s.review.available,
+    done: s.review.done,
+    running: s.review.running,
+    supported: s.review.supported,
+    deadline_s: s.review.deadline_s,
+    seconds_left: s.review.seconds_left,
+  },
+  // v0.14 (§13.3, §13.8): the identities are dealt at the start (`dealt`), the status label, the bots (the live BotsPayload)
+  dealt: s.dealt,
+  system_status: s.system_status,
+  bots: s.bots,
   participants: Object.fromEntries(
-    s.participants.map((p) => [p.id, { name: p.name, seat: p.seat, avatar: p.avatar, tags: p.tags, out: p.out, state: p.state, sleep_until: p.sleep_until }])
+    s.participants.map((p) => [
+      p.id,
+      { name: p.name, seat: p.seat, avatar: p.avatar, tags: p.tags, out: p.out, state: p.state, sleep_until: p.sleep_until, bot_id: p.bot_id, init_status: p.init_status },
+    ])
   ),
   moderator: { state: s.moderator.state, sleep_until: s.moderator.sleep_until },
   channels: Object.fromEntries(

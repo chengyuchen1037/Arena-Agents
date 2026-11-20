@@ -45,13 +45,13 @@ const cardClick = (env, id) => env.el("participants-grid").dispatch("click", { t
 const modClick = (env) => env.el("topbar-status").dispatch("click", { target: target({ "#mod-chip": { "data-actor": "moderator" } }) });
 const channelClick = (env, id) => env.el("channels-list").dispatch("click", { target: target({ ".channel-item": { "data-channel": id } }) });
 const panelText = (env) => textOf(env.el("detail-head").innerHTML + " " + env.el("detail-live").innerHTML + " " + env.el("detail-editors").innerHTML);
-// v0.13 (F1): the drop-down only chooses; the viewpoint changes when "切换" is pressed
+// v0.14 (H27): the viewpoint is chosen in the menu of the viewpoint label ("以 X 的视角观看" / 全局视角): one click applies it
 const selectViewpoint = (env, id) => {
-  env.el("select-viewpoint").value = id;
-  env.el("select-viewpoint").dispatch("change");
-  env.el("btn-viewpoint-switch").click();
+  if (env.el("viewpoint-menu").hidden) env.el("btn-viewpoint").dispatch("click");
+  env.el("viewpoint-menu").dispatch("click", { target: target({ "[data-vp-view]": { "data-vp-view": id } }) });
   env.flushRaf();
 };
+const attr = (env, id, name) => env.el(id).getAttribute(name);
 const setClock = (env, clock) => {
   env.app().state.clockSync = { clock, at: 0, running: false }; // a frozen game clock: deterministic timers
   env.app().renderAll(true);
@@ -76,7 +76,7 @@ test("12 cards in seat order: round number top-left, pixel avatar, nickname, exa
   assert.deepEqual(Object.keys(c), F.PLAYER_IDS, "p10..p12 come after p9 (natural seat order)");
   for (const [i, id] of F.PLAYER_IDS.entries()) {
     const html = c[id];
-    assert.ok(html.includes(`<span class="pcard-num">${i + 1}</span>`), `${id}: seat number`);
+    assert.ok(html.includes(`<span class="pcard-num seat-bubble" aria-hidden="true">${i + 1}</span>`), `${id}: the seat is a bubble (H28)`);
     assert.match(html, /<span class="pcard-avatar"><img class="avatar-img"[^>]* src="data:image\/png;base64,/, `${id}: pixel avatar`);
     assert.ok(html.includes(`<span class="pcard-name">${F.NAMES[i]}</span>`), `${id}: nickname`);
     assert.equal((html.match(/class="pcard-tag /g) || []).length, 1, `${id}: one main tag`);
@@ -170,8 +170,8 @@ test("the identity is ALWAYS the main tag: a sheriff badge appears next to it an
   assert.equal(tagText(c4), "预言家");
   assert.match(c4, /class="pcard-badges"><span class="pbadge pbadge-warning" title="警长">警<\/span>/);
   assert.equal((c4.match(/class="pcard-tag /g) || []).length, 1);
-  // the badge sits in the top-right corner block, the number in the top-left one
-  assert.ok(c4.indexOf('class="pcard-num"') < c4.indexOf('class="pcard-badges"'));
+  // the badge sits in the top-right corner block, the seat bubble in the top-left one
+  assert.ok(c4.indexOf('class="pcard-num seat-bubble"') < c4.indexOf('class="pcard-badges"'));
   // everybody else has no badge
   assert.match(cards(env).N5, /class="pcard-badges"><\/span>/);
   // the sheriff badge is public: another player's view shows it next to a "?"
@@ -188,7 +188,7 @@ test("out players are greyed (class out) and keep their identity; the strike-thr
   const c5 = cards(env).N5;
   assert.ok(cardClasses(c5).includes("out"));
   assert.equal(tagText(c5), "女巫");
-  assert.ok(c5.includes('<span class="pcard-num">5</span>'));
+  assert.ok(c5.includes('<span class="pcard-num seat-bubble" aria-hidden="true">5</span>'));
   assert.ok(!cardClasses(cards(env).N1).includes("out"));
   assert.match(H.CSS_SRC, /\.pcard\.out \.pcard-name,\s*\.pcard\.out \.pcard-tag \{\s*text-decoration: line-through/);
   assert.match(H.CSS_SRC, /\.pcard\.out \{[^}]*filter: grayscale\(1\)/);
@@ -298,7 +298,8 @@ test("names and tags from the server are escaped on the cards, in the detail pan
   const evil = "<img src=x onerror=alert(1)>";
   const parts = F.makeParticipants({ N1: { name: evil, tags: [evil, "存活"] } });
   const { env } = await live({ participants: parts, messages: [F.msg(9, "public", "N1", evil)] });
-  const html = env.el("participants-grid").innerHTML + env.el("channels-list").innerHTML + feedHtml(env) + env.el("select-viewpoint").innerHTML;
+  env.el("btn-viewpoint").dispatch("click"); // (the menu of the viewpoint label lists the names too)
+  const html = env.el("participants-grid").innerHTML + env.el("channels-list").innerHTML + feedHtml(env) + env.el("viewpoint-menu").innerHTML;
   assert.ok(!html.includes("<img src=x"), "no raw markup");
   assert.ok(html.includes("&lt;img src=x onerror=alert(1)&gt;"));
   cardClick(env, "N1");
@@ -466,7 +467,8 @@ test("a renamed player is renamed in old messages, cards, channels and the viewp
   assert.match(feedHtml(env), /<span class="msg-name">Caroline<\/span>/);
   assert.ok(!feedHtml(env).includes("<span class=\"msg-name\">Carol</span>"));
   assert.ok(env.el("participants-grid").innerHTML.includes('<span class="pcard-name">Caroline</span>'));
-  assert.match(env.el("select-viewpoint").innerHTML, /<option value="N3">3 · Caroline<\/option>/);
+  env.el("btn-viewpoint").dispatch("click");
+  assert.match(env.el("viewpoint-menu").innerHTML, /<span class="vp-label">3 · Caroline<\/span>/);
   assert.equal(env.el("feed-channel-label").textContent, "Caroline");
   assert.match(channelItems(env)["dm-N3"].html, /<span class="channel-name">Caroline<\/span>/);
   assert.match(env.el("mod-chip").innerHTML, /主持人/);
@@ -875,44 +877,53 @@ test("clicking a channel selects it once (mousedown + click); DM group toggle op
 });
 
 // ---- the spectator viewpoint ----------------------------------------------------------------------------------------------
-test("viewpoint select: god view + one entry per player (seat · nickname); switching never asks the server again", async () => {
+test("viewpoint menu (v0.14, H27): 全局视角 + one row per player (seat · nickname); switching never asks the server again", async () => {
   const { env, backend } = await live();
-  const options = env.el("select-viewpoint").innerHTML;
-  assert.equal((options.match(/<option /g) || []).length, 13);
-  assert.match(options, /<option value="god">上帝视角<\/option>/);
-  assert.match(options, /<option value="N3">3 · Carol<\/option>/);
-  assert.ok(!/p03|N3 ·|· Carol 3/.test(options), "no internal ids in the labels");
+  env.el("btn-viewpoint").dispatch("click");
+  assert.equal(env.el("viewpoint-menu").hidden, false);
+  const menu = env.el("viewpoint-menu").innerHTML;
+  assert.equal((menu.match(/class="vp-row[ "]/g) || []).length, 12, "one row per player, in seat order");
+  assert.match(menu, /data-vp-view="god"[^>]*>[^<]*<span class="vp-check">✓<\/span>全局视角/);
+  assert.match(menu, /<span class="vp-label">3 · Carol<\/span>/);
+  assert.ok(menu.indexOf('data-seat="N2"') < menu.indexOf('data-seat="N10"'), "natural seat order: N10 after N9");
+  assert.ok(!/上帝视角|p03|N3 ·|· Carol 3/.test(menu), "no internal ids in the labels");
   const callsBefore = backend.calls.length;
   for (const v of ["N3", "god", "N1"]) selectViewpoint(env, v);
   assert.equal(backend.calls.length, callsBefore, "no request was made");
   assert.equal(env.app().state.viewpoint, "N1");
+  assert.equal(env.el("viewpoint-text").textContent, "Alice视角");
 });
 
-test("v0.13: choosing in the drop-down changes nothing; only the 切换 button applies the viewpoint (and is disabled when there is nothing to switch)", async () => {
+test("v0.14: the label says 全局视角 / Alice视角; choosing in its menu applies the viewpoint at once and closes the menu; there is no pending choice and no 切换 button", async () => {
   const { env } = await live();
   assert.equal(env.app().state.viewpoint, "god");
-  assert.equal(env.el("btn-viewpoint-switch").disabled, true, "already looking from there");
-  env.el("select-viewpoint").value = "N3";
-  env.el("select-viewpoint").dispatch("change");
-  assert.equal(env.app().state.viewpoint, "god", "the choice alone does not switch");
-  assert.equal(env.el("feed-viewing").textContent, "视角：上帝视角");
-  assert.equal(env.el("btn-viewpoint-switch").disabled, false, "a pending choice can be applied");
-  env.el("btn-viewpoint-switch").click();
-  env.flushRaf();
+  assert.deepEqual([env.el("viewpoint-text").textContent, env.el("viewpoint-icon").textContent], ["全局视角", "👁"]);
+  env.el("btn-viewpoint").dispatch("click");
+  assert.equal(env.el("btn-viewpoint").getAttribute("aria-expanded"), "true");
+  assert.equal(env.app().state.viewpoint, "god", "opening the menu changes nothing");
+  assert.equal(env.el("feed-viewing").textContent, "视角：全局视角");
+  selectViewpoint(env, "N3");
   assert.equal(env.app().state.viewpoint, "N3");
+  assert.equal(env.el("viewpoint-menu").hidden, true, "the menu closes after a choice");
   assert.equal(env.el("feed-viewing").textContent, "视角：Carol");
-  assert.equal(env.el("btn-viewpoint-switch").disabled, true, "applied: nothing pending any more");
-  // a pending choice is kept while other things are repainted ...
-  env.el("select-viewpoint").value = "N5";
-  env.el("select-viewpoint").dispatch("change");
-  env.sse("phase.changed", { text: "第 2 天" });
-  assert.equal(env.el("select-viewpoint").value, "N5");
-  assert.equal(env.app().state.viewpoint, "N3");
-  // ... and dropped when the applied viewpoint moves under it (here: the detail panel's "view as")
-  env.el("select-viewpoint").value = "N7";
-  env.el("select-viewpoint").dispatch("change");
+  assert.equal(env.el("viewpoint-text").textContent, "Carol视角");
+  assert.equal(attr(env, "btn-viewpoint", "data-kind"), "player");
+  assert.equal(env.el("btn-viewpoint").classList.contains("is-player"), true);
+  // the current one is marked in the menu and cannot be chosen again
+  env.el("btn-viewpoint").dispatch("click");
+  assert.match(env.el("viewpoint-menu").innerHTML, /class="vp-row current"[^>]*data-seat="N3"/);
+  assert.match(env.el("viewpoint-menu").innerHTML, /data-vp-view="N3"[^>]*disabled/);
+  // another viewpoint arriving under an open menu (the detail panel's "view as") is shown in it
   env.app().setViewpoint("N2");
-  assert.equal(env.el("select-viewpoint").value, "N2");
+  assert.equal(env.el("viewpoint-text").textContent, "Bob视角");
+  assert.match(env.el("viewpoint-menu").innerHTML, /class="vp-row current"[^>]*data-seat="N2"/);
+  // a click anywhere else closes the menu; so does Escape
+  env.document.dispatchEvent("click", { target: target({}) });
+  assert.equal(env.el("viewpoint-menu").hidden, true);
+  env.el("btn-viewpoint").dispatch("click");
+  env.document.dispatchEvent("keydown", { key: "Escape" });
+  assert.equal(env.el("viewpoint-menu").hidden, true);
+  assert.ok(!H.HTML_SRC.includes("btn-viewpoint-switch") && !H.HTML_SRC.includes("select-viewpoint") && !H.HTML_SRC.includes('id="btn-takeover"'), "the drop-down, 切换 and the 接管 button are gone");
 });
 
 test("player viewpoint: only its messages, only its channels, other players' identities are '?'", async () => {
@@ -971,7 +982,7 @@ test("the viewpoint is remembered; a channel the viewer cannot see falls back to
   const withPref = await H.bootLive({}, { storage: { arena_viewpoint_v1: "N5" } });
   withPref.env.sse("snapshot", { session: F.makeSession({ event_id: 500 }) }, 500);
   assert.equal(withPref.env.app().state.viewpoint, "N5");
-  assert.equal(withPref.env.el("select-viewpoint").value, "N5");
+  assert.equal(withPref.env.el("viewpoint-text").textContent, "Eve视角");
   const stale = await H.bootLive({}, { storage: { arena_viewpoint_v1: "p99" } });
   stale.env.sse("snapshot", { session: F.makeSession({ event_id: 500 }) }, 500);
   assert.equal(stale.env.app().state.viewpoint, "god");
@@ -1028,7 +1039,8 @@ test("a paused game on hold shows the moderator's reason (status pill + banner);
   const { env } = await live({ status: "running" });
   assert.equal(env.el("status-banner").hidden, true);
   env.sse("session.updated", { status: "paused", pause_reason: "hold", hold_reason: "请确认警长归属", active_status_text: "已暂停 · 主持人：请确认警长归属", winner: null, summary: "" });
-  assert.equal(env.el("active-status-text").textContent, "已暂停 · 主持人：请确认警长归属");
+  assert.equal(env.el("active-status-text").textContent, "已暂停 · 主持人暂停了对局：请确认警长归属", "(v0.14, H26: the status label says 已暂停 and why)");
+  assert.equal(attr(env, "active-status-pill", "data-code"), "paused");
   assert.equal(env.el("status-banner").hidden, false);
   assert.match(env.el("status-banner").innerHTML, /banner-hold/);
   assert.match(env.el("status-banner").innerHTML, /请确认警长归属/);
@@ -1045,6 +1057,8 @@ test("a paused game on hold shows the moderator's reason (status pill + banner);
   assert.match(banner, /复盘全部/);
   assert.match(banner, /banner-short">🏁 对局已结束：好人阵营 获胜</, "a phone shows the short sentence");
   assert.ok(env.el("active-status-dot").className.includes("finished"));
+  assert.equal(env.el("active-status-text").textContent, "已结束");
+  assert.match(attr(env, "active-status-pill", "title"), /对局已结束/);
   assert.equal(env.el("phase-pill").textContent, "第 1 天 · 白天发言");
   env.sse("phase.changed", { text: "第 3 天 · 终局" });
   assert.equal(env.el("phase-pill").textContent, "第 3 天 · 终局");
@@ -1091,7 +1105,7 @@ test("usage: the stats bar turns yellow at 80 % and red at 100 % of the limit; a
   assert.match(env.el("status-banner").innerHTML, /已达到预算上限/);
   // the game pauses because of it
   env.sse("session.updated", { status: "paused", pause_reason: "budget", active_status_text: "已暂停" });
-  assert.equal(env.el("active-status-text").textContent, "因预算上限暂停");
+  assert.equal(env.el("active-status-text").textContent, "已暂停 · 已达到预算上限");
   assert.match(env.el("status-banner").innerHTML, /因预算上限暂停/);
   assert.match(env.el("status-banner").innerHTML, /banner-short">⛔ 因预算上限暂停/);
   assert.equal(env.el("btn-resume").disabled, false, "the user can raise the limit and continue");

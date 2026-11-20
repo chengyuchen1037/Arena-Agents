@@ -68,6 +68,8 @@ async def record_a_game(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     # (the deal is random: a seat that is killed in the first night never gets anything to do - then another game is played)
     for _attempt in range(6):
         orch = build(monkeypatch)
+        await orch.start_or_resume()  # (v0.14, H52: the identities are dealt when the game starts - the seat is picked by its identity afterwards)
+        await orch.pause("user")
         seat = next(p.id for p in orch.world.state.players if p.role == "villager")
         await orch.takeover(seat)
         # a browser connects now: it gets the snapshot, then every event (a queue so big that nothing is ever shed)
@@ -105,9 +107,25 @@ def game(monkeypatch_module: pytest.MonkeyPatch) -> dict[str, Any]:
 
 
 @pytest.fixture(scope="module")
-def monkeypatch_module():
+def monkeypatch_module(tmp_path_factory: pytest.TempPathFactory, _program_dir: Any):
+    """A module-wide ``monkeypatch`` that ALSO isolates the storage the way ``tests/conftest.py`` does for every test - the game is recorded in a
+    module-scoped fixture, which pytest sets up BEFORE the autouse fixture of a single test, so without this the game would run against the real data
+    directory of the developer (v0.14: the bots, the contract and the rules are created there on first use)."""
+    import base64
+
+    import app.config
+    from app.storage import reset_stores_for_tests
+
     patch = pytest.MonkeyPatch()
+    project, _pristine = _program_dir
+    patch.setattr(app.config, "BASE_DIR", project)
+    patch.setenv("ARENA_DATA_DIR", str(tmp_path_factory.mktemp("live-softpause-data")))
+    patch.setenv("ARENA_MASTER_KEY", base64.urlsafe_b64encode(bytes(range(32))).decode("ascii"))
+    patch.delenv("ARENA_MASTER_KEY_FILE", raising=False)
+    patch.delenv("ARENA_DEMO", raising=False)
+    reset_stores_for_tests()
     yield patch
+    reset_stores_for_tests()
     patch.undo()
 
 

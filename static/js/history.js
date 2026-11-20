@@ -6,17 +6,20 @@
    it took (game time), what it cost, whether a person played a seat.  A game can be
      replayed   ("重放":  GET api/games/{id}/replay -> replay.js plays the spectator view back),
      continued  ("继续":  POST api/games/{id}/load  -> it becomes the live game, paused),
-     deleted    ("删除":  DELETE api/games/{id} -> the game and its logs only; the agents' memory lives in the
-                          roster and is untouched - the confirmation says so).
-   The live game is marked "当前" and can be neither loaded nor deleted.
+     deleted    ("删除":  DELETE api/games/{id} -> the game and its logs only; what the bots learned from it stays with
+                          the bots - the confirmation says so, in the fixed words of contract section 13.10).
+   The live game is marked "当前" and can be neither loaded nor deleted here (v0.14: deleting the CURRENT game - an empty new one takes
+   its place - is a thing of 对局管理 in the settings dialog, which this dialog has a button to).
 
-   ctx: { api, Core, showToast, getSession, openDialog, isReplaying(), onLoaded(sessionRaw), onReplay(replay, game) }
+   ctx: { api, Core, showToast, getSession, openDialog, isReplaying(), onLoaded(sessionRaw), onReplay(replay, game), openManagement() }
    ========================================================================== */
 
 (function (root) {
   "use strict";
 
   const enc = encodeURIComponent;
+  /** The fixed sentence of the delete question (docs/v0.12-contracts.md section 13.10; the settings dialog says the same). */
+  const DELETE_SENTENCE = "删除这局的存档和日志。bot 已经通过复盘形成的记忆不会被删除，也无法通过删除对局撤销。";
 
   /** "2026-11-18 01:20" in the viewer's local time ("" when unparsable). */
   function formatWhen(iso) {
@@ -52,7 +55,7 @@
    */
   function rowModel(game, env, Core) {
     const e = env || {};
-    const unreadable = game.status === "unreadable";
+    const unreadable = game.status === "unreadable" || game.readable === false; // (v0.14: `readable`; a save that cannot be opened)
     const current = Boolean(game.current);
     const status = current && e.status ? e.status : game.status;
     const running = current && status === "running";
@@ -107,7 +110,7 @@
       canLoad,
       loadTitle,
       canDelete: !current,
-      deleteTitle: current ? "当前对局不能删除：请先新建或载入另一局" : "删除这一局（agent 的记忆不受影响）",
+      deleteTitle: current ? "当前对局不能在这里删除：请在「设置 → 对局管理」里删除（会新建一局空白对局）" : "删除这一局（bot 的记忆不受影响）",
     };
   }
 
@@ -130,6 +133,7 @@
       btnOpen: $("btn-open-history-modal"),
       btnClose: $("btn-close-history-modal"),
       btnRefresh: $("btn-refresh-history"),
+      btnManage: $("btn-history-manage"),
     };
     const st = { games: [], loading: false, error: "", busyId: "", lastHtml: null };
 
@@ -300,15 +304,15 @@
         okText: "删除",
         danger: true,
         bodyHtml:
-          `<p>永久删除 <strong>${esc(labelOf(game))}</strong>？这一局的日志会一起删除，无法恢复。</p>` +
-          `<p class="form-hint history-memory-note">删除对局不会影响当前 agent 的记忆：每个座位的性格与记忆保存在名册里，不属于某一局。</p>`,
+          `<p>永久删除 <strong>${esc(labelOf(game))}</strong>？</p>` +
+          `<p class="form-hint history-memory-note">${esc(DELETE_SENTENCE)}</p>`,
       });
       if (!answer || !answer.ok) return;
       st.busyId = id;
       render();
       try {
         await api.del(`api/games/${enc(id)}`);
-        showToast("对局已删除（agent 的记忆没有受到影响）");
+        showToast("对局已删除（bot 的记忆没有受到影响）");
       } catch (e) {
         showToast(e.message);
       } finally {
@@ -338,6 +342,11 @@
     on(el.btnOpen, "click", () => openDialogAndLoad());
     on(el.btnClose, "click", hide);
     on(el.btnRefresh, "click", () => refresh());
+    on(el.btnManage, "click", () => {
+      // 对局管理 (settings, column ⑤): delete, export and import games; this dialog steps aside for it
+      hide();
+      if (typeof opts.openManagement === "function") opts.openManagement();
+    });
     on(el.list, "click", (evt) => {
       const action = closestAttr(evt && evt.target, "[data-action]", "data-action");
       const id = closestAttr(evt && evt.target, ".history-item[data-session-id]", "data-session-id");
@@ -350,6 +359,6 @@
     return { open: openDialogAndLoad, close: hide, refresh, onSession, isOpen, _state: st };
   }
 
-  root.ArenaHistoryUI = { create, rowModel, normalizeGames, formatWhen, formatGameTime };
+  root.ArenaHistoryUI = { create, rowModel, normalizeGames, formatWhen, formatGameTime, DELETE_SENTENCE };
   if (typeof module !== "undefined" && module.exports) module.exports = root.ArenaHistoryUI;
 })(typeof window !== "undefined" ? window : globalThis);

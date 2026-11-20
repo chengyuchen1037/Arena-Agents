@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Arena-Agents v0.13.1 Frontend Controller
+   Arena-Agents v0.14.0 Frontend Controller
    (async agents · SSE v2 · player cards with pixel avatars · request cards · responsive)
 
    Pure logic lives in
@@ -8,8 +8,9 @@
      store.js     SSE event application on a PublicSession v3 object
      view.js      viewpoint filtering, cards, channels, request cards, banners
      platform.js  desktop / tablet / phone detection (<html data-platform>)
-   Panels with their own state: roster.js (detail panel, roster menu), budget.js (limit dialog),
-   providers.js (Provider / price source / bindings), layout.js, archive.js (settings: export / import an archive).
+   Panels with their own state: bots.js (+ botedit.js, botlib.js: the player detail panel with the bot's editors, the initialization,
+   the roster menu), budget.js (limit dialog), providers.js (Provider / price source / bindings), layout.js, archive.js (settings:
+   export / import an archive).
    This file wires them to the DOM.
 
    What is NOT here (v0.12 -> v0.12.1): the 🎤 / ✋ / ■ card states and their legend, the execution
@@ -50,11 +51,14 @@
   let providerUI = null; // v0.10 provider / binding UI (providers.js)
   let layoutUI = null; // v0.11 collapse/resize UI (layout.js)
   let archiveUI = null; // v0.13 settings dialog (export / import an archive) + the "old data found" notice (archive.js)
-  let rosterUI = null; // v0.12.1 detail panel + roster menu (roster.js)
+  let botsUI = null; // v0.14 detail panel of a player (a bot), initialization, roster menu (bots.js)
+  let settingsUI = null; // v0.14 the five columns of the settings dialog (settings.js)
   let budgetUI = null; // v0.12.1 token / cost limit dialog (budget.js)
   let historyUI = null; // v0.13 history of games: list, delete, continue, replay (history.js)
   let replayUI = null; // v0.13 replay player: plays a saved game back in a session of its own (replay.js)
-  let takeoverUI = null; // v0.13 viewpoint bar / takeover bar / reshuffle reminder (takeover.js)
+  let takeoverUI = null; // v0.13 / v0.14 viewpoint label + menu, takeover bar, soft pause (takeover.js)
+  let seatDragUI = null; // v0.14 (H29) moving the player cards while the game has not started (layout.js)
+  let endReviewUI = null; // v0.14 (H31-H33) the question at the end of a game: should the bots review it? (endreview.js)
   let composerUI = null; // v0.13 input box, abilities, request answers of the played seat (composer.js)
   let marksUI = null; // v0.13.1 colour marks on the players: dots, palette, localStorage (marks.js)
   let thoughtsUI = null; // v0.13.1 the thinking record window of an agent (thoughts.js)
@@ -91,6 +95,8 @@
     rosterSig: "", // names + avatars: part of every cache key that contains them
     // render caches (skip DOM writes when nothing changed)
     lastBoardHtml: null,
+    boardHeld: false, // v0.14 (H29): a card is pressed / dragged: the grid was not repainted and is drawn when the hand lets go
+    lineupSaving: false, // v0.14 (H29): a PUT api/bots/lineup is on its way (one move at a time)
     lastSummaryHtml: null,
     lastChannelsHtml: null,
     lastHintsHtml: null,
@@ -122,6 +128,34 @@
     } catch {
       /* storage unavailable: keep in memory only */
     }
+  }
+
+  /**
+   * A file of the API saved by the page (v0.14: .arenabot, .arenagame, the L0 / contract / rules as .md): these GETs need the token as a HEADER, which a link
+   * cannot send, so the bytes are fetched through the API client and saved from memory.  The name is the server's (Content-Disposition), else `fallback`.
+   * Rejects with the client's ApiError (a refusal such as 409 / 422 carries the server's sentence in `.detail`).
+   */
+  async function downloadFromApi(path, fallback) {
+    const got = await api.download(path);
+    const blob = got && got.blob;
+    if (!blob) throw new Error("服务器没有返回文件内容");
+    const name = (got && got.filename) || fallback || "";
+    const url = typeof URL !== "undefined" && typeof URL.createObjectURL === "function" ? URL.createObjectURL(blob) : "";
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    if (document.body && typeof document.body.appendChild === "function") document.body.appendChild(a);
+    a.click();
+    if (typeof a.remove === "function") a.remove();
+    if (url && typeof URL.revokeObjectURL === "function") window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+    return name;
+  }
+
+  /** A URL of the API for a download link / an XHR upload: a link cannot send the token as a header, so it carries ?token= (the server accepts it there). */
+  function buildApiUrl(path, options) {
+    const url = Core.joinUrl(URL_PREFIX, path);
+    const token = options && options.token ? getToken() : "";
+    return token ? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : url;
   }
 
   let authPrompt = null; // shared pending promise so concurrent 401s ask once
@@ -156,12 +190,12 @@
   const elAppTitle = $("app-title");
   const elAppVersion = $("app-version");
   const elBtnTheme = $("btn-theme");
+  const elStatusPill = $("active-status-pill");
   const elStatusDot = $("active-status-dot");
   const elStatusText = $("active-status-text");
   const elPhasePill = $("phase-pill");
   const elRequestHints = $("request-hints");
   const elStatusBanner = $("status-banner");
-  const elSelectViewpoint = $("select-viewpoint");
   const elFeedViewing = $("feed-viewing");
   const elModChip = $("mod-chip");
   const elTopbarStatus = $("topbar-status");
@@ -384,7 +418,7 @@
         : "");
     setHtml(elModChip, html, "lastModHtml");
     if (elModChip.setAttribute) elModChip.setAttribute("title", t.title);
-    elModChip.classList.toggle("popover-open", Boolean(rosterUI && rosterUI.openId() === MOD));
+    elModChip.classList.toggle("popover-open", Boolean(botsUI && botsUI.openId() === MOD));
   }
 
   function usageTitle(budget) {
@@ -402,12 +436,18 @@
     const ver = state.appVersion || s.version || "";
     if (elAppVersion) elAppVersion.textContent = s.demo ? `${ver} · 演示模式` : ver;
 
-    elStatusText.textContent = View.statusText(s);
-    if (elStatusText.setAttribute) elStatusText.setAttribute("title", View.statusText(s));
+    // v0.14 (H26): the first label of the second row is the system status (session.system_status: 未初始化 / 初始化中 / 对局前 / 对局中 /
+    // 已暂停 · 原因 / 已结束 / 复盘中; a soft pause is "对局中 · agent 已暂停"); the status text the server used to send is its hover sentence
+    const sys = View.systemStatus(s);
+    elStatusText.textContent = sys.label;
+    for (const node of [elStatusPill, elStatusText]) {
+      if (node && typeof node.setAttribute === "function") node.setAttribute("title", sys.title);
+    }
+    if (elStatusPill && typeof elStatusPill.setAttribute === "function") elStatusPill.setAttribute("data-code", sys.code);
     elPhasePill.textContent = s.phase_text || "未开始";
     // before the game starts the phase repeats the status ("未开始 …"): a phone has no room for both
     if (elPhasePill.classList) elPhasePill.classList.toggle("is-idle", s.status === "idle");
-    elStatusDot.className = `status-dot ${View.statusDotClass(s)}`;
+    elStatusDot.className = `status-dot ${sys.dot}`;
 
     // Top-right token & cost telemetry (the cost is accumulated server-side per call);
     // yellow from 80 % of the limit, red when it is reached.
@@ -443,7 +483,7 @@
     elBtnNew.disabled = Boolean(s.replay); // a replay is not the live game: nothing of the live controls applies
     if (historyUI) historyUI.onSession();
 
-    // v0.13: the viewpoint bar [视角▾][切换][接管] / the takeover bar / the reshuffle reminder (takeover.js)
+    // v0.13 / v0.14: the viewpoint label and its menu, the takeover bar (takeover.js)
     if (takeoverUI) takeoverUI.render();
     renderRequestHints(s);
     renderBanner(s);
@@ -452,14 +492,29 @@
       elFeedViewing.textContent = `视角：${View.viewpointLabel(s, state.viewpoint)}`;
       elFeedViewing.classList.toggle("is-player", state.viewpoint !== View.GOD);
     }
-    // (the drop-down's own colour follows its pending choice: takeover.js)
     if (budgetUI) budgetUI.onSession(s);
-    if (rosterUI) rosterUI.renderControls();
+    if (botsUI) botsUI.renderControls();
   }
 
   // ---------------------------------------------------------------------------
   // Rendering: player cards (E17: identity is the main tag; badges; three agent states)
   // ---------------------------------------------------------------------------
+
+  /** v0.14 (H22): ✔ ready · ⚠ needs a new initialization · ✖ failed · ⏳ initializing (with the seconds left) · ○ not initialized - "" for a game of the old format. */
+  function initBadgeHtml(t) {
+    const Lib = window.ArenaBotLib;
+    if (!Lib || !t.initStatus || !Lib.INIT_SYMBOLS[t.initStatus]) return "";
+    const sum = ((state.session.bots && state.session.bots.bots) || []).find((b) => b.id === t.botId) || { init: { status: t.initStatus } };
+    let title = Lib.initView(sum).label;
+    if (t.initStatus === "initializing") {
+      const pv = Lib.initProgressView((state.session.init_progress || {})[t.botId], 120);
+      if (pv) title = `初始化中：${pv.line}`;
+    } else {
+      const detail = Lib.initView(sum).detail;
+      if (detail && t.initStatus !== "ready") title = `${title}：${detail}`;
+    }
+    return `<span class="pcard-init init-${escapeHtml(t.initStatus)}" data-init="${escapeHtml(t.initStatus)}" title="${escapeHtml(title)}">${Lib.INIT_SYMBOLS[t.initStatus]}</span>`;
+  }
 
   function tileHtml(t) {
     const classes = ["pcard"];
@@ -467,7 +522,7 @@
     if (t.viewing) classes.push("viewing");
     if (t.state) classes.push(`st-${t.state}`);
     if (state.flash.has(t.id)) classes.push("flash");
-    if (rosterUI && rosterUI.openId() === t.id) classes.push("popover-open");
+    if (botsUI && botsUI.openId() === t.id) classes.push("popover-open");
     // v0.13.1 (G16, G18): the colour mark - a stripe along the card's top edge and a dot in the top-right corner (the
     // button of the palette while a seat is played); the sheriff's badge makes room for it
     const markEl = marksUI ? marksUI.cardMarkHtml(t.id) : "";
@@ -481,36 +536,66 @@
           `<span class="pbadge pbadge-${escapeHtml(b.variant)}" title="${escapeHtml(b.tag)}">${escapeHtml(b.text)}</span>`
       )
       .join("");
-    const tag =
-      `<span class="pcard-tag tag-${escapeHtml(t.main.variant)}${t.main.known ? "" : " unknown"}"` +
-      ` title="${t.main.known ? escapeHtml(t.main.text) : "当前视角看不到这名玩家的身份"}">${escapeHtml(t.main.text)}</span>`;
+    // v0.14 (H52): before the deal (`session.dealt === false`) the model has no identity tag (`t.main` is null): the card then shows NONE -
+    // not an identity, not even the grey "?" - and a card without a tag is drawn tighter (`no-tag`)
+    const tag = t.main
+      ? `<span class="pcard-tag tag-${escapeHtml(t.main.variant)}${t.main.known ? "" : " unknown"}"` +
+        ` title="${t.main.known ? escapeHtml(t.main.text) : "当前视角看不到这名玩家的身份"}">${escapeHtml(t.main.text)}</span>`
+      : "";
+    if (!t.main) classes.push("no-tag");
     const stateEl = t.state
       ? `<span class="pcard-state st-${t.state}" title="${escapeHtml(t.stateTitle)}">${t.stateIcon}</span>`
       : "";
     const until = t.sleepUntil === null || t.sleepUntil === undefined ? "" : numText(t.sleepUntil);
-    // Layout: [number]            [badges]
+    // Layout: (seat)              [badges]        v0.14 (H28): the seat is a translucent bubble over the card's top-left corner - the card is the bot
     //                 [avatar]
-    //                 [name]
-    //                 [identity tag]      [state]
+    //                 [name ✔]            (v0.14: the mark of the initialization sits next to the name)
+    //                 [identity tag]      [state]   (no identity tag before the deal)
     return (
       `<div class="${classes.join(" ")}" data-actor="${escapeHtml(t.id)}" data-state="${escapeHtml(t.state)}"` +
       ` data-until="${until}" role="button" tabindex="0" title="${escapeHtml(t.title)}"` +
       ` aria-label="${escapeHtml(t.name)}，${numText(t.seat)} 号">` +
-      `<span class="pcard-num">${numText(t.seat)}</span>` +
+      `<span class="pcard-num seat-bubble" aria-hidden="true">${numText(t.seat)}</span>` +
       `<span class="pcard-badges">${badges}</span>${markEl}` +
       `<span class="pcard-avatar">${avatarImg(t.id, 40)}</span>` +
-      `<span class="pcard-text"><span class="pcard-name">${escapeHtml(t.name)}</span>${tag}</span>` +
+      `<span class="pcard-text"><span class="pcard-nameline"><span class="pcard-name">${escapeHtml(t.name)}</span>${initBadgeHtml(t)}</span>${tag}</span>` +
       `${stateEl}</div>`
     );
   }
 
+  /** The actor id of the card that has the keyboard focus ("" when the focus is elsewhere). */
+  function focusedCardId() {
+    const node = document.activeElement;
+    if (!node || !elParticipantsGrid || typeof node.getAttribute !== "function" || typeof elParticipantsGrid.contains !== "function") return "";
+    return elParticipantsGrid.contains(node) ? node.getAttribute("data-actor") || "" : "";
+  }
+
+  function refocusCard(actorId) {
+    if (!elParticipantsGrid || typeof elParticipantsGrid.querySelector !== "function") return;
+    const node = elParticipantsGrid.querySelector(`.pcard[data-actor="${cssEscape(actorId)}"]`);
+    if (node && typeof node.focus === "function") node.focus({ preventScroll: true });
+  }
+
   function renderBoard() {
+    // v0.14 (H29): while a card is pressed / dragged the grid is not repainted - the card in the hand would be replaced under the finger, and a
+    // repaint between the press and the release loses the click; it is drawn when the hand lets go (see seatDragUI's onBusy)
+    if (seatDragUI && seatDragUI.busy()) {
+      state.boardHeld = true;
+      return;
+    }
+    state.boardHeld = false;
     const s = state.session;
     const tiles = View.boardTiles(s, state.viewpoint, { clockNow: clockNow() });
     const html = tiles.map(tileHtml).join("");
-    // Skip the DOM write when nothing changed (keeps hover / focus, saves work).
+    // Skip the DOM write when nothing changed (keeps hover / focus, saves work).  When the cards ARE written the keyboard focus goes back to the card that had it
+    // (a card is replaced by its new drawing: without this a person who tabbed to a card - or moved it with Alt+← / → - would lose the place at every event)
+    const kept = focusedCardId();
+    const before = state.lastBoardHtml;
     setHtml(elParticipantsGrid, html, "lastBoardHtml");
-    if (rosterUI && rosterUI.isOpen()) rosterUI.position();
+    if (kept && state.lastBoardHtml !== before) refocusCard(kept);
+    // the cards can be moved while the game has not started: the grid says so (the cursor), the stylesheet follows
+    if (elParticipantsGrid && elParticipantsGrid.classList) elParticipantsGrid.classList.toggle("seats-draggable", View.seatDragState(s).enabled);
+    if (botsUI && botsUI.isOpen()) botsUI.position();
   }
 
   /** "狼 2/4 · 神 4/4 · 民 3/4 · 警长 Grace": the god view's compact summary at the end of the bar. */
@@ -726,7 +811,7 @@
       state.autoScroll = true;
       scheduleRender({ ...Store.newDirty(false), feed: true });
     }
-    if (rosterUI) rosterUI.close();
+    if (botsUI) botsUI.close();
   }
 
   // ---------------------------------------------------------------------------
@@ -799,7 +884,7 @@
         let ans;
         if (r.answer) {
           const revised = r.answer.changes > 0 ? `<span class="req-revised" title="改答 ${numText(r.answer.changes)} 次">↻${numText(r.answer.changes)}</span>` : "";
-          const lock = c.sealed ? `<span class="req-lock" title="密封请求：只有上帝视角能看到答案">🔒</span>` : "";
+          const lock = c.sealed ? `<span class="req-lock" title="密封请求：只有全局视角能看到答案">🔒</span>` : "";
           const text = escapeHtml(r.answer.label);
           ans = `<span class="req-ans answered${r.answer.defaulted ? " defaulted" : ""}"><span class="req-ans-label" title="${escapeHtml(
             r.answer.reason || r.answer.label
@@ -987,28 +1072,28 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Detail panel (roster.js owns it; this only forwards)
+  // Detail panel (bots.js owns it; this only forwards)
   // ---------------------------------------------------------------------------
 
   function renderPopover() {
-    if (rosterUI) rosterUI.render();
+    if (botsUI) botsUI.render();
   }
 
   function openPopover(actorId) {
-    if (rosterUI) rosterUI.open(actorId);
+    if (botsUI) botsUI.open(actorId);
     renderBoard();
     renderModeratorChip(state.session);
   }
 
   function closePopover() {
-    if (!rosterUI || !rosterUI.isOpen()) return;
-    rosterUI.close();
+    if (!botsUI || !botsUI.isOpen()) return;
+    botsUI.close();
     renderBoard();
     renderModeratorChip(state.session);
   }
 
   function togglePopover(actorId) {
-    if (rosterUI && rosterUI.openId() === actorId) closePopover();
+    if (botsUI && botsUI.openId() === actorId) closePopover();
     else openPopover(actorId);
   }
 
@@ -1137,7 +1222,7 @@
     markChannelRead(state.selectedChannel);
     state.autoScroll = true;
     state.feed.key = "";
-    if (rosterUI && rosterUI.isOpen()) rosterUI.render();
+    if (botsUI && botsUI.isOpen()) botsUI.render();
   }
 
   // ---------------------------------------------------------------------------
@@ -1224,15 +1309,16 @@
       ? View.normalizeSelectedChannel(next, state.viewpoint, state.selectedChannel)
       : View.defaultChannelId(next, state.viewpoint);
     if (state.selectedChannel && key !== prevKey) markChannelRead(state.selectedChannel);
-    if (rosterUI && rosterUI.openId() && rosterUI.openId() !== MOD && !View.participantOf(next, rosterUI.openId())) {
-      rosterUI.close();
+    if (botsUI && botsUI.openId() && botsUI.openId() !== MOD && !View.participantOf(next, botsUI.openId())) {
+      botsUI.close();
     }
     // providers, bindings, the notice bar and the archive import concern the LIVE game (during a replay, `next` is the
     // replayed one); the roster shows what is on screen
     if (providerUI) providerUI.onSession(liveSession());
     if (archiveUI) archiveUI.onSession(liveSession());
     if (calllogUI) calllogUI.onSession(liveSession()); // v0.13.1: the error log is the live game's, also while a replay is on screen
-    if (rosterUI) rosterUI.onSession(next);
+    if (botsUI) botsUI.onSession(next);
+    if (endReviewUI) endReviewUI.onSession(liveSession()); // v0.14: a game that is over and was not reviewed asks - once (it waits while a replay is on screen)
     if (thoughtsUI) thoughtsUI.onSession(next); // v0.13.1: the open thinking record re-checks "may I look" (a seat taken over, a replay) and follows a new game
     // The feed compares what it already shows (view key + blocks), so an identical
     // snapshot after a reconnect does not rebuild the list or move the scroll position.
@@ -1256,7 +1342,7 @@
 
   const PROVIDER_RELEVANT = new Set(["session.updated", "game.status"]);
 
-  /** roster.js / the store change names and avatars through the same code path as roster.updated. */
+  /** bots.js / the store change names and avatars through the same code path as roster.updated. */
   function patchParticipants(list) {
     // the moderator is not a participant: its entry travels as ``data.moderator`` (exactly like the SSE event)
     const moderator = list.find((x) => x && x.id === MOD);
@@ -1264,6 +1350,29 @@
     if (moderator) data.moderator = moderator;
     const res = Store.applyEvent(state.session, { type: "roster.updated", data });
     scheduleRender(res.dirty);
+  }
+
+  /**
+   * v0.14: a whole `BotsPayload` that came with an HTTP answer (GET api/bots, a write that answers with the table) - it is applied like the
+   * bots.updated event: `session.bots` and the seats' `bot_id` / `init_status` follow.  The bots are the LIVE game's, also while a replay is on screen.
+   */
+  function applyBotsPayload(payload) {
+    if (!payload || typeof payload !== "object") return;
+    const live = liveSession();
+    const res = Store.applyEvent(live, { type: "bots.updated", data: { bots: payload } });
+    if (botsUI) botsUI.onBots();
+    if (settingsUI) settingsUI.onBots();
+    if (!state.replay) scheduleRender(res.dirty);
+  }
+
+  /** The settings dialog, at `column` ("bots" | "contract" | "rules" | "games" ...) when the dialog has columns (settings.js). */
+  function openSettingsAt(column) {
+    if (settingsUI && typeof settingsUI.open === "function") return settingsUI.open(column);
+    if (archiveUI) {
+      archiveUI.openSettings();
+      return true;
+    }
+    return false;
   }
 
   /** Apply one SSE v2 event {id, type, data}. */
@@ -1320,12 +1429,19 @@
     if (result.budgetEvent === "reached") showToast("⛔ 已达到预算上限");
     if (result.reviewEvent) {
       const ev = result.reviewEvent;
-      if (ev.state === "done" && rosterUI) rosterUI.onReviewDone(ev.id);
+      if (botsUI) botsUI.onReviewEvent(ev);
+      if (endReviewUI) endReviewUI.onReviewEvent(ev); // v0.14: the progress rows of the end-of-game window (its countdown restarts from this event)
       if (ev.state === "error") showToast(`复盘失败（${View.displayName(s, ev.id)}）：${ev.message || "未知错误"}`);
     }
+    // v0.14: the bots (the line-up, ✔ ⚠ ✖ ⏳, the memory statistics) and one bot's initialization: the panel and the header controls follow
+    if (result.botsEvent && botsUI) botsUI.onBots();
+    if (result.botsEvent && settingsUI) settingsUI.onBots();
+    if (result.initEvent && botsUI) botsUI.onInitEvent(result.initEvent);
+    if (endReviewUI) endReviewUI.onSession(state.session); // v0.14: the game became finished? (cheap: it is asked after every event)
     if (PROVIDER_RELEVANT.has(payload.type)) {
       if (providerUI) providerUI.onSession(state.session);
       if (archiveUI) archiveUI.onSession(state.session);
+      if (settingsUI) settingsUI.onSession();
     }
     scheduleRender(result.dirty);
   }
@@ -1346,8 +1462,9 @@
       if (evt.button !== undefined && evt.button !== 0) return;
       const node = closestFrom(evt.target, selector);
       if (!node) return;
+      // (v0.14: a handler may decline a mousedown by returning false - a card that can be dragged opens on its click - the click then is not skipped)
+      if (handler(node, evt) === false) return;
       recent = { key: node.getAttribute(keyAttr), at: Date.now() };
-      handler(node, evt);
     });
     container.addEventListener("click", (evt) => {
       const node = closestFrom(evt.target, selector);
@@ -1422,6 +1539,11 @@
   // a player card (or the moderator chip) opens the detail panel / drawer
   bindPress(elParticipantsGrid, ".pcard[data-actor]", "data-actor", (node, evt) => {
     if (closestFrom(evt && evt.target, "[data-mark-toggle]")) return; // (the dot is handled above)
+    // v0.14 (H29): while the cards can be moved a press may be the start of a drag: the card opens on the click, and never on the click that ends a drag
+    if (seatDragUI && seatDragUI.armed()) {
+      if (evt && evt.type === "mousedown") return false;
+      if (seatDragUI.clickSuppressed()) return;
+    }
     togglePopover(node.getAttribute("data-actor"));
   });
   bindPress(elTopbarStatus, "#mod-chip", "data-actor", (node) =>
@@ -1492,7 +1614,7 @@
     }
   }
 
-  // Click outside the ticket popover closes it; the detail panel / roster menu close themselves (roster.js).
+  // Click outside the ticket popover closes it; the detail panel / roster menu close themselves (bots.js).
   if (typeof document.addEventListener === "function") {
     // the event path is computed at dispatch time: a handler that repaints (detaches) the clicked
     // button must not turn an inside click into an "outside" one
@@ -1540,8 +1662,7 @@
   const RELOCATIONS = [
     { id: "btn-open-settings-modal", slot: "menu" },
     { id: "btn-theme", slot: "menu" },
-    // v0.13: the whole bar [视角▾][切换][接管] moves; the takeover bar (#takeover-bar) stays in the first row
-    { id: "viewpoint-bar", slot: "menu" },
+    // v0.14 (H27): the viewpoint label (#viewpoint-bar) and the takeover bar (#takeover-bar) stay in the first row of a phone - they are not moved
     { id: "btn-open-budget-modal", slot: "menu" },
     // v0.13.1 (G32): the error log button moves too; its unread badge then shows on the ⋯ button (calllog.js)
     { id: "btn-open-calllog", slot: "menu" },
@@ -1594,7 +1715,7 @@
     state.platform = info;
     relocateTopbar(info.platform === "phone");
     if (layoutUI) layoutUI.apply(); // the avatar rail follows the layout
-    if (rosterUI) rosterUI.render();
+    if (botsUI) botsUI.render();
     renderTabbar();
     hideTip();
     state.ticketPopOpen = false;
@@ -1612,7 +1733,7 @@
     htmlEl.setAttribute("data-theme", next);
   });
 
-  // (v0.13: the drop-down only chooses; "切换" / "接管" are wired in takeover.js)
+  // (v0.14: the viewpoint label and its menu - 全局视角 / 以 X 的视角观看 / 接管 X / 退出接管 - are wired in takeover.js)
 
   /** POST a control endpoint and adopt the session in its response. */
   async function control(path, okMessage) {
@@ -1622,8 +1743,113 @@
       if (okMessage) showToast(okMessage);
       return true;
     } catch (err) {
+      // v0.14 (H25): the start check said no - 409 NOT_READY + the problems: a dialog that says who is not ready and why, nothing was dealt
+      if (err && err.code === "NOT_READY") {
+        await showNotReady(err);
+        return false;
+      }
       showToast(err.message);
       return false;
+    }
+  }
+
+  const NOT_READY_FALLBACK = "还没有准备好，不能开局。";
+
+  /**
+   * v0.14 (H25): the dialog of a refused start.  `err` is the ApiError of `409 {"detail", "code": "NOT_READY", "problems": [Problem…]}`.  The problems are grouped
+   * by player (the contract, the scenario, every player of the table, the moderator) - each item has the server's sentence and, when the page knows how to
+   * fix it, a button that closes the dialog and takes the user there: `window.Bots.focus(botId, fix)` (web-bots' convention; ignored in silence when there is no
+   * `window.Bots`).  `botId` is the bot's id for a player's items, "moderator" for the moderator's missing model and null for the contract / the scenario.
+   * When two or more players only need their initialization the dialog's own button starts the global one (`Bots.initAll()`).
+   * Resolves when the dialog is closed.
+   */
+  async function showNotReady(err) {
+    const model = View.startCheckModel(state.session, err.problems);
+    if (!model.groups.length) {
+      showToast(err.detail || err.message || NOT_READY_FALLBACK); // (the server gave no list: its sentence is all there is)
+      return;
+    }
+    const groupsHtml = model.groups
+      .map((g) => {
+        const items = g.items
+          .map((it) => {
+            const button = it.fixLabel
+              ? `<button type="button" class="btn btn-xs btn-primary-outline nr-fix" data-nr-fix="${escapeHtml(it.fix)}" data-nr-bot="${escapeHtml(g.focusId || "")}"` +
+                ` title="${escapeHtml(it.fixLabel)}">${escapeHtml(it.fixLabel)}</button>`
+              : "";
+            return `<li class="nr-item" data-code="${escapeHtml(it.code)}"><span class="nr-msg">${escapeHtml(it.message)}</span>${button}</li>`;
+          })
+          .join("");
+        return `<section class="nr-group nr-${escapeHtml(g.kind)}" data-key="${escapeHtml(g.key)}"><h4 class="nr-title">${escapeHtml(g.title)}</h4><ul class="nr-items">${items}</ul></section>`;
+      })
+      .join("");
+    const globalInit = model.initCount > 1;
+    let picked = null;
+    const pending = openDialog({
+      title: "还不能开局",
+      bodyHtml:
+        `<p class="dialog-p">点「开始」时检查发现下面这些还没有准备好，所以没有开局，也没有发牌。处理好之后再点「开始」。</p>` +
+        `<div class="nr-groups" id="not-ready-groups">${groupsHtml}</div>`,
+      okText: globalInit ? "⚙ 全局初始化" : "知道了",
+      cancelText: "关闭",
+      hideCancel: !globalInit,
+      collect: () => picked,
+    });
+    // a fix button closes the dialog like its OK button does and tells which fix was asked for (collect() above)
+    const body = $("dialog-body");
+    const onClick = (evt) => {
+      const btn = closestFrom(evt && evt.target, "[data-nr-fix]");
+      if (!btn) return;
+      picked = { fix: btn.getAttribute("data-nr-fix"), botId: btn.getAttribute("data-nr-bot") || "" };
+      const ok = $("btn-dialog-ok");
+      if (ok && typeof ok.click === "function") ok.click();
+    };
+    if (body && typeof body.addEventListener === "function") body.addEventListener("click", onClick);
+    const res = await pending;
+    if (body && typeof body.removeEventListener === "function") body.removeEventListener("click", onClick);
+    if (!res || !res.ok) return;
+    const bots = window.Bots;
+    if (res.values && res.values.fix) {
+      if (bots && typeof bots.focus === "function") bots.focus(res.values.botId || null, res.values.fix);
+    } else if (globalInit && bots && typeof bots.initAll === "function") {
+      bots.initAll();
+    }
+  }
+
+  /**
+   * v0.14 (H29): a card was dropped on another seat (`from` / `to`: indexes in seat order).  The line-up changes at once on the page - the cards, the names of the
+   * channels and the feed follow - then `PUT api/bots/lineup {order}` makes it the server's.  A refusal (409: the game has started, 422, a failed request) puts
+   * everything back and says why.  One move at a time: the next one waits for the answer to this one.
+   */
+  async function moveSeat(from, to, info) {
+    const s = state.session;
+    const check = View.seatDragState(s);
+    if (!check.enabled) {
+      showToast(check.reason);
+      return false;
+    }
+    if (state.lineupSaving) {
+      showToast("正在保存上一次的座位调整，请稍等一下");
+      return false;
+    }
+    const order = View.moveInLineup(s.bots.lineup, from, to);
+    const change = order ? Store.applyLineup(s, order) : null;
+    if (!change) return false;
+    state.lineupSaving = true;
+    const dirty = { ...Store.newDirty(false), board: true, topbar: true, popover: true, channels: true, feed: true };
+    renderNow(dirty, true); // (at once, not with the next frame: the keyboard focus below needs the new cards)
+    if (info && info.keyboard && seatDragUI) seatDragUI.focusIndex(to); // the focus goes with the moved card, so Alt+← / → can be pressed again
+    try {
+      const payload = await api.put("api/bots/lineup", { order });
+      applyBotsPayload(payload); // the server's own table
+      return true;
+    } catch (err) {
+      change.undo();
+      renderNow(dirty, true);
+      showToast(`座位没有调整成功，已恢复原来的座位：${err && err.message ? err.message : "请求失败"}`);
+      return false;
+    } finally {
+      state.lineupSaving = false;
     }
   }
 
@@ -1673,6 +1899,22 @@
     // Layout is pure DOM/state: create it before the first render so the saved
     // collapsed panels are applied immediately.
     layoutUI = window.ArenaLayout.create({ Core });
+    // v0.14 (H29): the cards can be moved while the game has not started (pointer, touch long press, Alt+← / →); a drop is `moveSeat`
+    if (typeof window.ArenaLayout.createSeatDrag === "function") {
+      seatDragUI = window.ArenaLayout.createSeatDrag({
+        View,
+        grid: elParticipantsGrid,
+        armed: () => View.seatDragState(state.session).enabled,
+        onBusy: (busy) => {
+          // the repaint that was held while the hand was on a card is made after the click that may follow the release (a timer), not before it
+          if (busy || !state.boardHeld) return;
+          window.setTimeout(() => {
+            if (state.boardHeld && !(seatDragUI && seatDragUI.busy())) renderBoard();
+          }, 0);
+        },
+        commit: (from, to, info) => moveSeat(from, to, info),
+      });
+    }
   }
 
   if (window.ArenaProviderUI) {
@@ -1710,8 +1952,8 @@
     });
   }
 
-  if (window.ArenaRosterUI) {
-    rosterUI = window.ArenaRosterUI.create({
+  if (window.ArenaBotsUI) {
+    botsUI = window.ArenaBotsUI.create({
       api,
       Core,
       Avatar,
@@ -1721,6 +1963,12 @@
       getViewpoint: () => state.viewpoint,
       getClockNow: clockNow,
       bindingText,
+      // v0.14: a BotsPayload from an HTTP answer (GET api/bots ...) goes through the same code path as the bots.updated event
+      applyBots: applyBotsPayload,
+      download: downloadFromApi,
+      buildUrl: buildApiUrl,
+      // the start check's "去导入契约 / 规则" and the notes of the bots point at a column of the settings dialog
+      openSettings: openSettingsAt,
       openBindings: (id) => {
         if (providerUI) providerUI.openBindings(id);
       },
@@ -1773,14 +2021,14 @@
     });
   }
 
-  /** The shared modal of roster.js (confirmations, forms); the browser's confirm() when it is missing. */
+  /** The shared modal of bots.js (confirmations, forms); the browser's confirm() when it is missing. */
   function openDialog(options) {
-    if (rosterUI && typeof rosterUI.openDialog === "function") return rosterUI.openDialog(options);
+    if (botsUI && typeof botsUI.openDialog === "function") return botsUI.openDialog(options);
     const ok = typeof window.confirm === "function" ? window.confirm(String((options && options.title) || "确认")) : false;
     return Promise.resolve({ ok, values: {} });
   }
 
-  // v0.13 (F1-F5): the viewpoint bar [视角▾][切换][接管], the takeover bar, the reshuffle reminder
+  // v0.13 (F1-F4) / v0.14 (H27): the viewpoint label and its menu, the takeover bar, the soft pause
   if (window.ArenaTakeoverUI) {
     takeoverUI = window.ArenaTakeoverUI.create({
       api,
@@ -1794,6 +2042,22 @@
       adoptSession: (raw, opts) => adoptHttpSession(raw, opts),
       refreshState: () => reloadState(),
       isReplaying: () => Boolean(state.replay),
+    });
+  }
+
+  // v0.14 (H31-H33): the question at the end of a game - should the bots review it?  (the LIVE game's: it waits while a replay is on screen)
+  if (window.ArenaEndReviewUI) {
+    endReviewUI = window.ArenaEndReviewUI.create({
+      api,
+      Core,
+      View,
+      showToast,
+      getSession: () => liveSession(),
+      isReplaying: () => Boolean(state.replay),
+      // "去看看": the panel of that player (the memory it changed, the proposals for its L0 that wait for the user) - window.Bots.open(seat), ignored when absent
+      openBot: (seat) => {
+        if (window.Bots && typeof window.Bots.open === "function") window.Bots.open(seat);
+      },
     });
   }
 
@@ -1841,6 +2105,10 @@
       onReplay: (data, game) => {
         if (replayUI) replayUI.start(data, game);
       },
+      // v0.14 (H40): the history dialog is for replaying / continuing; deleting, exporting and importing games is 对局管理 of the settings
+      openManagement: () => {
+        if (settingsUI) settingsUI.open("games");
+      },
     });
   }
 
@@ -1876,19 +2144,52 @@
     });
   }
 
+  // v0.14 (H35-H40): the five columns of the settings dialog; archive.js draws column ① and asks this for the frame (wrapHome / onHomeRendered / onOpened)
+  if (window.ArenaSettingsUI) {
+    settingsUI = window.ArenaSettingsUI.create({
+      api,
+      Core,
+      Avatar,
+      showToast,
+      getSession: () => liveSession(), // (the games' buttons follow the LIVE game, also while a replay is on screen)
+      openDialog,
+      download: downloadFromApi,
+      buildUrl: buildApiUrl,
+      bots: botsUI,
+      applyBots: applyBotsPayload,
+      archive: {
+        openSettings: () => (archiveUI ? archiveUI.openSettings() : undefined),
+        closeSettings: () => (archiveUI ? archiveUI.closeSettings() : undefined),
+        goHome: () => (archiveUI ? archiveUI.goHome() : false),
+      },
+      // the history dialog (replay / continue) and this one send the user to each other
+      openHistory: () => {
+        if (historyUI) historyUI.open();
+      },
+      // a game was deleted here: its colour marks (they live in this browser) go; when it was the CURRENT game the server made an empty new one
+      onGameDeleted: (res) => {
+        if (marksUI && res && res.session_id) marksUI.forget(res.session_id);
+        if (res && res.new_game) reloadState();
+      },
+      // the server made an empty new game although the old file could not be deleted for the moment (409 in_use): the screen follows the new game
+      onNewGame: () => {
+        reloadState();
+      },
+    });
+  }
+
   if (window.ArenaArchiveUI) {
     archiveUI = window.ArenaArchiveUI.create({
+      wrapHome: settingsUI ? settingsUI.wrapHome : undefined,
+      onHomeRendered: settingsUI ? settingsUI.onHomeRendered : undefined,
+      onOpened: settingsUI ? settingsUI.onOpened : undefined,
       api,
       Core,
       showToast,
       getSession: () => liveSession(), // (a replay on screen must not hide that the live game runs: import needs it paused)
       getToken,
       // XHR uploads send the token as a header; a download link cannot, so it carries ?token= (the server accepts it there)
-      buildUrl: (path, options) => {
-        const url = Core.joinUrl(URL_PREFIX, path);
-        const token = options && options.token ? getToken() : "";
-        return token ? `${url}${url.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}` : url;
-      },
+      buildUrl: buildApiUrl,
       requestToken: requestAuthToken,
       reload: () => {
         if (typeof window.location.reload === "function") window.location.reload();
@@ -2113,7 +2414,7 @@
     if (typeof window.setInterval !== "function") return;
     window.setInterval(() => {
       tickCountdowns();
-      if (rosterUI && rosterUI.isOpen()) rosterUI.render({ live: true });
+      if (botsUI && botsUI.isOpen()) botsUI.render({ live: true });
       // the seconds left of the played seat's floor (the hint under the input box)
       if (composerUI && View.takeoverSeat(state.session)) composerUI.render();
     }, 1000);
@@ -2145,7 +2446,7 @@
       return;
     }
     await reloadState();
-    if (rosterUI) rosterUI.load().catch(() => {});
+    if (botsUI) botsUI.load().catch(() => {});
     if (!SSE_DISABLED) {
       window.setTimeout(connectSSE, 300);
     }
@@ -2174,12 +2475,18 @@
     renderNow,
     patchParticipants,
     platform: () => (platformCtl ? platformCtl.info() : null),
-    roster: () => rosterUI,
+    roster: () => botsUI, // (the old name of bots)
+    bots: () => botsUI,
+    settings: () => settingsUI,
+    openSettings: openSettingsAt, // (column) -> opens the settings dialog at that column ("bots" / "contract" / "rules" / "games" / ...)
     thoughts: () => thoughtsUI,
     calllog: () => calllogUI,
     budget: () => budgetUI,
     archive: () => archiveUI,
     takeover: () => takeoverUI,
+    seatDrag: () => seatDragUI,
+    moveSeat,
+    endReview: () => endReviewUI,
     composer: () => composerUI,
     marks: () => marksUI,
     history: () => historyUI,

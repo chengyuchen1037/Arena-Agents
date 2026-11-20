@@ -14,6 +14,7 @@ const Platform = require(jsPath("platform.js"));
 const Store = require(jsPath("store.js"));
 const View = require(jsPath("view.js"));
 const F = require("./fixtures.js");
+const { makeBotsFake } = require("./bots_fake.js"); // v0.14: the bots / contract / rules / games part of the fake backend
 
 const read = (name) => fs.readFileSync(jsPath(name), "utf8");
 const SRC = {
@@ -21,14 +22,18 @@ const SRC = {
   providers: read("providers.js"),
   layout: read("layout.js"),
   archive: read("archive.js"),
-  roster: read("roster.js"),
+  botlib: read("botlib.js"), // v0.14: the pure helpers of the bot UI
+  botedit: read("botedit.js"), // v0.14: the editors of the bot panel
+  bots: read("bots.js"), // v0.14: the player panel, the initialization, the roster menu (replaces roster.js)
   budget: read("budget.js"),
   marks: read("marks.js"), // v0.13.1: the colour marks on the players
   thoughts: read("thoughts.js"), // v0.13.1: the thinking record window
   calllog: read("calllog.js"), // v0.13.1: the error log window + the badge
   takeover: read("takeover.js"),
   composer: read("composer.js"),
+  endreview: read("endreview.js"), // v0.14: the question at the end of a game (should the bots review it?)
   history: read("history.js"),
+  settings: read("settings.js"), // v0.14: the five columns of the settings dialog
   replay: read("replay.js"),
   platform: read("platform.js"),
   avatar: read("avatar.js"),
@@ -208,6 +213,7 @@ function resp(status, body, ct = "application/json", extraHeaders = {}) {
     text: async () => text,
     json: async () => JSON.parse(text),
     blob: async () => new Blob([text], { type: ct }),
+    _body: body, // (what it was made from: the fake answers of an XHR upload need the object, not the text)
   };
 }
 
@@ -434,7 +440,9 @@ function makeEnv({
     run: () => {
       vm.runInContext(SRC.layout, sandbox, { filename: "layout.js" });
       vm.runInContext(SRC.providers, sandbox, { filename: "providers.js" });
-      vm.runInContext(SRC.roster, sandbox, { filename: "roster.js" });
+      vm.runInContext(SRC.botlib, sandbox, { filename: "botlib.js" });
+      vm.runInContext(SRC.botedit, sandbox, { filename: "botedit.js" });
+      vm.runInContext(SRC.bots, sandbox, { filename: "bots.js" });
       vm.runInContext(SRC.budget, sandbox, { filename: "budget.js" });
       vm.runInContext(SRC.archive, sandbox, { filename: "archive.js" });
       vm.runInContext(SRC.marks, sandbox, { filename: "marks.js" });
@@ -442,7 +450,9 @@ function makeEnv({
       vm.runInContext(SRC.calllog, sandbox, { filename: "calllog.js" });
       vm.runInContext(SRC.takeover, sandbox, { filename: "takeover.js" });
       vm.runInContext(SRC.composer, sandbox, { filename: "composer.js" });
+      vm.runInContext(SRC.endreview, sandbox, { filename: "endreview.js" });
       vm.runInContext(SRC.history, sandbox, { filename: "history.js" });
+      vm.runInContext(SRC.settings, sandbox, { filename: "settings.js" });
       vm.runInContext(SRC.replay, sandbox, { filename: "replay.js" });
       vm.runInContext(SRC.app, sandbox, { filename: "app.js" });
     },
@@ -475,29 +485,7 @@ const clone = (v) => JSON.parse(JSON.stringify(v));
 
 /** The `takeover` of a session in which `seat` is played and nothing else is going on yet (F.takeover with defaults). */
 function takeoverOf(session, seat, over = {}) {
-  return F.makeTakeover(seat, { reshuffle_available: session.status === "idle", ...over });
-}
-
-// ---- v0.13.1: the memory of a seat as the server keeps it (contract §12.5): the impressions of the OTHER seats + lessons ----
-const LIMITS = { impression_chars: 80, experience_items: 3, experience_chars: 300, memory_chars: 1500, legacy_chars: 600, persona_chars: 500, persona_item_chars: 40 };
-const emptyParts = (id) => ({
-  record: "",
-  impressions: Object.fromEntries(F.PLAYER_IDS.filter((p) => p !== id).map((p) => [p, ""])),
-  experience: [],
-  legacy: "",
-});
-
-/** The canonical memory text of a seat (the server renders it; GET /api/roster sends it as `memory`, ``""`` when there is nothing). */
-function memoryTextOf(seat, seats) {
-  const p = seat.memory_parts;
-  if (!(p.record.trim() || Object.values(p.impressions).some(Boolean) || p.experience.length || p.legacy.trim())) return "";
-  const name = (id) => (seats.find((s) => s.id === id) || {}).name || id;
-  const blocks = [];
-  if (p.record.trim()) blocks.push(`## 战绩\n${p.record.trim()}`);
-  const lines = Object.keys(p.impressions).map((id) => `- ${id} ${name(id)}：${p.impressions[id] || "（暂无）"}`);
-  blocks.push(`## 印象\n${lines.join("\n")}\n\n## 经验${p.experience.length ? `\n${p.experience.map((e) => `- ${e}`).join("\n")}` : ""}`);
-  if (p.legacy.trim()) blocks.push(`## 旧记忆（待整理）\n${p.legacy.trim()}`);
-  return blocks.join("\n\n");
+  return F.makeTakeover(seat, over);
 }
 
 function makeBackend(overrides = {}) {
@@ -553,34 +541,21 @@ function makeBackend(overrides = {}) {
     // v0.13 (history.js): the rows of GET /api/games (the live game is marked `current` by the route) and, per id, the
     // answer of GET /api/games/{id}/replay
     games: [
-      { session_id: "s-test", title: "Arena-Agents", scenario_title: "狼人杀 12 人局", status: "idle", winner: null, created_at: "2026-11-18T08:00:00Z", updated_at: "2026-11-18T08:00:00Z", duration_gt: 0, players: 12, tokens: 0, cost_usd: 0, human_involved: false, schema_version: 5, size_bytes: 1200 },
-      { session_id: "old-1", title: "Arena-Agents", scenario_title: "狼人杀 12 人局", status: "finished", winner: "好人阵营", created_at: "2026-11-17T09:00:00Z", updated_at: "2026-11-17T10:00:00Z", duration_gt: 1523, players: 12, tokens: 1250000, cost_usd: 0.5, human_involved: false, schema_version: 5, size_bytes: 91000 },
-      { session_id: "old-2", title: "Arena-Agents", scenario_title: "狼人杀 12 人局", status: "paused", winner: null, created_at: "2026-11-16T09:00:00Z", updated_at: "2026-11-16T09:40:00Z", duration_gt: 600, players: 12, tokens: 3200, cost_usd: 0.01, human_involved: true, schema_version: 5, size_bytes: 40000 },
+      { session_id: "s-test", title: "Arena-Agents", scenario_title: "狼人杀 12 人局", status: "idle", winner: null, created_at: "2026-11-18T08:00:00Z", updated_at: "2026-11-18T08:00:00Z", duration_gt: 0, players: 12, tokens: 0, cost_usd: 0, human_involved: false, schema_version: 6, size_bytes: 1200, log_bytes: 0, readable: true, review: { done: 0, total: null }, participants_brief: F.NAMES.slice() },
+      { session_id: "old-1", title: "Arena-Agents", scenario_title: "狼人杀 12 人局", status: "finished", winner: "好人阵营", created_at: "2026-11-17T09:00:00Z", updated_at: "2026-11-17T10:00:00Z", duration_gt: 1523, players: 12, tokens: 1250000, cost_usd: 0.5, human_involved: false, schema_version: 6, size_bytes: 91000, log_bytes: 2400000, readable: true, review: { done: 5, total: 12 }, participants_brief: F.NAMES.slice() },
+      { session_id: "old-2", title: "Arena-Agents", scenario_title: "狼人杀 12 人局", status: "paused", winner: null, created_at: "2026-11-16T09:00:00Z", updated_at: "2026-11-16T09:40:00Z", duration_gt: 600, players: 12, tokens: 3200, cost_usd: 0.01, human_involved: true, schema_version: 5, size_bytes: 40000, log_bytes: 900000, readable: true, review: { done: 0, total: null }, participants_brief: F.NAMES.slice() },
     ],
     replays: {},
     discovered: ["model-x", "m-new", "other/slash"],
     suggestions: {}, // model id -> a `suggested` object (null / missing = no match)
     pricing: { url: Core.DEFAULT_PRICING_SOURCE_URL, default_url: Core.DEFAULT_PRICING_SOURCE_URL, fetched_at: "2026-11-17T08:00:00Z", entries: 2345, error: null },
     budget: { max_tokens: null, max_cost_usd: null, force_stop: false, used_tokens: 0, used_cost_usd: 0, state: "ok" },
-    roster: {
-      memory_enabled: true,
-      editable: true,
-      limits: { ...LIMITS }, // v0.13.1: the limits of persona and memory (contract §12.5)
-      seats: F.PLAYER_IDS.map((id, i) => ({
-        seat: i + 1,
-        id,
-        name: F.NAMES[i],
-        default_name: F.NAMES[i],
-        avatar: F.avatarOf(i + 1),
-        persona: "",
-        memory: "",
-        memory_parts: emptyParts(id),
-      })),
-      moderator: { id: "moderator", name: "主持人", avatar: F.avatarOf(13) },
-    },
-    refineDraft: "【草稿】这是主持人模型完善后的设定。",
-    // v0.13.1: the memory draft `refine` answers with (`null`: the fake merges the notes into what the seat remembers as one lesson)
-    refineMemory: null,
+    // v0.14: the bots (a player IS a bot now), the official contract, the rules, the games' files: `b.botsApi` (tests/frontend/bots_fake.js) is
+    // the world of them - `b.botsApi.set("N3", {...})`, `.preset("mixed")`, `.payload(true)`, `.detail("N3")`, `.checkReady()` ...
+    // `refineDraft`: what core:refine answers as `draft` (a merged L0 file; `null`: the fake drafts one out of the notes); `refineError`:
+    // [status, detail, code?] makes it fail
+    refineDraft: null,
+    refineError: null,
     // v0.13.1: the error log (GET /api/llm/calls, contract §12.3): CallEntry lines, oldest first (ids count up from 1);
     // `callsFailure` = [status, detail] makes the endpoint fail
     llmCalls: [],
@@ -589,7 +564,7 @@ function makeBackend(overrides = {}) {
     // `thoughtsFailure` = [status, detail] makes the endpoint fail
     thoughts: {},
     thoughtsFailure: null,
-    reviewStarted: ["N1"],
+    reviewStarted: ["N1"], // v0.14: POST /api/game/review answers {started, deadline_s: 60}
     // v0.13 (archive.js, contract section 11.9): /api/state.legacy_data, GET /api/archive/status, the import summary
     legacyData: { found: false, dismissed: false },
     archiveStatus: { busy: false, job: null, import: null, game_active: false },
@@ -619,8 +594,24 @@ function makeBackend(overrides = {}) {
     ...overrides,
     session,
   };
+  b.botsFake = makeBotsFake({ b, resp, F });
+  b.botsApi = b.botsFake.api;
+  if (b.botsPreset) {
+    // `botsPreset: "fresh" | "mixed"`: the twelve bots start in that state (the page starts with the fake's table; the default "everybody ✔ and
+    // frozen" is what the fixtures say too).  "fresh": nobody initialized, no memory - nothing is frozen, a name / avatar changes without a question.
+    b.botsApi.preset(b.botsPreset);
+    session.bots = b.botsApi.live();
+    for (const p of session.participants) {
+      const sum = session.bots.bots.find((x) => x.seat === p.id);
+      if (sum) {
+        p.bot_id = sum.id;
+        p.init_status = sum.init.status;
+      }
+    }
+  }
   /** The default answer to an archive upload (POST /api/archive/import by XHR): progress, "uploaded", then the reply. */
   b.uploadHandler = (xhr) => {
+    if (b.botsFake.upload(xhr)) return; // v0.14: a .arenabot over a bot, an .arenagame (the NAME of the file picks what happens)
     const size = Number((xhr.body && xhr.body.size) || 0);
     const name = decodeURIComponent((String(xhr.url).match(/[?&]name=([^&]*)/) || [])[1] || "");
     b.uploads = (b.uploads || []).concat([{ url: xhr.url, name, size, headers: { ...xhr.headers } }]);
@@ -645,12 +636,18 @@ function makeBackend(overrides = {}) {
     if (b.requireToken && init.headers["X-Arena-Token"] !== b.requireToken) {
       return resp(401, { detail: "Invalid or missing API token" });
     }
-    if (b.failures[key]) return resp(b.failures[key][0], { detail: b.failures[key][1] });
+    // [status, detail, extra?]: `extra` is merged into the body (a `code`, `problems`, `will_clear` ... of the new endpoints)
+    if (b.failures[key]) return resp(b.failures[key][0], { detail: b.failures[key][1], ...(b.failures[key][2] || {}) });
     const find = (id) => b.providers.find((p) => p.id === id);
     let m;
     if (key === "GET /api/state") return resp(200, { app_version: "v0.13.1-test", legacy_data: b.legacyData, session: b.session });
     // (v0.13.1: soft-pause / soft-resume answer like the other controls - a test sets `controlSession` to what the
     // server would answer with, e.g. the session with `soft_pause: {state: "draining", in_flight: 2}`)
+    if (key === "POST /api/control/start") {
+      b.startCalls = (b.startCalls || 0) + 1;
+      const problems = b.botsApi.checkReady();
+      if (problems.length) return resp(409, { detail: b.botsApi.notReadyText(problems), code: "NOT_READY", problems });
+    }
     if (/^POST \/api\/control\/(new|start|pause|force-pause|soft-pause|soft-resume)$/.test(key)) {
       return resp(200, { ok: true, session: b.controlSession || b.session });
     }
@@ -746,12 +743,7 @@ function makeBackend(overrides = {}) {
       const current = b.session.session_id;
       return resp(200, { games: b.games.map((g) => ({ ...g, current: g.session_id === current })), current });
     }
-    if ((m = key.match(/^DELETE \/api\/games\/([^/]+)$/))) {
-      const id = decodeURIComponent(m[1]);
-      if (id === b.session.session_id) return resp(409, { detail: "当前对局不能删除：请先新建或载入另一局。" });
-      b.games = b.games.filter((g) => g.session_id !== id);
-      return resp(200, { ok: true, session_id: id });
-    }
+    if ((m = key.match(/^DELETE \/api\/games\/([^/]+)$/))) return b.botsFake.deleteGame(decodeURIComponent(m[1]));
     if ((m = key.match(/^POST \/api\/games\/([^/]+)\/load$/))) {
       if (b.loadError) return resp(409, { detail: b.loadError });
       return resp(200, { ok: true, session: { ...b.session, session_id: decodeURIComponent(m[1]), status: "paused" } });
@@ -783,82 +775,10 @@ function makeBackend(overrides = {}) {
       b.budget.state = Core.budgetStateOf(b.budget); // like the server: the state follows the new limits
       return resp(200, b.budget);
     }
-    if (key === "GET /api/roster") return resp(200, b.roster);
-    if (key === "PUT /api/roster/memory-enabled") {
-      b.roster.memory_enabled = Boolean(body.enabled);
-      return resp(200, { enabled: b.roster.memory_enabled });
-    }
-    if (key === "POST /api/roster/memory:clear") {
-      b.lastClear = body;
-      for (const seat of b.roster.seats) {
-        seat.memory = "";
-        seat.memory_parts = emptyParts(seat.id);
-        if (body && body.include_persona) seat.persona = "";
-      }
-      return resp(200, { ok: true });
-    }
-    if (key === "POST /api/roster/avatars:regenerate") {
-      if (b.session.status !== "idle") return resp(409, { detail: "对局已开始，不能重新生成头像" });
-      b.roster.seats.forEach((seat, i) => (seat.avatar = F.avatarOf(i + 20)));
-      b.roster.moderator.avatar = F.avatarOf(40); // "all" includes the moderator
-      return resp(200, { seats: b.roster.seats, moderator: b.roster.moderator });
-    }
-    if (key === "POST /api/roster/moderator/avatar:regenerate") {
-      if (b.session.status !== "idle") return resp(409, { detail: "对局已开始，不能重新生成头像" });
-      b.roster.moderator.avatar = F.avatarOf(41 + (b.moderatorRolls = (b.moderatorRolls || 0) + 1));
-      return resp(200, b.roster.moderator);
-    }
-    if ((m = key.match(/^POST \/api\/roster\/([^/]+)\/avatar:regenerate$/))) {
-      const seat = b.roster.seats.find((x) => x.id === m[1]);
-      seat.avatar = F.avatarOf(30 + b.roster.seats.indexOf(seat));
-      return resp(200, seat);
-    }
-    if ((m = key.match(/^POST \/api\/roster\/([^/]+)\/refine$/))) {
-      b.lastRefine = { id: m[1], ...body };
-      b.refineCalls = (b.refineCalls || []).concat([{ id: m[1], ...body }]);
-      if (b.refineError) return resp(502, { detail: b.refineError });
-      if (body.kind === "memory") {
-        // v0.13.1 (contract §12.5): {draft: the 印象 / 经验 text, memory_parts: {impressions (every OTHER seat), experience}} - never legacy / record
-        const seat = b.roster.seats.find((x) => x.id === m[1]);
-        if (b.refineMemory) return resp(200, b.refineMemory);
-        const parts = { impressions: { ...seat.memory_parts.impressions }, experience: [String(body.text).split("\n")[0], ...seat.memory_parts.experience].slice(0, 3) };
-        const draft = `## 印象\n${Object.entries(parts.impressions).map(([id, t]) => `- ${id} ${(b.roster.seats.find((x) => x.id === id) || {}).name}：${t || "（暂无）"}`).join("\n")}\n\n## 经验\n${parts.experience.map((e) => `- ${e}`).join("\n")}`;
-        return resp(200, { draft, memory_parts: parts });
-      }
-      return resp(200, { draft: b.refineDraft });
-    }
-    if (key === "PUT /api/roster/moderator") {
-      // the moderator only has an avatar to change (contract §10.9), and only before the game starts
-      b.rosterPuts = (b.rosterPuts || []).concat([{ id: "moderator", ...body }]);
-      if (b.session.status !== "idle") return resp(409, { detail: "对局已开始，不能修改头像" });
-      b.roster.moderator.avatar = body.avatar;
-      return resp(200, b.roster.moderator);
-    }
-    if ((m = key.match(/^PUT \/api\/roster\/([^/]+)$/))) {
-      const seat = b.roster.seats.find((x) => x.id === m[1]);
-      if (!seat) return resp(404, { detail: "no such seat" });
-      b.rosterPuts = (b.rosterPuts || []).concat([{ id: m[1], ...body }]);
-      if (("name" in body || "avatar" in body) && b.session.status !== "idle") return resp(409, { detail: "对局已开始，不能修改名字或头像" });
-      if ("name" in body) {
-        if (b.roster.seats.some((x) => x.id !== m[1] && x.name === body.name)) return resp(422, { detail: `名字「${body.name}」已被使用` });
-        seat.name = body.name;
-      }
-      for (const k of ["persona", "avatar"]) if (k in body) seat[k] = body[k];
-      if ("memory" in body) seat.memory_parts = { ...emptyParts(seat.id), legacy: String(body.memory) }; // (a whole text: free text becomes the legacy text)
-      if (body.memory_parts) {
-        // only the parts that are given change; `record` is the engine's (accepted, ignored)
-        const mp = body.memory_parts;
-        if (mp.impressions) Object.assign(seat.memory_parts.impressions, mp.impressions);
-        if ("experience" in mp) seat.memory_parts.experience = mp.experience.slice();
-        if ("legacy" in mp) seat.memory_parts.legacy = mp.legacy;
-      }
-      seat.memory = memoryTextOf(seat, b.roster.seats);
-      return resp(200, seat);
-    }
     if (key === "POST /api/game/review") {
       b.lastReview = body;
       if (b.reviewError) return resp(409, { detail: b.reviewError });
-      return resp(200, { started: b.reviewStarted });
+      return resp(200, { started: b.reviewStarted, deadline_s: 60 });
     }
     // ---- v0.13.1: the error log (G32-G36, contract §12.3).  `b.llmCalls` is the log (oldest first); `b.llmCallRequests`
     // records the query of every GET
@@ -906,7 +826,8 @@ function makeBackend(overrides = {}) {
     }
     // ---- v0.13: playing a seat (docs/v0.12-contracts.md §11.7).  The fake keeps no game: a test sets
     // `b.takeoverResult` (what POST /api/takeover answers with), `b.seatReply.<kind>` (a receipt, or a function of
-    // the body returning one) and reads `b.takeoverCalls` / `b.releaseCalls` / `b.shuffleCalls` / `b.seatCalls`.
+    // the body returning one) and reads `b.takeoverCalls` / `b.releaseCalls` / `b.seatCalls`.
+    // (v0.14: POST /api/control/shuffle-identities is gone - H52: the cards are dealt when the game starts - and answers 404 like any unknown route)
     if (key === "POST /api/takeover") {
       b.takeoverCalls = (b.takeoverCalls || []).concat([body]);
       const taken = b.takeoverResult || { ...b.session, takeover: takeoverOf(b.session, body.seat) };
@@ -914,11 +835,7 @@ function makeBackend(overrides = {}) {
     }
     if (key === "POST /api/takeover/release") {
       b.releaseCalls = (b.releaseCalls || 0) + 1;
-      return resp(200, { ok: true, session: b.releaseResult || { ...b.session, takeover: { seat: null, reshuffle_available: false } } });
-    }
-    if (key === "POST /api/control/shuffle-identities") {
-      b.shuffleCalls = (b.shuffleCalls || 0) + 1;
-      return resp(200, { ok: true, session: b.controlSession || b.session });
+      return resp(200, { ok: true, session: b.releaseResult || { ...b.session, takeover: { seat: null } } });
     }
     if ((m = key.match(/^POST \/api\/seat\/(speak|pass|respond|ability)$/))) {
       b.seatCalls = (b.seatCalls || []).concat([{ kind: m[1], body }]);
@@ -926,6 +843,8 @@ function makeBackend(overrides = {}) {
       const out = typeof reply === "function" ? reply(body) : reply;
       return resp(200, out || { accepted: true, seq: 99, code: null, message: "已发送。" });
     }
+    const bots = b.botsFake.handle(key, url, body, init);
+    if (bots) return bots;
     return resp(404, { detail: "nf" });
   };
   // v0.13.1: `b.hold(test)` parks the answers of the requests that `test(key, url)` accepts.  An answer is COMPUTED when the request is made

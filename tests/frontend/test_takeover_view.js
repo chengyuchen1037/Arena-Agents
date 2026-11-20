@@ -1,7 +1,8 @@
 "use strict";
-// Playing a seat (v0.13, F1-F19): the pure parts - the store's takeover state and `takeover.updated`, and the view
-// model of the viewpoint bar, the takeover bar, the reshuffle reminder, the channel bar, the input box and the
-// answer part of a request card (static/js/store.js, view.js).  The wiring to the page: test_takeover_ui.js.
+// Playing a seat (v0.13, F1-F19; v0.14, H27): the pure parts - the store's takeover state and `takeover.updated`, and the view
+// model of the takeover bar, the channel bar, the input box and the answer part of a request card (static/js/store.js, view.js).
+// (v0.14: the viewpoint bar [视角▾][切换][接管] became the viewpoint label and its menu - test_v014_play_view.js; the reshuffle
+// reminder is gone with the re-deal, H52.)  The wiring to the page: test_takeover_ui.js.
 // Run: node tests/frontend/test_takeover_view.js
 const assert = require("node:assert/strict");
 const path = require("node:path");
@@ -18,13 +19,13 @@ const played = (over = {}, takeoverOver = {}, seat = "N3") => Store.normalizeSes
 const plain = (over = {}) => Store.normalizeSession(F.makeSession(over));
 
 // ---------------------------------------------------------------------------------------------- the store
-test("the takeover of a session is normalized: nobody played -> only the seat and the re-deal flag count", () => {
+test("the takeover of a session is normalized: nobody played -> only the seat counts (v0.14: no re-deal flag any more, H52)", () => {
   assert.deepEqual(Store.normalizeTakeover(undefined), {
-    seat: null, reshuffle_available: false, seq: 0, channels: {}, requests: [], abilities: [], attention: [],
+    seat: null, seq: 0, channels: {}, requests: [], abilities: [], attention: [],
   });
   const junk = Store.normalizeTakeover({ seat: null, reshuffle_available: true, channels: { public: { can_write: true } }, attention: ["public"] });
   assert.equal(junk.seat, null);
-  assert.equal(junk.reshuffle_available, true);
+  assert.ok(!("reshuffle_available" in junk), "an old server's flag is ignored: the re-deal is gone");
   assert.deepEqual([junk.channels, junk.attention], [{}, []], "state of a seat nobody plays is not kept");
   assert.equal(Store.emptySession().takeover.seat, null);
   assert.equal(plain().takeover.seat, null, "an older server without the field: nobody plays");
@@ -43,7 +44,7 @@ test("a played seat's state is read field by field (types, defaults, unknown fie
   });
   const t = Store.normalizeTakeover(raw);
   assert.equal(t.seq, 41);
-  assert.deepEqual(Object.keys(t).sort(), ["abilities", "attention", "channels", "requests", "reshuffle_available", "seat", "seq"]);
+  assert.deepEqual(Object.keys(t).sort(), ["abilities", "attention", "channels", "requests", "seat", "seq"]);
   const wolves = t.channels.wolves;
   assert.deepEqual([wolves.can_write, wolves.max_chars, wolves.can_pass, wolves.code, wolves.why_not], [true, 300, true, null, null]);
   assert.deepEqual(wolves.floor, { kind: "queue", mine: true, paused: false, messages_left: 2, chars_left: 560, seconds_left: 12.5, deadline_clock: 130, untimed: false });
@@ -73,7 +74,7 @@ test("takeover.updated: the seat is locked in, its card says human, the old seat
   assert.equal(other.takeoverChanged, true);
   assert.deepEqual([View.participantOf(s, "N3").state, View.participantOf(s, "N5").state], ["sleeping", "human"]);
 
-  const given = Store.applyEvent(s, { id: 8, type: "takeover.updated", data: { takeover: { seat: null, reshuffle_available: false } } });
+  const given = Store.applyEvent(s, { id: 8, type: "takeover.updated", data: { takeover: { seat: null } } });
   assert.equal(given.takeoverChanged, true);
   assert.equal(s.takeover.seat, null);
   assert.ok(s.participants.every((p) => p.state !== "human"));
@@ -89,7 +90,7 @@ test("agent.status never takes 'human' away from the seat a person plays (it has
   Store.applyEvent(s, { id: 10, type: "agent.status", data: { id: "N4", state: "thinking" } });
   assert.equal(View.participantOf(s, "N4").state, "thinking");
   // after the seat is given back it is an ordinary agent again
-  Store.applyEvent(s, { id: 11, type: "takeover.updated", data: { takeover: { seat: null, reshuffle_available: false } } });
+  Store.applyEvent(s, { id: 11, type: "takeover.updated", data: { takeover: { seat: null } } });
   Store.applyEvent(s, { id: 12, type: "agent.status", data: { id: "N3", state: "thinking" } });
   assert.equal(View.participantOf(s, "N3").state, "thinking");
 });
@@ -104,24 +105,38 @@ test("a snapshot carries the played seat; session.updated leaves it alone", () =
   assert.equal(snap.session.status, "running");
 });
 
-// ----------------------------------------------------------------------------------- the viewpoint bar
-test("viewpointBar: the drop-down only chooses; 切换 needs a different choice; 接管 needs a player and a game that is not running", () => {
+// ------------------------------------------------------------------ the viewpoint label and its menu (v0.14, H27)
+test("viewpointMenu: 以 X 的视角观看 needs a different viewpoint; 接管 X needs a player and a game that is not running (the rules of F2)", () => {
   const s = plain({ status: "paused" });
-  let bar = View.viewpointBar(s, GOD, GOD);
-  assert.deepEqual([bar.locked, bar.canSwitch, bar.canTakeover], [false, false, false]);
-  assert.match(bar.takeoverTitle, /上帝视角不能接管/);
+  let menu = View.viewpointMenu(s, GOD);
+  assert.deepEqual([menu.god.current, menu.god.enabled], [true, false], "already the global view");
+  assert.equal(menu.players.length, 12);
+  const carol = (m) => m.players.find((p) => p.id === "N3");
+  assert.deepEqual([carol(menu).view.enabled, carol(menu).takeover.enabled], [true, true]);
+  assert.match(carol(menu).takeover.title, /接管 3 · Carol/);
 
-  bar = View.viewpointBar(s, "N3", GOD);
-  assert.deepEqual([bar.draft, bar.canSwitch, bar.canTakeover], ["N3", true, true]);
-  assert.match(bar.takeoverTitle, /接管 3 · Carol/);
-  assert.match(bar.takeoverTitle, /暂停/);
+  menu = View.viewpointMenu(s, "N3");
+  assert.deepEqual([menu.god.current, menu.god.enabled], [false, true]);
+  assert.deepEqual([carol(menu).current, carol(menu).view.enabled, carol(menu).takeover.enabled], [true, false, true], "already looking from there; still may take the seat over");
+  // an unknown viewpoint falls back to the global one
+  assert.equal(View.viewpointMenu(s, "N99").god.current, true);
+  // while the game runs nothing can be taken over - and the menu says so once, in a sentence (a phone has no hover)
+  const running = View.viewpointMenu(plain({ status: "running" }), GOD);
+  assert.ok(running.players.every((p) => !p.takeover.enabled));
+  assert.match(running.takeoverNote, /对局进行中不能接管.*暂停/);
+  assert.equal(View.viewpointMenu(s, GOD).takeoverNote, "", "nothing to explain when a seat can be taken over");
+  assert.equal(View.viewpointMenu(s, GOD).release, null, "nobody is played: no 退出接管");
+});
 
-  bar = View.viewpointBar(s, "N3", "N3");
-  assert.deepEqual([bar.canSwitch, bar.canTakeover], [false, true], "already looking from there; still may take the seat over");
-  // an unknown draft falls back to god
-  assert.equal(View.viewpointBar(s, "N99", GOD).draft, GOD);
-  // the draft defaults to the applied viewpoint
-  assert.equal(View.viewpointBar(s, undefined, "N4").draft, "N4");
+test("viewpointChip: 全局视角 · Alice视角 · Alice视角（接管）; a played seat locks it", () => {
+  const s = plain({ status: "paused" });
+  assert.deepEqual([View.viewpointChip(s, GOD).text, View.viewpointChip(s, GOD).kind, View.viewpointChip(s, GOD).locked], ["全局视角", "god", false]);
+  assert.deepEqual([View.viewpointChip(s, "N1").text, View.viewpointChip(s, "N1").kind], ["Alice视角", "player"]);
+  assert.equal(View.viewpointChip(s, "N99").text, "全局视角", "an unknown viewpoint is the global one");
+  const p = played({ status: "paused" });
+  const chip = View.viewpointChip(p, GOD);
+  assert.deepEqual([chip.text, chip.kind, chip.icon, chip.locked, chip.seat], ["Carol视角（接管）", "played", "🎮", true, "N3"]);
+  assert.equal(View.viewpointChip(p, "N5").text, "Carol视角（接管）", "whatever the user had chosen: the viewpoint is the played seat");
 });
 
 test("takeover is possible only while the game has not started or is paused (F2); the tooltip says why not", () => {
@@ -139,15 +154,21 @@ test("takeover is possible only while the game has not started or is paused (F2)
   assert.equal(View.takeoverAvailability(s, "moderator").ok, false);
   assert.equal(View.takeoverAvailability(s, "N99").ok, false);
   assert.equal(View.takeoverAvailability(s, GOD).ok, false);
+  assert.match(View.takeoverAvailability(s, GOD).reason, /全局视角没有座位/);
   const busy = View.takeoverAvailability(played(), "N4");
   assert.equal(busy.ok, false);
   assert.match(busy.reason, /请先退出接管/);
 });
 
-test("while a seat is played the viewpoint bar is locked to it and the takeover bar replaces it (F3)", () => {
+test("while a seat is played the viewpoint is locked to it: only 退出接管 works in the menu; the takeover bar comes with it (F3, H27)", () => {
   const s = played({ status: "paused" });
-  const bar = View.viewpointBar(s, GOD, GOD);
-  assert.deepEqual([bar.locked, bar.seat, bar.draft, bar.canSwitch, bar.canTakeover], [true, "N3", "N3", false, false]);
+  const menu = View.viewpointMenu(s, GOD);
+  assert.deepEqual([menu.chip.locked, menu.chip.seat], [true, "N3"]);
+  assert.deepEqual([menu.god.enabled, menu.god.current], [false, false], "no way back to the global view while a seat is played");
+  assert.ok(menu.players.every((p) => !p.view.enabled && !p.takeover.enabled), "no other viewpoint, no second takeover");
+  assert.equal(menu.players.find((p) => p.id === "N3").played, true);
+  assert.deepEqual([menu.release.enabled, menu.release.label], [true, "退出接管（3 · Carol）"]);
+  assert.match(menu.players[0].view.title, /接管期间视角已锁定/);
   const tb = View.takeoverBar(s);
   assert.deepEqual([tb.seat, tb.label, tb.text, tb.canRelease], ["N3", "3 · Carol", "🎮 正在扮演 3 · Carol", true]);
   assert.equal(View.takeoverBar(plain()), null);
@@ -159,14 +180,13 @@ test("while a seat is played the viewpoint bar is locked to it and the takeover 
   assert.equal(View.takeoverSeat(plain()), null);
 });
 
-test("the reshuffle reminder shows only for a played seat in a game that has not started, and never after the start (F5)", () => {
-  assert.equal(View.reshuffleReminder(played({ status: "idle" }, { reshuffle_available: true })).visible, true);
-  assert.match(View.reshuffleReminder(played({ status: "idle" }, { reshuffle_available: true })).text, /你已经知道自己的身份，建议点击「重新发牌」/);
-  assert.equal(View.reshuffleReminder(played({ status: "idle" }, { reshuffle_available: false })).visible, false, "the server says a start was recorded");
-  for (const status of ["running", "paused", "finished"]) {
-    assert.equal(View.reshuffleReminder(played({ status }, { reshuffle_available: true })).visible, false, status);
-  }
-  assert.equal(View.reshuffleReminder(plain({ status: "idle" })).visible, false, "nobody plays: nothing to remind of");
+test("there is no re-deal any more (v0.14, H52): the cards are dealt when the game starts - no reminder, no flag, no old viewpoint bar", () => {
+  assert.equal(View.reshuffleReminder, undefined);
+  assert.equal(View.viewpointBar, undefined);
+  assert.equal(View.viewpointOptions, undefined);
+  // a seat taken over before the start sees no identity until the game starts (nothing to re-deal)
+  const idle = played({ status: "idle", dealt: false });
+  for (const t of View.boardTiles(idle, "N3")) assert.equal(t.main, null, "no identity tag before the deal - not even for the seat that is played");
 });
 
 // ---------------------------------------------------------------------------------------- the card
@@ -246,14 +266,24 @@ test("composer: the send button's five states (F14) - 发送 / 禁言中 / 已�
   assert.match(unknown.hint, /同步中/);
 });
 
-test("composer: the counter is 'n/max' with the server's limit; over the limit the tail is cut (not refused)", () => {
+test("composer (v0.14, H16): the counter is 'n/max' with the server's limit; over the limit the send button is OFF - a speech is refused whole, never cut", () => {
   const limited = { channels: { public: { can_write: true, max_chars: 10, floor: F.seatFree() } } };
   const m = model({ status: "running" }, limited, "public", "一二三四五六七八九十十一");
-  assert.deepEqual([m.count, m.max, m.over, m.sendEnabled], [12, 10, 2, true]);
+  assert.deepEqual([m.count, m.max, m.over, m.sendEnabled], [12, 10, 2, false], "12 of 10: nothing to send until it is shortened");
+  assert.equal(m.mode, "send", "(still a channel that may be written to: the button is the 发送 one, only greyed)");
+  assert.equal(m.overText, "这条发言 12 个字，超过了单条上限 10 字：请删减 2 字后再发送");
+  assert.equal(m.reason, m.overText, "the hover text of the button says it");
+  assert.equal(m.hint, m.overText, "the line under the box says it too - a phone has no hover");
+  // exactly the limit is fine; the characters are counted like the server counts them
+  const exact = model({ status: "running" }, limited, "public", "一二三四五六七八九十");
+  assert.deepEqual([exact.count, exact.over, exact.sendEnabled, exact.overText], [10, 0, true, ""]);
   assert.equal(View.countChars("😀😀 "), 2, "characters, not UTF-16 units; the ends are trimmed like the server does");
   assert.equal(View.countChars(null), 0);
   const free = model({ status: "running" }, { channels: { public: { can_write: true, max_chars: null } } }, "public", "abc");
-  assert.deepEqual([free.max, free.over], [null, 0]);
+  assert.deepEqual([free.max, free.over, free.sendEnabled], [null, 0, true], "a channel without a limit: never over");
+  // a muted channel keeps its own reason (the over-limit sentence is for a box that could send)
+  const muted = model({ status: "running" }, { channels: { public: { can_write: false, code: "NO_FLOOR", why_not: "还没轮到你发言。", max_chars: 10, floor: null } } }, "public", "一二三四五六七八九十十一");
+  assert.deepEqual([muted.mode, muted.reason, muted.over], ["muted", "还没轮到你发言。", 2]);
 });
 
 test("composer: 结束发言 shows only while the seat holds that channel's floor; 技能 is grey without an enabled ability (F15, F16)", () => {

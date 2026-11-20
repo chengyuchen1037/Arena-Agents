@@ -58,7 +58,10 @@
     retry: { label: "将重试", cls: "retry" },
     error: { label: "运行错误", cls: "error" },
   };
-  const PURPOSE_LABELS = { turn: "对局", review: "复盘", refine: "完善", runtime: "运行" };
+  // v0.14 (H24): "init" = a bot studies the contract and the rules (its lines are the BOT's: actor_id is its id, `b-xxxxxxxx`)
+  const PURPOSE_LABELS = { turn: "对局", review: "复盘", refine: "完善", runtime: "运行", init: "初始化" };
+  /** The id of a bot (app/bots/types.py BOT_ID_RE).  The page never shows it: a bot is its name. */
+  const BOT_ID_RE = /^b-[0-9a-f]{8}$/;
 
   const isNum = (v) => typeof v === "number" && Number.isFinite(v);
   const pad2 = (n) => String(n).padStart(2, "0");
@@ -123,20 +126,34 @@
     return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
   }
 
-  /** "N3 Carol" (the live nickname wins), "主持人", "名册" (the moderator's model completing a persona / memory), "系统". */
+  /**
+   * The name of a bot for the line of its own (an initialization): the name it has at the table NOW (a rename shows at once), else the one frozen into the line,
+   * else - a bot that is gone, for which the server writes its id as the name - just "玩家".  Never the id.
+   */
+  function botName(entry, session) {
+    const id = entry.actor_id;
+    const bots = session && session.bots && Array.isArray(session.bots.bots) ? session.bots.bots : [];
+    const live = bots.find((b) => b && b.id === id);
+    if (live && live.name) return live.name;
+    return entry.actor_name && entry.actor_name !== id && !BOT_ID_RE.test(entry.actor_name) ? entry.actor_name : "玩家";
+  }
+
+  /** "N3 Carol" (the live nickname wins), "主持人", "名册" (the moderator's model completing a text for the user), "系统", "Carol" (a bot's own line: its initialization). */
   function actorLabel(entry, session, View) {
     const id = entry.actor_id;
     if (id === "moderator") return (session && session.moderator && session.moderator.name) || entry.actor_name || "主持人";
     if (id === "roster") return "名册";
     if (id === "engine") return "系统";
+    if (BOT_ID_RE.test(id || "")) return botName(entry, session);
     const p = View && session ? View.participantOf(session, id) : null;
     const name = p ? p.name : entry.actor_name;
     return name && name !== id ? `${id} ${name}` : id;
   }
 
-  /** The "角色" column: who made the call and what for ("复盘 · N3 Carol", "完善"). */
+  /** The "角色" column: who made the call and what for ("复盘 · N3 Carol", "初始化 · Carol", "完善"). */
   function roleLabel(entry, session, View) {
     if (entry.purpose === "review") return `复盘 · ${actorLabel(entry, session, View)}`;
+    if (entry.purpose === "init") return `初始化 · ${actorLabel(entry, session, View)}`;
     if (entry.purpose === "refine") return "完善";
     return actorLabel(entry, session, View);
   }
@@ -157,9 +174,10 @@
       if (m) return 1 + Number(m[1]);
       return id === "roster" ? 100 : id === "engine" ? 101 : 102;
     };
+    // (a bot's own lines - its initialization - come after the helpers, by the bot's NAME: its id says nothing and is never shown)
     return Array.from(seen.entries())
-      .sort((a, b) => rank(a[0]) - rank(b[0]) || String(a[0]).localeCompare(String(b[0])))
-      .map(([id, c]) => ({ id, label: actorLabel({ ...c, actor_id: id }, session, View) }));
+      .map(([id, c]) => ({ id, label: actorLabel({ ...c, actor_id: id }, session, View) }))
+      .sort((a, b) => rank(a.id) - rank(b.id) || String(a.label).localeCompare(String(b.label)) || String(a.id).localeCompare(String(b.id)));
   }
 
   /** Input side of a call: every token that was read, cached or written ("" when the line has no numbers). */

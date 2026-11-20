@@ -10,10 +10,27 @@ const History = require(path.join(__dirname, "..", "..", "static", "js", "histor
 const Replay = require(path.join(__dirname, "..", "..", "static", "js", "replay.js"));
 const F = require("./fixtures.js");
 const H = require("./harness.js");
+const M = require("./markup.js");
 
 const tests = [];
-const test = (name, fn) => tests.push([name, fn]);
-const { boot, settle, target, resp } = H;
+// Every test also checks the markup the page drew by the end of it (the fake DOM never parses markup: a stray </div>, a <div> in a <p> or an id that occurs
+// twice would pass unseen and break the page in a real browser) - see markup.js.
+const envs = [];
+const test = (name, fn) =>
+  tests.push([
+    name,
+    async () => {
+      envs.length = 0;
+      await fn();
+      for (const env of envs) assert.deepEqual(M.envProblems(env, H.HTML_SRC), [], `the markup drawn in "${name}" is well formed`);
+    },
+  ]);
+const { boot: bootRaw, settle, target, resp } = H;
+const boot = async (...args) => {
+  const ctx = await bootRaw(...args);
+  envs.push(ctx.env);
+  return ctx;
+};
 
 // ---- a small replay: three players speak in a channel, then the game ends ----------------------------------
 function msg(seq, gt, text, from = "N1") {
@@ -414,7 +431,7 @@ test("deleting asks first and says the agents' memory is not affected; cancellin
   click(env, "delete", "old-1");
   await settle();
   assert.equal(dialog.asked.length, 1);
-  assert.match(dialog.asked[0].bodyHtml, /删除对局不会影响当前 agent 的记忆/);
+  assert.ok(dialog.asked[0].bodyHtml.includes("删除这局的存档和日志。bot 已经通过复盘形成的记忆不会被删除，也无法通过删除对局撤销。"), "the fixed sentence of contract 13.10");
   assert.equal(dialog.asked[0].danger, true);
   assert.ok(!backend.calls.some((c) => c.method === "DELETE"), "cancelled: nothing was deleted");
 
@@ -422,7 +439,7 @@ test("deleting asks first and says the agents' memory is not affected; cancellin
   await settle();
   assert.ok(backend.calls.some((c) => c.method === "DELETE" && c.url.endsWith("/api/games/old-1")));
   assert.ok(!env.el("history-list").innerHTML.includes('data-session-id="old-1"'), "the list was reloaded");
-  assert.ok(env.toasts.some((t) => /agent 的记忆没有受到影响/.test(t.textContent)));
+  assert.ok(env.toasts.some((t) => /bot 的记忆没有受到影响/.test(t.textContent)));
   dialog.restore();
 });
 
@@ -434,7 +451,7 @@ test("the live game is never asked to be deleted, even if its (disabled) button 
   await settle();
   assert.equal(dialog.asked.length, 0, "no question: the action itself refuses");
   assert.ok(!backend.calls.some((c) => c.method === "DELETE"));
-  assert.ok(env.toasts.some((t) => /当前对局不能删除/.test(t.textContent)));
+  assert.ok(env.toasts.some((t) => /当前对局不能在这里删除：请在「设置 → 对局管理」里删除/.test(t.textContent)), "(v0.14: the current game is deleted in 对局管理)");
 });
 
 test("a running game cannot be replaced: the load button is refused with the reason", async () => {
@@ -488,6 +505,7 @@ test("a refused load keeps the dialog and says why", async () => {
 
 test("replay: the saved game takes the screen, the live one is kept aside and comes back untouched", async () => {
   const { env, backend } = await H.bootLive(); // the event stream is connected: the live game keeps going
+  envs.push(env);
   env.sse("snapshot", { session: backend.session }, 500);
   backend.replays["old-1"] = makeReplay();
   const live = env.app().state.session;
@@ -556,8 +574,12 @@ test("replay: the viewpoint can be switched while replaying; the takeover button
   app.setViewpoint("N2");
   env.flushRaf();
   assert.equal(app.state.viewpoint, "N2");
-  assert.equal(env.el("btn-takeover").disabled, true);
-  assert.match(env.el("btn-takeover").getAttribute("title"), /重放中/);
+  assert.equal(env.el("viewpoint-text").textContent, "Bob视角", "the label follows the viewpoint (v0.14, H27)");
+  // v0.14: the takeover buttons of the viewpoint menu stay off while a replay is shown - every row says why
+  env.el("btn-viewpoint").dispatch("click");
+  const menu = env.el("viewpoint-menu").innerHTML;
+  assert.equal((menu.match(/data-vp-take="N\d+"[^>]*disabled/g) || []).length, 12, "no seat can be taken over during a replay");
+  assert.match(menu, /data-vp-take="N2" title="重放中不能接管：请先退出重放"/);
   app.setViewpoint("god");
   assert.equal(app.state.viewpoint, "god");
 });

@@ -1,4 +1,4 @@
-"""Contract tests for tools/mock_ui_server.py (the v0.13.1 UI mock) and, through it, for the SSE v2 client store.
+"""Contract tests for tools/mock_ui_server.py (the v0.14 UI mock) and, through it, for the SSE v2 client store.
 
 * every event the mock script publishes must match docs/v0.12-contracts.md §8.2 + §10.6 (``validate_event``);
 * the REAL client store (static/js/store.js, run with node) must reduce the whole event log to exactly
@@ -59,6 +59,7 @@ def _find_node() -> str | None:
 NODE = _find_node()
 NAMES = ["Alice", "Bob", "Carol", "David", "Eve", "Frank", "Grace", "Henry", "Ivy", "Jack", "Kate", "Leo"]
 IDS = [f"N{i}" for i in range(1, 13)]
+ROLE_OF = mock.ROLES  # seat id -> the identity the mock deals to it when the game starts
 
 
 @pytest.fixture(scope="module")
@@ -90,7 +91,9 @@ def test_the_script_covers_every_event_type_the_front_end_consumes(replay: dict)
     assert final["winner"]
     kinds = {m["kind"] for m in final["messages"]}
     assert {"speech", "announce", "system", "challenge", "reply", "ability"} <= kinds
-    assert any(m["truncated"] for m in final["messages"]), "one speech is cut by the per-message limit"
+    # v0.14 (H16): a speech over the per-message limit is sent back (TOO_LONG) and written again - the engine never cuts what a player says
+    assert not any(m["truncated"] for m in final["messages"]), "no speech of the scripted game is cut"
+    assert max(len(m["content"]) for m in final["messages"] if m["kind"] == "speech" and m["channel_id"] == "public" and m["from"] != "moderator") <= 300
     assert {t["verdict"] for t in final["tickets"]} == {"upheld", "rejected"}
     # the free discussion, the queue and the frozen channel all showed up
     channel_updates = [ev["data"]["channel"] for ev in _events(replay, "channel.updated")]
@@ -208,16 +211,45 @@ def test_the_budget_warns_at_80_percent_pauses_at_100_and_continues_after_the_li
 
 
 def test_the_review_reports_progress_for_every_player_and_marks_them_done(replay: dict) -> None:
+    """v0.14 (H31-H34, §13.8): every bot reviews on its own for at most 60 s: queued -> running (a countdown, once a second) -> done, and a
+    finished review says what it wrote into the memory."""
     progress = [ev["data"] for ev in _events(replay, "review.progress")]
     assert {d["id"] for d in progress} == set(IDS)
     for pid in IDS:
-        states = [d["state"] for d in progress if d["id"] == pid]
-        assert states == ["running", "done"], pid
-    # the review only starts after the game finished, and it writes the stats into the memory text
+        mine = [d for d in progress if d["id"] == pid]
+        states = [d["state"] for d in mine]
+        assert states[0] == "queued" and states[-1] == "done" and "running" in states, (pid, states)
+        assert set(states) <= {"queued", "running", "done"}
+        assert mine[0]["seconds_left"] is None and all(d["deadline_s"] == 60 for d in mine)
+        counting = [d["seconds_left"] for d in mine if d["state"] == "running"]
+        assert counting and counting == sorted(counting, reverse=True) and counting[0] <= 60, "the countdown only goes down"
+        assert [d["changes"] for d in mine[:-1]] == [None] * (len(mine) - 1) and mine[-1]["changes"]["files"], "only the end has changes"
+        assert {d["bot_id"] for d in mine} == {next(p["bot_id"] for p in replay["final"]["participants"] if p["id"] == pid)}
+    # the review only starts after the game finished
     first = next(i for i, ev in enumerate(replay["events"]) if ev["type"] == "review.progress")
     last_finish = max(i for i, ev in enumerate(replay["events"]) if ev["type"] == "game.status" and ev["data"]["status"] == "finished")
     assert first > last_finish
-    assert replay["final"]["review"] == {"available": True, "done": IDS, "running": False}
+    assert replay["final"]["review"] == {"available": True, "done": IDS, "running": False, "supported": True, "deadline_s": 60, "seconds_left": None}
+    assert replay["final"]["system_status"] == {"code": "finished", "text": "已结束", "reason": ""}
+    # while it runs the status label says so (session.updated), and the bots' memory statistics follow (bots.updated)
+    reviewing = [ev for ev in _events(replay, "session.updated") if ev["data"]["system_status"]["code"] == "reviewing"]
+    assert reviewing and all(ev["data"]["review"]["running"] for ev in reviewing)
+    assert _events(replay, "bots.updated")[-1]["data"]["bots"]["bots"][0]["memory_stats"]["people"] == 11
+
+
+def test_the_identities_are_dealt_when_the_game_starts_and_not_before(replay: dict) -> None:
+    """H52 (§13.3): before the start no seat has any tag - not an identity, not even the public "存活" - and ``dealt`` is false; the deal is one
+    ``player.updated`` per seat, before ``game.status`` says running."""
+    initial = replay["initial"]
+    assert initial["dealt"] is False and all(p["tags"] == [] for p in initial["participants"]) and initial["dashboard"] == {"factions": [], "tag_stats": []}
+    assert initial["system_status"] == {"code": "before_game", "text": "对局前", "reason": ""}
+    events = replay["events"]
+    deal = [i for i, ev in enumerate(events) if ev["type"] == "player.updated" and ev["data"]["tags"][:1] == [ROLE_OF[ev["data"]["player_id"]]]]
+    running = next(i for i, ev in enumerate(events) if ev["type"] == "game.status" and ev["data"]["status"] == "running")
+    assert [events[i]["data"]["player_id"] for i in deal[:12]] == IDS and max(deal[:12]) < running, "dealt before the game is running"
+    dealt = next(ev["data"] for ev in events if ev["type"] == "session.updated" and ev["data"]["dealt"])
+    assert dealt["status"] == "running" and dealt["system_status"]["code"] == "in_game"
+    assert replay["final"]["dealt"] is True and [p["tags"][0] for p in replay["final"]["participants"]] == [ROLE_OF[p] for p in IDS]
 
 
 def _all_keys(value: object) -> set[str]:
@@ -290,8 +322,9 @@ def test_validator_rejects_broken_events() -> None:
     good = [
         {"id": 2, "type": "agent.status", "data": {"id": "N1", "state": "sleeping", "until": 42.5}},
         {"id": 3, "type": "agent.status", "data": {"id": "N1", "state": "acting", "until": None}},
-        # (v0.13.1) a finished review always says what it changed in the memory
-        {"id": 4, "type": "review.progress", "data": {"id": "N1", "state": "done", "message": "ok", "changes": {"impressions": [], "experience": None}}},
+        # (v0.14, §13.8) a finished review always says what it changed in the memory (and how many L0 proposals it made)
+        {"id": 4, "type": "review.progress", "data": {"id": "N1", "bot_id": "b-1", "name": "Alice", "state": "done", "message": "ok", "seconds_left": 12,
+                                                       "deadline_s": 60, "changes": {"files": [{"file": "people", "before": "", "after": "- Bob：话少"}], "proposals": 0}}},
         {"id": 5, "type": "archive.progress", "data": {"job_id": "j1", "kind": "export", "phase": "pack", "done": 3, "total": 12, "status": "running"}},
     ]
     for ev in good:
@@ -414,7 +447,10 @@ def test_new_game_snapshot_carries_its_own_event_id_and_keeps_the_budget_limits(
         budget = ev["data"]["session"]["budget"]
         assert (budget["max_tokens"], budget["max_cost_usd"], budget["force_stop"]) == (777_000, 3.5, False)
         assert (budget["used_tokens"], budget["used_cost_usd"], budget["state"]) == (0, 0, "ok")
-        assert ev["data"]["session"]["review"] == {"available": False, "done": [], "running": False}
+        assert ev["data"]["session"]["review"] == {"available": False, "done": [], "running": False, "supported": True, "deadline_s": 60, "seconds_left": None}
+        # a new game: the identities are not dealt yet, the bots stay (they outlive a game)
+        assert ev["data"]["session"]["dealt"] is False and all(p["tags"] == [] for p in ev["data"]["session"]["participants"])
+        assert [p["name"] for p in ev["data"]["session"]["participants"]] == NAMES
 
     asyncio.run(scenario())
 
@@ -540,11 +576,11 @@ def test_the_review_only_works_after_the_end_and_never_twice() -> None:
             game.start_review(["N3"])
         assert game.start_review(None) == [p for p in IDS if p not in ("N3", "N4")]
         await game.review_task
-        assert game.session["review"] == {"available": True, "done": IDS, "running": False}
-        # the memory of a reviewed player got the stats and REVISED impressions of the other seats (v0.13.1: overwritten, never appended to)
-        text = game.roster.memory_text("N3")
-        assert "## 战绩" in text and "## 印象" in text and "## 经验" in text and "## 对局记忆" not in text
-        assert all(game.roster.seats["N3"]["memory_parts"]["impressions"].values())
+        assert game.session["review"] == {"available": True, "done": IDS, "running": False, "supported": True, "deadline_s": 60, "seconds_left": None}
+        # the bot of a reviewed seat got its record and impressions of the others (the review writes into the memory directly, C9)
+        bot = game.hub.bots.bots[game.hub.bots.bot_at("N3")]
+        assert bot["mem"]["record"]["games"] >= 1 and len(mock.mb.parse_people(bot["mem"]["people"])) == 11
+        assert "Alice" in mock.mb.parse_people(bot["mem"]["people"]) and "Carol" not in mock.mb.parse_people(bot["mem"]["people"]), "never about itself"
 
     asyncio.run(scenario())
 
@@ -577,7 +613,7 @@ def test_http_state_pages_and_static_files() -> None:
     app, c = _client()
     with c as client:
         state = client.get("/api/state").json()
-        assert state["app_version"].startswith("v0.13.1")
+        assert state["app_version"].startswith("v0.14.0")
         assert mock.validate_session(state["session"]) == []
         assert state["session"]["status"] == "idle"
         assert [p["id"] for p in state["session"]["participants"]] == IDS
@@ -585,21 +621,22 @@ def test_http_state_pages_and_static_files() -> None:
         assert state["session"]["memory_enabled"] is True
         assert "workspace" not in state, "v0.13: there is no workspace any more"
         assert state["legacy_data"] == {"found": False, "dismissed": False}
-        assert client.get("/api/health").json()["version"].startswith("v0.13.1")
+        assert client.get("/api/health").json()["version"].startswith("v0.14.0")
 
         index = client.get("/")
         assert index.status_code == 200 and 'data-platform' in index.text
         assert index.headers["cache-control"].startswith("no-store")
-        for script in ("app", "core", "store", "view", "avatar", "platform", "layout", "providers", "roster", "budget", "archive"):
+        for script in ("app", "core", "store", "view", "avatar", "platform", "layout", "providers", "botlib", "botedit", "bots", "budget", "archive", "history", "settings"):  # (v0.14: roster.js became botlib / botedit / bots)
             assert client.get(f"/static/js/{script}.js").status_code == 200, script
+        assert client.get("/static/js/roster.js").status_code == 404
         assert client.get("/static/css/style.css").status_code == 200
         parts = client.get("/static/avatar/parts.json")
         assert parts.status_code == 200
         library = parts.json()
         assert library["version"] == 1 and library["size"] == 20 and {"face", "hair", "eyes", "mouth", "accessory"} <= set(library["parts"])
-        # every avatar of the roster can be drawn from the library the page will get
-        for seat in client.get("/api/roster").json()["seats"]:
-            av = seat["avatar"]
+        # every avatar of the bots can be drawn from the library the page will get
+        for bot in client.get("/api/bots").json()["bots"]:
+            av = bot["avatar"]
             assert av["face"] in library["parts"]["face"] and av["hair"] in library["parts"]["hair"]
             assert av["skin"] in library["palettes"]["skin"] and av["hair_color"] in library["palettes"]["hair_color"]
 
@@ -648,7 +685,7 @@ def test_http_controls_game_flow_and_the_budget_pause() -> None:
         resumed = client.post("/api/control/start").json()["session"]
         assert resumed["status"] == "running"
         assert resumed["winner"] is None  # the verdict is withdrawn while the game continues
-        assert resumed["review"]["available"] is False
+        assert resumed["review"]["available"] is False and resumed["system_status"]["code"] == "in_game"
         paused = client.post("/api/control/pause").json()["session"]
         assert (paused["status"], paused["pause_reason"]) == ("paused", "user")
         assert {p["state"] for p in paused["participants"]} == {"sleeping"}
@@ -664,174 +701,17 @@ def test_http_controls_game_flow_and_the_budget_pause() -> None:
         assert new["messages"] == [] and mock.validate_session(new) == []
         assert new["budget"]["max_tokens"] == 50_000_000, "the limits survive a new game, the used amounts do not"
         assert new["budget"]["used_tokens"] == 0 and new["budget"]["state"] == "ok"
-        assert new["review"] == {"available": False, "done": [], "running": False}
+        assert new["review"] == {"available": False, "done": [], "running": False, "supported": True, "deadline_s": 60, "seconds_left": None}
+        assert new["dealt"] is False and new["system_status"]["code"] == "before_game", "a new game: nothing dealt, the bots are still ready"
         assert client.post("/api/session/save").status_code in (404, 405)  # v0.13: the game saves itself
         # a bad mock-only event is refused by the validator
         assert client.post("/api/mock/emit", json={"type": "agent.status", "data": {"id": "N1", "state": "x", "until": None}}).status_code == 422
         assert client.post("/api/mock/emit", json={"type": "phase.changed", "data": {"text": "ok"}}).json()["ok"] is True
 
 
-def test_http_roster_names_and_avatars_are_idle_only_and_publish_roster_updated() -> None:
-    app, c = _client()
-    with c as client:
-        roster = client.get("/api/roster").json()
-        assert roster["editable"] is True and roster["memory_enabled"] is True
-        seats = roster["seats"]
-        assert [s["id"] for s in seats] == IDS and [s["name"] for s in seats] == NAMES and [s["seat"] for s in seats] == list(range(1, 13))
-        assert all(s["default_name"] == s["name"] and s["persona"] == "" and s["memory"] == "" for s in seats)
-        assert all(mock.validate_avatar(s["avatar"]) == [] and s["avatar"] is not None for s in seats)
-        before_ids = _bus(app).latest_id if "game" in app.state.mock_holder else 0
-
-        # rename: PUT /api/roster/{id}
-        r = client.put("/api/roster/N3", json={"name": "  Caroline "})
-        assert r.status_code == 200 and r.json()["name"] == "Caroline"
-        participants = client.get("/api/state").json()["session"]["participants"]
-        assert next(p for p in participants if p["id"] == "N3")["name"] == "Caroline"
-        updates = [e for e in _bus(app).ring if e["type"] == "roster.updated" and e["id"] > before_ids]
-        assert updates and updates[-1]["data"]["participants"] == [{"id": "N3", "name": "Caroline", "avatar": r.json()["avatar"]}]
-        assert mock.validate_event(updates[-1]) == []
-        # refusals: empty / too long / a duplicate (also of the DEFAULT of another seat) / unknown seat / not a string
-        for bad, what in (("", "不能为空"), ("   ", "不能为空"), ("x" * 21, "最多 20"), ("Bob", "已被其他玩家使用"), (7, "必须是文字")):
-            resp = client.put("/api/roster/N3", json={"name": bad})
-            assert resp.status_code == 422 and what in resp.json()["detail"], (bad, resp.text)
-        assert client.put("/api/roster/N3", json={"name": "x" * 20}).status_code == 200  # 20 characters are fine
-        assert client.put("/api/roster/N99", json={"name": "Z"}).status_code == 404
-        # keeping its own name is not a duplicate
-        assert client.put("/api/roster/N3", json={"name": "x" * 20}).status_code == 200
-
-        # regenerate one avatar / all avatars
-        old = client.get("/api/roster").json()["seats"]
-        one = client.post("/api/roster/N5/avatar:regenerate").json()
-        assert one["id"] == "N5" and one["avatar"] != old[4]["avatar"] and mock.validate_avatar(one["avatar"]) == []
-        assert client.get("/api/roster").json()["seats"][3]["avatar"] == old[3]["avatar"]
-        everyone = client.post("/api/roster/avatars:regenerate").json()["seats"]
-        assert len(everyone) == 12 and len({json.dumps(s["avatar"], sort_keys=True) for s in everyone}) == 12
-        assert sum(1 for a, b in zip(old, everyone) if a["avatar"] != b["avatar"]) >= 11
-        last = [e for e in _bus(app).ring if e["type"] == "roster.updated"][-1]
-        assert [p["id"] for p in last["data"]["participants"]] == IDS
-        # an explicit avatar description must be valid
-        assert client.put("/api/roster/N1", json={"avatar": {"v": 9}}).status_code == 422
-        assert client.put("/api/roster/N1", json={"avatar": everyone[1]["avatar"]}).status_code == 200
-
-        # the moderator has a random avatar of its own: it is in the roster and in the session, never a seat
-        roster_now = client.get("/api/roster").json()
-        moderator = roster_now["moderator"]
-        assert moderator["id"] == "moderator" and moderator["name"] == "主持人" and mock.validate_avatar(moderator["avatar"]) == []
-        assert moderator["avatar"] is not None and moderator["avatar"] not in [s["avatar"] for s in everyone]
-        assert client.get("/api/state").json()["session"]["moderator"]["avatar"] == moderator["avatar"]
-        before_mod = _bus(app).latest_id
-        rolled = client.post("/api/roster/moderator/avatar:regenerate").json()
-        assert rolled["id"] == "moderator" and rolled["avatar"] != moderator["avatar"] and mock.validate_avatar(rolled["avatar"]) == []
-        assert [s["avatar"] for s in client.get("/api/roster").json()["seats"]] == [s["avatar"] for s in roster_now["seats"]]  # players untouched
-        event = [e for e in _bus(app).ring if e["type"] == "roster.updated" and e["id"] > before_mod][-1]
-        assert event["data"]["participants"] == [] and event["data"]["moderator"] == {"id": "moderator", "avatar": rolled["avatar"]}
-        assert mock.validate_event(event) == []
-        assert client.get("/api/state").json()["session"]["moderator"]["avatar"] == rolled["avatar"]
-        everybody = client.post("/api/roster/avatars:regenerate").json()
-        assert set(everybody) == {"seats", "moderator"} and everybody["moderator"]["avatar"] != rolled["avatar"]
-        assert everybody["moderator"]["avatar"] not in [s["avatar"] for s in everybody["seats"]]
-        # the moderator only has an avatar to change
-        chosen = everybody["seats"][1]["avatar"]
-        assert client.put("/api/roster/moderator", json={"avatar": chosen}).json() == {"id": "moderator", "name": "主持人", "avatar": chosen}
-        for body in ({"name": "Boss"}, {"persona": "x"}, {"memory": "x"}):
-            assert client.put("/api/roster/moderator", json=body).status_code == 400
-        assert client.put("/api/roster/moderator", json={"avatar": {"v": 9}}).status_code == 422
-        assert client.post("/api/roster/moderator/refine", json={"kind": "persona", "text": "x"}).status_code == 400
-
-        # once the game started: names and avatars are locked (409), the texts stay editable
-        client.post("/api/control/start")
-        assert client.get("/api/roster").json()["editable"] is False
-        assert client.put("/api/roster/N3", json={"name": "Nope"}).status_code == 409
-        assert client.post("/api/roster/N3/avatar:regenerate").status_code == 409
-        assert client.post("/api/roster/moderator/avatar:regenerate").status_code == 409
-        assert client.put("/api/roster/moderator", json={"avatar": chosen}).status_code == 409
-        assert client.post("/api/roster/avatars:regenerate").status_code == 409
-        assert client.put("/api/roster/N3", json={"persona": "still fine"}).status_code == 200
-        assert client.put("/api/roster/memory-enabled", json={"enabled": False}).status_code == 409
-
-
-def test_http_a_new_name_with_a_colon_is_refused_like_the_real_server() -> None:
-    """app/storage/roster.py ``clean_name``: a NEW name may not hold ``:`` or ``：`` (U+FF1A) - the name is the label in front of an
-    impression (``- N5 Eve：…``) - and the real API answers with HTTP 400 and exactly these words.  Nothing else counts as a colon (no
-    normalizing).  The refusal comes after 'empty' and 'too long' and before 'taken'; a refused write changes nothing."""
-    app, c = _client()
-    with c as client:
-        colon = "名字不能包含冒号（: 或 ：）。"
-        before = client.get("/api/state").json()["session"]["participants"]
-        events = len(_bus(app).ring)
-        for bad in ("A:B", "A：B", ":", "：", " Eve:2 ", "名字:", "a" * 19 + ":", "😀：😀"):
-            r = client.put("/api/roster/N3", json={"name": bad})
-            assert r.status_code == 400 and r.json()["detail"] == colon, (bad, r.status_code, r.text)
-        assert client.get("/api/state").json()["session"]["participants"] == before, "a refused write changes nothing"
-        assert next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N3")["name"] == "Carol"
-        assert len(_bus(app).ring) == events, "and publishes nothing"
-        # the order of the server's checks: empty, too long, THEN the colon, then 'taken' (Bob is another seat's name)
-        assert client.put("/api/roster/N3", json={"name": " "}).status_code == 422
-        too_long = client.put("/api/roster/N3", json={"name": ":" * 21})
-        assert too_long.status_code == 422 and "最多 20" in too_long.json()["detail"], "too long is said before the colon"
-        assert client.put("/api/roster/N3", json={"name": "Bob:"}).json()["detail"] == colon, "'Bob:' is not Bob: the colon is what is wrong"
-        taken = client.put("/api/roster/N3", json={"name": "Bob"})
-        assert taken.status_code == 422 and "已被其他玩家使用" in taken.json()["detail"]
-        # look-alikes are no colons for the server (no normalizing): modifier letter colon, small colon, ratio, the lot
-        for fine in ("A\ua789B", "A\ufe55B", "A\u2236B", "A\u02d0B"):
-            r = client.put("/api/roster/N3", json={"name": fine})
-            assert r.status_code == 200 and r.json()["name"] == fine, (fine, r.text)
-        # an old name is not run through the rule: the roster holds it, sends it, and keeps it when something else is written
-        app.state.mock_roster.seats["N4"]["name"] = "Dave:2"  # (as if it came from an older version)
-        assert next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N4")["name"] == "Dave:2"
-        assert client.put("/api/roster/N4", json={"persona": "冷静"}).status_code == 200
-        assert next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N4")["name"] == "Dave:2"
-
-
-def test_http_roster_persona_memory_and_refine() -> None:
-    app, c = _client()
-    with c as client:
-        # (v0.13.1) a whole memory TEXT is parsed: free text (no "## 印象") becomes the legacy section; the persona has a limit
-        r = client.put("/api/roster/N3", json={"persona": "说话简短", "memory": "Bob 总是附和"})
-        assert r.status_code == 200 and r.json()["persona"] == "说话简短"
-        assert r.json()["memory_parts"]["legacy"] == "Bob 总是附和" and r.json()["memory"].endswith("## 旧记忆（待整理）\nBob 总是附和")
-        seat = next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N3")
-        assert (seat["persona"], seat["memory"], seat["memory_parts"]) == ("说话简短", r.json()["memory"], r.json()["memory_parts"])
-        assert client.put("/api/roster/N3", json={"persona": "x" * 501}).status_code == 400
-        assert client.put("/api/roster/N3", json={"memory": 5}).status_code == 422
-        # a text edit does not rename: no roster.updated for it
-        assert not [e for e in _bus(app).ring if e["type"] == "roster.updated"]
-
-        # "用主持人模型完善": a DRAFT comes back, nothing is saved by the call
-        for kind in ("persona", "memory"):
-            draft = client.post("/api/roster/N3/refine", json={"kind": kind, "text": "爱反问"})
-            assert draft.status_code == 200 and "爱反问" in draft.json()["draft"], kind
-        assert next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N3")["persona"] == "说话简短"
-        assert client.post("/api/roster/N3/refine", json={"kind": "persona", "text": "  "}).status_code == 422
-        assert client.post("/api/roster/N3/refine", json={"kind": "mood", "text": "x"}).status_code == 422
-        assert client.post("/api/roster/N99/refine", json={"kind": "persona", "text": "x"}).status_code == 404
-
-
-def test_http_memory_clear_and_the_load_memory_switch() -> None:
-    app, c = _client()
-    with c as client:
-        client.put("/api/roster/N3", json={"persona": "P3", "memory": "M3"})
-        client.put("/api/roster/N5", json={"memory": "M5"})
-        # (v0.13: the memory pack export / import is gone - the archive covers it)
-        assert client.get("/api/roster/memory:export").status_code in (404, 405)
-        assert client.post("/api/roster/memory:import?dry_run=true", content=b"x").status_code in (404, 405)
-
-        # clear: memory only, or memory and persona
-        assert client.post("/api/roster/memory:clear", json={"include_persona": False}).json() == {"ok": True}
-        seats = {s["id"]: s for s in client.get("/api/roster").json()["seats"]}
-        assert (seats["N3"]["persona"], seats["N3"]["memory"], seats["N5"]["memory"]) == ("P3", "", "")
-        assert client.post("/api/roster/memory:clear", json={"include_persona": True}).status_code == 200
-        assert next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N3")["persona"] == ""
-        assert client.post("/api/roster/memory:clear").status_code == 200  # no body: memory only
-
-        # "本局加载记忆": PUT /api/roster/memory-enabled publishes session.updated
-        before = _bus(app).latest_id
-        assert client.put("/api/roster/memory-enabled", json={"enabled": False}).json() == {"enabled": False}
-        assert client.get("/api/roster").json()["memory_enabled"] is False
-        assert client.get("/api/state").json()["session"]["memory_enabled"] is False
-        update = [e for e in _bus(app).ring if e["type"] == "session.updated" and e["id"] > before][-1]
-        assert update["data"]["memory_enabled"] is False and mock.validate_event(update) == []
-        assert client.put("/api/roster/memory-enabled", json={"enabled": True}).json() == {"enabled": True}
+# (v0.14: the four tests of ``/api/roster/**`` that stood here - names, avatars, the moderator's avatar, a colon in a name, persona / memory /
+# refine, memory:clear and the load-memory switch - are gone with the endpoints they tested (H55: /api/roster/** is deleted, a player is a bot now).
+# ``test_mock_bots.py`` holds their successors: the same rules (idle only, 1-20 characters, no colon, unique), now on ``/api/bots/**``.)
 
 
 def test_http_budget_dialog_endpoints() -> None:
@@ -916,7 +796,8 @@ def test_http_review_after_the_game_and_the_stall_notice() -> None:
         assert started.status_code == 409 and "对局结束后" in started.json()["detail"]
         client.post("/api/mock/finish")
         assert client.get("/api/state").json()["session"]["review"]["available"] is True
-        assert client.post("/api/game/review", json={"ids": ["N1"]}).json() == {"started": ["N1"]}
+        # (v0.14: {"started": [seat ids], "deadline_s": 60} - every bot gets 60 seconds)
+        assert client.post("/api/game/review", json={"ids": ["N1"]}).json() == {"started": ["N1"], "deadline_s": 60}
         _wait_for(lambda: client.get("/api/state").json()["session"]["review"]["done"] == ["N1"])
         assert client.post("/api/game/review", json={"ids": ["N1"]}).status_code == 409  # already reviewed
         rest = client.post("/api/game/review").json()["started"]  # no body: everybody who is left
@@ -924,9 +805,15 @@ def test_http_review_after_the_game_and_the_stall_notice() -> None:
         _wait_for(lambda: client.get("/api/state").json()["session"]["review"]["done"] == IDS)
         assert client.post("/api/game/review").status_code == 409
         progress = [e["data"] for e in _bus(app).ring if e["type"] == "review.progress"]
-        assert [(d["id"], d["state"]) for d in progress] == [(pid, st) for pid in IDS for st in ("running", "done")]
-        # the review wrote into the players' memory text (visible in the roster)
-        assert "战绩" in next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == "N4")["memory"]
+        for pid in IDS:
+            states = [d["state"] for d in progress if d["id"] == pid]
+            assert states[0] == "queued" and states[-1] == "done" and set(states) <= {"queued", "running", "done"}, (pid, states)
+        # the review wrote into the bots' memory (the record counts the game, the impressions are of the others)
+        bot = client.get("/api/bots").json()["bots"][3]
+        assert bot["memory_stats"]["people"] == 11 and bot["memory_stats"]["record"].startswith("场次")
+        # a malformed request is refused before anything starts
+        assert client.post("/api/game/review", json={"ids": "N1"}).status_code == 422
+        assert client.post("/api/game/review", json={"learn_style": {"N1": "yes"}}).status_code == 422
 
         # the watchdog's stall notice: a banner, no pause; an empty notice clears it
         out = client.post("/api/mock/stall", json={"notice": "对局似乎停滞了"}).json()
@@ -967,22 +854,27 @@ def test_http_history_of_games_list_delete_load() -> None:
         live = body["current"]
         games = body["games"]
         assert games[0]["session_id"] == live and games[0]["current"] is True
-        assert [g["session_id"] for g in games[1:]] == ["mock-old-1", "mock-old-2", "mock-old-3"]
+        # (v0.14: v6 and v5 games, one with a person in it, one that cannot be read - tests/frontend/test_mock_files.py has the details)
+        assert [g["session_id"] for g in games[1:]] == ["mock-old-1", "mock-old-2", "mock-old-3", "mock-old-4", "mock-broken-5"]
         assert all(g["current"] is False for g in games[1:])
-        keys = {"title", "scenario_title", "status", "winner", "created_at", "updated_at", "duration_gt", "players", "tokens", "cost_usd", "human_involved"}
+        keys = {"title", "scenario_title", "status", "winner", "created_at", "updated_at", "duration_gt", "players", "tokens", "cost_usd", "human_involved",
+                "readable", "size_bytes", "log_bytes", "review", "participants_brief"}
         assert all(keys <= set(g) for g in games)
-        assert {g["session_id"]: g["human_involved"] for g in games[1:]} == {"mock-old-1": False, "mock-old-2": True, "mock-old-3": False}
+        assert {g["session_id"]: g["human_involved"] for g in games[1:]} == {
+            "mock-old-1": False, "mock-old-2": True, "mock-old-3": False, "mock-old-4": True, "mock-broken-5": False}
 
-        # the live game cannot be deleted; an unknown / malformed id is a clear error
-        assert client.delete(f"/api/games/{live}").status_code == 409
+        # an unknown / malformed id is a clear error (the current game can be deleted unless it runs: tests/frontend/test_mock_files.py)
         assert client.delete("/api/games/nope").status_code == 404
         assert client.delete("/api/games/bad.id").status_code == 400
-        assert client.delete("/api/games/mock-old-3").json() == {"ok": True, "session_id": "mock-old-3"}
-        assert [g["session_id"] for g in client.get("/api/games").json()["games"]][1:] == ["mock-old-1", "mock-old-2"]
+        deleted = client.delete("/api/games/mock-old-3").json()  # (v0.14: it says what is NOT deleted - what the bots learned stays)
+        assert deleted == {"ok": True, "session_id": "mock-old-3", "note": "bot 已经通过复盘形成的记忆不会被删除，也无法通过删除对局撤销。", "new_game": False, "new_session_id": None}
+        assert [g["session_id"] for g in client.get("/api/games").json()["games"]][1:] == ["mock-old-1", "mock-old-2", "mock-old-4", "mock-broken-5"]
 
         # continuing a game: a running game is not replaced, the live one cannot be loaded again, unknown ones 404
         assert client.post(f"/api/games/{live}/load").status_code == 409
         assert client.post("/api/games/nope/load").status_code == 404
+        assert client.delete(f"/api/games/{live}").json()["new_game"] is True, "(an idle current game can be deleted: a new one takes its place)"
+        live = client.get("/api/games").json()["current"]
         started = client.post("/api/control/start").json()
         assert started["session"]["status"] == "running"
         refused = client.post("/api/games/mock-old-2/load")

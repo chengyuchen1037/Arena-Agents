@@ -1564,39 +1564,7 @@ body.arena-resizing * {
 
 /* ---- v0.12 rules kept in v0.12.1 ---- */
 
-.viewpoint-picker {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  background: var(--bg-subtle);
-  border: 1px solid var(--border-color);
-  border-radius: 999px;
-  padding: 3px 8px 3px 12px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-secondary);
-}
-
-.viewpoint-select {
-  border: none;
-  background: transparent;
-  color: var(--text-primary);
-  font-size: 13px;
-  font-weight: 700;
-  cursor: pointer;
-  outline: none;
-  max-width: 150px;
-  padding: 2px 0;
-}
-
-.viewpoint-select option {
-  background: var(--bg-surface);
-  color: var(--text-primary);
-}
-
-.viewpoint-select.is-player {
-  color: var(--blue-text);
-}
+/* (v0.14: the viewpoint drop-down is gone - the viewpoint label and its menu are at the end of this file) */
 
 .request-hints {
   display: inline-flex;
@@ -2173,8 +2141,10 @@ body.arena-resizing * {
 [data-theme="light"] {
   --flow-floor: #16a34a;
   --flow-wait: #9333ea;
-  --num-bg: #1e293b;
-  --num-fg: #ffffff;
+  /* v0.14 (H28): the seat bubble over the corner of a card - translucent, one set of colours per theme */
+  --seat-bubble-bg: rgba(30, 41, 59, 0.6);
+  --seat-bubble-fg: #ffffff;
+  --seat-bubble-ring: rgba(255, 255, 255, 0.95);
   --dm-bg: #f5f3ff;
   --dm-bg-hover: #ede9fe;
   --dm-active-bg: #ddd6fe;
@@ -2193,8 +2163,9 @@ body.arena-resizing * {
 [data-theme="dark"] {
   --flow-floor: #4ade80;
   --flow-wait: #c084fc;
-  --num-bg: #e2e8f0;
-  --num-fg: #0f172a;
+  --seat-bubble-bg: rgba(226, 232, 240, 0.66);
+  --seat-bubble-fg: #0b1220;
+  --seat-bubble-ring: rgba(15, 23, 42, 0.95);
   --dm-bg: rgba(139, 92, 246, 0.13);
   --dm-bg-hover: rgba(139, 92, 246, 0.22);
   --dm-active-bg: rgba(139, 92, 246, 0.3);
@@ -2411,8 +2382,7 @@ button,
   gap: 4px;
 }
 
-.more-menu-list > .btn,
-.more-menu-list > .viewpoint-picker {
+.more-menu-list > .btn {
   width: 100%;
   min-height: 46px;
   justify-content: flex-start;
@@ -2424,8 +2394,7 @@ button,
   max-width: none;
 }
 
-html[data-layout="phone"] .more-menu-list > .btn,
-html[data-layout="phone"] .more-menu-list > .viewpoint-picker {
+html[data-layout="phone"] .more-menu-list > .btn {
   min-height: 46px;
 }
 
@@ -2456,21 +2425,6 @@ html[data-layout="phone"] .more-menu-list > .viewpoint-picker {
   white-space: nowrap;
 }
 
-.more-menu-list > .viewpoint-picker {
-  display: flex;
-  gap: 10px;
-  border: 1px solid var(--border-card-subtle);
-  border-radius: 10px;
-  background: var(--bg-subtle);
-}
-
-.more-menu-list .viewpoint-select {
-  flex: 1;
-  max-width: none;
-  font-size: 15px;
-  min-height: 40px;
-}
-
 .more-menu-list .theme-label {
   display: inline;
 }
@@ -2496,7 +2450,7 @@ html[data-layout="phone"] .more-menu-list > .viewpoint-picker {
   display: inline-block;
 }
 
-/* fixed: the participant bar clips its overflow; roster.js places the menu under its button */
+/* fixed: the participant bar clips its overflow; bots.js places the menu under its button */
 .dropdown {
   position: fixed;
   z-index: 7500;
@@ -2596,24 +2550,29 @@ html[data-layout="phone"] .more-menu-list > .viewpoint-picker {
   outline-offset: 1px;
 }
 
-/* the round seat number at the top-left corner */
+/* v0.14 (H28): the seat is a translucent round bubble over the top-left corner of the card (the card is the bot, the bubble is the seat); a ring in the
+   colour of the page keeps it readable on any card, and it never takes a click (the card behind it does) */
 .pcard-num {
   position: absolute;
-  top: 5px;
-  left: 5px;
-  z-index: 2;
-  min-width: 20px;
-  height: 20px;
-  padding: 0 4px;
+  top: -6px;
+  left: -5px;
+  z-index: 3;
+  min-width: 21px;
+  height: 21px;
+  padding: 0 5px;
   border-radius: 999px;
-  background: var(--num-bg);
-  color: var(--num-fg);
+  background: var(--seat-bubble-bg);
+  color: var(--seat-bubble-fg);
+  box-shadow: 0 0 0 2px var(--seat-bubble-ring), 0 1px 3px rgba(15, 23, 42, 0.3);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 11px;
   font-weight: 800;
-  line-height: 20px;
+  line-height: 21px;
   text-align: center;
   letter-spacing: -0.3px;
+  pointer-events: none;
 }
 
 /* small status badges (sheriff, ...) at the top-right corner; they never replace the identity tag */
@@ -3906,10 +3865,13 @@ html[data-layout="wide"] .pcard-state {
 }
 
 .detail-editor-meta {
+  min-width: 0;
   margin-left: auto;
   color: var(--text-muted);
   font-size: 12px;
   font-weight: 600;
+  overflow-wrap: anywhere; /* "缺少：身份、说话方式、分析方式" is long: it breaks into two lines rather than pushing the panel wider */
+  text-align: right;
 }
 
 .detail-editor-body {
@@ -4310,12 +4272,13 @@ html[data-layout="compact"] .pcard-text {
 }
 
 html[data-layout="compact"] .pcard-num {
-  top: 3px;
-  left: 3px;
-  min-width: 18px;
-  height: 18px;
+  top: -5px;
+  left: -4px;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 4px;
   font-size: 10px;
-  line-height: 18px;
+  line-height: 19px;
 }
 
 html[data-layout="compact"] .pcard-state {
@@ -4362,8 +4325,7 @@ html[data-input="touch"] .btn-xs {
   padding-right: 12px;
 }
 
-html[data-input="touch"] .form-input,
-html[data-input="touch"] .viewpoint-select {
+html[data-input="touch"] .form-input {
   min-height: 40px;
 }
 
@@ -4595,12 +4557,13 @@ html[data-layout="phone"] .main-container[data-phone-tab="feed"] .pcard-avatar {
 }
 
 html[data-layout="phone"] .main-container[data-phone-tab="feed"] .pcard-num {
-  top: 2px;
-  left: 2px;
-  min-width: 16px;
-  height: 16px;
+  top: -4px;
+  left: -3px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 3px;
   font-size: 9.5px;
-  line-height: 16px;
+  line-height: 17px;
 }
 
 html[data-layout="phone"] .main-container[data-phone-tab="feed"] .pcard-state {
@@ -4640,10 +4603,12 @@ html[data-layout="phone"] .main-container[data-phone-tab="players"] .pcard-tag {
 }
 
 html[data-layout="phone"] .main-container[data-phone-tab="players"] .pcard-num {
-  min-width: 22px;
-  height: 22px;
+  top: -6px;
+  left: -5px;
+  min-width: 23px;
+  height: 23px;
   font-size: 12px;
-  line-height: 22px;
+  line-height: 23px;
 }
 
 html[data-layout="phone"] .main-container[data-phone-tab="players"] .pcard-state {
@@ -5034,19 +4999,7 @@ html[data-layout="phone"] .banner-short {
    (docs/v0.13-plan.md F1-F19; static/js/takeover.js, composer.js)
    ========================================================================== */
 
-/* [视角▾][切换][接管] */
-.viewpoint-bar {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: nowrap;
-  gap: 6px;
-  min-width: 0;
-}
-
-.viewpoint-bar .btn-xs {
-  white-space: nowrap;
-}
-
+/* (v0.14: the viewpoint bar [视角▾][切换][接管] became the viewpoint label and its menu - at the end of this file) */
 .btn-takeover:not(:disabled) {
   border-color: var(--success-tag-border);
   color: var(--success-text);
@@ -5056,32 +5009,7 @@ html[data-layout="phone"] .banner-short {
   background: var(--success-bg);
 }
 
-/* in the phone's "⋯" menu the whole bar is one row: the drop-down takes what the two buttons leave */
-.more-menu-list > .viewpoint-bar {
-  display: flex;
-  width: 100%;
-  gap: 8px;
-}
-
-.more-menu-list > .viewpoint-bar .viewpoint-picker {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 46px;
-  padding: 0 12px;
-  border: 1px solid var(--border-card-subtle);
-  border-radius: 10px;
-  background: var(--bg-subtle);
-}
-
-.more-menu-list > .viewpoint-bar .btn {
-  flex: none;
-  min-height: 46px;
-  padding: 0 14px;
-  font-size: 15px;
-  border-radius: 10px;
-}
-
-/* 🎮 正在扮演 3 · Carol [退出接管]: replaces the viewpoint bar while a seat is played */
+/* 正在扮演 3 · Carol [⏸ 暂停 agent] [退出接管]: next to the viewpoint label while a seat is played */
 .takeover-bar {
   display: inline-flex;
   align-items: center;
@@ -5107,31 +5035,20 @@ html[data-layout="phone"] .banner-short {
   font-weight: 800;
 }
 
-/* the first row of a phone is narrow: while a seat is played the bar takes the place of the title (it stays in the
-   first row - it is not moved into the "⋯" menu - and the name gives way with an ellipsis on a 360 px screen) */
+/* the first row of a phone is narrow: while a seat is played the viewpoint label and the bar take the place of the title (they stay in the first
+   row - they are not moved into the "⋯" menu; the bar goes under the label, full width, and the label already says whose seat it is) */
 html[data-layout="phone"][data-takeover="1"] .brand-group {
   display: none;
 }
 
 html[data-layout="phone"] .takeover-bar {
-  flex: 1 1 auto;
+  flex: 1 1 100%;
   justify-content: space-between;
   max-width: 100%;
 }
 
 html[data-layout="phone"] .takeover-bar .takeover-badge {
-  flex: 1 1 auto;
-}
-
-/* F5: "你已经知道自己的身份，建议点击「重新发牌」" */
-.takeover-reminder {
-  background: var(--success-bg);
-  color: var(--success-text);
-  border-bottom-color: var(--success-tag-border);
-}
-
-html[data-layout="phone"] .takeover-reminder {
-  justify-content: space-between;
+  display: none;
 }
 
 /* a seat a person plays: 🎮 on its card */
@@ -6246,18 +6163,19 @@ html[data-input="touch"] .mark-clear {
   border-radius: 3px;
 }
 
-/* a phone: the bar wraps - the name and 退出接管 in the first line, the soft pause (state + button + link) below */
+/* a phone: the bar is a line of its own under the viewpoint label - the soft pause (state + button + link) and 退出接管; it wraps when they do not fit */
 html[data-layout="phone"] .takeover-bar {
   flex-wrap: wrap;
   row-gap: 4px;
   padding-top: 3px;
   padding-bottom: 3px;
+  padding-left: 6px;
   border-radius: 16px;
 }
 
 html[data-layout="phone"] .takeover-bar .softpause {
-  order: 3;
-  flex: 1 0 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   padding-right: 3px;
 }
 
@@ -6908,6 +6826,11 @@ html[data-layout="phone"] .takeover-bar:not(.is-soft-paused) .btn-softpause {
   font-size: 10px;
 }
 
+/* a finger hits a line of text only if the line is as tall as a button */
+html[data-input="touch"] .review-changes-toggle {
+  min-height: var(--tap);
+}
+
 .review-changes-list {
   display: flex;
   flex-direction: column;
@@ -7272,3 +7195,1437 @@ html[data-layout="phone"] .cl-detail {
 html[data-layout="phone"] .avatar-pop-row .btn {
   min-height: 42px;
 }
+
+/* ==========================================================================
+   v0.14: the bots (bots.js / botedit.js) - initialization marks, the lock, the editors of the panel, proposals, diffs
+   ========================================================================== */
+
+/* ---- the card: the name and the mark of its initialization (H22): ✔ ready · ⚠ needs a new one · ✖ failed · ⏳ running · ○ never ------ */
+.pcard-nameline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.pcard-nameline .pcard-name {
+  min-width: 0;
+}
+
+.pcard-init {
+  flex: none;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  cursor: help;
+}
+
+.pcard-init.init-ready {
+  color: var(--success-text);
+}
+
+.pcard-init.init-stale {
+  color: var(--amber-text);
+}
+
+.pcard-init.init-failed {
+  color: var(--danger-text);
+}
+
+.pcard-init.init-uninitialized {
+  color: var(--text-muted);
+}
+
+.pcard-init.init-initializing {
+  animation: init-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes init-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pcard-init.init-initializing {
+    animation: none;
+  }
+}
+
+/* ---- the participant bar: 全局初始化 + the counts, the roster menu ----------------------------------------------------------- */
+.init-summary {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.dropdown-note {
+  margin-top: 4px;
+  padding: 6px 12px 4px;
+  border-top: 1px solid var(--border-color);
+  line-height: 1.4;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---- the head of the panel: the lock and the initialization row ------------------------------------------------------------------ */
+.lock-badge {
+  flex: none;
+  margin: 0 4px;
+  cursor: help;
+}
+
+.detail-frozen {
+  margin: 2px 0 0;
+}
+
+.detail-init {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  background: var(--bg-muted);
+  border: 1px solid var(--border-color);
+  border-left-width: 3px;
+  border-radius: 9px;
+}
+
+.detail-init.init-ok {
+  border-left-color: var(--success-text);
+}
+
+.detail-init.init-warn {
+  border-left-color: var(--amber-border);
+}
+
+.detail-init.init-bad {
+  border-left-color: var(--danger-border);
+}
+
+.detail-init.init-busy {
+  border-left-color: var(--blue-border);
+}
+
+.detail-init.init-none {
+  border-left-color: var(--border-card-subtle);
+}
+
+.detail-init.flash {
+  box-shadow: 0 0 0 3px var(--blue-bg-tint), 0 0 0 4px var(--blue-border);
+}
+
+.detail-init-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.init-symbol {
+  flex: none;
+  font-weight: 800;
+}
+
+.init-ok .init-symbol {
+  color: var(--success-text);
+}
+
+.init-warn .init-symbol {
+  color: var(--amber-text);
+}
+
+.init-bad .init-symbol {
+  color: var(--danger-text);
+}
+
+.init-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.init-detail,
+.init-reason,
+.init-note,
+.init-nobind {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.init-bar {
+  height: 6px;
+  overflow: hidden;
+  background: var(--bg-subtle);
+  border-radius: 999px;
+}
+
+.init-bar-fill {
+  width: 0;
+  height: 100%;
+  background: var(--blue-primary);
+  transition: width 0.3s ease;
+}
+
+.init-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13.5px;
+}
+
+.init-target-head {
+  margin-top: 8px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.dialog-check {
+  margin-top: 10px;
+}
+
+.dialog-reset,
+.dialog-init {
+  line-height: 1.55;
+}
+
+/* ---- the editors: 底层设定 ------------------------------------------------------------------------------------------------------ */
+.core-field,
+.core-extra,
+.mem-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mem-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.mem-label-text {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.core-required,
+.mem-scope {
+  margin-left: 4px;
+  font-weight: 500;
+}
+
+.core-count {
+  flex: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.core-count.over {
+  color: var(--danger-text);
+}
+
+.core-extra {
+  padding: 6px 8px;
+  background: var(--bg-surface);
+  border: 1px dashed var(--border-card-subtle);
+  border-radius: 8px;
+}
+
+.core-extra-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.core-extra-title {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 8px;
+}
+
+.core-extras {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.core-warn {
+  padding: 5px 9px;
+  color: var(--amber-text);
+  background: var(--amber-bg-tint);
+  border: 1px solid var(--amber-border);
+  border-radius: 7px;
+}
+
+.core-refine {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-card-subtle);
+}
+
+.editor-problems {
+  margin: 0;
+  padding: 6px 10px 6px 24px;
+}
+
+.editor-problems li {
+  margin: 1px 0;
+}
+
+.editor-busy {
+  margin: 0;
+}
+
+.draft-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  white-space: normal;
+}
+
+.draft-sec {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* ---- the editors: 记忆 ----------------------------------------------------------------------------------------------------------- */
+.mem-block {
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-card-subtle);
+}
+
+.mem-block:first-of-type {
+  padding-top: 0;
+  border-top: none;
+}
+
+.mem-block.mem-record {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  background: transparent;
+  border-radius: 0;
+}
+
+.mem-playbook {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 2px 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+}
+
+.pb-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 6px;
+}
+
+.pb-conf {
+  flex: none;
+  padding: 0 6px;
+  background: var(--neutral-bg);
+  border-radius: 4px;
+  color: var(--neutral-text);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.pb-conf-高 {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.pb-conf-中 {
+  background: var(--amber-bg-tint);
+  color: var(--amber-text);
+}
+
+.pb-stats,
+.pb-tag {
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pb-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ---- the editors: 待确认 (proposals) and every old → new diff --------------------------------------------------------------------- */
+.stage-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+}
+
+.stage-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  font-size: 13px;
+}
+
+.stage-reason {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.stage-diff {
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  background: var(--bg-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.diff-line {
+  display: flex;
+  gap: 6px;
+  padding: 0 7px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.diff-mark {
+  flex: none;
+  width: 10px;
+  color: var(--text-muted);
+  font-weight: 800;
+  text-align: center;
+}
+
+.diff-line.add {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.diff-line.del {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.diff-line.same {
+  color: var(--text-secondary);
+}
+
+.default-select {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  font-size: 13px;
+}
+
+.detail-nobot,
+.editors-replay,
+.editors-loading {
+  margin-top: 8px;
+}
+
+html[data-input="touch"] .core-extra-title,
+html[data-input="touch"] .default-select {
+  min-height: var(--tap);
+}
+
+/* ==========================================================================
+   v0.14: the settings dialog in five columns (settings.js): ① 总存档 ② 底层设定 ③ 官方契约 ④ 规则 ⑤ 对局管理
+   ========================================================================== */
+.settings-col {
+  margin-bottom: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+}
+
+.settings-col.open {
+  border-color: var(--border-card-subtle);
+}
+
+.settings-col-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: var(--tap);
+  padding: 6px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 15px;
+  font-weight: 800;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-col-head .caret {
+  width: 12px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.settings-col-no {
+  color: var(--text-muted);
+}
+
+.settings-col-meta {
+  margin-left: auto;
+  font-weight: 500;
+  text-align: right;
+}
+
+.settings-col-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 12px 12px;
+}
+
+.settings-col-body[hidden] {
+  display: none;
+}
+
+/* column ① keeps the two boxes of the archive wizards (v0.13) inside its own frame */
+.settings-col-body > .settings-section {
+  align-items: stretch;
+}
+
+.settings-col-body > .settings-section > .btn {
+  align-self: flex-start;
+}
+
+.settings-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-rows,
+.settings-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-row {
+  background: var(--bg-muted);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+
+.settings-row.is-current {
+  border-color: var(--blue-border);
+}
+
+.settings-row.is-unreadable {
+  opacity: 0.8;
+}
+
+.settings-row-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  width: 100%;
+  min-height: var(--tap);
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings-row-main:disabled {
+  cursor: default;
+}
+
+.settings-row-main .caret {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.srow-avatar {
+  display: inline-flex;
+  flex: none;
+}
+
+.srow-avatar .avatar-img {
+  --av: 28px;
+  border-radius: 4px;
+}
+
+.srow-name {
+  font-weight: 800;
+}
+
+.srow-seat,
+.srow-time,
+.srow-chars {
+  font-size: 12px;
+}
+
+.srow-chars {
+  flex: 1;
+  min-width: 140px;
+}
+
+.srow-init {
+  flex: none;
+  font-weight: 800;
+}
+
+.srow-init.init-ready {
+  color: var(--success-text);
+}
+
+.srow-init.init-stale {
+  color: var(--amber-text);
+}
+
+.srow-init.init-failed {
+  color: var(--danger-text);
+}
+
+.srow-state {
+  flex: none;
+  padding: 0 7px;
+  background: var(--neutral-bg);
+  border-radius: 999px;
+  color: var(--neutral-text);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.srow-state.ok {
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.srow-state.bad {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.srow-state.warn {
+  background: var(--amber-bg-tint);
+  color: var(--amber-text);
+}
+
+/* the head of a row of the lists (② the bots, ⑤ the games): the toggle takes the line, the actions are quiet text buttons at its right end - and go under it,
+   right-aligned, where the line is too narrow for both (a phone) */
+.settings-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: 2px;
+}
+
+/* the toggle takes what the actions leave: 240 px is the least it asks for, so on a 360 px phone a quiet button (清除) still fits beside it */
+.settings-row-head > .settings-row-main {
+  flex: 1 1 240px;
+  width: auto;
+  min-width: 0;
+}
+
+.srow-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.settings-row-head > .srow-actions {
+  padding-right: 6px;
+}
+
+/* a button that is only text until the pointer comes (the actions of a row: twelve boxes in a list are too loud); `.danger` turns red then, not before */
+.btn-quiet {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.btn-quiet:hover:not(:disabled),
+.btn-quiet:focus-visible {
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+.btn-quiet.danger:hover:not(:disabled),
+.btn-quiet.danger:focus-visible {
+  background: var(--danger-bg);
+  color: var(--danger-text);
+}
+
+.btn-quiet:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* a finger needs the same room as for any button, although there is no box to see */
+html[data-input="touch"] .btn-quiet {
+  min-height: var(--tap);
+  padding-left: 10px;
+  padding-right: 10px;
+}
+
+/* "全部清除…": a red outline, but a thin one - the one loud thing of the column, not a slab */
+.btn-danger-soft {
+  border-color: var(--danger-border);
+  background: transparent;
+  color: var(--danger-text);
+}
+
+.btn-danger-soft:hover:not(:disabled) {
+  background: var(--danger-bg);
+}
+
+.settings-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 10px 10px;
+}
+
+.settings-pre {
+  max-height: 260px;
+  margin: 0;
+  padding: 8px 10px;
+  overflow: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 7px;
+  color: var(--text-primary);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.settings-facts {
+  margin: 0;
+}
+
+.settings-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--bg-muted);
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+}
+
+.settings-block-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+}
+
+.settings-problem {
+  margin: 0;
+}
+
+.settings-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-card-subtle);
+}
+
+.settings-sub-title {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.settings-sub-title .form-hint {
+  margin-left: 8px;
+  font-weight: 500;
+}
+
+.mat-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 4px 10px;
+}
+
+/* the table of the players of a game: a name that does not fit scrolls the table, it does not push the dialog wider */
+.settings-table-wrap {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.settings-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.settings-table th,
+.settings-table td {
+  padding: 2px 8px;
+  border-bottom: 1px solid var(--border-color);
+  text-align: left;
+}
+
+.settings-table th {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+html[data-layout="phone"] .settings-col-meta {
+  display: none;
+}
+
+html[data-layout="phone"] .srow-chars {
+  flex-basis: 100%;
+  order: 9;
+}
+
+.settings-col-title {
+  min-width: 0;
+}
+
+/* The confirm dialog (openDialog) is opened from other dialogs - settings, history, the bindings - and sits BEFORE them in the page: with the same z-index
+   as theirs it would be painted under them (the later sibling wins a tie).  It goes above them; the access-token prompt goes above everything modal. */
+#dialog-modal {
+  z-index: 9100;
+}
+
+#token-modal {
+  z-index: 9200;
+}
+
+/* ==========================================================================
+   v0.14 — web-play (W1-W4): the cards without an identity before the deal (H52) and the cards that can be moved (H29), the system status label (H26),
+   the viewpoint label and its menu (H27), the start check (H25), the length of a speech (H16), the question at the end of a game (H31).
+   (static/js/app.js, layout.js createSeatDrag, takeover.js, composer.js, endreview.js.)  The seat bubble itself is `.pcard-num` (H28, further up).
+   ========================================================================== */
+
+/* ---- the cards: no identity tag before the deal (H52); the cards that can be moved (H29) ------------------------------------------------ */
+.pcard.no-tag .pcard-text {
+  gap: 0;
+}
+
+.pcard.no-tag .pcard-nameline {
+  margin-top: 2px;
+}
+
+/* the game has not started: the cards are in a hand; the card that is carried floats, the seat it would take is outlined */
+.participants-grid.seats-draggable .pcard {
+  cursor: grab;
+  -webkit-touch-callout: none;
+}
+
+.participants-grid.seats-dragging,
+.participants-grid.seats-dragging .pcard {
+  cursor: grabbing;
+}
+
+.participants-grid.seats-dragging {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.pcard.seat-dragging {
+  z-index: 30;
+  opacity: 0.92;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.32);
+  pointer-events: none;
+  transition: none;
+}
+
+.pcard.seat-target {
+  border-color: var(--blue-primary);
+  outline: 2px dashed var(--blue-primary);
+  outline-offset: 2px;
+}
+
+/* ---- the system status label: the first thing of the second row of the top bar (H26) ------------------------------------------------- */
+.status-pill {
+  max-width: 100%;
+}
+
+.status-pill > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-pill[data-code="uninitialized"],
+.status-pill[data-code="paused"] {
+  border-color: color-mix(in srgb, var(--amber-border) 45%, transparent);
+  background: var(--amber-bg-tint);
+  color: var(--amber-text);
+}
+
+.status-pill[data-code="initializing"],
+.status-pill[data-code="reviewing"] {
+  border-color: var(--blue-border);
+  background: var(--blue-bg-tint);
+  color: var(--blue-text);
+}
+
+.status-dot.uninit {
+  background-color: var(--amber-border);
+}
+
+.status-dot.busy {
+  background-color: var(--blue-primary);
+  animation: statusBusy 1.3s ease-in-out infinite;
+}
+
+@keyframes statusBusy {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-dot.busy {
+    animation: none;
+  }
+}
+
+/* ---- the viewpoint label and its menu (H27): 全局视角 · Alice视角 · 🎮 Alice视角（接管） ------------------------------------------------ */
+.viewpoint-bar {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.viewpoint-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 3px 11px 3px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.viewpoint-chip:hover,
+.viewpoint-chip.open {
+  border-color: var(--blue-border);
+}
+
+.viewpoint-chip.open {
+  box-shadow: 0 0 0 2px var(--blue-bg-tint);
+}
+
+.viewpoint-chip:focus-visible {
+  outline: 2px solid var(--blue-border);
+  outline-offset: 2px;
+}
+
+.viewpoint-chip.is-player {
+  border-color: var(--blue-border);
+  background: var(--blue-bg-tint);
+  color: var(--blue-text);
+}
+
+.viewpoint-chip.is-played {
+  border-color: var(--success-tag-border);
+  background: var(--success-bg);
+  color: var(--success-text);
+}
+
+.viewpoint-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewpoint-caret {
+  flex: none;
+  font-size: 10px;
+  opacity: 0.65;
+}
+
+html[data-input="touch"] .viewpoint-chip {
+  min-height: 40px;
+}
+
+/* the menu is position: fixed (takeover.js puts it under the label); a row = a player with its two buttons */
+.viewpoint-menu {
+  width: min(340px, calc(100vw - 16px));
+  min-width: 0;
+  max-height: min(76dvh, 580px);
+  overflow-y: auto;
+  gap: 1px;
+  padding: 6px;
+}
+
+.viewpoint-menu .vp-god {
+  font-weight: 700;
+}
+
+.viewpoint-menu .vp-god.current {
+  background: var(--blue-bg-tint);
+}
+
+.vp-head {
+  padding: 8px 10px 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.vp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 10px;
+  border-radius: 8px;
+}
+
+.vp-row:hover {
+  background: var(--bg-subtle);
+}
+
+.vp-row.current {
+  background: var(--blue-bg-tint);
+}
+
+.vp-row.played {
+  background: var(--success-bg);
+}
+
+.vp-name {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.vp-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vp-check {
+  display: inline-block;
+  flex: none;
+  width: 14px;
+  color: var(--blue-text);
+  font-weight: 800;
+  text-align: center;
+}
+
+.vp-played {
+  flex: none;
+}
+
+.vp-row .btn {
+  flex: none;
+  white-space: nowrap;
+}
+
+.vp-note {
+  padding: 4px 10px;
+}
+
+.viewpoint-menu .vp-release {
+  margin-top: 4px;
+  border-top: 1px solid var(--border-color);
+  border-radius: 0 0 8px 8px;
+  font-weight: 700;
+}
+
+/* ---- the start check: what is not ready, by player (H25) -------------------------------------------------------------------------- */
+.nr-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(56dvh, 420px);
+  overflow-y: auto;
+}
+
+.nr-group {
+  padding: 8px 10px;
+  border: 1px solid var(--border-card-subtle);
+  border-radius: 10px;
+  background: var(--bg-subtle);
+}
+
+.nr-title {
+  margin: 0 0 4px;
+  color: var(--text-primary);
+  font-size: 13.5px;
+  font-weight: 800;
+}
+
+.nr-contract .nr-title,
+.nr-scenario .nr-title {
+  color: var(--amber-text);
+}
+
+.nr-items {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nr-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+
+.nr-msg {
+  flex: 1 1 220px;
+  min-width: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.nr-fix {
+  flex: none;
+  white-space: nowrap;
+}
+
+/* ---- the length of a speech: over the limit of the channel the box turns red and the send button is off (H16) ------------------------ */
+.composer.is-over .composer-input {
+  border-color: var(--danger-text);
+}
+
+.composer.is-over .composer-input:focus {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger-text) 25%, transparent);
+}
+
+.composer.is-over .composer-hint {
+  color: var(--danger-text);
+  font-weight: 600;
+}
+
+/* ---- the question at the end of a game: should the bots review it? (H31) ------------------------------------------------------------- */
+.modal-card.review-card {
+  display: flex;
+  flex-direction: column;
+  width: 640px;
+  max-width: 96vw;
+  max-height: 92vh;
+}
+
+.review-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  max-height: min(64dvh, 520px);
+  overflow-y: auto;
+}
+
+.review-footer {
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.review-count {
+  margin-right: auto;
+}
+
+/* a phone: the card is the whole screen (the generic rule above) - the list takes what the header and the footer leave, the count has a line of its own */
+html[data-layout="phone"] .review-body {
+  max-height: none;
+}
+
+html[data-layout="phone"] .review-count {
+  flex: 1 1 100%;
+  margin-right: 0;
+}
+
+html[data-layout="phone"] .rv-row {
+  padding: 8px 10px;
+}
+
+/* the whole label is the tap target of a check box (the box itself is 22 px): as tall as a button on a touch screen - the name of a bot and the switch of its style */
+html[data-layout="phone"] .rv-pick,
+html[data-layout="phone"] .rv-style {
+  min-height: var(--tap);
+}
+
+.rv-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.rv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rv-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-card-subtle);
+  border-radius: 9px;
+  background: var(--bg-surface);
+}
+
+.rv-row.is-human {
+  border-color: var(--success-tag-border);
+  background: var(--success-bg);
+}
+
+.rv-row.is-done {
+  opacity: 0.6;
+}
+
+.rv-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.rv-seat {
+  display: inline-block;
+  flex: none;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--seat-bubble-bg);
+  color: var(--seat-bubble-fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 20px;
+  text-align: center;
+}
+
+.rv-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13.5px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+}
+
+.rv-human {
+  flex: none;
+  padding: 0 8px;
+  border: 1px solid var(--success-tag-border);
+  border-radius: 999px;
+  background: var(--success-bg);
+  color: var(--success-text);
+  font-size: 11.5px;
+  font-weight: 800;
+  line-height: 18px;
+}
+
+.rv-done {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.rv-style {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.rv-note {
+  margin: 0;
+}
+
+.rv-state {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 700;
+}
+
+.rv-state.ok {
+  color: var(--success-text);
+}
+
+.rv-state.warn {
+  color: var(--amber-text);
+}
+
+.rv-state.bad {
+  color: var(--danger-text);
+}
+
+.rv-state.busy {
+  color: var(--blue-text);
+}
+
+.rv-left {
+  font-variant-numeric: tabular-nums;
+}
+
+.rv-bar {
+  flex: 1 1 100%;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--bg-subtle);
+}
+
+.rv-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--blue-primary);
+  transition: width 1s linear;
+}
+
+.rv-msg {
+  flex: 1 1 100%;
+}
+
+.rv-result {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.rv-proposals {
+  color: var(--amber-text);
+  font-weight: 700;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rv-bar > span {
+    transition: none;
+  }
+}
+
+/* ---- a phone (H27): the viewpoint label stays in the first row - smaller there; while a seat is played it takes the title's place (the bar goes under it) -- */
+html[data-layout="phone"] .viewpoint-bar {
+  max-width: 100%;
+}
+
+html[data-layout="phone"] .viewpoint-chip {
+  min-height: 34px;
+  padding: 2px 10px;
+}
+
+html[data-layout="phone"][data-takeover="1"] .viewpoint-bar {
+  flex: 1 1 auto;
+}
+
+html[data-layout="phone"][data-takeover="1"] .viewpoint-chip {
+  justify-content: space-between;
+  width: 100%;
+}
+
+/* ==========================================================================
+   v0.14: what the phone walk-through found (tests/frontend/test_phone_layout.js asks this style sheet about every screen of the bots and the settings, at 360 - 430 px)
+   ========================================================================== */
+/* the start check: on a phone the dialog is the whole screen and its body scrolls - the list of the groups needs no scroll box of its own inside it */
+html[data-layout="phone"] .nr-groups {
+  max-height: none;
+  overflow-y: visible;
+}
+
+/* the questions and the notices PRINT what a person brought: the name of a file from the downloads folder, the id of a game (up to 64 characters, no blank in them).
+   A long word that cannot break pushes the card wider than the screen - and the card clips (overflow: hidden), so the end of the name is simply gone. */
+#dialog-body,
+.settings-col-body,
+.detail-editors {
+  overflow-wrap: anywhere;
+}
+

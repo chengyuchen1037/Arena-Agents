@@ -2,19 +2,34 @@
 // v0.13.1 (G27-G31, contract §12.6): the avatar code in the detail panel and the 🎲 panel behind it
 //   the code under the avatar + "复制" (the moderator has one too; it stays after the game started, the 🎲 does not),
 //   the panel: random (the existing logic) or "按编号生成" (format and parts checked first, a twin is allowed with a hint),
-//   PUT /api/roster/{id} {avatar} (no new write endpoint), the server's refusal shown in the panel.
+//   PUT /api/bots/{id} {avatar} (no new write endpoint; v0.14: the moderator's is PUT /api/moderator), the server's refusal shown in the panel,
+//   and (v0.14, H23) the question a bot that is initialized (frozen) asks first: a new avatar clears its initialization and memory.
 // The pure encoding / decoding has its own file (test_avatar_code.js, which runs the vectors shared with Python).
 // Run: node tests/frontend/test_avatar_pop_ui.js
 const assert = require("node:assert/strict");
 const H = require("./harness.js");
+const M = require("./markup.js");
 
 const { F, target, settle, bootLive, Avatar } = H;
 const tests = [];
-const test = (name, fn) => tests.push([name, fn]);
+// Every test also checks the markup the page drew by the end of it (the fake DOM never parses markup: a stray </div>, a <div> in a <p> or an id that occurs
+// twice would pass unseen and break the page in a real browser) - see markup.js.
+const envs = [];
+const test = (name, fn) =>
+  tests.push([
+    name,
+    async () => {
+      envs.length = 0;
+      await fn();
+      for (const env of envs) assert.deepEqual(M.envProblems(env, H.HTML_SRC), [], `the markup drawn in "${name}" is well formed`);
+    },
+  ]);
 
 async function live(over = {}, overrides = {}, envOpts = {}) {
   const session = F.makeSession({ event_id: 500, ...over });
-  const ctx = await bootLive({ session, ...overrides }, envOpts);
+  // (v0.14: the bots start "fresh" - nobody initialized, nothing learned: they are not frozen, so a new avatar needs no question)
+  const ctx = await bootLive({ session, botsPreset: "fresh", ...overrides }, envOpts);
+  envs.push(ctx.env);
   ctx.env.sse("snapshot", { session }, 500);
   return ctx;
 }
@@ -152,7 +167,7 @@ test("the 🎲 opens a small panel (random / by code) and a second press closes 
 });
 
 // ---- 按编号生成 (G30) ----------------------------------------------------------------------------
-test("按编号生成: PUT /api/roster/{id} {avatar} with the decoded description; the card and the code row follow; no other endpoint", async () => {
+test("按编号生成: PUT /api/bots/{id} {avatar} with the decoded description; the card and the code row follow; no other endpoint", async () => {
   const { env, backend } = await live({ status: "idle" });
   const before = cardImg(env, "N3");
   const others = Object.fromEntries(F.PLAYER_IDS.filter((id) => id !== "N3").map((id) => [id, cardImg(env, id)]));
@@ -164,7 +179,7 @@ test("按编号生成: PUT /api/roster/{id} {avatar} with the decoded descriptio
   assert.ok(!html(env, "detail-head").includes("avatar-pop-note ok"), "(and typing did not repaint the head: the caret stays)");
   panelClick(env, "apply-code");
   await flush(env);
-  assert.deepEqual(backend.rosterPuts, [{ id: "N3", avatar: CODE_DESC }], "exactly one PUT, with exactly the description");
+  assert.deepEqual(backend.botPuts, [{ id: F.botId(3), avatar: CODE_DESC }], "exactly one PUT, with exactly the description (and no confirm_reset: the bot is not frozen)");
   assert.equal(backend.calls.filter((c) => /avatar:regenerate/.test(c.url)).length, 0, "no random pick");
   assert.notEqual(cardImg(env, "N3"), before, "the card changed");
   for (const id of Object.keys(others)) assert.equal(cardImg(env, id), others[id], `${id} is untouched`);
@@ -180,7 +195,7 @@ test("按编号生成: PUT /api/roster/{id} {avatar} with the decoded descriptio
   typeCode(env, CODE);
   panelClick(env, "apply-code");
   await flush(env);
-  assert.deepEqual(backend.rosterPuts.pop(), { id: "N6", avatar: CODE_DESC });
+  assert.deepEqual(backend.botPuts.pop(), { id: F.botId(6), avatar: CODE_DESC });
 });
 
 test("Enter in the code box applies it", async () => {
@@ -190,7 +205,7 @@ test("Enter in the code box applies it", async () => {
   typeCode(env, CODE);
   env.el("detail-panel").dispatch("keydown", { key: "Enter", target: { id: "input-avatar-code" } });
   await flush(env);
-  assert.deepEqual(backend.rosterPuts, [{ id: "N2", avatar: CODE_DESC }]);
+  assert.deepEqual(backend.botPuts, [{ id: F.botId(2), avatar: CODE_DESC }]);
 });
 
 test("an invalid code says WHICH part is wrong and sends nothing", async () => {
@@ -236,7 +251,7 @@ test("an invalid code says WHICH part is wrong and sends nothing", async () => {
   assert.match(r.text, /素材库里没有脸型 f99/);
   r = await attempt("f01s02h02c01e01m02a77k01"); // the first unknown part in field order
   assert.match(r.text, /素材库里没有配饰 a77/);
-  assert.equal((backend.rosterPuts || []).length, 0, "nothing was sent, whatever was wrong");
+  assert.equal((backend.botPuts || []).length, 0, "nothing was sent, whatever was wrong");
   assert.equal(backend.calls.filter((c) => c.method === "PUT").length, 0);
   // what was typed stays in the box so that it can be corrected (the panel redraws it from its state)
   assert.match(html(env, "detail-head"), /id="input-avatar-code" value="f01s02h02c01e01m02a77k01"/);
@@ -258,14 +273,14 @@ test("a code that looks exactly like somebody else's is allowed - the panel says
   assert.match(liveText(env), /和 5 号 Eve 的头像完全相同：可以生成，但看起来会是同款/);
   panelClick(env, "apply-code");
   await flush(env);
-  assert.deepEqual(backend.rosterPuts, [{ id: "N3", avatar: F.avatarOf(5) }], "it is NOT refused");
+  assert.deepEqual(backend.botPuts, [{ id: F.botId(3), avatar: F.avatarOf(5) }], "it is NOT refused");
   assert.match(noteText(env), /头像已按编号生成。注意：和 5 号 Eve 的头像完全相同（同款）/);
   assert.match(lastToast(env), /和 5 号 Eve 同款/);
   // now it IS the current avatar: pressing again sends nothing
   typeCode(env, codeOfSeat(5));
   panelClick(env, "apply-code");
   await flush(env);
-  assert.equal(backend.rosterPuts.length, 1);
+  assert.equal(backend.botPuts.length, 1);
   assert.match(noteText(env), /这已经是当前的头像/);
   // the moderator counts as somebody else, and so does N3 for the moderator
   modClick(env);
@@ -274,7 +289,7 @@ test("a code that looks exactly like somebody else's is allowed - the panel says
   assert.match(liveText(env), /和 3 号 Carol、5 号 Eve 的头像完全相同/, "every twin is named");
 });
 
-test("the moderator's panel: 按编号生成 PUTs /api/roster/moderator {avatar}; the chip, the panel and the code follow", async () => {
+test("the moderator's panel: 按编号生成 PUTs /api/moderator {avatar}; the chip, the panel and the code follow", async () => {
   const { env, backend } = await live({ status: "idle", moderator: { id: "moderator", name: "主持人", avatar: F.avatarOf(13), state: "sleeping", sleep_until: null } });
   const chip = () => (html(env, "mod-chip").match(/ src="([^"]+)"/) || [])[1];
   const before = chip();
@@ -283,7 +298,8 @@ test("the moderator's panel: 按编号生成 PUTs /api/roster/moderator {avatar}
   typeCode(env, CODE);
   panelClick(env, "apply-code");
   await flush(env);
-  assert.deepEqual(backend.rosterPuts, [{ id: "moderator", avatar: CODE_DESC }]);
+  assert.deepEqual(backend.moderatorPuts, [{ avatar: CODE_DESC }]);
+  assert.equal((backend.botPuts || []).length, 0, "the moderator is not a bot");
   assert.deepEqual(env.app().state.session.moderator.avatar, CODE_DESC);
   assert.notEqual(chip(), before, "the top bar chip shows the new avatar");
   assert.match(html(env, "detail-head"), new RegExp(`id="avatar-code"[^>]*>${CODE}<`));
@@ -296,18 +312,18 @@ test("the server's refusal is shown in the panel (409 once the game moved on, 40
   cardClick(env, "N3");
   panelClick(env, "toggle-avatar-pop");
   typeCode(env, CODE);
-  backend.failures["PUT /api/roster/N3"] = [409, "对局已开始，不能修改名字或头像"];
+  backend.failures[`PUT /api/bots/${F.botId(3)}`] = [409, "名字和头像只能在对局开始之前修改；请先新建对局。", { code: "game_active" }];
   panelClick(env, "apply-code");
   await flush(env);
   assert.equal(noteKind(env), "error");
-  assert.match(noteText(env), /对局已开始，不能修改名字或头像/);
+  assert.match(noteText(env), /名字和头像只能在对局开始之前修改/);
   assert.equal(cardImg(env, "N3"), before);
-  backend.failures["PUT /api/roster/N3"] = [400, "头像描述的 hair（发型）含有未知的 id：'h02'"];
+  backend.failures[`PUT /api/bots/${F.botId(3)}`] = [400, "头像描述的 hair（发型）含有未知的 id：'h02'"];
   panelClick(env, "apply-code");
   await flush(env);
   assert.match(noteText(env), /含有未知的 id：'h02'/, "the server's own words (it knows the library better than a stale page)");
   // the panel is usable again afterwards
-  delete backend.failures["PUT /api/roster/N3"];
+  delete backend.failures[`PUT /api/bots/${F.botId(3)}`];
   panelClick(env, "apply-code");
   await flush(env);
   assert.equal(noteText(env), "头像已按编号生成。");
@@ -323,11 +339,11 @@ test("without the sprite library the format is still checked here; unknown parts
   panelClick(env, "apply-code");
   await flush(env, 10);
   assert.match(noteText(env), /缺少「发型」/);
-  assert.equal((backend.rosterPuts || []).length, 0);
+  assert.equal((backend.botPuts || []).length, 0);
   typeCode(env, "f99s02h02c01e01m02a01k01");
   panelClick(env, "apply-code");
   await flush(env);
-  assert.equal(backend.rosterPuts.length, 1, "this page cannot know f99 is missing: the server decides");
+  assert.equal(backend.botPuts.length, 1, "this page cannot know f99 is missing: the server decides");
 });
 
 test("the random pick still works from the panel and keeps its own note; the old direct button is gone from the head", async () => {
@@ -338,10 +354,69 @@ test("the random pick still works from the panel and keeps its own note; the old
   panelClick(env, "toggle-avatar-pop");
   panelClick(env, "regen-avatar");
   await flush(env);
-  assert.equal(backend.calls.filter((c) => c.method === "POST" && /N5\/avatar:regenerate$/.test(c.url)).length, 1);
+  assert.equal(backend.calls.filter((c) => c.method === "POST" && new RegExp(`${F.botId(5)}/avatar:regenerate$`).test(c.url)).length, 1);
   assert.notEqual(cardImg(env, "N5"), before);
   assert.equal(noteText(env), "已随机生成新头像。");
   assert.match(html(env, "detail-head"), new RegExp(`id="avatar-code"[^>]*>${Avatar.codeOf(env.app().state.session.participants.find((p) => p.id === "N5").avatar)}<`));
+});
+
+// ---- v0.14 (H23): a bot that is initialized is frozen - a new avatar resets it, after a question ----------------------------------
+const askedTexts = (env) => (env.el("dialog-body").innerHTML.match(/id="dialog-reset-text">([^<]*)</) || [])[1];
+const dialogOk = (env) => env.el("btn-dialog-ok").dispatch("click");
+const dialogCancel = (env) => env.el("btn-dialog-cancel").dispatch("click");
+
+test("a frozen bot (initialized): 按编号生成 asks first - the fixed sentence - and only a yes sends confirm_reset; the bot gets a new id, the seat stays", async () => {
+  const { env, backend } = await live({ status: "idle" }, { botsPreset: "ready" });
+  cardClick(env, "N3");
+  assert.match(html(env, "detail-head"), /class="lock-badge"/, "🔒");
+  panelClick(env, "toggle-avatar-pop");
+  typeCode(env, CODE);
+  panelClick(env, "apply-code");
+  await flush(env);
+  assert.equal(env.el("dialog-modal").style.display, "flex");
+  assert.equal(askedTexts(env), "修改名字或头像会清空这个玩家的初始化结果和全部记忆（操作笔记、规则要点、打法、待解问题、印象、战绩），底层设定保留。修改后需要重新初始化才能开局。是否确认？");
+  assert.equal((backend.botPuts || []).length, 0, "nothing is sent before the answer");
+  dialogCancel(env);
+  await flush(env);
+  assert.equal((backend.botPuts || []).length, 0, "no: nothing was sent");
+  assert.deepEqual(JSON.parse(JSON.stringify(env.app().state.session.participants.find((p) => p.id === "N3").avatar)), F.avatarOf(3));
+  panelClick(env, "apply-code");
+  await flush(env);
+  dialogOk(env);
+  await flush(env);
+  assert.deepEqual(backend.botPuts, [{ id: F.botId(3), avatar: CODE_DESC, confirm_reset: true }]);
+  const p3 = env.app().state.session.participants.find((p) => p.id === "N3");
+  assert.deepEqual(p3.avatar, CODE_DESC);
+  assert.notEqual(p3.bot_id, F.botId(3), "a reset bot has a new internal id: the seat shows the new one");
+  assert.equal(p3.init_status, "uninitialized", "and it has to be initialized again");
+  assert.match(html(env, "detail-head"), /data-init="uninitialized"/);
+  assert.ok(!html(env, "detail-head").includes("lock-badge"), "no longer frozen");
+});
+
+test("the random pick of a frozen bot asks as well; a server that says needs_confirm (the bot got frozen behind our back) is answered with the same question", async () => {
+  const { env, backend } = await live({ status: "idle" }, { botsPreset: "ready" });
+  cardClick(env, "N5");
+  panelClick(env, "toggle-avatar-pop");
+  panelClick(env, "regen-avatar");
+  await flush(env);
+  assert.equal(askedTexts(env).slice(0, 12), "修改名字或头像会清空这个");
+  dialogCancel(env);
+  await flush(env);
+  assert.equal(backend.calls.filter((c) => /avatar:regenerate$/.test(c.url)).length, 0);
+  // a bot the page thinks is free, which the server knows to be frozen: 409 needs_confirm carries the sentence and the page asks it
+  const fresh = await live({ status: "idle" });
+  const f = fresh.env;
+  cardClick(f, "N2");
+  panelClick(f, "toggle-avatar-pop");
+  typeCode(f, CODE);
+  fresh.backend.botsApi.initialized("N2"); // (the fake's N2 is initialized now; the page was not told)
+  panelClick(f, "apply-code");
+  await flush(f);
+  assert.equal(askedTexts(f).slice(0, 12), "修改名字或头像会清空这个", "the server's own sentence");
+  dialogOk(f);
+  await flush(f);
+  assert.deepEqual(fresh.backend.botPuts.map((x) => x.confirm_reset), [undefined, true], "the first try had no confirmation, the second has");
+  assert.deepEqual(JSON.parse(JSON.stringify(env.app().state.session.participants.find((p) => p.id === "N5").avatar)), F.avatarOf(5), "(N5 of the first page: untouched)");
 });
 
 H.runTests(tests);

@@ -44,6 +44,13 @@
     return Number.isFinite(n) ? n : d;
   };
   const list = (v) => (Array.isArray(v) ? v : []);
+  /** A sentence of someone else without the stops at its end (the same rule as `Core.stripEndPunct`): the page puts its own punctuation after it. */
+  const END_STOPS = /[\s。．；;，,、：:]+$/u;
+  const endStopsOff = (text) => {
+    let s = String(text === undefined || text === null ? "" : text).replace(END_STOPS, "");
+    if (/[^.]\.$/.test(s)) s = s.slice(0, -1).replace(END_STOPS, "");
+    return s;
+  };
   const esc = (s) =>
     String(s === undefined || s === null ? "" : s)
       .replace(/&/g, "&amp;")
@@ -96,22 +103,14 @@
   // spectator viewpoint
   // -------------------------------------------------------------------------
 
-  function viewpointOptions(session) {
-    const opts = [{ id: GOD, label: "上帝视角" }];
-    for (const p of list(session && session.participants)) {
-      opts.push({ id: p.id, label: `${p.seat} · ${p.name}` });
-    }
-    return opts;
-  }
-
-  /** Unknown / missing players fall back to the god view. */
+  /** Unknown / missing players fall back to the global view. */
   function normalizeViewpoint(session, viewpoint) {
     if (!viewpoint || viewpoint === GOD) return GOD;
     return participantOf(session, viewpoint) ? String(viewpoint) : GOD;
   }
 
   // -------------------------------------------------------------------------
-  // v0.13: playing a seat (F1-F5): the viewpoint bar [视角▾][切换][接管], the takeover bar, the reminder
+  // v0.13 / v0.14: playing a seat: the viewpoint label and its menu (H27), the takeover bar
   // -------------------------------------------------------------------------
 
   /** The seat a person plays right now (null: nobody). */
@@ -134,13 +133,13 @@
   }
 
   /**
-   * May the seat chosen in the viewpoint drop-down be taken over (F2)?  Only a player seat, only while
-   * nobody is played yet, only while the game has not started or is paused.  `reason` is the tooltip.
+   * May this seat be taken over (F2)?  Only a player seat, only while nobody is played yet, only while the game has not
+   * started or is paused.  `reason` is the tooltip.
    */
   function takeoverAvailability(session, seatId) {
     if (session && session.replay) return { ok: false, reason: "重放中不能接管：请先退出重放" }; // (F36)
     if (takeoverSeat(session)) return { ok: false, reason: "你已经在扮演一个座位：请先退出接管" };
-    if (!seatId || seatId === GOD) return { ok: false, reason: "先在下拉框里选一名玩家（上帝视角不能接管）" };
+    if (!seatId || seatId === GOD) return { ok: false, reason: "全局视角没有座位，不能接管：请选一名玩家" };
     const p = participantOf(session, seatId);
     if (!p) return { ok: false, reason: "这个座位不存在" };
     const status = (session && session.status) || "idle";
@@ -155,35 +154,87 @@
   }
 
   /**
-   * The viewpoint bar: the drop-down only chooses what to look at ("切换" applies it), "接管" plays the chosen
-   * seat.  While a seat is played the bar is locked (the takeover bar replaces it).
-   *   draft      the drop-down's value (pending), viewpoint  the one that is applied
+   * The viewpoint label of the top bar (H27, contract §13.10), a pure front-end state worked out from the chosen viewpoint and
+   * `takeover.seat`: "全局视角" · "Alice视角" · "Alice视角（接管）" (with 🎮, locked while a seat is played).
    */
-  function viewpointBar(session, draft, viewpoint) {
+  function viewpointChip(session, viewpoint) {
     const seat = takeoverSeat(session);
     if (seat) {
+      const name = displayName(session, seat);
       return {
+        kind: "played",
+        icon: "🎮",
+        text: `${name}视角（接管）`,
         locked: true,
         seat,
-        draft: seat,
-        canSwitch: false,
-        canTakeover: false,
-        switchTitle: "接管期间视角已锁定为你扮演的座位",
-        takeoverTitle: "你已经在扮演一个座位：请先退出接管",
+        title: `你正在扮演 ${seatLabel(session, seat)}：视角已锁定为这个座位。点击打开菜单（退出接管…）`,
       };
     }
-    const pending = normalizeViewpoint(session, draft === undefined || draft === null ? viewpoint : draft);
-    const applied = normalizeViewpoint(session, viewpoint);
-    const avail = takeoverAvailability(session, pending);
+    const vp = normalizeViewpoint(session, viewpoint);
+    if (vp === GOD) {
+      return {
+        kind: "god",
+        icon: "👁",
+        text: "全局视角",
+        locked: false,
+        seat: null,
+        title: "全局视角：看到全部消息、频道和（开局后的）身份。点击切换视角，或接管一个座位",
+      };
+    }
+    const name = displayName(session, vp);
     return {
+      kind: "player",
+      icon: "👁",
+      text: `${name}视角`,
       locked: false,
       seat: null,
-      draft: pending,
-      canSwitch: pending !== applied,
-      canTakeover: avail.ok,
-      switchTitle: pending !== applied ? "切换到所选的视角（只改变你看到的内容）" : "已经是这个视角；先在下拉框里选另一个",
-      takeoverTitle: avail.reason,
+      title: `${name}视角：只显示这名玩家能看到的消息、频道、标签与请求。点击切换视角，或接管一个座位`,
     };
+  }
+
+  /**
+   * The menu behind the label (H27): 全局视角 · 以 X 的视角观看 (one per player) · 接管 X (one per player; the rules of F2) · 退出接管.
+   * Nothing here is applied until an item is chosen.  While a seat is played the viewpoint is locked: only 退出接管 works.
+   */
+  function viewpointMenu(session, viewpoint) {
+    const chip = viewpointChip(session, viewpoint);
+    const seat = takeoverSeat(session);
+    const applied = seat || normalizeViewpoint(session, viewpoint);
+    const lockedWhy = "接管期间视角已锁定为你扮演的座位：请先退出接管";
+    const god = {
+      id: GOD,
+      label: "全局视角",
+      current: applied === GOD,
+      enabled: !seat && applied !== GOD,
+      reason: seat ? lockedWhy : applied === GOD ? "现在就是全局视角" : "全局视角：看到全部消息、频道和（开局后的）身份",
+    };
+    const players = list(session && session.participants)
+      .slice()
+      .sort((a, b) => num(a.seat) - num(b.seat))
+      .map((p) => {
+        const take = takeoverAvailability(session, p.id);
+        const current = p.id === applied;
+        return {
+          id: p.id,
+          seat: p.seat,
+          name: p.name,
+          label: `${p.seat} · ${p.name}`,
+          current,
+          played: p.id === seat,
+          view: {
+            enabled: !seat && !current,
+            title: seat ? lockedWhy : current ? `现在就是${p.name}的视角` : `以 ${p.name} 的视角观看：只显示这名玩家能看到的内容`,
+          },
+          takeover: { enabled: take.ok, title: take.ok ? `接管 ${p.seat} · ${p.name}` : take.reason },
+        };
+      });
+    const bar = takeoverBar(session);
+    const release = bar
+      ? { enabled: bar.canRelease, title: bar.releaseTitle, label: `退出接管（${bar.label}）` }
+      : null;
+    // one sentence for the whole 接管 section when nothing can be taken over (so a phone, which has no hover, reads why)
+    const note = seat || players.some((p) => p.takeover.enabled) ? "" : takeoverAvailability(session, players.length ? players[0].id : "").reason;
+    return { chip, god, players, release, takeoverNote: note };
   }
 
   // -------------------------------------------------------------------------
@@ -282,19 +333,10 @@
     };
   }
 
-  /**
-   * The reminder of a seat taken over before the game started (F5): the player knows the identity now and may
-   * deal again - never once the game has started (the server refuses it as well).
-   */
-  function reshuffleReminder(session) {
-    const t = session && session.takeover;
-    const visible = Boolean(t && t.seat && session.status === "idle" && t.reshuffle_available);
-    return { visible, text: "你已经知道自己的身份，建议点击「重新发牌」" };
-  }
-
+  /** The name of the viewpoint as the feed header says it: "全局视角" or the player's nickname. */
   function viewpointLabel(session, viewpoint) {
     const vp = normalizeViewpoint(session, viewpoint);
-    if (vp === GOD) return "上帝视角";
+    if (vp === GOD) return "全局视角";
     return displayName(session, vp);
   }
 
@@ -420,9 +462,11 @@
    * The main tag of a card for a viewpoint:
    *   known identity  -> {text: "狼人", known: true}
    *   hidden identity -> {text: "?", known: false}   (the participant has one, this viewpoint may not see it)
+   *   not dealt yet   -> null                        (v0.14, H52: before the game starts there is no identity tag at all - not even the "?")
    * A scenario without private identity tags falls back to the first non-status tag.
    */
   function mainTagInfo(session, viewpoint, participant) {
+    if (!isDealt(session)) return null;
     const sets = tagSets(session);
     const visible = visibleTags(session, viewpoint, participant);
     const identity = visible.find((t) => isIdentityTag(sets, t));
@@ -435,8 +479,9 @@
     return { text: "?", known: false, variant: "muted" };
   }
 
-  /** Small corner badges: the visible highlight tags (sheriff, …) that are not the identity itself. */
+  /** Small corner badges: the visible highlight tags (sheriff, …) that are not the identity itself (none before the deal, H52). */
   function badgeTags(session, viewpoint, participant) {
+    if (!isDealt(session)) return [];
     const sets = tagSets(session);
     return visibleTags(session, viewpoint, participant)
       .filter((t) => sets.highlight.has(t) && !isIdentityTag(sets, t))
@@ -488,10 +533,22 @@
     return parts.join("｜");
   }
 
-  /** One player card. ctx: {clockNow} (the client's game-clock estimate, for the sleep timer). */
+  /**
+   * Have the identities been dealt (H52)?  They are dealt when the game starts: until then (`dealt === false`) nothing about an identity
+   * is shown anywhere - no identity tag, no grey "?", whatever the viewpoint (the global one included).  A server that does not say
+   * (an older one) has dealt: its games always show them.
+   */
+  function isDealt(session) {
+    return !session || session.dealt !== false;
+  }
+
+  /**
+   * One player card. ctx: {clockNow} (the client's game-clock estimate, for the sleep timer).
+   * `main` is the identity tag ({text, known, variant}) - `null` before the deal (H52): the card then has no identity tag at all, not even "?".
+   */
   function tileModel(session, viewpoint, participant, ctx) {
     const id = participant.id;
-    const main = mainTagInfo(session, viewpoint, participant);
+    const main = mainTagInfo(session, viewpoint, participant); // (null before the deal)
     const state = cardState(session, viewpoint, id, participant.state);
     const clockNow = ctx && ctx.clockNow;
     const sTitle = stateTitle(state, participant.sleep_until, clockNow);
@@ -500,6 +557,9 @@
       seat: participant.seat,
       name: participant.name,
       avatar: participant.avatar || null,
+      // v0.14 (H22): the bot in the seat and how far its initialization is (✔ ⚠ ✖ ⏳ next to the name); "" / null for a game of the old format
+      botId: participant.bot_id || "",
+      initStatus: participant.init_status || null,
       isModerator: false,
       main,
       badges: badgeTags(session, viewpoint, participant),
@@ -574,6 +634,7 @@
    */
   function boardSummary(session, viewpoint) {
     if (viewpoint !== GOD) return null;
+    if (!isDealt(session)) return null; // (H52) before the deal there is nothing to count - and nothing about the identities is shown
     const items = [];
     for (const f of list(session && session.dashboard && session.dashboard.factions)) {
       const alive = num(f.alive);
@@ -1068,7 +1129,7 @@
   // v0.13: the input box of a played seat (F13-F16)
   // -------------------------------------------------------------------------
 
-  /** Characters as the server counts them (code points of the trimmed text, like the gate's truncation). */
+  /** Characters as the server counts them (code points of the trimmed text, like the gate's limit of one message). */
   function countChars(text) {
     return Array.from(String(text === undefined || text === null ? "" : text).trim()).length;
   }
@@ -1123,9 +1184,10 @@
   }
 
   /**
-   * Everything the input box of the played seat shows for a channel (F13-F16):
+   * Everything the input box of the played seat shows for a channel (F13-F16, v0.14 H16):
    *   the send button  发送 (may write) / 禁言中 (may not; the reason on hover) / 已暂停 / 未开始 / 已结束
-   *   the counter      "23/300" (the server's `max_chars`; over the limit the tail is cut when sent)
+   *   the counter      "23/300" (the server's `max_chars`) - over the limit it turns red and the send button is off: a speech
+   *                    that is too long is sent back whole (`TOO_LONG`), never cut, so the person shortens it first
    *   结束发言          only while the seat holds that channel's floor
    *   技能              greyed without a usable ability
    * Typing is always possible: only the buttons depend on the state.
@@ -1138,6 +1200,8 @@
     const status = session.status || "idle";
     const count = countChars(text);
     const max = state && state.max_chars ? state.max_chars : null;
+    const over = max ? Math.max(0, count - max) : 0;
+    const overText = over > 0 ? `这条发言 ${count} 个字，超过了单条上限 ${max} 字：请删减 ${over} 字后再发送` : "";
     let mode;
     let label;
     let reason;
@@ -1164,7 +1228,7 @@
     } else {
       mode = "send";
       label = "发送";
-      reason = count > 0 ? "发送（Enter）；Shift+Enter 换行" : "先写点什么";
+      reason = over > 0 ? overText : count > 0 ? "发送（Enter）；Shift+Enter 换行" : "先写点什么";
     }
     const running = status === "running";
     const showPass = Boolean(state && state.floor && state.floor.mine);
@@ -1179,10 +1243,11 @@
       mode,
       label,
       reason,
-      sendEnabled: mode === "send" && count > 0,
+      sendEnabled: mode === "send" && count > 0 && over === 0,
       count,
       max,
-      over: max ? Math.max(0, count - max) : 0,
+      over,
+      overText,
       showPass,
       canPass: showPass && running && Boolean(state && state.can_pass),
       passTitle: showPass
@@ -1194,7 +1259,8 @@
         : "",
       abilityEnabled: running && abilities.length > 0,
       abilityReason,
-      hint: composerHint(session, state, ctx && ctx.clockNow),
+      // (the sentence under the box: while a text that is too long is typed it says so first - a phone has no hover)
+      hint: mode === "send" && over > 0 ? overText : composerHint(session, state, ctx && ctx.clockNow),
     };
   }
 
@@ -1242,23 +1308,292 @@
     return "idle";
   }
 
-  function statusText(session) {
+  // -------------------------------------------------------------------------
+  // v0.14 (H26): the system status label - the first thing of the second row of the top bar (it replaces the status text of v0.13)
+  // -------------------------------------------------------------------------
+
+  /** `system_status.reason` of a pause, as the server words it (the same table as `PAUSE_TEXTS` of app/game/bots_runtime.py). */
+  const PAUSE_REASON_TEXT = {
+    user: "手动暂停",
+    hold: "主持人暂停了对局",
+    stall: "对局长时间没有进展，已暂停",
+    error: "运行出错，已暂停",
+    budget: "已达到预算上限，已暂停",
+  };
+
+  /** One sentence per code for the hover text of the label (what it means and what to do). */
+  const SYSTEM_STATUS_TIPS = {
+    uninitialized: "还有 bot 没有初始化好（卡片上是 ○ ⚠ ✖）：先点「⚙ 全局初始化」，之后才能开局",
+    initializing: "bot 正在读官方契约和规则、写自己的笔记和打法；期间不能开局",
+    before_game: "一切就绪：点「开始」发牌并开局（身份在点击「开始」时才发）",
+    in_game: "对局正在进行",
+    paused: "对局已暂停：点「继续」接着玩",
+    finished: "对局已结束：可以复盘，也可以点「继续」在终局后继续",
+    reviewing: "bot 正在复盘本局（每个最多 60 秒）",
+    replay: "正在重放一局保存的对局",
+  };
+
+  /**
+   * What the client can tell about the label from what it holds - the server's own rules (H26: initializing / reviewing, then in game /
+   * paused / finished, then uninitialized, then before the game).  It stands in when the server sent no `system_status` (an older one) and
+   * corrects one that went stale between two events.
+   */
+  function deriveSystemStatus(session) {
     const s = session || {};
-    if (s.status === "paused" && s.pause_reason === "budget") return "因预算上限暂停";
-    // (v0.13.1) the status stays "running" in a soft pause: say what the agents are doing
-    const sp = softPauseOf(s);
-    const soft = sp.active ? ` · ${softPauseText(sp)}` : "";
-    if (s.active_status_text) return `${s.active_status_text}${soft}`;
+    const bots = s.bots || {};
+    if (bots.init_job) return { code: "initializing", text: "初始化中", reason: "" };
+    if (s.review && s.review.running) return { code: "reviewing", text: "复盘中", reason: "" };
     switch (s.status) {
       case "running":
-        return `对局进行中${soft}`;
-      case "paused":
-        return "已暂停";
+        return { code: "in_game", text: softPauseOf(s).active ? "对局中 · agent 已暂停" : "对局中", reason: "" };
+      case "paused": {
+        let reason = PAUSE_REASON_TEXT[s.pause_reason] || "已暂停";
+        if (s.hold_reason) reason = `${reason}：${s.hold_reason}`;
+        return { code: "paused", text: "已暂停", reason };
+      }
       case "finished":
-        return "对局已结束";
+        return { code: "finished", text: "已结束", reason: "" };
       default:
-        return "未开始 · 点击「开始」由主持人初始化对局";
+        return list(bots.bots).some((b) => b && b.init && b.init.status !== "ready")
+          ? { code: "uninitialized", text: "未初始化", reason: "" }
+          : { code: "before_game", text: "对局前", reason: "" };
     }
+  }
+
+  /**
+   * Is the label the server sent still the one that fits the status this page holds?  `game.status` (and the HTTP answer of a control) moves the status a moment
+   * before the next `session.updated` brings the label: until then the old label would say something the status contradicts.  An initialization only runs for a
+   * game that has not started or is over, a review only for one that is over - the server's word for those is trusted as long as the status allows them.
+   */
+  function systemStatusFits(code, session) {
+    const s = session || {};
+    switch (code) {
+      case "in_game":
+        return s.status === "running";
+      case "paused":
+        return s.status === "paused";
+      case "finished":
+        return s.status === "finished";
+      case "uninitialized":
+      case "before_game":
+        return (s.status || "idle") === "idle";
+      case "initializing":
+        return (s.status || "idle") === "idle" || s.status === "finished";
+      case "reviewing":
+        return s.status === "finished";
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * The label of the second row (H26, contract §13.8): `{code, text, reason, label, dot, title}` - `label` is what is written ("对局前", "对局中 · agent 已暂停",
+   * "已暂停 · 手动暂停"), `dot` the class of its dot, `title` the hover sentence.  It reads `session.system_status`; the status text the server used
+   * to send (`active_status_text`) is merged into it (it is the hover text of a finished / paused game).  A replay on screen says so instead.
+   */
+  function systemStatus(session) {
+    const s = session || {};
+    if (s.replay) {
+      const text = s.active_status_text || "重放中";
+      return { code: "replay", text, reason: "", label: text, dot: "active", title: SYSTEM_STATUS_TIPS.replay };
+    }
+    // the server's label is the label (H26: it decides the order of priority) - unless the status of the page has moved past it (see systemStatusFits) or the server
+    // sent none (an older one): then the page works it out from what it holds (the same rules; the running initialization is `bots.init_job`, a running review `review.running`)
+    const derived = deriveSystemStatus(s);
+    const given = s.system_status && s.system_status.code ? s.system_status : null;
+    const base = given && systemStatusFits(given.code, s) ? { code: given.code, text: given.text, reason: given.reason || "" } : { ...derived };
+    if (!base.text) base.text = derived.text;
+    // the soft pause (G2-G3): the game runs and nothing moves.  Draining says how many answers are still on their way.
+    if (base.code === "in_game") {
+      const sp = softPauseOf(s);
+      if (sp.active) base.text = sp.phase === "held" ? "对局中 · agent 已暂停" : `对局中 · 收尾中${sp.inFlight > 0 ? `（还有 ${sp.inFlight} 个回答）` : ""}`;
+    }
+    // a pause says why: "已暂停 · 手动暂停" (the reason's own "，已暂停" at its end would only say it twice)
+    const shortReason = base.reason.replace(/[，,]\s*已暂停$/, "");
+    const label = base.code === "paused" && shortReason && shortReason !== base.text ? `${base.text} · ${shortReason}` : base.text;
+    const dot =
+      base.code === "uninitialized"
+        ? "uninit"
+        : base.code === "initializing" || base.code === "reviewing"
+          ? "busy"
+          : base.code === "before_game"
+            ? "idle"
+            : statusDotClass(s);
+    // the hover sentence: what the label means and what to do; the full reason of a pause; and what the server's own status text adds (who won, ...)
+    const lines = [SYSTEM_STATUS_TIPS[base.code] || ""];
+    if (base.code === "paused" && base.reason) lines.push(base.reason);
+    const extra = String(s.active_status_text || "");
+    if (extra && extra !== label && extra !== base.reason && extra !== "对局进行中" && !extra.startsWith("未开始")) lines.push(extra);
+    return { code: base.code, text: base.text, reason: base.reason, label, dot, title: lines.filter(Boolean).join("\n") };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.14 (H29): moving the cards - the line-up (bot ids in seat order) while the game has not started
+  // -------------------------------------------------------------------------
+
+  /**
+   * May the cards be dragged?  Only while the game has not started (the line-up is the seating of an idle game) and while nobody plays a seat (the seat a person
+   * plays is a seat, not a bot: the bots would move under them).  `reason` is the sentence a disabled card (and the toast of a refused drag) says.
+   */
+  function seatDragState(session) {
+    const s = session || {};
+    if (s.replay) return { enabled: false, reason: "重放中不能调整座位" };
+    if ((s.status || "idle") !== "idle") return { enabled: false, reason: "对局已经开始，不能再调整座位" };
+    if (takeoverSeat(s)) return { enabled: false, reason: "接管期间不能调整座位：请先退出接管" };
+    const lineup = list(s.bots && s.bots.lineup);
+    const seats = list(s.participants).length;
+    if (!seats || lineup.length !== seats) return { enabled: false, reason: "这局没有 bot 阵容（旧版存档），不能调整座位" };
+    return { enabled: true, reason: "拖动卡片调整座位（触屏：长按后拖动；键盘：Alt+←/→）" };
+  }
+
+  /** The line-up after the bot at index `from` moved to index `to` (the bots in between shift by one); null when that is no move. */
+  function moveInLineup(order, from, to) {
+    const out = list(order).slice();
+    const ok = (i) => Number.isInteger(i) && i >= 0 && i < out.length;
+    if (!ok(from) || !ok(to) || from === to) return null;
+    const [moved] = out.splice(from, 1);
+    out.splice(to, 0, moved);
+    return out;
+  }
+
+  /**
+   * The card under a point: the index (in seat order) of the first of `rects` ({left, top, right, bottom}) that holds (x, y), grown by `slack` px
+   * on every side (the gap between two cards belongs to the nearer one); -1 when the point is over no card.
+   */
+  function seatIndexAt(rects, x, y, slack = 4) {
+    let best = -1;
+    let bestDistance = Infinity;
+    list(rects).forEach((r, i) => {
+      if (!r) return;
+      const dx = x < r.left ? r.left - x : x > r.right ? x - r.right : 0;
+      const dy = y < r.top ? r.top - y : y > r.bottom ? y - r.bottom : 0;
+      const distance = Math.hypot(dx, dy);
+      if (distance <= slack && distance < bestDistance) {
+        best = i;
+        bestDistance = distance;
+      }
+    });
+    return best;
+  }
+
+  /** Where the keys Alt+← / Alt+→ send the bot at index `index` (one seat to the left / right; null at the ends). */
+  function seatKeyTarget(index, key, count) {
+    const to = key === "ArrowLeft" ? index - 1 : key === "ArrowRight" ? index + 1 : NaN;
+    return Number.isInteger(to) && to >= 0 && to < count ? to : null;
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.14 (H25): the start check - what a 409 NOT_READY says, grouped by player
+  // -------------------------------------------------------------------------
+
+  const FIX_LABELS = {
+    edit_core: "去编辑底层设定",
+    import_core: "去导入底层设定",
+    init: "去初始化",
+    bind_model: "去绑定模型",
+    import_contract: "去导入契约",
+    import_rules: "去导入规则",
+  };
+
+  /**
+   * The `problems` of a refused start (`Problem[]`, §13.7) as the dialog lists them: one group per thing that is not ready, in this order -
+   * the official contract, the scenario, the players (seat order; a player's own problems and the missing model of his seat are ONE group), the
+   * moderator, anything else.  Every item has the sentence of the server and, when the page knows how to fix it, the button (`fix` + `fixLabel`).
+   * `botId` is the bot of a player's group (null for the others); `focusId` is what the button hands to `window.Bots.focus(focusId, fix)`: the bot's id for a
+   * player, "moderator" for the moderator's missing model, "" for the contract / the scenario / the game (they have no bot to go to).
+   *   {groups: [{key, kind, title, seat, botId, focusId, items: [{code, message, fix, fixLabel}]}], total, initCount}
+   */
+  function startCheckModel(session, problems) {
+    const groups = new Map();
+    const seatNo = (p) => {
+      const part = p.seat ? participantOf(session, p.seat) : null;
+      return part ? num(part.seat, 999) : 999;
+    };
+    const order = { contract: 0, scenario: 1, player: 2, moderator: 3, other: 4 };
+    for (const raw of list(problems)) {
+      if (!raw || typeof raw !== "object") continue;
+      const scope = String(raw.scope || "");
+      let key;
+      let kind;
+      let title;
+      if (scope === "contract") [key, kind, title] = ["contract", "contract", "官方契约"];
+      else if (scope === "scenario") [key, kind, title] = ["scenario", "scenario", "剧本"];
+      else if (raw.bot_id || raw.seat) {
+        key = `player:${raw.seat || raw.bot_id}`;
+        kind = "player";
+        const part = raw.seat ? participantOf(session, raw.seat) : null;
+        const name = raw.name || (part ? part.name : "") || String(raw.seat || raw.bot_id);
+        title = part ? `${part.seat} 号 ${name}` : name;
+      } else if (scope === "binding" || raw.name === "主持人") [key, kind, title] = ["moderator", "moderator", raw.name || "主持人"];
+      else [key, kind, title] = [`other:${scope || raw.name || "?"}`, "other", raw.name || (scope === "game" ? "对局" : scope || "其他")];
+      let group = groups.get(key);
+      if (!group) {
+        group = { key, kind, title, seat: raw.seat || null, botId: raw.bot_id || null, focusId: kind === "moderator" ? MODERATOR_ID : "", items: [], _no: seatNo(raw) };
+        groups.set(key, group);
+      }
+      if (!group.botId && raw.bot_id) group.botId = raw.bot_id;
+      if (group.kind === "player" && group.botId) group.focusId = group.botId;
+      for (const item of list(raw.items)) {
+        if (!item || typeof item !== "object") continue;
+        const fix = String(item.fix || "");
+        group.items.push({ code: String(item.code || ""), message: String(item.message || ""), fix, fixLabel: FIX_LABELS[fix] || "" });
+      }
+    }
+    const out = [...groups.values()]
+      .filter((g) => g.items.length)
+      .sort((a, b) => order[a.kind] - order[b.kind] || a._no - b._no)
+      .map(({ _no, ...g }) => g);
+    const all = out.flatMap((g) => g.items);
+    return { groups: out, total: all.length, initCount: all.filter((i) => i.fix === "init").length };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.14 (H31-H33): the question at the end of a game - should the bots review it?
+  // -------------------------------------------------------------------------
+
+  /**
+   * Does the question "这局结束了，是否让 bot 复盘？" come up for this session (contract §13.10)?  The game is over (not a replay), can be reviewed
+   * (`supported`: it has bots; `available`), no review runs and nobody was reviewed yet (`done` is empty), and the user did not say 暂不 for this game
+   * (`dismissed`: the object kept in `localStorage["arena_review_dismissed_v1"]`, `{session_id: true}`).
+   */
+  function reviewPrompt(session, dismissed) {
+    const s = session || {};
+    const r = s.review || {};
+    if (s.replay || s.status !== "finished") return { show: false, why: "not finished" };
+    if (r.supported === false) return { show: false, why: "unsupported" };
+    if (r.available === false) return { show: false, why: "unavailable" };
+    if (r.running) return { show: false, why: "running" };
+    if (list(r.done).length) return { show: false, why: "reviewed" };
+    if (dismissed && dismissed[s.session_id]) return { show: false, why: "dismissed" };
+    return { show: true, why: "" };
+  }
+
+  /**
+   * The rows of the review dialog: the bots at the table in seat order, `human` = a person played that seat in this game ("有人类代打"; `humanSeats`: seat ids
+   * from the game's `human_spans` and what the page saw), `done` = reviewed already, `checked` = selected (all of them, except the reviewed ones), `learnStyle` =
+   * the switch 学习接管者的风格 (on by default; only a human seat has one).
+   */
+  function reviewRows(session, humanSeats, choices) {
+    const humans = new Set(list(humanSeats));
+    const chosen = choices || {};
+    const done = new Set(list(session && session.review && session.review.done));
+    return list(session && session.participants)
+      .slice()
+      .sort((a, b) => num(a.seat) - num(b.seat))
+      .map((p) => {
+        const c = chosen[p.id] || {};
+        const isDone = done.has(p.id);
+        const human = humans.has(p.id);
+        return {
+          id: p.id,
+          seat: p.seat,
+          name: p.name,
+          done: isDone,
+          human,
+          checked: !isDone && c.checked !== false,
+          learnStyle: human && c.learnStyle !== false,
+        };
+      });
   }
 
   /** Token / cost usage against the limits (the dialog and the top-bar colours). */
@@ -1336,7 +1671,9 @@
       });
     } else if (s.status === "paused") {
       if (s.pause_reason === "hold") {
-        const reason = s.hold_reason ? `：${s.hold_reason}` : "";
+        // (the moderator's own sentence may end with a full stop: the banner puts one of its own after it)
+        const held = endStopsOff(s.hold_reason);
+        const reason = held ? `：${held}` : "";
         out.push({
           kind: "hold",
           text: `⏸ 主持人暂停了对局${reason}。确认后点击「继续」。`,
@@ -1390,19 +1727,24 @@
     const ids = list(s.participants).map((p) => p.id);
     const done = new Set(list(r.done));
     const progress = r.progress || {};
-    const running = Boolean(r.running) || Object.values(progress).some((p) => p && p.state === "running");
+    // v0.14 (§13.8): a review is queued before it runs, and one that ran into its 60 seconds is finished (it keeps what it had written)
+    const underway = (p) => Boolean(p) && (p.state === "running" || p.state === "queued");
+    const running = Boolean(r.running) || Object.values(progress).some(underway);
     const finished = s.status === "finished";
     const stateOf = (id) => {
-      if (done.has(id)) return { state: "done", message: (progress[id] && progress[id].message) || "" };
       const p = progress[id];
-      if (p && p.state === "running") return { state: "running", message: p.message || "" };
-      if (p && p.state === "error") return { state: "error", message: p.message || "" };
-      return { state: "none", message: "" };
+      if (done.has(id)) return { state: "done", message: (p && p.message) || "", secondsLeft: null };
+      if (underway(p)) return { state: "running", message: p.message || "", secondsLeft: p.seconds_left === undefined ? null : p.seconds_left };
+      if (p && p.state === "error") return { state: "error", message: p.message || "", secondsLeft: null };
+      return { state: "none", message: "", secondsLeft: null };
     };
     const doneCount = ids.filter((id) => done.has(id)).length;
+    // `supported` is false for a game of the old format (v5): it has no bots, so there is nothing to review (the buttons say so)
+    const supported = r.supported !== false;
     return {
       visible: finished,
-      available: r.available !== false,
+      available: r.available !== false && supported,
+      supported,
       running,
       doneCount,
       total: ids.length,
@@ -1422,17 +1764,16 @@
     actorLabel,
     refName,
     actorAvatar,
-    viewpointOptions,
     normalizeViewpoint,
     takeoverSeat,
     seatLabel,
     takeoverAvailability,
-    viewpointBar,
+    viewpointChip,
+    viewpointMenu,
     takeoverBar,
     softPauseOf,
     softPauseControl,
     clockRunning,
-    reshuffleReminder,
     viewpointLabel,
     canSee,
     visibleMessages,
@@ -1485,7 +1826,16 @@
     requestHints,
     controlState,
     statusDotClass,
-    statusText,
+    systemStatus,
+    isDealt,
+    seatDragState,
+    moveInLineup,
+    seatIndexAt,
+    seatKeyTarget,
+    startCheckModel,
+    FIX_LABELS,
+    reviewPrompt,
+    reviewRows,
     budgetView,
     statusBanners,
     actorMetrics,
