@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import random
+import re
 import time
 import uuid
 from collections import Counter
@@ -30,7 +32,8 @@ from typing import Any
 from app.agents.gates import check_speech
 from app.runtime.agent import Agent, AgentConfig
 from app.runtime.conversation import ConversationBook
-from bench.bots import BenchBot
+from bench.bots import BenchBot, pinned_bots
+from bench.loaders import speeches_of
 from bench.metrics import inline_enumeration, length_band, runtime_health
 from bench.play import PlayError, Scene, build_scene
 from bench.safety import scrub
@@ -84,21 +87,54 @@ class RunConfig:
 
 
 class Budget:
-    """The calls a run may still make.  ``take()`` is asked before every model call; ``False`` = the call must not be made."""
+    """The calls a run may still make (``None`` = no limit).  ``take()`` is asked before every model call; ``False`` = the call must not be made.
+
+    A sample is *admitted* only when the budget can pay for its first call: ``reserve()`` sets one call aside for it (so that samples running side by
+    side cannot all start on the last calls and then all stop at the gate).  A reservation counts against the cap like a call that was made; the first
+    call of the sample uses it up, and a sample that made no call gives it back."""
 
     def __init__(self, max_calls: int | None = None) -> None:
         self.max_calls = max_calls
         self.calls = 0
+        self.reserved = 0
 
     @property
     def exhausted(self) -> bool:
-        return self.max_calls is not None and self.calls >= self.max_calls
+        """No call is left that is not made or set aside."""
+        return self.max_calls is not None and self.calls + self.reserved >= self.max_calls
 
     def take(self) -> bool:
+        """One call, without a reservation (the second call of a sample, say)."""
         if self.exhausted:
             return False
         self.calls += 1
         return True
+
+    def reserve(self) -> "Reservation | None":
+        """Set one call aside for a sample that is about to start; ``None`` when none is left."""
+        if self.exhausted:
+            return None
+        self.reserved += 1
+        return Reservation(self)
+
+
+class Reservation:
+    """One call set aside by :meth:`Budget.reserve`: ``use()`` turns it into a call that is made, ``release()`` gives it back (idempotent)."""
+
+    def __init__(self, budget: Budget) -> None:
+        self.budget = budget
+        self.open = True
+
+    def use(self) -> None:
+        if self.open:
+            self.open = False
+            self.budget.reserved -= 1
+            self.budget.calls += 1
+
+    def release(self) -> None:
+        if self.open:
+            self.open = False
+            self.budget.reserved -= 1
 
 
 class SampleTrace:
@@ -141,11 +177,12 @@ class GuardedLlm:
     used up, a call is *parked* (it never reaches the model and never returns) until the runner stops the agent - so nothing is spent after
     the bot's move, and a limit never raises into the agent (which would retry)."""
 
-    def __init__(self, inner: Any, trace: SampleTrace, *, max_rounds: int, budget: Budget) -> None:
+    def __init__(self, inner: Any, trace: SampleTrace, *, max_rounds: int, budget: Budget, reservation: Reservation | None = None) -> None:
         self.inner = inner
         self.trace = trace
         self.max_rounds = max_rounds
         self.budget = budget
+        self.reservation = reservation
         self.calls = 0
 
     async def complete(
@@ -156,7 +193,9 @@ class GuardedLlm:
         if self.calls >= self.max_rounds:
             self.trace.finish("max_rounds")
             await self._park()
-        if not self.budget.take():
+        if self.reservation is not None and self.reservation.open:
+            self.reservation.use()  # the call that was set aside for this sample
+        elif not self.budget.take():
             self.trace.finish("budget")
             await self._park()
         self.calls += 1
@@ -264,12 +303,20 @@ def decision_of(calls: Sequence[Mapping[str, Any]], expect: Iterable[str], scene
     return None
 
 
+def mentions(text: str, needle: str) -> bool:
+    """Whether ``text`` says ``needle`` as a word of its own: ``N1`` is not in "N12", ``5`` is not in "15" (a seat id or a number must not be the front of a longer one)."""
+    left = r"(?<![A-Za-z0-9])" if needle[:1].isalnum() else ""
+    right = r"(?![A-Za-z0-9])" if needle[-1:].isalnum() else ""
+    return re.search(f"{left}{re.escape(needle)}{right}", text) is not None
+
+
 def score_of(decision: Mapping[str, Any] | None, scene: Scene) -> dict[str, Any] | None:
-    """The objective score of a ``respond`` decision (the situation's ``score`` list: ``choice`` = the value is one of the ``correct`` options)."""
+    """The objective score of a ``respond`` decision (the situation's ``score`` list).  ``choice``: the value is one of the ``correct`` options.  ``text``: the
+    written answer mentions every word of ``contains`` and none of ``absent`` (a seat id or a number counts as a word of its own: see :func:`mentions`)."""
     if decision is None:
         return None
     for rule in scene.situation.score:
-        if rule.get("kind") != "choice" or decision["tool"] != "respond":
+        if rule.get("kind") not in ("choice", "text") or decision["tool"] != "respond":
             continue
         request = str(rule["request"])
         if request.startswith("@"):
@@ -277,6 +324,11 @@ def score_of(decision: Mapping[str, Any] | None, scene: Scene) -> dict[str, Any]
             request = str(scene.runner.labels.get(label, {}).get("request_id") or "")
         if decision.get("request_id") != request:
             continue
+        if rule["kind"] == "text":
+            written = str(decision.get("value") or "")
+            said = [w for w in rule["absent"] if mentions(written, w)]
+            ok = all(mentions(written, w) for w in rule["contains"]) and not said
+            return {"kind": "text", "request": request, "value": written, "correct": ok, "wrong": bool(said)}
         value = str(decision.get("value"))
         return {"kind": "choice", "request": request, "value": value, "correct": value in rule["correct"], "wrong": value in rule.get("wrong", [])}
     return None
@@ -310,13 +362,27 @@ def _sha(text: Any) -> str:
     return hashlib.sha256(str(text or "").encode("utf-8")).hexdigest()[:12]
 
 
+def _runtime(scene: Scene, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The R numbers of one sample (``bench.metrics.runtime_health``): the trace the agent wrote, and the ledger of what the bot's moves made the engine
+    write after the decision point - its speeches (so ``truncated_speeches`` is counted, not assumed) and the ends of its floor."""
+    after = scene.after()
+    game = {"participants": [{"id": seat, "name": name} for seat, name in scene.names.items()], "world": {"ledger": after}, "human_spans": []}
+    return runtime_health(after, rows, speeches=speeches_of(game, scope="all"))
+
+
 # ---------------------------------------------------------------------------------------------------------------------- one sample
 def _base_row(job: Job, cfg: RunConfig) -> dict[str, Any]:
     return {
         "format": RESULT_FORMAT, "version": ROW_VERSION, "run": cfg.run_id, "bot": job.bot.label, "brain": job.bot.brain,
         "situation": job.situation.id, "seat": job.seat, "sample": job.sample, "scenario": job.situation.scenario,
         "seed": job.situation.seed, "mode": cfg.mode, "model": cfg.model, "tags": list(job.situation.tags), "meta": dict(job.situation.meta),
+        "truth": _row_truth(job.situation),
     }
+
+
+def _row_truth(situation: Situation) -> dict[str, Any]:
+    """The part of ``truth:`` a result row keeps for the numbers (``answer`` / ``wrong`` / ``sides`` / ``kind``): not the words of the decisive fact."""
+    return {key: situation.truth[key] for key in ("answer", "wrong", "sides", "kind") if key in situation.truth}
 
 
 def _failure(job: Job, cfg: RunConfig, stop: str, error: str, started: float, secrets: Sequence[str]) -> dict[str, Any]:
@@ -327,10 +393,18 @@ def _failure(job: Job, cfg: RunConfig, stop: str, error: str, started: float, se
 
 
 async def run_sample(
-    job: Job, cfg: RunConfig, llm_factory: LlmFactory, budget: Budget, *, secrets: Sequence[str] = (), prompts_dir: Path | None = None
+    job: Job,
+    cfg: RunConfig,
+    llm_factory: LlmFactory,
+    budget: Budget,
+    *,
+    secrets: Sequence[str] = (),
+    prompts_dir: Path | None = None,
+    reservation: Reservation | None = None,
 ) -> dict[str, Any]:
     """Play the situation, run the agent of ``job.bot`` on the decision seat until it moves (or stops), and describe what happened as one
-    ``results.jsonl`` row.  Never raises for a failing sample: the row says what failed (``status: error``)."""
+    ``results.jsonl`` row.  Never raises for a failing sample: the row says what failed (``status: error``).  ``reservation``: the call the budget set
+    aside for this sample (its first call uses it); the caller releases it."""
     started = time.monotonic()
     try:
         scene = build_scene(job.situation, seat=job.seat, seat_name=job.bot.name or None)
@@ -342,7 +416,7 @@ async def run_sample(
     except Exception as exc:  # noqa: BLE001 - a bot that cannot be made fails its own samples, not the run
         return _failure(job, cfg, "bot", f"{type(exc).__name__}: {exc}", started, secrets)
     trace = SampleTrace(job.situation.decision.expect)
-    guarded = GuardedLlm(llm, trace, max_rounds=cfg.max_rounds, budget=budget)
+    guarded = GuardedLlm(llm, trace, max_rounds=cfg.max_rounds, budget=budget, reservation=reservation)
     book = ConversationBook()
     window = cfg.context_window
     agent = Agent(
@@ -399,7 +473,8 @@ def build_row(job: Job, cfg: RunConfig, scene: Scene, trace: SampleTrace, book: 
     verbatim: bool | None = None
     if decision is not None and decision["tool"] == "speak":
         wrote = next((c["args"].get("content") for c in calls if c["i"] == decision["i"]), None)
-        verbatim = text == wrote  # H18: what reached the ledger is exactly what the model wrote
+        # H18: what reached the ledger is exactly what the model wrote (the commit gate trims the whitespace around a speech; nothing else)
+        verbatim = isinstance(wrote, str) and text == wrote.strip()
     return {
         **_base_row(job, cfg),
         "status": status,
@@ -414,7 +489,7 @@ def build_row(job: Job, cfg: RunConfig, scene: Scene, trace: SampleTrace, book: 
         "refusals": dict(refusals),
         "speech": speech_metrics(text, job.bot, scene.seat, scene.seat_name),
         "integrity": {"speech_verbatim": verbatim},
-        "runtime": runtime_health([], rows, speeches=[]),
+        "runtime": _runtime(scene, rows),
         "usage": usage_of(rows),
         "rounds": sum(1 for r in rows if r.get("event") == "llm_call"),
         "thoughts": _cap_list(thoughts, cfg.thought_chars),
@@ -465,10 +540,21 @@ def thought_text(row: Mapping[str, Any]) -> str:
     return "\n\n".join(row.get("thoughts") or [])
 
 
+#: The fields of an item's ``subject`` a judge sees by default (``blind_view``); ``attempts`` (the refused tries) are left out: they tell which brain it was.
+BLIND_SUBJECT = ("kind", "tool", "text", "value", "reason", "thought")
+
+
+def blind_id(item_id: str) -> str:
+    """An opaque id for an item (12 hex digits of the hash of its ``item_id``, which names the bot): what a judge is given to refer to it."""
+    return hashlib.sha256(item_id.encode("utf-8")).hexdigest()[:12]
+
+
 def judge_items(row: Mapping[str, Any], situation: Situation, bots: Sequence[BenchBot]) -> list[dict[str, Any]]:
-    """The items of ``row`` for the rubrics the situation asks for (``judge:``): everything a judge may see - the situation's brief and
-    facts, what the bot did (its speech or choice, what it thought, its refused attempts) - and nothing else.  ``S2`` gets the style cards of
-    every bot of the run and the truth (which bot spoke).  A row without a decision has no items."""
+    """The items of ``row`` for the rubrics the situation asks for (``judge:``).  An item holds everything about one decision that a judge or a person
+    labelling it may need - the situation's title, brief and the facts the situation gives for that rubric (``context``), what the bot did (``subject``: its
+    speech or choice, its reason, its thinking, its refused tries) - and the *truth* (which bot, which run: ``bot``, ``item_id``, ``context.truth`` for S2),
+    which :func:`blind_view` removes before a judge sees it.  ``S2`` also gets the style cards of every bot of the run.  A row without a decision has no
+    items."""
     decision = row.get("decision")
     if not decision or not situation.judge:
         return []
@@ -478,29 +564,81 @@ def judge_items(row: Mapping[str, Any], situation: Situation, bots: Sequence[Ben
         kind = "choice"
     else:
         kind = decision["tool"]
+    bot = next((b for b in bots if b.label == row["bot"]), None)
+    seat = row["seat"]
     subject = {
-        "kind": kind, "tool": decision["tool"], "text": decision.get("text"), "value": decision.get("value"), "reason": decision.get("reason"),
-        "thought": _cap(thought_text(row), THOUGHT_CAP), "attempts": row.get("attempts") or [],
+        "kind": kind, "tool": decision["tool"], "text": _unname(decision.get("text"), bot, seat), "value": decision.get("value"),
+        "reason": _unname(decision.get("reason"), bot, seat), "thought": _unname(_cap(thought_text(row), THOUGHT_CAP), bot, seat), "attempts": row.get("attempts") or [],
     }
     items = []
+    # What a judge may know of the situation besides what the rubric's own facts say: the decisive fact and what pulls the other way - not the answer
+    # (it would tell the judge whether the bot was right) and not who is who.
+    shown = {key: situation.truth[key] for key in ("decisive", "trap") if key in situation.truth}
     for rubric, facts in situation.judge.items():
-        context: dict[str, Any] = {**facts}
+        context: dict[str, Any] = {**shown, **facts}
+        truth: dict[str, Any] = {"answer": list(situation.truth.get("answer", [])), "correct": row.get("correct")}
+        item_id = f"{row['run']}/{row['situation']}/{row['seat']}/{row['bot']}/{row['sample']}/{rubric}"
         if rubric == "S2":
-            context["cards"] = {bot.label: bot.card for bot in bots}
-            context["truth"] = {"bot": row["bot"]}
+            # The cards of the bots that have a voice, in an order of their own for this item and under letters, not names; the truth says which card is whose.
+            owners = [b for b in bots if b.style_card]
+            if bot is None or not bot.style_card:
+                continue  # (a bot without a voice - legacy - has no style a judge could recognise)
+            random.Random(blind_id(item_id)).shuffle(owners)
+            letters = [chr(ord("A") + i) for i in range(len(owners))]
+            context["cards"] = [{"id": letter, "text": owner.style_card} for letter, owner in zip(letters, owners)]
+            truth.update({"bot": row["bot"], "cards": {letter: owner.label for letter, owner in zip(letters, owners)}})
         items.append({
-            "format": JUDGE_FORMAT, "version": ROW_VERSION, "item_id": f"{row['run']}/{row['situation']}/{row['seat']}/{row['bot']}/{row['sample']}/{rubric}",
+            "format": JUDGE_FORMAT, "version": ROW_VERSION, "item_id": item_id, "blind_id": blind_id(item_id),
             "rubric": rubric, "run": row["run"], "situation": row["situation"], "seat": row["seat"], "bot": row["bot"], "sample": row["sample"],
             "title": situation.title, "brief": situation.brief, "tags": list(situation.tags), "context": context, "subject": subject,
-            "meta": dict(situation.meta),
+            "truth": truth, "meta": dict(situation.meta),
         })
     return items
 
 
+def _unname(text: Any, bot: BenchBot | None, seat: str) -> Any:
+    """``text`` with the bot's own name (and its label) replaced by its seat id: a judge must not learn who spoke from "我是 Alice" or "bot:Alice@no-people"."""
+    if not isinstance(text, str) or bot is None:
+        return text
+    names = sorted({n for n in (bot.label, bot.name, bot.mind.name if bot.mind else "") if n}, key=len, reverse=True)
+    for name in names:
+        text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])" if name.isascii() else re.escape(name), seat, text)
+    return text
+
+
+def blind_view(item: Mapping[str, Any], *, subject: Sequence[str] = BLIND_SUBJECT) -> dict[str, Any]:
+    """What a judge may see of an item: its opaque ``blind_id``, the rubric, the title and brief, the ``context`` without the truth, and the chosen fields of
+    the ``subject``.  Nothing that names the bot, the run, the sample or the situation.  (S2 asks for ``("kind", "text")``: the style of a speech is judged
+    from the words alone.)  Join the verdicts back to the items by ``blind_id``."""
+    context = dict(item.get("context") or {})
+    return {
+        "blind_id": item["blind_id"], "rubric": item["rubric"], "title": item.get("title") or "", "brief": item.get("brief") or "", "context": context,
+        "subject": {key: (item.get("subject") or {}).get(key) for key in subject},
+    }
+
+
 # ---------------------------------------------------------------------------------------------------------------------- the whole run
-def jobs_for(situations: Sequence[Situation], bots: Sequence[BenchBot], samples: int) -> list[Job]:
-    """Every sample of the run: situation (and each seat the situation asks for) × bot × sample number."""
-    return [Job(situation, bot, seat, sample) for situation in situations for seat in situation.decision.seats for bot in bots for sample in range(samples)]
+def jobs_for(
+    situations: Sequence[Situation], bots: Sequence[BenchBot], samples: int, *, library: Path | None = None, contract: Any = None
+) -> list[Job]:
+    """Every sample of the run: situation (and each seat the situation asks for) × bot × sample number.  A seat that its situation file puts a bot on
+    (``bots:``) is played by that bot alone; every other decision seat by each of ``bots``.  Raises ``BotSpecError`` for a pinned bot that cannot be
+    made."""
+    jobs: list[Job] = []
+    for situation in situations:
+        pinned = pinned_bots(situation, library=library, contract=contract) if situation.bots else {}
+        for seat in situation.decision.seats:
+            for bot in [pinned[seat]] if seat in pinned else bots:
+                jobs.extend(Job(situation, bot, seat, sample) for sample in range(samples))
+    return jobs
+
+
+def bots_of(jobs: Iterable[Job]) -> list[BenchBot]:
+    """The bots a list of jobs uses, once each (by label), in the order they first appear."""
+    seen: dict[str, BenchBot] = {}
+    for job in jobs:
+        seen.setdefault(job.bot.label, job.bot)
+    return list(seen.values())
 
 
 def new_run_id() -> str:
@@ -512,6 +650,7 @@ class RunReport:
     run_id: str
     rows: list[dict[str, Any]] = field(default_factory=list)
     items: list[dict[str, Any]] = field(default_factory=list)
+    bots: list[BenchBot] = field(default_factory=list)  # the bots the run used (those of ``--bots`` and those the situation files pinned)
     skipped: int = 0  # samples that were not started (the budget was used up, or they were done already)
     calls: int = 0
     elapsed_s: float = 0.0
@@ -577,20 +716,21 @@ async def run_suite(
     secrets: Sequence[str] = (),
     resume: bool = False,
     on_row: Callable[[dict[str, Any]], None] | None = None,
+    jobs: Sequence[Job] | None = None,
 ) -> RunReport:
-    """Run every sample (situation × seat × bot × ``cfg.samples``), at most ``cfg.concurrency`` at a time, within ``budget``.  Rows (and judge
-    items) are written to ``out_dir`` as they finish.  A sample the budget cannot pay for is not started (it is counted in ``skipped``; with
-    ``resume`` the next run picks it up)."""
+    """Run every sample (situation × seat × bot × ``cfg.samples``; see :func:`jobs_for`, or give the ``jobs`` made with it), at most
+    ``cfg.concurrency`` at a time, within ``budget``.  Rows (and judge items) are written to ``out_dir`` as they finish.  A sample the budget cannot pay
+    for is not started (it is counted in ``skipped``; with ``resume`` the next run picks it up)."""
     run_id = cfg.run_id or new_run_id()
     cfg = RunConfig(**{**cfg.__dict__, "run_id": run_id})
     budget = budget or Budget(cfg.max_calls)
-    jobs = jobs_for(situations, bots, cfg.samples)
+    jobs = list(jobs) if jobs is not None else jobs_for(situations, bots, cfg.samples)
     done: set[tuple[Any, ...]] = set()
     if resume and out_dir is not None:
         done = {
             (r["situation"], r["seat"], r["bot"], r["sample"]) for r in read_results(out_dir / "results.jsonl") if r.get("status") in ("ok", "no_decision")
         }
-    report = RunReport(run_id=run_id)
+    report = RunReport(run_id=run_id, bots=bots_of(jobs))
     writer = ResultWriter(out_dir) if out_dir is not None else None
     by_id = {s.id: s for s in situations}
     semaphore = asyncio.Semaphore(max(1, cfg.concurrency))
@@ -601,11 +741,17 @@ async def run_suite(
             report.skipped += 1
             return
         async with semaphore:
-            if budget.exhausted:
+            reservation = budget.reserve()  # a sample starts only when the budget can pay for its first call (and keeps it for it)
+            if reservation is None:
                 report.skipped += 1
                 return
-            row = await run_sample(job, cfg, llm_factory, budget, secrets=secrets, prompts_dir=(out_dir / "prompts") if out_dir is not None else None)
-        items = judge_items(row, by_id[job.situation.id], bots)
+            try:
+                row = await run_sample(
+                    job, cfg, llm_factory, budget, secrets=secrets, prompts_dir=(out_dir / "prompts") if out_dir is not None else None, reservation=reservation
+                )
+            finally:
+                reservation.release()  # (a sample that made no call gives its call back)
+        items = judge_items(row, by_id[job.situation.id], report.bots)
         report.rows.append(row)
         report.items.extend(items)
         if writer is not None:
@@ -624,13 +770,20 @@ async def run_suite(
 
 
 def run_info(
-    report: RunReport, cfg: RunConfig, situations: Sequence[Situation], bots: Sequence[BenchBot], *, real: Mapping[str, Any] | None = None,
+    report: RunReport, cfg: RunConfig, situations: Sequence[Situation], bots: Sequence[BenchBot] | None = None, *, real: Mapping[str, Any] | None = None,
     max_calls: int | None = None,
 ) -> dict[str, Any]:
-    """``run.json``: what was run, with what, and what it cost (no secrets, no texts of the bots' memory)."""
-    usage = Counter()
+    """``run.json``: what was run, with what, and what it cost (no secrets, no texts of the bots' memory).  ``bots`` default: the bots the run used
+    (``report.bots``: those of ``--bots`` and those the situation files pinned)."""
+    bots = report.bots if bots is None else bots
+    usage: Counter[str] = Counter()
     for row in report.rows:
         usage.update({k: v for k, v in (row.get("usage") or {}).items() if isinstance(v, int)})
+    price_in, price_out = float((real or {}).get("input_price_per_m") or 0.0), float((real or {}).get("output_price_per_m") or 0.0)
+    cost: dict[str, Any] = {}
+    if price_in or price_out:
+        # an upper bound: every cached input token is priced as an ordinary input token
+        cost["cost_usd_upper_bound"] = round(((usage["prompt"] + usage["cache_read"]) * price_in + usage["completion"] * price_out) / 1_000_000, 4)
     files = []
     for situation in situations:
         path = Path(situation.path) if situation.path else None
@@ -644,7 +797,7 @@ def run_info(
         },
         "situations": files, "bots": [bot.describe() for bot in bots],
         "rows": len(report.rows), "by_status": report.by_status(), "skipped": report.skipped, "model_calls": report.calls,
-        "usage": dict(usage), "elapsed_s": report.elapsed_s,
+        "usage": dict(usage), **cost, "elapsed_s": report.elapsed_s,
     }
 
 
@@ -658,11 +811,16 @@ __all__ = [
     "Job",
     "LlmFactory",
     "NullSink",
+    "Reservation",
     "ResultWriter",
     "RunConfig",
     "RunReport",
     "SampleTrace",
+    "BLIND_SUBJECT",
     "attempts_of",
+    "blind_id",
+    "blind_view",
+    "bots_of",
     "build_row",
     "decision_of",
     "extract_calls",

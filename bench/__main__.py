@@ -2,7 +2,11 @@
 
     python -m bench audit    --game <game.json> [--trace <trace.jsonl>] [--scope public|all]
     python -m bench baseline --data-dir <dir> [--data-dir <dir> ...] [--out <report.json>]
-    python -m bench situations [--check] | run --out <dir> ... | summarize --results <results.jsonl> | replay --game <game.json> ...   (bench.cli)
+    python -m bench situations [--check] | run [--out <dir>] ... | summarize --results <results.jsonl> | replay --game <game.json> ...   (bench.cli)
+
+``situations`` lists / checks the situation scripts, ``run`` is the runner (bot × situation × sample on the real agent loop; a fake model by default, a
+real one only with ``--real --max-calls N``), ``summarize`` turns a ``results.jsonl`` into numbers, ``replay`` asks whether a saved game's decision point can
+be rebuilt on the real engine (and writes a situation script from it).  See ``bench/README.md``.
 
 ``audit`` prints the R / S1 / S3 numbers of ONE saved game; ``baseline`` does it for every saved game below the given data directories
 (``<dir>/games/<id>/game.json`` + ``<dir>/logs/<id>/trace-*.jsonl``) and writes a pooled report: how the bots of an older version
@@ -87,7 +91,7 @@ def baseline(data_dirs: list[Path]) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m bench", description="The v0.14 benchmark (metrics over saved games).")
+    parser = argparse.ArgumentParser(prog="python -m bench", description="The v0.14 benchmark: metrics over saved games, situation scripts and the runner.")
     sub = parser.add_subparsers(dest="command", required=True)
     audit = sub.add_parser("audit", help="the R / S1 / S3 numbers of one saved game")
     audit.add_argument("--game", required=True, type=Path)
@@ -99,12 +103,24 @@ def main(argv: list[str] | None = None) -> int:
     from bench import cli  # (the commands that run things: situations, run, summarize, replay)
 
     cli.add_commands(sub)
+    from bench import judging  # (the judges: judge-check / judge-pack / judge-merge)
+
+    judging.add_commands(sub)
+    from bench import calibrate  # (the calibration of the judges against people: calibration-set / calibrate)
+
+    calibrate.add_commands(sub)
+    from bench import report as acceptance_report  # (the acceptance report: report)
+
+    acceptance_report.add_commands(sub)
     args = parser.parse_args(argv)
     try:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     except (AttributeError, ValueError):  # (a captured stdout of a test)
         pass
-    handlers = {"situations": cli.cmd_situations, "run": cli.cmd_run, "summarize": cli.cmd_summarize, "replay": cli.cmd_replay}
+    handlers = {"situations": cli.cmd_situations, "run": cli.cmd_run, "summarize": cli.cmd_summarize, "replay": cli.cmd_replay, "fixtures": cli.cmd_fixtures, "suites": cli.cmd_suites}
+    handlers.update(judging.HANDLERS)
+    handlers.update(calibrate.HANDLERS)
+    handlers.update(acceptance_report.HANDLERS)
     if args.command in handlers:
         return handlers[args.command](args)
 

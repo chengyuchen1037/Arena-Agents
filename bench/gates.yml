@@ -1,6 +1,18 @@
 # v0.14 验收门槛（docs/v0.14-plan.md §6.5）。status: provisional = 初拟，等 v0.14 的真实对局 / 题目数据出来后再收紧；
-# baseline = v0.13.1 在真实对局里测得的数字（bench/reports/baseline-v0.13.1.json，8 局 deepseek-flash，249 条 agent 公共发言）。
+# pending_baseline = 门槛的数字要等基线（LegacyBrain 在同一批题目上的结果）出来再定稿。
+# baseline = v0.13.1 在真实对局里测得的数字（bench/reports/baseline-v0.13.1.json，8 局 deepseek-flash，249 条 agent 公共发言），只做对照。
 # 度量由 `python -m bench audit|baseline` 算出（R / S1 / S3）；需要真模型或裁判的套件（S2 / L1–L4 / M1–M3 / E1–E2 / G）由 runner 产出。
+#
+# 每条门槛的 id 就是 bench/suites/<套件>.yml 里 `gates:` 声明的 id（有测试对着）；suite + metric 用的是那个套件 yml 里 `metrics:` 的名字
+# （M1 的指标由它的 ablations 各层自己指定，所以这里的 ablation.p_value 是“每一层的 p 值”；E1 / E2 的指标还没有定，报告里是“待数据”）。
+# `python -m bench report` 按这里的门槛对照实测数字，每个候选 bot 各判一次（bench/report.py 的文档写了每个指标怎么算、每种状态什么意思）。
+#
+# 字段：
+#   id / suite / metric / op（== <= >= < >）/ value / baseline / status / note
+#   value：一个数字，或者 "<k> * baseline"、"baseline + <x>"、"baseline - <x>"——只认这几种写法，报告不会求值别的东西；
+#          baseline 是结果里那个基线 bot（python -m bench report --baseline，默认 legacy）在同一批题上的数字，没有就是“待基线”。
+#   abs: true      候选和基线都取绝对值再比（L1 的表达偏差：偏向“不会说的”一方同样是偏差）。
+#   scope: pooled  所有候选 bot 合在一起判（S2 / S3 这种整体的指标）；默认每个候选 bot 各判一次，取最差的。
 format: arena-bench-gates
 version: 1
 baseline_report: reports/baseline-v0.13.1.json
@@ -20,19 +32,25 @@ gates:
   - {id: S1d, suite: S1, metric: "form.report_rate", op: "<=", value: 0.25, baseline: 0.6787, status: provisional,
      note: "编号行 / 行内编号 / markdown / 自报座位，任一项就算“像报告”"}
   # ---- S3 同质化 ------------------------------------------------------------------------------------------------
-  - {id: S3a, suite: S3, metric: "cliches.hits_per_speech", op: "<=", value: 0.96, baseline: 1.916, status: provisional,
+  - {id: S3a, suite: S3, metric: "cliches.hits_per_speech", op: "<=", value: 0.96, baseline: 1.916, scope: pooled, status: provisional,
      note: "套话（可验证 / 顺位 / 对账 / 兑现 / 记一笔 ……）每条发言的命中数，不超过基线的一半"}
-  - {id: S3b, suite: S3, metric: "homogeneity.shared_occurrence_share", op: "<=", value: 0.011, baseline: 0.011, status: provisional,
-     note: "跨 4 个以上座位共用的 6 字片段占比，不比基线高"}
+  - {id: S3b, suite: S3, metric: "homogeneity.shared_occurrence_share", op: "<=", value: 0.011, baseline: 0.011, scope: pooled, status: provisional,
+     note: "跨 4 个以上座位共用的 6 字片段占比，不比基线高；要 4 个以上 bot 的发言才可比"}
   # ---- 需要真模型 / 裁判的套件（基线要用 LegacyBrain 在同一批题目上跑出来，M0 之后填）-----------------------------------------
-  - {id: S2, suite: S2, metric: "style.top1_accuracy", op: ">=", value: 0.5, baseline: null, status: pending_baseline,
-     note: "风格识别 top-1（随机水平 1/12 ≈ 8.3%）"}
-  - {id: L1, suite: L1, metric: "expression_bias", op: "<=", value: "0.5 * baseline", baseline: null, status: pending_baseline,
-     note: "表达偏差 = P(信“会说的”一方) − 0.5；不超过基线的一半"}
-  - {id: L2, suite: L2, metric: "trivia_hit_rate", op: "<=", value: "0.5 * baseline", baseline: null, status: pending_baseline}
-  - {id: L4, suite: L4, metric: "side_accuracy", op: ">=", value: "baseline + 0.20", baseline: null, status: pending_baseline}
+  - {id: S2, suite: S2, metric: "style.top1_accuracy", op: ">=", value: 0.5, baseline: null, scope: pooled, status: pending_baseline,
+     note: "风格识别 top-1（随机水平 1/12 ≈ 8.3%）；裁判 S2 校准通过才计入"}
+  - {id: L1, suite: L1, metric: "expression_bias", op: "<=", value: "0.5 * baseline", abs: true, baseline: null, status: pending_baseline,
+     note: "表达偏差 = P(信“会说的”一方) − 0.5，A / B 两版成对算；绝对值不超过基线的一半"}
+  - {id: L2, suite: L2, metric: "trivia_hit_rate", op: "<=", value: "0.5 * baseline", baseline: null, status: pending_baseline,
+     note: "被琐碎点带偏的比例（裁判 L2：basis = trivia），不超过基线的一半；裁判 L2 校准通过才计入"}
+  - {id: L3, suite: L3, metric: "decisive_hit_rate", op: ">=", value: "baseline + 0.20", baseline: null, status: pending_baseline,
+     note: "抓住决定性事实的比例（裁判 L3：cites_decisive 或 basis = decisive_fact），比基线高 20 个百分点。计划 §6.5 没有给 L3 的数字，这一条是照 L4 初拟的，M0 基线后修订；裁判 L3 校准通过才计入"}
+  - {id: L4, suite: L4, metric: "side_accuracy", op: ">=", value: "baseline + 0.20", baseline: null, status: pending_baseline,
+     note: "站边 / 投票准确率比基线高 20 个百分点"}
   - {id: M1, suite: M1, metric: "ablation.p_value", op: "<", value: 0.05, baseline: null, status: pending_baseline,
-     note: "每一层在自己对应的指标上显著，且其他指标不变差"}
+     note: "每一层在自己对应的指标上显著（完整的 bot 比拿掉这一层的更好，单侧配对 bootstrap）；“其他指标不变差”这一半报告不检查"}
   - {id: M3, suite: M3, metric: "rules_quiz.accuracy", op: ">=", value: 0.9, baseline: null, status: pending_baseline}
-  - {id: E1, suite: E1, metric: "learning_curve.after_10_games", op: "no_regression_and_one_significant_gain", baseline: null, status: pending_baseline}
-  - {id: E2, suite: E2, metric: "style_similarity.win_rate", op: ">=", value: 0.65, baseline: null, status: pending_baseline}
+  - {id: E1, suite: E1, metric: "learning_curve.after_10_games", op: "no_regression_and_one_significant_gain", baseline: null, status: pending_baseline,
+     note: "不由 run 运行：学 10 局后不退化，且至少一项显著提升（报告里是“待数据”）"}
+  - {id: E2, suite: E2, metric: "style_similarity.win_rate", op: ">=", value: 0.65, baseline: null, status: pending_baseline,
+     note: "不由 run 运行：胜率 ≥ 65%（报告里是“待数据”）"}

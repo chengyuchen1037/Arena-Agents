@@ -1,0 +1,81 @@
+# S2 · pk-speech
+# 在测什么：风格识别：为自己的命辩护：被逼到墙角时的口气。
+# 被测座位：N7（villager）；12 人暗牌局（werewolf_12p 2.2.0），局面是用主持人手册的步骤在真实引擎上打出来的。
+# 局面：第 1 天放逐投票：被测座位和 N9 并列最高票（各 5 票），进入平票 PK，被测座位先发言。
+# 陷阱：“我是好人，别投我”是现成的辩护，容易所有 bot 都从它开始。
+# S2 的裁判拿 12 张风格卡（每个 bot 的 voice.md 三行）去匹配这段发言；随机水平 1/12，门槛 ≥ 50%。S1 / S3 用同一批发言算形态和同质化。
+# 本文件由 bench/cases 里的代码生成，不要手改：改代码后运行 `python -m bench fixtures` 重写。
+format: arena-situation
+version: 1
+id: s2-pk-speech
+title: 风格：pk-speech
+tags: [S2, speech]
+scenario: werewolf_12p
+seed: 3609
+deal: start
+players:
+  count: 12
+  names: [Alice, Bob, Carol, David, Eve, Frank, Grace, Henry, Ivy, Jack, Kate, Leo]
+roles: [hunter, villager, villager, werewolf, witch, werewolf, villager, werewolf, villager, guard, white_wolf, seer]
+
+steps:
+  - {as: moderator, tool: set_phase, args: {text: 准备阶段 · 建立频道}, at: 3.0}
+  - {as: moderator, tool: create_channel, args: {channel_id: public, name: 公共频道, type: public, mode: closed, members: [N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12]}}
+  - {as: moderator, tool: create_channel, args: {channel_id: wolf-team, name: 狼人阵营, type: group, mode: closed, members: [N4, N6, N8, N11]}, at: 3.4}
+  - {as: moderator, tool: send_message, args: {channel_id: wolf-team, content: 你们是狼人阵营的队友：N4、N6、N8、N11。夜间会在这里商议，并用“刀口”请求拍刀；允许自刀或空刀。}, at: 4.9}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 对局开始。本局是 12 人暗牌局：出局不公布身份和死因。夜间行动由我私下询问，请留意你的待处理请求。}, at: 5.9}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 夜}, at: 9.9}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 第 1 夜，天黑请闭眼。}, at: 10.0}
+  - {as: moderator, tool: open_request, args: {to: [N10], kind: choice, question: 第 1 夜：请选择今晚守护的玩家（可以守自己，也可以空守；不能连续两晚守护同一人）。, options: [{id: none, label: 空守}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], default: none}, label: guard1, at: 12.0}
+  - {as: N10, tool: respond, args: {request_id: '@guard1', value: N10}, at: 20.1}
+  - {as: moderator, tool: update_player, args: {player_id: N10, set_attributes: {last_guard: N10}}, at: 21.1}
+  - {as: moderator, tool: open_floor, args: {channel_id: wolf-team, mode: free, holders: [N4, N6, N8, N11], limits: {duration_s: 100, max_messages_per_member: 6, max_chars_per_message: 300, max_chars_total: 3000, silence_s: 40}}, at: 23.1}
+  - {as: moderator, tool: open_request, args: {to: [N4, N6, N8, N11], kind: choice, question: 第 1 夜：请和队友商量后选定今晚的刀口（可以自刀，也可以空刀）。你可以随时改选，队友的选择实时可见；大家选得一致，刀口立刻确定。, options: [{id: none, label: 空刀}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], share_answers: true, auto_close: unanimous, duration_s: 150}, label: wolf1, at: 24.1}
+  - {as: moderator, tool: send_message, args: {channel_id: wolf-team, content: 第 1 夜：请商议今晚的刀口，并用你的“刀口”请求拍刀；想改就再选一次，队友的选择大家都看得到。大家选得一致，刀口立刻确定。}, at: 24.6}
+  - {answer: '@wolf1', values: {N4: N3, N6: N3, N8: N3, N11: N3}, at: 29.5}
+  - {as: moderator, tool: close_floor, args: {channel_id: wolf-team}, at: 31.5}
+  - {as: moderator, tool: announce, args: {channel_id: wolf-team, template_id: wolf_target, params: {target: N3}}, at: 33.0}
+  - {as: moderator, tool: open_request, args: {to: [N12], kind: choice, question: 第 1 夜：请选择要查验的玩家。, options: [{id: skip, label: 不查验}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], default: skip}, label: seer1, at: 35.0}
+  - {as: N12, tool: respond, args: {request_id: '@seer1', value: N12}, at: 40.5}
+  - {as: moderator, tool: announce, args: {channel_id: dm-N12, template_id: seer_result, params: {target: N12, side: 好人阵营}}, at: 42.5}
+  - {as: moderator, tool: send_message, args: {channel_id: dm-N5, content: 今晚被狼人袭击的是 N3。}, at: 44.5}
+  - {as: moderator, tool: open_request, args: {to: [N5], kind: choice, question: 第 1 夜：请选择本晚唯一的用药动作（同一晚只能用一瓶药，也可以不用）。, options: [{id: pass, label: 本晚不用药}, {id: save, label: 使用解药（救今晚被袭击的人）}, {id: 'poison:N1', label: 毒杀 N1}, {id: 'poison:N2', label: 毒杀 N2}, {id: 'poison:N3', label: 毒杀 N3}, {id: 'poison:N4', label: 毒杀 N4}, {id: 'poison:N5', label: 毒杀 N5}, {id: 'poison:N6', label: 毒杀 N6}, {id: 'poison:N7', label: 毒杀 N7}, {id: 'poison:N8', label: 毒杀 N8}, {id: 'poison:N9', label: 毒杀 N9}, {id: 'poison:N10', label: 毒杀 N10}, {id: 'poison:N11', label: 毒杀 N11}, {id: 'poison:N12', label: 毒杀 N12}], default: pass}, label: witch1, at: 46.5}
+  - {as: N5, tool: respond, args: {request_id: '@witch1', value: pass}, at: 50.5}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 警长竞选}, at: 53.5}
+  - {as: moderator, tool: open_request, args: {to: [N1, N2, N4, N5, N6, N7, N8, N9, N10, N11, N12], kind: choice, question: 是否上警竞选警长？本选择保密。, options: [{id: 'yes', label: 上警}, {id: 'no', label: 不上警}], sealed: true, default: 'no'}, label: run, at: 55.5}
+  - {answer: '@run', values: {N1: 'no', N2: 'no', N4: 'no', N5: 'no', N6: 'no', N7: 'no', N8: 'no', N9: 'no', N10: 'no', N11: 'no', N12: 'no'}, at: 62.0}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: no_sheriff, params: {}}, at: 64.5}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 公布死讯}, at: 67.5}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: death_notice, params: {players: [N3]}}, at: 69.0}
+  - {as: moderator, tool: update_player, args: {player_id: N3, add_tags: [出局], remove_tags: [存活]}, at: 69.3}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 遗言}, at: 71.3}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N3], limits: {max_messages: 1}}, at: 71.6}
+  - {say: {N3: 我是平民，没有信息给大家。}, channel: public, at: 79.5}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 白天发言}, at: 81.5}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N1, N2, N4, N5, N6, N7, N8, N9, N10, N11, N12], limits: {max_messages: 1}}, at: 81.8}
+  - {say: {N1: 目前没抓到明显的毛病，先观望，投票前再说。}, channel: public, at: 102.2}
+  - {say: {N2: 我这轮没有什么特别的信息，先听听大家的。}, channel: public, at: 110.3}
+  - {say: {N4: 我没有信息，只想多听几句再决定票型。}, channel: public, at: 128.4}
+  - {say: {N5: 我先不说怀疑谁，怕说错了带偏大家。}, channel: public, at: 143.4}
+  - {say: {N6: 我是好人，没有信息可报，等投票。}, channel: public, at: 161.8}
+  - {as: N7, tool: pass, args: {channel_id: public}, at: 176.8}
+  - {say: {N8: 目前没有谁让我特别不放心，我再看看。}, channel: public, at: 193.7}
+  - {say: {N9: 信息不多，我先不乱表态，投票的时候再认真选。}, channel: public, at: 212.4}
+  - {say: {N10: 我这轮就听，不带节奏。}, channel: public, at: 226.8}
+  - {say: {N11: 没什么要补充的，听完再投。}, channel: public, at: 247.2}
+  - {say: {N12: 我这边平平安安，没有消息可给，听大家的。}, channel: public, at: 265.5}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 放逐投票}, at: 268.5}
+  - {as: moderator, tool: open_request, args: {to: [N1, N2, N4, N5, N6, N7, N8, N9, N10, N11, N12], kind: choice, question: 第 1 天放逐投票：请选择要放逐的玩家，或弃票。, options: [{id: abstain, label: 弃票}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], sealed: true, default: abstain}, label: vote1, at: 270.5}
+  - {answer: '@vote1', values: {N1: N9, N2: N9, N4: N7, N5: N9, N6: N7, N7: N9, N8: N7, N9: abstain, N10: N9, N11: N7, N12: N7}, at: 276.5}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: vote_result, params: {summary: 票型：N1→N9，N2→N9，N4→N7，N5→N9，N6→N7，N7→N9，N8→N7，N9 弃票，N10→N9，N11→N7，N12→N7；得票：N7 5 票，N9 5 票}}, at: 279.5}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: tie_pk, params: {players: [N7, N9]}}, at: 281.5}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 平票 PK}, at: 283.0}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N7, N9], limits: {max_messages: 1}}, at: 283.3}
+
+decision:
+  seat: N7
+  expect: [speak]
+brief: 第 1 天放逐投票：被测座位和 N9 并列最高票（各 5 票），进入平票 PK，被测座位先发言。
+judge: [S2]
+meta:
+  moment: pk-speech

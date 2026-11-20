@@ -1,0 +1,50 @@
+# 示例：题目自己带 bot（bots:）。M 系列（分层消融、规则理解）的题目这样写：bot 的记忆就写在题目里，不会随 bots/ 的变化而变化。
+# 这一题的决策点是“规则小测”：主持人问一个规则问题，被测座位（带着自己的规则记忆）作答。运行方式见 bench/README.md。
+format: arena-situation
+version: 1
+id: example-pinned
+title: 示例：规则小测，自带一个有记忆的 bot
+tags: [example, M3]
+scenario: minimal_test
+seed: 5
+players: {count: 4, names: [Alice, Bob, Carol, David]}
+roles: [red, red, blue, blue]
+
+steps:
+  - {as: moderator, tool: create_channel, args: {channel_id: public, name: 公共频道, type: public, members: [N1, N2, N3, N4]}}
+  - {as: moderator, tool: set_phase, args: {text: 规则小测}}
+  - as: moderator
+    tool: open_request
+    label: quiz
+    args:
+      to: [N3]
+      kind: choice
+      question: 两个人得票相同时，怎么处理？
+      options:
+        - {id: again, label: 平票的人各再发言一轮，然后只在他们之间重新投票}
+        - {id: both, label: 两个人都出局}
+        - {id: none, label: 无人出局}
+      duration_s: 60
+
+decision: {seat: N3, expect: [respond]}
+
+# 只有被测的座位需要 bot（别的座位不会运行）。写法有两种：
+#   N3: bot:Alice@no-playbook        一个 spec 字符串（和 --bots 一样；bot:./minds/zed = 题目文件旁边的 bot 目录）
+#   N3: {name: ..., core: {...}}     一份快照：下面这样（L0 core；notes = L1；digest / playbook / questions = 这个剧本的 L2；people；record）
+bots:
+  N3:
+    name: Zed
+    core:
+      identity: 一个爱把规则记清楚的老玩家。
+      voice: 你说话短而直接。篇幅：20–60 字
+      mind: 先看规则怎么说，再看别人怎么说。
+    digest: 我记得：平票时，平票的人各再发言一轮，然后只在他们之间重新投票。
+    playbook:
+      - "- [把握:高|支持:3|反例:0|来源:复盘|#投票] 规则里没写的事，先问主持人，不要自己想当然。"
+    people: {Alice: 话少，爱反问}
+
+brief: 规则小测：正确答案是 again（平票的人各再发言一轮并重新投票）。被测的 bot 的 L2 规则摘要里写着这条规则；去掉 digest（bot 的 no-digest 变体）后它应当答得更差——M3 / M1 看的就是这个。
+score:
+  - {kind: choice, request: "@quiz", correct: [again]}
+judge: [M3]
+meta: {pair: rules, variant: with-digest}

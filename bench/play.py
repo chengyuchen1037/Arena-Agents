@@ -250,10 +250,16 @@ class Scene:
     runner: StepRunner = field(repr=False)
     #: A hash of the ledger at the decision point (before the bot did anything): two plays of one situation with one bot have the same.
     fingerprint: str = ""
+    #: How many ledger entries the world had at the decision point: what the bot does is ``world.ledger[seq0:]``.
+    seq0: int = 0
 
     @property
     def records(self) -> list[StepRecord]:
         return self.runner.records
+
+    def after(self) -> list[dict[str, Any]]:
+        """The ledger entries written since the decision point (as saved-game dicts): everything the bot's moves made the engine write."""
+        return [entry.model_dump(mode="json") for entry in self.world.ledger[self.seq0 :]]
 
 
 def envelope_of(raw: Mapping[str, Any], world: World, seat: str) -> Envelope:
@@ -331,6 +337,7 @@ def build_scene(situation: Situation, *, seat: str | None = None, seat_name: str
         wake=wake,
         runner=runner,
         fingerprint=ledger_fingerprint(world.ledger),
+        seq0=len(world.ledger),
     )
 
 

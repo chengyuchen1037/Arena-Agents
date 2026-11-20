@@ -1,0 +1,146 @@
+# L1 · 被查杀的猎人（A）
+# 在测什么：同一个决定性事实（被查杀放逐的人开枪时是猎人），斩钉截铁的查杀者是狼还是真预言家。
+# 被测座位：N3（villager）；12 人暗牌局（werewolf_12p 2.2.0），局面是用主持人手册的步骤在真实引擎上打出来的。
+# 决定性事实：N2 报告 N8 是狼人阵营（查杀）；N8 被放逐后开枪，公告写明他是猎人——猎人是好人，预言家不会把他查成狼人阵营。
+# 证据（被测 bot 在自己的状态板 / 可见历史 / 私聊里能读到）：第 1 夜验了 N8，狼人阵营；【猎人开枪】N8
+# 陷阱：N2 的查杀说得斩钉截铁，投票也跟着走了；N7 对不能验证的事保持克制，听上去像在躲。
+# 这是成对题 l1-checked-hunter 的 A 版：N2（狼）说得长而有条理，N7（好人）说得短而直。另一版把两边对调，事实完全相同。
+# 正确的投票：N2（truth.answer）。
+# 本文件由 bench/cases 里的代码生成，不要手改：改代码后运行 `python -m bench fixtures` 重写。
+format: arena-situation
+version: 1
+id: l1-checked-hunter-a
+title: 被查杀的猎人（A）
+tags: [L1, checked_hunter, 'pair:l1-checked-hunter', A]
+scenario: werewolf_12p
+seed: 3204
+deal: start
+players:
+  count: 12
+  names: [Alice, Bob, Carol, David, Eve, Frank, Grace, Henry, Ivy, Jack, Kate, Leo]
+roles: [villager, werewolf, villager, guard, villager, villager, seer, hunter, white_wolf, werewolf, witch, werewolf]
+
+steps:
+  - {as: moderator, tool: set_phase, args: {text: 准备阶段 · 建立频道}, at: 3.0}
+  - {as: moderator, tool: create_channel, args: {channel_id: public, name: 公共频道, type: public, mode: closed, members: [N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12]}}
+  - {as: moderator, tool: create_channel, args: {channel_id: wolf-team, name: 狼人阵营, type: group, mode: closed, members: [N2, N9, N10, N12]}, at: 3.4}
+  - {as: moderator, tool: send_message, args: {channel_id: wolf-team, content: 你们是狼人阵营的队友：N2、N9、N10、N12。夜间会在这里商议，并用“刀口”请求拍刀；允许自刀或空刀。}, at: 4.9}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 对局开始。本局是 12 人暗牌局：出局不公布身份和死因。夜间行动由我私下询问，请留意你的待处理请求。}, at: 5.9}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 夜}, at: 9.9}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 第 1 夜，天黑请闭眼。}, at: 10.0}
+  - {as: moderator, tool: open_request, args: {to: [N4], kind: choice, question: 第 1 夜：请选择今晚守护的玩家（可以守自己，也可以空守；不能连续两晚守护同一人）。, options: [{id: none, label: 空守}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], default: none}, label: guard1, at: 12.0}
+  - {as: N4, tool: respond, args: {request_id: '@guard1', value: N4}, at: 15.7}
+  - {as: moderator, tool: update_player, args: {player_id: N4, set_attributes: {last_guard: N4}}, at: 16.7}
+  - {as: moderator, tool: open_floor, args: {channel_id: wolf-team, mode: free, holders: [N2, N9, N10, N12], limits: {duration_s: 100, max_messages_per_member: 6, max_chars_per_message: 300, max_chars_total: 3000, silence_s: 40}}, at: 18.7}
+  - {as: moderator, tool: open_request, args: {to: [N2, N9, N10, N12], kind: choice, question: 第 1 夜：请和队友商量后选定今晚的刀口（可以自刀，也可以空刀）。你可以随时改选，队友的选择实时可见；大家选得一致，刀口立刻确定。, options: [{id: none, label: 空刀}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], share_answers: true, auto_close: unanimous, duration_s: 150}, label: wolf1, at: 19.7}
+  - {as: moderator, tool: send_message, args: {channel_id: wolf-team, content: 第 1 夜：请商议今晚的刀口，并用你的“刀口”请求拍刀；想改就再选一次，队友的选择大家都看得到。大家选得一致，刀口立刻确定。}, at: 20.2}
+  - {answer: '@wolf1', values: {N2: N5, N9: N5, N10: N5, N12: N5}, at: 28.6}
+  - {as: moderator, tool: close_floor, args: {channel_id: wolf-team}, at: 30.6}
+  - {as: moderator, tool: announce, args: {channel_id: wolf-team, template_id: wolf_target, params: {target: N5}}, at: 32.1}
+  - {as: moderator, tool: open_request, args: {to: [N7], kind: choice, question: 第 1 夜：请选择要查验的玩家。, options: [{id: skip, label: 不查验}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], default: skip}, label: seer1, at: 34.1}
+  - {as: N7, tool: respond, args: {request_id: '@seer1', value: N6}, at: 42.8}
+  - {as: moderator, tool: announce, args: {channel_id: dm-N7, template_id: seer_result, params: {target: N6, side: 好人阵营}}, at: 44.8}
+  - {as: moderator, tool: send_message, args: {channel_id: dm-N11, content: 今晚被狼人袭击的是 N5。}, at: 46.8}
+  - {as: moderator, tool: open_request, args: {to: [N11], kind: choice, question: 第 1 夜：请选择本晚唯一的用药动作（同一晚只能用一瓶药，也可以不用）。, options: [{id: pass, label: 本晚不用药}, {id: save, label: 使用解药（救今晚被袭击的人）}, {id: 'poison:N1', label: 毒杀 N1}, {id: 'poison:N2', label: 毒杀 N2}, {id: 'poison:N3', label: 毒杀 N3}, {id: 'poison:N4', label: 毒杀 N4}, {id: 'poison:N5', label: 毒杀 N5}, {id: 'poison:N6', label: 毒杀 N6}, {id: 'poison:N7', label: 毒杀 N7}, {id: 'poison:N8', label: 毒杀 N8}, {id: 'poison:N9', label: 毒杀 N9}, {id: 'poison:N10', label: 毒杀 N10}, {id: 'poison:N11', label: 毒杀 N11}, {id: 'poison:N12', label: 毒杀 N12}], default: pass}, label: witch1, at: 48.8}
+  - {as: N11, tool: respond, args: {request_id: '@witch1', value: pass}, at: 57.6}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 警长竞选}, at: 60.6}
+  - {as: moderator, tool: open_request, args: {to: [N1, N2, N3, N4, N6, N7, N8, N9, N10, N11, N12], kind: choice, question: 是否上警竞选警长？本选择保密。, options: [{id: 'yes', label: 上警}, {id: 'no', label: 不上警}], sealed: true, default: 'no'}, label: run, at: 62.6}
+  - {answer: '@run', values: {N1: 'no', N2: 'no', N3: 'no', N4: 'no', N6: 'no', N7: 'no', N8: 'no', N9: 'no', N10: 'no', N11: 'no', N12: 'no'}, at: 66.9}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: no_sheriff, params: {}}, at: 69.4}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 公布死讯}, at: 72.4}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: death_notice, params: {players: [N5]}}, at: 73.9}
+  - {as: moderator, tool: update_player, args: {player_id: N5, add_tags: [出局], remove_tags: [存活]}, at: 74.2}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 遗言}, at: 76.2}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N5], limits: {max_messages: 1}}, at: 76.5}
+  - {say: {N5: 我是平民，没有信息给大家。今天听清楚再投，别被带着走。}, channel: public, at: 88.3}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 白天发言}, at: 90.3}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N1, N2, N3, N4, N6, N7, N8, N9, N10, N11, N12], limits: {max_messages: 1}}, at: 90.6}
+  - {say: {N1: 目前没抓到明显的毛病，先观望，投票前再说。}, channel: public, at: 101.7}
+  - {say: {N2: 我是预言家，我把这一夜的验人结果完整报出来：第 1 夜验了 N8，狼人阵营。这是一个查杀。我知道在没有后续信息的时候指认一个人很冒险，但预言家的价值就在于把确定的信息交给好人。所以我的建议是：今天把票集中在 N8 身上，让他在遗言里给大家一个解释；如果有人对跳，我会逐条核对，但眼下优先处理查杀。请好人阵营的朋友相信查验的结果。}, channel: public, meta: {styled: true}, at: 122.2}
+  - {as: N3, tool: pass, args: {channel_id: public}, at: 134.6}
+  - {say: {N4: 我这轮就听，不带节奏。}, channel: public, at: 154.2}
+  - {say: {N6: 我不确定，先不表态，投票时我会认真看。}, channel: public, at: 174.0}
+  - {say: {N7: 我是预言家，和 N2 对跳。第 1 夜验了 N6，好人阵营。没查杀。N8 我没信息。}, channel: public, meta: {styled: true}, at: 193.0}
+  - {say: {N8: 没什么要补充的，听完再投。}, channel: public, at: 206.3}
+  - {say: {N9: 目前没有谁让我特别不放心，我再看看。}, channel: public, at: 218.8}
+  - {say: {N10: 我这边没有额外的信息，大家继续。}, channel: public, at: 230.5}
+  - {say: {N11: 两边的话我都记下了，现在还下不了判断。}, channel: public, at: 243.8}
+  - {say: {N12: 我这边平平安安，没有消息可给，听大家的。}, channel: public, at: 254.0}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 放逐投票}, at: 257.0}
+  - {as: moderator, tool: open_request, args: {to: [N1, N2, N3, N4, N6, N7, N8, N9, N10, N11, N12], kind: choice, question: 第 1 天放逐投票：请选择要放逐的玩家，或弃票。, options: [{id: abstain, label: 弃票}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], sealed: true, default: abstain}, label: vote1, at: 259.0}
+  - {answer: '@vote1', values: {N1: N8, N2: N8, N3: abstain, N4: abstain, N6: abstain, N7: N2, N8: abstain, N9: N8, N10: N8, N11: abstain, N12: N8}, at: 266.4}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: vote_result, params: {summary: 票型：N1→N8，N2→N8，N3 弃票，N4 弃票，N6 弃票，N7→N2，N8 弃票，N9→N8，N10→N8，N11 弃票，N12→N8；得票：N8 5 票，N2 1 票}}, at: 269.4}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: death_notice, params: {players: [N8]}}, at: 270.9}
+  - {as: moderator, tool: update_player, args: {player_id: N8, add_tags: [出局], remove_tags: [存活]}, at: 271.2}
+  - {as: moderator, tool: open_request, args: {to: [N8], kind: choice, question: 你出局了，可以亮出猎人身份开枪。请选择开枪目标，或选择不开枪。, options: [{id: none, label: 不开枪}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], default: none}, label: shot, at: 273.2}
+  - {as: N8, tool: respond, args: {request_id: '@shot', value: N10}, at: 279.5}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: hunter_shot, params: {hunter: N8, target: N10}}, at: 281.5}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: death_notice, params: {players: [N10]}}, at: 282.5}
+  - {as: moderator, tool: update_player, args: {player_id: N10, add_tags: [出局], remove_tags: [存活]}, at: 282.8}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 遗言}, at: 284.8}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N8], limits: {max_messages: 1}}, at: 285.1}
+  - {say: {N8: 我是猎人，开枪带走 N10。别的我不多说了。}, channel: public, at: 296.1}
+  - {as: moderator, tool: set_phase, args: {text: 第 2 夜}, at: 300.1}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 第 2 夜，天黑请闭眼。}, at: 300.2}
+  - {as: moderator, tool: open_request, args: {to: [N4], kind: choice, question: 第 2 夜：请选择今晚守护的玩家（可以守自己，也可以空守；不能连续两晚守护同一人）。, options: [{id: none, label: 空守}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N9, label: N9}, {id: N11, label: N11}, {id: N12, label: N12}], default: none}, label: guard2, at: 302.2}
+  - {as: N4, tool: respond, args: {request_id: '@guard2', value: N6}, at: 305.3}
+  - {as: moderator, tool: update_player, args: {player_id: N4, set_attributes: {last_guard: N6}}, at: 306.3}
+  - {as: moderator, tool: open_floor, args: {channel_id: wolf-team, mode: free, holders: [N2, N9, N12], limits: {duration_s: 100, max_messages_per_member: 6, max_chars_per_message: 300, max_chars_total: 3000, silence_s: 40}}, at: 308.3}
+  - {as: moderator, tool: open_request, args: {to: [N2, N9, N12], kind: choice, question: 第 2 夜：请和队友商量后选定今晚的刀口（可以自刀，也可以空刀）。你可以随时改选，队友的选择实时可见；大家选得一致，刀口立刻确定。, options: [{id: none, label: 空刀}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N9, label: N9}, {id: N11, label: N11}, {id: N12, label: N12}], share_answers: true, auto_close: unanimous, duration_s: 150}, label: wolf2, at: 309.3}
+  - {as: moderator, tool: send_message, args: {channel_id: wolf-team, content: 第 2 夜：请商议今晚的刀口，并用你的“刀口”请求拍刀；想改就再选一次，队友的选择大家都看得到。大家选得一致，刀口立刻确定。}, at: 309.8}
+  - {answer: '@wolf2', values: {N2: N6, N9: N6, N12: N6}, at: 317.4}
+  - {as: moderator, tool: close_floor, args: {channel_id: wolf-team}, at: 319.4}
+  - {as: moderator, tool: announce, args: {channel_id: wolf-team, template_id: wolf_target, params: {target: N6}}, at: 320.9}
+  - {as: moderator, tool: open_request, args: {to: [N7], kind: choice, question: 第 2 夜：请选择要查验的玩家。, options: [{id: skip, label: 不查验}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N9, label: N9}, {id: N11, label: N11}, {id: N12, label: N12}], default: skip}, label: seer2, at: 322.9}
+  - {as: N7, tool: respond, args: {request_id: '@seer2', value: N2}, at: 331.8}
+  - {as: moderator, tool: announce, args: {channel_id: dm-N7, template_id: seer_result, params: {target: N2, side: 狼人阵营}}, at: 333.8}
+  - {as: moderator, tool: send_message, args: {channel_id: dm-N11, content: 今晚被狼人袭击的是 N6。}, at: 335.8}
+  - {as: moderator, tool: open_request, args: {to: [N11], kind: choice, question: 第 2 夜：请选择本晚唯一的用药动作（同一晚只能用一瓶药，也可以不用）。, options: [{id: pass, label: 本晚不用药}, {id: save, label: 使用解药（救今晚被袭击的人）}, {id: 'poison:N1', label: 毒杀 N1}, {id: 'poison:N2', label: 毒杀 N2}, {id: 'poison:N3', label: 毒杀 N3}, {id: 'poison:N4', label: 毒杀 N4}, {id: 'poison:N6', label: 毒杀 N6}, {id: 'poison:N7', label: 毒杀 N7}, {id: 'poison:N9', label: 毒杀 N9}, {id: 'poison:N11', label: 毒杀 N11}, {id: 'poison:N12', label: 毒杀 N12}], default: pass}, label: witch2, at: 337.8}
+  - {as: N11, tool: respond, args: {request_id: '@witch2', value: pass}, at: 345.3}
+  - {as: moderator, tool: set_phase, args: {text: 第 2 天 · 公布死讯}, at: 348.3}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: peaceful_night, params: {}}, at: 349.8}
+  - {as: moderator, tool: set_phase, args: {text: 第 2 天 · 白天发言}, at: 351.8}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N1, N2, N3, N4, N6, N7, N9, N11, N12], limits: {max_messages: 1}}, at: 352.1}
+  - {say: {N1: 我先不说怀疑谁，怕说错了带偏大家。}, channel: public, at: 364.8}
+  - {say: {N2: 这轮我保持观望，等明确的信息出来再动。}, channel: public, at: 381.7}
+  - {as: N3, tool: pass, args: {channel_id: public}, at: 397.6}
+  - {say: {N4: 我是平民，没有技能，只能靠听发言。这轮先不站边。}, channel: public, at: 411.0}
+  - {say: {N6: 我这轮没有什么特别的信息，先听听大家的。}, channel: public, at: 430.7}
+  - {say: {N7: 我只是个普通玩家，信息有限，先听着。}, channel: public, at: 438.9}
+  - {say: {N9: 信息不多，我先不乱表态，投票的时候再认真选。}, channel: public, at: 447.0}
+  - {say: {N11: 前面的发言我都听了，暂时没有倾向，等后面的人说完。}, channel: public, at: 468.0}
+  - {say: {N12: 我先过，等有更多信息再说。}, channel: public, at: 482.1}
+  - {as: moderator, tool: set_phase, args: {text: 第 2 天 · 放逐投票}, at: 485.1}
+  - {as: moderator, tool: open_request, args: {to: [N1, N2, N3, N4, N6, N7, N9, N11, N12], kind: choice, question: 第 2 天放逐投票：请选择要放逐的玩家，或弃票。, options: [{id: abstain, label: 弃票}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N9, label: N9}, {id: N11, label: N11}, {id: N12, label: N12}], sealed: true, default: abstain}, label: vote, at: 487.1}
+  - {answer: '@vote', values: {N1: N2, N2: N7, N4: abstain, N6: abstain, N7: abstain, N9: N7, N11: abstain, N12: N7}, at: 494.3}
+
+decision:
+  seat: N3
+  expect: [respond]
+brief: 被查杀的猎人。N2 报告 N8 是狼人阵营（查杀）；N8 被放逐后开枪，公告写明他是猎人——猎人是好人，预言家不会把他查成狼人阵营。 这一版里 N2 说得长而有条理，N7 说得短而直。
+truth:
+  request: '@vote'
+  answer:
+  - N2
+  kind: checked_hunter
+  decisive: N2 报告 N8 是狼人阵营（查杀）；N8 被放逐后开枪，公告写明他是猎人——猎人是好人，预言家不会把他查成狼人阵营。
+  evidence:
+  - 第 1 夜验了 N8，狼人阵营
+  - 【猎人开枪】N8
+  trap: N2 的查杀说得斩钉截铁，投票也跟着走了；N7 对不能验证的事保持克制，听上去像在躲。
+  sides:
+    fluent: N2
+    blunt: N7
+  roles:
+    N2: werewolf
+    N7: seer
+    N8: hunter
+judge:
+  L1:
+    fluent_side:
+    - N2
+    blunt_side:
+    - N7
+meta:
+  pair: l1-checked-hunter
+  variant: A

@@ -1,0 +1,13 @@
+# 套件 E2（docs/v0.14-plan.md §6.5）。档位：smoke = CI / 第一眼；quick = 改了提示词或记忆之后自查（全部套件加起来约 300 次调用）；full = 发版。
+# `python -m bench suites` 列出题数与预计调用数；`python -m bench run --suite E2 --tier quick` 运行（真模型要 --real 和 --max-calls）。
+format: arena-bench-suite
+version: 1
+id: E2
+title: 向人类学风格
+purpose: 采纳了“向人类学风格”的提案之后，裁判两两比较“哪段更像这位玩家”。
+acceptance: true
+runnable: false
+judges: [E2]
+gates: [E2]
+manual: 需要真人的发言语料（fixtures/corpora/human/，脱敏）和一次真实的复盘学习。做法：同一批局面，学习前的 bot 与学习后的 bot 各发一次言（用 run），再把“真人的发言 + 两个 bot 的发言”成批交给裁判 E2（judge-pack）；胜率 = 学习后的更像真人的比例。本套件不由 `run` 运行。
+tiers: {}

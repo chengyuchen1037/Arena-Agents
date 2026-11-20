@@ -24,8 +24,20 @@ The file::
       - {say: {N1: "..", N2: ".."}, channel: public}
       - {as: moderator, tool: open_request, label: vote, args: {to: [N3], kind: choice, question: 投谁？, options: [{id: N1}, {id: N2}]}}
     decision: {seat: N3, wake: redeliver, expect: [respond]}   # or seats: [N3, N4]: the situation is played once for each of them
+    bots:                          # optional: pin the bot that plays a decision seat (the other seats of the table are never run)
+      N3: bot:Alice@no-people      #   a spec string (the syntax of --bots; ``bot:./minds/zed`` = a directory next to this file), or
+      N4: {name: Zed, core: {identity: .., voice: .., mind: ..}, notes: .., digest: .., playbook: ["- [把握:高|支持:3|反例:0|来源:复盘|#投票] .."], people: {Alice: ..}}
+                                   #   a snapshot of what a game starts a bot with (L0 ``core``; ``notes`` = L1; ``digest`` / ``playbook`` / ``questions`` = L2)
     brief: |                       # for the judges (never shown to a bot): what the situation is about, what is true
     score: [{kind: choice, request: "@vote", correct: [N1]}]   # objective scoring of a ``respond`` decision
+    truth:                         # what is true (never shown to a bot): ``request`` + ``answer`` are the objective score (no ``score:`` needed)
+      request: "@vote"             #   which request the decision answers (a label, or r1)
+      answer: [N1]                 #   the correct option id(s) - they must be options of that request (a test checks)
+      wrong: [N2]                  #   (optional) options that are known to be wrong
+      kind: dead_target            #   what kind of fact decides it; decisive: the fact in words; evidence: strings the bot can read it from
+      decisive: "N7 称第 2 夜验了 N9，但 N9 第 1 夜已经出局。"
+      evidence: ["【出局公告】N9 出局。", "验了 N9"]
+      trap: "…"                   #   (L2) what pulls the wrong way;  sides: {fluent: N7, blunt: N5}  (L1) who talks well and who talks bluntly
     judge: {L2: {...}, L3: {...}}  # per rubric (bench/judges/<id>.md): the facts the judge may use; copied into the judge items
     meta: {...}                    # anything else (pair id, expected side ...): copied into every result row
 
@@ -78,9 +90,14 @@ LABEL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
 #: starts with ``@``, a mention in a speech, is plain text).
 REF_RE = re.compile(r"^@([A-Za-z][A-Za-z0-9_-]{0,31})(?:\.([A-Za-z_][A-Za-z0-9_]*))?$")
 _TOP_KEYS = {
-    "format", "version", "id", "title", "tags", "scenario", "seed", "deal", "clock", "players", "roles", "steps", "decision", "brief", "score",
-    "judge", "meta", "notes",
+    "format", "version", "id", "title", "tags", "scenario", "seed", "deal", "clock", "players", "roles", "steps", "decision", "bots", "brief", "score",
+    "truth", "judge", "meta", "notes",
 }
+#: The keys of ``truth:`` (see :func:`_parse_truth`).
+TRUTH_KEYS = {"request", "answer", "wrong", "match", "kind", "decisive", "evidence", "trap", "sides", "roles", "notes", "source", "rule"}
+#: The keys of an inline bot (a snapshot of what a game would start a bot with) and of its L0.
+BOT_KEYS = {"name", "label", "core", "notes", "digest", "playbook", "questions", "people", "record"}
+CORE_KEYS = ("identity", "voice", "mind")
 _STEP_KEYS = {"as", "tool", "args", "at", "label", "meta", "note"}
 _MACRO_KEYS = {
     "say": {"say", "channel", "at", "label", "meta", "note"},
@@ -90,7 +107,7 @@ _MACRO_KEYS = {
     "running": {"running", "reason", "at", "meta", "note"},
     "untimed": {"untimed", "at", "meta", "note"},
 }
-SCORE_KINDS = ("choice",)
+SCORE_KINDS = ("choice", "text")
 WAKE_KEYS = {"event", "channel", "sender", "kind", "priority", "payload", "seq"}
 
 
@@ -100,7 +117,7 @@ class SituationError(ValueError):
 
 @dataclass(frozen=True)
 class Step:
-    """One thing the world is made to do.  ``kind``: ``tool`` (an intent of ``actor``), ``advance``, ``tick`` or ``running``."""
+    """One thing the world is made to do.  ``kind``: ``tool`` (an intent of ``actor``), ``advance``, ``tick``, ``running`` or ``untimed``."""
 
     index: int
     kind: str
@@ -168,6 +185,11 @@ class Situation:
     score: tuple[Mapping[str, Any], ...] = ()
     judge: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     meta: Mapping[str, Any] = field(default_factory=dict)
+    #: What is true about the situation (``truth:``): the answer of the request, the decisive fact, the evidence strings, the trap, the sides of a pair.
+    truth: Mapping[str, Any] = field(default_factory=dict)
+    #: The bots the script itself puts on decision seats (``{seat: {"spec": "bot:Alice@no-people"}}`` or an inline snapshot ``{"name": ..., "core": {...}, ...}``).
+    #: A seat that has one is played by that bot, whatever ``--bots`` says; a seat without one by every bot of the run.
+    bots: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     path: str = ""  # the file it was read from ("" = made in code)
 
     @property
@@ -282,7 +304,7 @@ def expand_steps(raw: Any, *, where: str = "steps") -> tuple[Step, ...]:
                 if not isinstance(request, str) or not request or (request.startswith("@") and not REF_RE.match(request)):
                     raise _fail(here, "answer 必须是请求 id（r1）或 @label。")
                 _check_label_ref(request, labels, here)
-                values = _mapping(data.get("values"), here, "values")
+                values = _mapping(data.get("values") or {}, here, "values")
                 if not values:
                     raise _fail(here, "answer 需要 values：{座位: 选项或文字}。")
                 reasons = _mapping(data.get("reasons") or {}, here, "reasons")
@@ -379,16 +401,33 @@ def _parse_score(raw: Any, labels: set[str], where: str) -> tuple[Mapping[str, A
         body = _mapping(item, here, "score 的每一项")
         if body.get("kind") not in SCORE_KINDS:
             raise _fail(here, f"score.kind 只能是 {'、'.join(SCORE_KINDS)}。")
-        _check_keys(body, {"kind", "request", "correct", "wrong"}, here)
+        kind = body["kind"]
+        _check_keys(body, {"kind", "request", "correct", "wrong"} if kind == "choice" else {"kind", "request", "contains", "absent"}, here)
         request = body.get("request")
         if not isinstance(request, str) or not request or (request.startswith("@") and not REF_RE.match(request)):
-            raise _fail(here, "choice 需要 request（请求 id 或 @label）。")
+            raise _fail(here, f"{kind} 需要 request（请求 id 或 @label）。")
         _check_label_ref(request, labels, here)
+        if kind == "text":
+            contains = _strings(body.get("contains"), here, "contains")
+            if not contains or any(not c.strip() for c in contains):
+                raise _fail(here, "text 需要 contains（答案里必须出现的词，不能是空的）。")
+            out.append({"kind": "text", "request": request, "contains": list(contains), "absent": list(_strings(body.get("absent"), here, "absent"))})
+            continue
         correct = _strings(body.get("correct"), here, "correct")
         if not correct:
             raise _fail(here, "choice 需要 correct（正确的选项 id 列表）。")
         out.append({"kind": "choice", "request": request, "correct": list(correct), "wrong": list(_strings(body.get("wrong"), here, "wrong"))})
     return tuple(out)
+
+
+def implied_score(truth: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The objective score a ``truth:`` implies (``request`` + ``answer``): a ``choice`` (the value is one of the answers) or, with ``match: text``, a ``text``
+    (the written answer mentions every ``answer`` and none of the ``wrong``).  ``None`` when the truth names no request or no answer."""
+    if not truth.get("request") or not truth.get("answer"):
+        return None
+    if truth.get("match") == "text":
+        return {"kind": "text", "request": truth["request"], "contains": list(truth["answer"]), "absent": list(truth.get("wrong", []))}
+    return {"kind": "choice", "request": truth["request"], "correct": list(truth["answer"]), "wrong": list(truth.get("wrong", []))}
 
 
 def _parse_judge(raw: Any, where: str) -> dict[str, Mapping[str, Any]]:
@@ -404,6 +443,114 @@ def _parse_judge(raw: Any, where: str) -> dict[str, Mapping[str, Any]]:
         if not re.match(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$", rubric):
             raise _fail(where, f"rubric 名 {rubric!r} 不合法。")
         out[rubric] = _mapping(facts or {}, f"{where}.{rubric}", "每个 rubric 的内容")
+    return out
+
+
+def _parse_truth(raw: Any, labels: set[str], where: str) -> dict[str, Any]:
+    """``truth:`` - what is true about the situation, for scoring and for the judges (never shown to a bot).  ``request`` + ``answer`` make an objective
+    score (the ``respond`` value is in ``answer``); ``decisive`` / ``evidence`` say which fact decides it and which strings of the board / history carry it
+    (a test checks the bot can read them); ``trap`` is what pulls the wrong way (L2); ``sides`` names the fluent and the blunt speaker of a pair (L1)."""
+    if raw is None:
+        return {}
+    body = _mapping(raw, where, "truth")
+    _check_keys(body, TRUTH_KEYS, where)
+    out: dict[str, Any] = {}
+    if body.get("match") is not None:
+        if body["match"] not in ("choice", "text"):
+            raise _fail(where, "match 只能是 choice 或 text（默认 choice：答案是选项 id；text：答案是写出来的文字里要出现的词）。")
+        out["match"] = body["match"]
+    request = body.get("request")
+    if request is not None:
+        if not isinstance(request, str) or not request or (request.startswith("@") and not REF_RE.match(request)):
+            raise _fail(where, "request 必须是请求 id（r1）或 @label。")
+        _check_label_ref(request, labels, where)
+        out["request"] = request
+    for key in ("answer", "wrong", "evidence"):
+        if body.get(key) is not None:
+            values = _strings(body[key], where, key)
+            if not values or any(not v.strip() for v in values):
+                raise _fail(where, f"{key} 不能是空的，也不能有空字符串。")
+            out[key] = list(values)
+    if "answer" in out and "request" not in out:
+        raise _fail(where, "写了 answer 就要写 request（答案对应哪一个请求）。")
+    if "wrong" in out and set(out["wrong"]) & set(out.get("answer", [])):
+        raise _fail(where, "wrong 和 answer 不能有交集。")
+    for key in ("kind", "decisive", "trap", "notes", "source", "rule"):
+        if body.get(key) is not None:
+            out[key] = _text(body[key], where, key, required=True, limit=2000)
+    if body.get("sides") is not None:
+        sides = _mapping(body["sides"], f"{where}.sides", "sides")
+        _check_keys(sides, {"fluent", "blunt"}, f"{where}.sides")
+        if set(sides) != {"fluent", "blunt"} or not all(isinstance(v, str) and SEAT_RE.match(v) for v in sides.values()) or sides["fluent"] == sides["blunt"]:
+            raise _fail(where, "sides 要写 fluent 和 blunt 两个不同的座位号。")
+        out["sides"] = {"fluent": sides["fluent"], "blunt": sides["blunt"]}
+    if body.get("roles") is not None:
+        roles = _mapping(body["roles"], f"{where}.roles", "roles")
+        out["roles"] = {str(seat): _text(text, f"{where}.roles", str(seat), required=True, limit=200) for seat, text in roles.items()}
+    return out
+
+
+def _text(value: Any, where: str, what: str, *, required: bool = False, limit: int = 20000) -> str:
+    if value is None:
+        if required:
+            raise _fail(where, f"{what} 不能是空的。")
+        return ""
+    if not isinstance(value, str):
+        raise _fail(where, f"{what} 必须是文字（现在是 {type(value).__name__}）。")
+    text = value.strip()
+    if required and not text:
+        raise _fail(where, f"{what} 不能是空的。")
+    if len(text) > limit:
+        raise _fail(where, f"{what} 太长了（{len(text)} 字，最多 {limit} 字）。")
+    return text
+
+
+def _parse_bots(raw: Any, seats: Sequence[str], where: str) -> dict[str, Mapping[str, Any]]:
+    """``bots:`` - the bot that plays a decision seat, as a spec string (``bot:Alice@no-people``, the syntax of ``--bots``) or as an inline snapshot of
+    what a game would start the bot with (L0 ``core``, ``notes`` = L1, ``digest`` / ``playbook`` / ``questions`` = L2 of this scenario, ``people``,
+    ``record``).  A self-contained snapshot keeps a committed situation (an M-suite question about one entry of a playbook, say) from changing when
+    ``bots/`` does."""
+    if raw is None:
+        return {}
+    from bench.bots import BotSpecError, check_spec_text, check_playbook_text  # (late: bench.bots imports this module)
+
+    body = _mapping(raw, where, "bots")
+    out: dict[str, Mapping[str, Any]] = {}
+    for seat, definition in body.items():
+        here = f"{where}.{seat}"
+        if seat not in seats:
+            raise _fail(where, f"座位 {seat} 不是 decision 的座位（{'、'.join(seats)}）：只有被测的座位会运行，别的座位不需要 bot。")
+        if isinstance(definition, str):
+            spec = _text(definition, here, "bot 的写法", required=True, limit=300)
+            try:
+                check_spec_text(spec)
+            except BotSpecError as exc:
+                raise _fail(here, str(exc)) from None
+            out[seat] = {"spec": spec}
+            continue
+        inline = _mapping(definition, here, "bot（写成 spec 字符串，或写成一份快照）")
+        _check_keys(inline, BOT_KEYS, here)
+        name = _text(inline.get("name"), here, "name", required=True, limit=32)
+        core = _mapping(inline.get("core"), f"{here}.core", "core")
+        _check_keys(core, set(CORE_KEYS), f"{here}.core")
+        parsed: dict[str, Any] = {"name": name, "core": {key: _text(core.get(key), f"{here}.core", key, required=True, limit=4000) for key in CORE_KEYS}}
+        if inline.get("label") is not None:
+            parsed["label"] = _text(inline["label"], here, "label", required=True, limit=64)
+        for key in ("notes", "digest", "questions", "record"):
+            if inline.get(key) is not None:
+                parsed[key] = _text(inline[key], here, key)
+        playbook = inline.get("playbook")
+        if playbook is not None:
+            lines = _strings(playbook, here, "playbook")
+            parsed["playbook"] = "\n".join(lines).strip()
+            try:
+                check_playbook_text(parsed["playbook"])
+            except BotSpecError as exc:
+                raise _fail(here, str(exc)) from None
+        if inline.get("people") is not None:
+            people = _mapping(inline["people"], f"{here}.people", "people")
+            parsed["people"] = {str(who): _text(text, f"{here}.people", str(who), required=True, limit=500) for who, text in people.items()}
+        out[seat] = parsed
     return out
 
 
@@ -470,6 +617,11 @@ def parse_situation(data: Any, *, source: str = "") -> Situation:
     for step in steps:
         if step.kind == "tool" and step.actor == MODERATOR and step.tool in ("announce", "send_message") and not step.args.get("channel_id"):
             raise _fail(step.describe(), "需要 channel_id。")
+    truth = _parse_truth(body.get("truth"), labels, f"{where}: truth")
+    score = list(_parse_score(body.get("score"), labels, f"{where}: score"))
+    implied = implied_score(truth)
+    if implied and not any(rule["request"] == truth["request"] for rule in score):
+        score.append(implied)  # the truth is the objective score: ``truth: {request, answer}`` needs no second ``score:`` (an explicit ``score:`` for that request wins)
     return Situation(
         id=sid,
         scenario=scenario,
@@ -484,9 +636,11 @@ def parse_situation(data: Any, *, source: str = "") -> Situation:
         names=names,
         roles=roles,
         brief=str(body.get("brief") or "").strip(),
-        score=_parse_score(body.get("score"), labels, f"{where}: score"),
+        score=tuple(score),
         judge=_parse_judge(body.get("judge"), f"{where}: judge"),
         meta=_mapping(body.get("meta") or {}, f"{where}: meta", "meta"),
+        truth=truth,
+        bots=_parse_bots(body.get("bots"), seats, f"{where}: bots"),
     )
 
 
@@ -551,6 +705,10 @@ def load_situations(
 
 
 __all__ = [
+    "BOT_KEYS",
+    "CORE_KEYS",
+    "TRUTH_KEYS",
+    "implied_score",
     "DEALS",
     "DECISION_TOOLS",
     "DEFAULT_NAMES",

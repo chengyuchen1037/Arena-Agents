@@ -1,7 +1,9 @@
 """What keeps a benchmark run away from the user's real data and secrets.
 
 * a run never reads or writes the real data directory (games, the provider table, the encrypted keys): :func:`isolated_data_dir` points
-  ``ARENA_DATA_DIR`` at a fresh temporary directory for the whole run (and :func:`refuse_real_data_dir` is the check the real-model mode makes);
+  ``ARENA_DATA_DIR`` at a fresh directory inside the run's output directory for the whole run (and :func:`refuse_real_data_dir` refuses an
+  output directory that is, or contains, the real data);
+* a run leaves nothing outside its output directory (``.pytest_tmp/bench-runs/<run id>/`` by default): it never calls ``tempfile.mkdtemp``;
 * a real model is reached only with what the user hands over *explicitly*: a base URL, a model id and the name of an environment variable that
   holds the key (``bench.realllm``) - the provider table of the app is never opened;
 * a key never appears in a result, a log or an error message (:func:`scrub`).
@@ -12,7 +14,7 @@ from __future__ import annotations
 import contextlib
 import os
 import shutil
-import tempfile
+import uuid
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
@@ -34,13 +36,10 @@ def _resolved(path: str | Path) -> Path:
 
 
 def real_data_dirs() -> list[Path]:
-    """The places the app keeps its data: ``<repository>/data`` (the development default), ``.demo-data``, ``%LOCALAPPDATA%/Arena-Agent``,
-    ``/data`` (Docker) and wherever ``ARENA_DATA_DIR`` pointed when this module was imported."""
-    found = [REPO_ROOT / "data", REPO_ROOT / ".demo-data", Path("/data")]
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        found.append(Path(local) / "Arena-Agent")
-    if _STARTUP_DATA_DIR:
+    """The places the app keeps its data (``app.storage.paths.get_data_dir``): ``ARENA_DATA_DIR`` as it was when this module was imported, the
+    demo data (``<repository>/.demo-data``) and ``<repository>/data``."""
+    found = [REPO_ROOT / "data", REPO_ROOT / ".demo-data"]
+    if _STARTUP_DATA_DIR and _STARTUP_DATA_DIR.strip():
         found.append(Path(_STARTUP_DATA_DIR))
     return [_resolved(p) for p in found]
 
@@ -54,10 +53,23 @@ def refuse_real_data_dir(path: str | Path) -> None:
             raise UnsafeDataDir(f"基准不能写进真实的数据目录：{target}（它与 {real} 重叠）。")
 
 
+DEFAULT_RUNS_DIR = REPO_ROOT / ".pytest_tmp" / "bench-runs"  # (``.pytest_tmp/`` is ignored by git, like every other scratch directory of the project)
+
+
+def default_out_dir(run_id: str) -> Path:
+    """Where a run's results go when ``--out`` is not given: ``.pytest_tmp/bench-runs/<run id>/``.  Never the system's temporary directory (in
+    some sandboxes that is the repository root) and never the app's data directory."""
+    return DEFAULT_RUNS_DIR / run_id
+
+
 @contextlib.contextmanager
-def isolated_data_dir() -> Iterator[Path]:
-    """``ARENA_DATA_DIR`` = a fresh temporary directory, removed afterwards; the old value is restored."""
-    directory = Path(tempfile.mkdtemp(prefix="arena-bench-"))
+def isolated_data_dir(base: str | Path) -> Iterator[Path]:
+    """``ARENA_DATA_DIR`` = a fresh directory *inside* ``base`` (the run's output directory), removed afterwards; the old value is restored.
+    Nothing a benchmark run needs lives outside the directory the user gave (or the default one): no ``tempfile`` directory is made."""
+    root = Path(base)
+    root.mkdir(parents=True, exist_ok=True)
+    directory = root / f".arena-data-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    directory.mkdir()
     previous = os.environ.get(DATA_DIR_ENV)
     os.environ[DATA_DIR_ENV] = str(directory)
     try:
@@ -79,4 +91,13 @@ def scrub(text: object, secrets: Iterable[str] = ()) -> str:
     return out
 
 
-__all__ = ["DATA_DIR_ENV", "UnsafeDataDir", "isolated_data_dir", "real_data_dirs", "refuse_real_data_dir", "scrub"]
+__all__ = [
+    "DATA_DIR_ENV",
+    "DEFAULT_RUNS_DIR",
+    "UnsafeDataDir",
+    "default_out_dir",
+    "isolated_data_dir",
+    "real_data_dirs",
+    "refuse_real_data_dir",
+    "scrub",
+]

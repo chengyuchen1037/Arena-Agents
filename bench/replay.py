@@ -16,7 +16,10 @@ What the converter does and cannot do (the findings are in bench/README.md):
   (when nobody was defaulted it never mattered);
 * an agent's private notes and compactions are not in the ledger: the replayed seat starts the decision point with empty notes - as a benchmark
   bot does anyway;
-* ``mod.random`` is replayed with the world's seed: the draws agree when the dealing used the same seed (``deal="seed"``), not after an explicit deal.
+* ``mod.random`` is replayed with the world's seed: the draws agree when the dealing used the same seed (``deal="seed"``), not after an explicit deal
+  (a pool that is not shuffled does not use the generator, so every later draw differs);
+* the unit of a replay is an action: "up to entry N" ends at the end of the action that wrote N (the entries the engine writes in the same breath
+  after N are written too: ``overshoot`` in the report).  A decision point - a ``request.opened``, a ``floor.granted`` - is the end of its action.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ import json
 import math
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import yaml
@@ -36,7 +39,7 @@ from app.world.spec import ScenarioSpec
 from app.world.world import World
 from bench.loaders import load_game
 from bench.play import PlayError, StepRunner, load_spec, with_explicit_roles
-from bench.situation import MODERATOR, Decision, Situation, Step, WakeSpec
+from bench.situation import MODERATOR, Decision, Situation, Step, WakeSpec, implied_score
 
 ENGINE = "engine"
 GT_TOLERANCE = 0.02  # seconds: the clock of a replay is set to the saved ``gt``, a timer fires at the same tick or one step later
@@ -391,8 +394,13 @@ def is_truncation_artifact(entry: Mapping[str, Any], diffs: Sequence[tuple[str, 
 def compare_ledgers(saved: Sequence[Mapping[str, Any]], replayed: Sequence[Mapping[str, Any]], upto: int) -> dict[str, Any]:
     """Entry by entry (same position): how many are identical (by ``normalize_entry``; ``gt`` within ``GT_TOLERANCE``), the first that is not, and
     the mismatches by type.  A replay that wrote more or fewer entries is reported by the counts.  Differences that are only the trace of a v0.13
-    truncation (:func:`is_truncation_artifact`) are counted as ``artifacts``, not as mismatches."""
-    expected = [e for e in saved if int(e["seq"]) <= upto]
+    truncation (:func:`is_truncation_artifact`) are counted as ``artifacts``, not as mismatches.
+
+    The unit of a replay is an *action* (a tool call): the engine writes everything that follows from it in the same breath, so a replay that is to stop
+    "at entry ``upto``" ends at the end of the action that wrote it.  When that action's consequences run past ``upto`` the replay has a few entries more
+    (``overshoot``); they are compared with the saved entries at the same positions."""
+    reach = min(len(saved), max(upto, len(replayed)))
+    expected = [e for e in saved if int(e["seq"]) <= reach]
     mismatches: list[Mismatch] = []
     artifacts: list[Mismatch] = []
     gt_drift = 0
@@ -415,6 +423,7 @@ def compare_ledgers(saved: Sequence[Mapping[str, Any]], replayed: Sequence[Mappi
             mismatches.append(Mismatch(int(entry["seq"]), str(entry.get("type")), diffs))
     return {
         "saved": len(expected), "replayed": len(replayed), "compared": min(len(expected), len(replayed)), "matched": matched,
+        "overshoot": max(0, len(replayed) - upto) if len(replayed) <= len(saved) else 0,
         "artifacts": len(artifacts), "identical": not mismatches and len(expected) == len(replayed), "gt_drift": gt_drift,
         "first_mismatch": mismatches[0].describe() if mismatches else (
             None if len(expected) == len(replayed) else f"条数不同：存档 {len(expected)} 条，重放 {len(replayed)} 条"
@@ -576,10 +585,15 @@ def situation_to_data(situation: Situation) -> dict[str, Any]:
         "wake": "redeliver" if wake.mode == "redeliver" else ({"since": wake.label} if wake.mode == "since" else [dict(e) for e in wake.envelopes]),
         "expect": list(situation.decision.expect),
     }
+    if situation.bots:
+        data["bots"] = {seat: (definition["spec"] if "spec" in definition else _plain(definition)) for seat, definition in situation.bots.items()}
     if situation.brief:
         data["brief"] = situation.brief
-    if situation.score:
-        data["score"] = _plain(list(situation.score))
+    if situation.truth:
+        data["truth"] = _plain(situation.truth)
+    implied = [rule] if (rule := implied_score(situation.truth)) else []
+    if situation.score and [dict(rule) for rule in situation.score] != implied:
+        data["score"] = _plain(list(situation.score))  # (a score that the truth already implies is not written twice)
     if situation.judge:
         data["judge"] = _plain(situation.judge)
     if situation.meta:
@@ -604,6 +618,8 @@ def report_text(result: ReplayResult, *, game_id: str = "") -> str:
         + (f"，另有 {led['artifacts']} 条只差 v0.13 截断留下的尾部空白（引擎现在会先去掉首尾空白，见模块说明）" if led["artifacts"] else "")
         + ("，其余全部一致。" if led["identical"] else f"，第一处不同 → {led['first_mismatch']}"),
     ]
+    if led["overshoot"]:
+        lines.append(f"  决策点（#{conv.upto_seq}）之后，同一个动作的后续记录又写了 {led['overshoot']} 条（引擎在一个动作里一口气写完），也一并比对了。")
     if led["gt_drift"]:
         lines.append(f"  游戏时钟与存档相差超过 {GT_TOLERANCE:g} 秒的条目：{led['gt_drift']} 条。")
     if led["mismatch_by_type"]:

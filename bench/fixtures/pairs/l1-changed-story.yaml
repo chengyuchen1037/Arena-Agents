@@ -1,0 +1,20 @@
+# L1 成对题 l1-changed-story：同一夜两个说法
+# A、B 两个局面的事实完全相同（同一份代码、同一个种子；只有标了 meta.styled 的发言不同）：A 里狼说得长而有条理、好人说得短而直，B 里两边对调。
+# 表达偏差 = P(投给说得好听的一方) − 0.5；两版都投正确答案的 bot 偏差为 0。本文件由 bench/cases 生成，不要手改（python -m bench fixtures）。
+format: arena-pair
+version: 1
+id: l1-changed-story
+title: 同一夜两个说法
+suite: L1
+a: situations/l1-changed-story-a.yaml
+b: situations/l1-changed-story-b.yaml
+answer:
+- N4
+decisive: N4 第 1 天说第 1 夜验的是 N1，第 2 天说第 1 夜验的是 N2——同一个晚上的查验，说了两个不同的目标。
+sides:
+  a:
+    fluent: N4
+    blunt: N12
+  b:
+    fluent: N12
+    blunt: N4

@@ -21,7 +21,8 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-from collections.abc import Callable, Iterable, Sequence
+import re
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,18 @@ BrainFactory = Callable[[str, World, ScenarioSpec], Any]
 
 #: The layers a bot spec may take away (``@no-...``); ``nomem`` switches the whole memory off, ``blank-core`` replaces the L0.
 ABLATIONS = ("nomem", "no-notes", "no-digest", "no-playbook", "no-questions", "no-people", "no-record", "blank-core")
+#: ``@history=6000``: the bot sees at most this many characters of the visible history (the default is 12000).  The M2 suite narrows it, the way a long game does:
+#: what happened early has scrolled out, and only what the bot kept (the hard-fact table, its notes) is left.  Works for ``legacy`` too.
+HISTORY_OPTION = re.compile(r"^history=(\d{3,6})$")
+
+
+def history_chars_of(options: Iterable[str]) -> int | None:
+    """The ``history=N`` of a spec's options (``None`` = the brain's own default)."""
+    for option in options:
+        match = HISTORY_OPTION.match(option)
+        if match:
+            return int(match.group(1))
+    return None
 #: The L0 of a ``blank-core`` bot: nobody in particular (the M1 control for "the L0 does something").
 NEUTRAL_CORE = CoreFiles(
     identity="一名普通的玩家。",
@@ -84,6 +97,21 @@ class BenchBot:
         core = self.mind.core
         return f"{self.mind.name}\n身份：{core.identity.strip()}\n说话方式：{core.voice.strip()}"
 
+    @property
+    def style_card(self) -> str:
+        """What a judge matches a speech against in S2: three lines of the bot's own ``voice`` (how it talks, how it sounds, how long) - no name, nothing
+        else of the bot.  Empty for a bot without a voice (``legacy`` has none: there is no style to recognise)."""
+        if self.mind is None:
+            return ""
+        lines = [line.strip() for line in self.mind.core.voice.strip().splitlines() if line.strip()]
+        if len(lines) > 3:
+            band = next((line for line in lines if line.startswith(("篇幅：", "篇幅:"))), lines[2])
+            lines = [*lines[:2], band]
+        text = "\n".join(lines)
+        for name in sorted({self.mind.name, self.name} - {""}, key=len, reverse=True):
+            text = text.replace(name, "我")  # (a voice that names itself must not name the bot on a card)
+        return text
+
     def make_brain(self, seat: str, world: World, spec: ScenarioSpec) -> Any:
         return self.factory(seat, world, spec)
 
@@ -124,6 +152,11 @@ def _find_bot_dir(ref: str, library: Path | None) -> Path:
     raise BotSpecError(f"找不到 bot {ref!r}（既不是 {root} 里的默认 bot，也不是一个带 core/ 的目录）。")
 
 
+def _bot_id(name: str) -> str:
+    """A stable id from the name (the runner needs no store: the same name is the same bot in every run)."""
+    return "b-" + hashlib.sha256(name.casefold().encode("utf-8")).hexdigest()[:8]
+
+
 def load_bot_mind(ref: str, *, scenario_id: str = "", memory: bool = True, library: Path | None = None) -> BotMind:
     """The snapshot a game would start with, read from a bot directory (``BotStore.load_mind`` without the store: pure file reading): L0 and - when
     ``memory`` - the operating notes, the digest / playbook / questions of ``scenario_id``, the impressions and the record."""
@@ -139,7 +172,7 @@ def load_bot_mind(ref: str, *, scenario_id: str = "", memory: bool = True, libra
     core = botfiles.read_core(directory / "core")
     if not core.complete:
         raise BotSpecError(f"bot {name} 的底层设定不完整（缺少：{'、'.join(core.missing)}）。")
-    bot_id = "b-" + hashlib.sha256(name.casefold().encode("utf-8")).hexdigest()[:8]
+    bot_id = _bot_id(name)
     if not memory:
         return BotMind(bot_id=bot_id, name=name, core=core, rules=RulesMemory(scenario_id=scenario_id))
     rules = RulesMemory(scenario_id=scenario_id)
@@ -184,13 +217,16 @@ def ablate(mind: BotMind, options: Iterable[str]) -> BotMind:
 
 
 # ---------------------------------------------------------------------------------------------------------------------- the factories
-def legacy_bot(name: str = "", *, label: str = "", persona: str = "", memory: str = "", cfg: dict[str, Any] | None = None) -> BenchBot:
+def legacy_bot(
+    name: str = "", *, label: str = "", persona: str = "", memory: str = "", cfg: dict[str, Any] | None = None, history_chars: int | None = None, options: Sequence[str] = ()
+) -> BenchBot:
     """The v0.13.1 player.  ``persona`` / ``memory`` are the roster texts of that version (empty = a fresh install: no persona, no memory)."""
 
     def factory(seat: str, world: World, spec: ScenarioSpec) -> LegacyBrain:
-        return LegacyBrain(world, spec, cfg, personas={seat: persona} if persona else {}, memories={seat: memory} if memory else {})
+        limits = {"player": history_chars, "moderator": history_chars} if history_chars else None
+        return LegacyBrain(world, spec, cfg, personas={seat: persona} if persona else {}, memories={seat: memory} if memory else {}, history_chars=limits)
 
-    return BenchBot(label=label or (f"legacy:{name}" if name else "legacy"), kind="legacy", name=name, brain="LegacyBrain", factory=factory)
+    return BenchBot(label=label or (f"legacy:{name}" if name else "legacy"), kind="legacy", name=name, brain="LegacyBrain", factory=factory, options=tuple(options))
 
 
 def mind_bot(
@@ -204,9 +240,10 @@ def mind_bot(
 ) -> BenchBot:
     """A v0.14 bot made from a ready ``BotMind`` (the snapshot a game starts with) and the official contract."""
     doc = contract if contract is not None else load_default_contract()
+    history_chars = history_chars_of(options)
 
     def factory(seat: str, world: World, spec: ScenarioSpec) -> BotBrain:
-        return BotBrain(world, spec, seat, mind, doc, cfg=cfg, memory_enabled=memory_enabled)
+        return BotBrain(world, spec, seat, mind, doc, cfg=cfg, memory_enabled=memory_enabled, history_chars=history_chars)
 
     return BenchBot(
         label=label or f"bot:{mind.name}", kind="bot", name=mind.name, brain="BotBrain", factory=factory, mind=mind,
@@ -222,34 +259,119 @@ def split_spec(text: str) -> tuple[str, str, tuple[str, ...]]:
     return kind.strip().lower(), ref.strip(), options
 
 
-def parse_bot_spec(text: str, *, scenario_id: str = "", library: Path | None = None, contract: ContractDoc | None = None) -> BenchBot:
-    """The bot a spec string stands for (see the module docstring).  Raises :class:`BotSpecError`."""
+def check_spec_text(text: str) -> None:
+    """The shape of a spec string - its kind, its reference, its options - without loading anything.  Raises :class:`BotSpecError`."""
     kind, ref, options = split_spec(text)
     label = text.strip()
-    unknown = [o for o in options if o not in ABLATIONS]
+    unknown = [o for o in options if o not in ABLATIONS and not HISTORY_OPTION.match(o)]
     if unknown:
-        raise BotSpecError(f"{label}：不认识的选项 {'、'.join(unknown)}。可用的：{'、'.join(ABLATIONS)}。")
+        raise BotSpecError(f"{label}：不认识的选项 {'、'.join(unknown)}。可用的：{'、'.join(ABLATIONS)}，以及 history=字数（例如 history=6000）。")
     if kind == "legacy":
-        if options:
-            raise BotSpecError(f"{label}：legacy 没有可以拿掉的层（选项只对 bot: 有用）。")
-        return legacy_bot(ref, label=label)
-    if kind == "bot":
+        if [o for o in options if not HISTORY_OPTION.match(o)]:
+            raise BotSpecError(f"{label}：legacy 没有可以拿掉的层（选项只对 bot: 有用；legacy 只认 history=字数）。")
+    elif kind == "bot":
         if not ref:
             raise BotSpecError(f"{label}：bot: 后面要写默认库里的名字或一个目录。")
-        memory = "nomem" not in options
-        mind = ablate(load_bot_mind(ref, scenario_id=scenario_id, memory=memory, library=library), options)
-        return mind_bot(mind, contract, label=label, memory_enabled=memory, options=options)
-    raise BotSpecError(f"{label}：bot 的种类只能是 legacy 或 bot（现在是 {kind!r}）。")
+    else:
+        raise BotSpecError(f"{label}：bot 的种类只能是 legacy 或 bot（现在是 {kind!r}）。")
+
+
+def check_playbook_text(text: str) -> None:
+    """A playbook written in a situation file: every line must be an entry (``- [把握:高|支持:3|反例:0|来源:复盘|#投票] 一句话``) or a heading."""
+    entries, ignored = botfiles.parse_playbook_ex(text)
+    if ignored:
+        raise BotSpecError(f"playbook 里有 {ignored} 行不是打法条目（每条写成 `- [把握:高|支持:3|反例:0|来源:复盘|#投票] 一句话`）。")
+    problems = botfiles.check_playbook(entries)
+    if problems:
+        raise BotSpecError("playbook 有问题：" + problems[0])
+
+
+def _resolve_ref(ref: str, base_dir: Path | None) -> str:
+    """A directory written relative to the file that names it (``bot:./minds/zed`` in a situation file) is looked for there first."""
+    if base_dir is not None and ref and not Path(ref).is_absolute():
+        candidate = Path(base_dir) / ref
+        if (candidate / "core").is_dir():
+            return str(candidate)
+    return ref
+
+
+def parse_bot_spec(
+    text: str, *, scenario_id: str = "", library: Path | None = None, contract: ContractDoc | None = None, base_dir: Path | None = None
+) -> BenchBot:
+    """The bot a spec string stands for (see the module docstring).  ``base_dir``: where a relative directory is looked for first (the situation
+    file's own).  Raises :class:`BotSpecError`."""
+    check_spec_text(text)
+    kind, ref, options = split_spec(text)
+    label = text.strip()
+    if kind == "legacy":
+        return legacy_bot(ref, label=label, history_chars=history_chars_of(options), options=options)
+    memory = "nomem" not in options
+    mind = ablate(load_bot_mind(_resolve_ref(ref, base_dir), scenario_id=scenario_id, memory=memory, library=library), options)
+    return mind_bot(mind, contract, label=label, memory_enabled=memory, options=options)
+
+
+def mind_from_definition(definition: Mapping[str, Any], *, scenario_id: str = "") -> BotMind:
+    """The snapshot an inline bot of a situation file stands for (``name``, ``core``, ``notes``, ``digest``, ``playbook``, ``questions``, ``people``,
+    ``record``: what a game would start the bot with; the memory of the *scenario* of the situation).  Raises :class:`BotSpecError`."""
+    name = str(definition.get("name") or "").strip()
+    core_in = definition.get("core") or {}
+    core = CoreFiles(identity=str(core_in.get("identity") or ""), voice=str(core_in.get("voice") or ""), mind=str(core_in.get("mind") or ""))
+    if not name or not core.complete:
+        raise BotSpecError(f"bot {name or '（没有名字）'} 的底层设定不完整（缺少：{'、'.join(core.missing) or 'name'}）。")
+    playbook = str(definition.get("playbook") or "")
+    check_playbook_text(playbook)
+    return BotMind(
+        bot_id=_bot_id(name),
+        name=name,
+        core=core,
+        arch_notes=str(definition.get("notes") or "").strip(),
+        rules=RulesMemory(
+            scenario_id=scenario_id,
+            digest=str(definition.get("digest") or "").strip(),
+            playbook=tuple(botfiles.parse_playbook(playbook)),
+            questions=str(definition.get("questions") or "").strip(),
+        ),
+        people={str(who): str(text).strip() for who, text in (definition.get("people") or {}).items()},
+        record=str(definition.get("record") or "").strip(),
+    )
+
+
+def bot_from_definition(
+    definition: Mapping[str, Any],
+    *,
+    scenario_id: str = "",
+    library: Path | None = None,
+    contract: ContractDoc | None = None,
+    base_dir: Path | None = None,
+) -> BenchBot:
+    """The bot a ``bots:`` entry of a situation file stands for: ``{"spec": "bot:Alice@no-people"}`` or an inline snapshot."""
+    if "spec" in definition:
+        return parse_bot_spec(str(definition["spec"]), scenario_id=scenario_id, library=library, contract=contract, base_dir=base_dir)
+    mind = mind_from_definition(definition, scenario_id=scenario_id)
+    return mind_bot(mind, contract, label=str(definition.get("label") or f"bot:{mind.name}"))
+
+
+def split_spec_list(raw: str) -> list[str]:
+    """``"legacy,bot:Alice@nomem,no-people,bot:Bob"`` -> ``["legacy", "bot:Alice@nomem,no-people", "bot:Bob"]``.  Specs are separated by commas, and so
+    are the options of one spec (``@nomem,no-people``): a piece that is exactly the name of an option belongs to the spec before it when that one
+    already has an ``@`` (an option name is never a spec)."""
+    out: list[str] = []
+    for token in str(raw).split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if (token in ABLATIONS or HISTORY_OPTION.match(token)) and out and "@" in out[-1]:
+            out[-1] += "," + token
+        else:
+            out.append(token)
+    return out
 
 
 def expand_bot_specs(items: Sequence[str], *, library: Path | None = None) -> list[str]:
     """``default12`` / ``legacy12`` expand to their twelve specs; everything else stays.  Duplicates are an error (the label is the key)."""
     out: list[str] = []
     for raw in items:
-        for item in str(raw).split(","):
-            item = item.strip()
-            if not item:
-                continue
+        for item in split_spec_list(raw):
             if item in _GROUPS:
                 names = default_names(library) if _GROUPS[item] == "bot" else list(DEFAULT_NAMES)
                 if not names:
@@ -273,6 +395,21 @@ def make_bots(
     return [parse_bot_spec(spec, scenario_id=scenario_id, library=library, contract=doc) for spec in expand_bot_specs(items, library=library)]
 
 
+def pinned_bots(
+    situation: Any, *, library: Path | None = None, contract: ContractDoc | None = None
+) -> dict[str, BenchBot]:
+    """``{seat: bot}`` for the seats a situation file puts a bot on (``bots:``); ``{}`` for a situation that does not.  A directory written relative
+    (``bot:./minds/zed``) is looked for next to the situation file.  Raises :class:`BotSpecError`, naming the situation and the seat."""
+    base = Path(situation.path).parent if getattr(situation, "path", "") else None
+    out: dict[str, BenchBot] = {}
+    for seat, definition in situation.bots.items():
+        try:
+            out[seat] = bot_from_definition(definition, scenario_id=situation.scenario, library=library, contract=contract, base_dir=base)
+        except BotSpecError as exc:
+            raise BotSpecError(f"{situation.id}（bots.{seat}）：{exc}") from None
+    return out
+
+
 def contract_from_markdown(markdown: str) -> ContractDoc:
     """A contract given as text (a snapshot in a saved game: ``parse_contract(snapshot["markdown"])``)."""
     return parse_contract(markdown)
@@ -285,6 +422,9 @@ __all__ = [
     "BotSpecError",
     "BrainFactory",
     "ablate",
+    "bot_from_definition",
+    "check_playbook_text",
+    "check_spec_text",
     "contract_from_markdown",
     "default_names",
     "expand_bot_specs",
@@ -293,6 +433,9 @@ __all__ = [
     "load_bot_mind",
     "make_bots",
     "mind_bot",
+    "mind_from_definition",
     "parse_bot_spec",
+    "pinned_bots",
     "split_spec",
+    "split_spec_list",
 ]

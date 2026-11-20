@@ -1,0 +1,12 @@
+# 套件 E1（docs/v0.14-plan.md §6.5）。档位：smoke = CI / 第一眼；quick = 改了提示词或记忆之后自查（全部套件加起来约 300 次调用）；full = 发版。
+# `python -m bench suites` 列出题数与预计调用数；`python -m bench run --suite E1 --tier quick` 运行（真模型要 --real 和 --max-calls）。
+format: arena-bench-suite
+version: 1
+id: E1
+title: 学习曲线
+purpose: 长期迭代：固定对手池打 N 局，每局后复盘，L / S 套件和胜率随版本（局数）的趋势。
+acceptance: true
+runnable: false
+gates: [E1]
+manual: 需要真实的整局对局和复盘（bots 的复盘会改它们自己的记忆）。做法：用一组固定的 bot 和对手池打 10 局（python -m tools 或界面），每局结束后让 bot 复盘；每 N 局把当时的 bot 快照拿来跑 L1 / L2 / L3 / M3（--bots 指向快照目录）。bench 的 report 画出随局数的趋势；本套件不由 `run` 运行。
+tiers: {}
