@@ -42,7 +42,8 @@ def test_the_default_output_directory_is_under_the_scratch_directory_of_the_proj
     out = default_out_dir("20260101-000000-abcd")
     assert out == REPO_ROOT / ".pytest_tmp" / "bench-runs" / "20260101-000000-abcd" == DEFAULT_RUNS_DIR / "20260101-000000-abcd"
     assert ".pytest_tmp/" in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").replace("\\", "/")  # (ignored by git, like every scratch directory)
-    assert Path(tempfile.gettempdir()) not in out.parents or Path(tempfile.gettempdir()) == REPO_ROOT
+    temp = Path(tempfile.gettempdir())
+    assert temp not in out.parents or temp in (REPO_ROOT, *REPO_ROOT.parents)  # (unless the project itself lives under the temporary directory, e.g. a checkout in /tmp)
 
 
 def test_the_isolated_data_directory_lives_inside_the_given_directory_and_is_gone_afterwards(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
