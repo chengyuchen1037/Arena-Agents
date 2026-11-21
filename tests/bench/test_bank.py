@@ -370,7 +370,9 @@ def test_every_l4_situation_is_the_structure_of_its_saved_game_roles_votes_and_w
     for path in BY_SUITE["L4"]:
         situation = load_situation(path)
         meta = situation.meta
-        game = games.get(meta["source"])
+        # (a situation names the saved game it was cut from by the first characters of its id: the full id of a game on somebody's machine is not published)
+        candidates = [g for game_id, g in games.items() if game_id.startswith(str(meta["source"]))]
+        game = candidates[0] if len(candidates) == 1 else None
         if game is None:
             continue
         compared += 1
