@@ -213,7 +213,7 @@ const SCENES = {
     await flushAll(env);
     // a game with another long id is simply added: the notice of the column prints the id
     act(env, "games-import");
-    env.el("file-settings-import").dispatch("change", { target: { files: [file(`game-${LONG_ID.replace("0fa7", "1b8c")}-20251119.arenagame`, "zip")], value: "x" } });
+    env.el("file-settings-import").dispatch("change", { target: { files: [file(`game-${LONG_ID.replace("a1b2", "1b8c")}-20251119.arenagame`, "zip")], value: "x" } });
     await flushAll(env);
     snap(env, "long names: the notice of a game that was imported (it prints its id)", "settings-modal");
     env.el("btn-close-settings-modal").dispatch("click");
@@ -494,7 +494,7 @@ test("the audit sees what it is for: take a rule of the style sheet away and the
   assert.equal(names.filter((s) => s.startsWith("strong ") && /my-really-long-contract-/.test(s)).length, 3, "the file name in the questions of a contract, a scenario and a .arenabot");
   assert.ok(names.some((s) => s.startsWith("strong ") && /game-a1b2c3d4e5f6-a-game/.test(s)), "the name of the .arenagame file in the conflict question");
   assert.ok(names.some((s) => s.startsWith("code ") && /a1b2c3d4e5f6-a-game-id/.test(s)), "the id of the game in the conflict question");
-  assert.ok(names.some((s) => s.startsWith("div.form-hint#settings-games-notice ") && /1b8cffdb48f3-a-game-id/.test(s)), "and the notice of the column that prints the id of the game that came in");
+  assert.ok(names.some((s) => s.startsWith("div.form-hint#settings-games-notice ") && /1b8cc3d4e5f6-a-game-id/.test(s)), "and the notice of the column that prints the id of the game that came in");
   // ... and a short name is never a problem
   assert.deepEqual(found(await scene(CSS, "initDialogs"), "longText"), []);
 });
