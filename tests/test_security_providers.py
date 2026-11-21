@@ -1060,16 +1060,29 @@ def test_template_storage_failure_is_503_and_never_treated_as_unreferenced(clien
 
 
 # ------------------------------------------------------- start guard
-def test_start_requires_complete_bindings_with_clear_chinese_error(client, env):
-    provider = env.providers.seed(models=("m1",))
-    env.session.model_bindings = {"moderator": bind(provider.id)}
-    response = client.post("/api/control/start")
-    assert response.status_code == 409
-    text = detail(response)
-    assert "p01" in text and "绑定" in text
-    env.orch.start_or_resume.assert_not_awaited()
+def test_start_is_refused_with_the_problems_of_the_start_check_and_goes_through_when_it_passes(client, env):
+    """v0.14 (H25): whether the models are complete is part of the start check, which is the orchestrator's; the route turns what it refuses with
+    into 409 ``NOT_READY`` (+ the problems) or, for a game that is resumed, the plain 409 about the bindings."""
+    from app.game.bindings import BindingError
+    from app.game.orchestrator import NotReadyError
+    from app.game.session import BindingIssue
 
-    env.session.model_bindings = {a: bind(provider.id) for a in ("moderator", "p01", "p02")}
+    problems = [
+        {"scope": "binding", "bot_id": None, "seat": "p01", "name": "Alice",
+         "items": [{"code": "no_binding", "message": "Alice（p01） 尚未选择模型", "fix": "bind_model"}]},
+    ]
+    env.orch.start_or_resume.side_effect = NotReadyError(problems)
+    response = client.post("/api/control/start")
+    assert response.status_code == 409 and response.json()["code"] == "NOT_READY" and response.json()["problems"] == problems
+    assert "p01" in response.json()["detail"] and "不能开局" in response.json()["detail"]
+
+    env.orch.start_or_resume.side_effect = BindingError([BindingIssue(actor_id="p01", message="p01 尚未选择模型")])
+    response = client.post("/api/control/start")
+    text = detail(response)
+    assert response.status_code == 409 and "p01" in text and "绑定" in text
+
+    env.orch.start_or_resume.side_effect = None
+    env.orch.start_or_resume.reset_mock()
     assert client.post("/api/control/start").status_code == 200
     env.orch.start_or_resume.assert_awaited_once()
 

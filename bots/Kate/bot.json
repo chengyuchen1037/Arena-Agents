@@ -1,0 +1,15 @@
+{
+ "format": 1,
+ "name": "Kate",
+ "avatar": {
+  "v": 1,
+  "face": "f10",
+  "skin": "s09",
+  "hair": "h02",
+  "hair_color": "c22",
+  "eyes": "e14",
+  "mouth": "m00",
+  "accessory": "a13",
+  "accessory_color": "k03"
+ }
+}

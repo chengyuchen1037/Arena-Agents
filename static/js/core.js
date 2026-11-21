@@ -329,6 +329,10 @@
       this.detail = info.detail || "";
       this.code = info.code || ""; // the server's machine-readable reason ({"detail", "code"}), when it sends one
       this.kind = info.kind || "http"; // http | network | bad-response | auth
+      // v0.14 (§13.7): the whole JSON body of an error answer (null when it was none) and its "problems" - `needs_confirm` has `will_clear`, a
+      // refused text has the faults of it as Chinese sentences, `NOT_READY` / `no_binding` have the Problem objects of the start check
+      this.body = info.body && typeof info.body === "object" && !Array.isArray(info.body) ? info.body : null;
+      this.problems = this.body && Array.isArray(this.body.problems) ? this.body.problems : [];
     }
   }
 
@@ -391,6 +395,17 @@
   function looksJson(text) {
     const t = String(text || "").trimStart();
     return t.startsWith("{") || t.startsWith("[");
+  }
+
+  /**
+   * `text` without the blanks and the stops at its end: a sentence of the server ("…原来的文件没有改动。") that the page puts into brackets, or follows with a
+   * sentence of its own ("…。确认后点击「继续」。"), would end in "。）" / "。。" otherwise.  Only what ends a sentence goes (。 . ； ; ， , 、 ： :): a "？" / "！" says
+   * something, an ellipsis ("…" / "...") is part of what was said, and a closing bracket belongs to the sentence ("（原来的文件没有改动）").
+   */
+  function stripEndPunct(text) {
+    let s = String(text === undefined || text === null ? "" : text).replace(/[\s。．；;，,、：:]+$/u, "");
+    if (/[^.]\.$/.test(s)) s = s.slice(0, -1).replace(/[\s。．；;，,、：:]+$/u, ""); // one ASCII full stop; "..." stays
+    return s;
   }
 
   /** File name out of a Content-Disposition header (filename*=UTF-8''… wins); "" when absent. */
@@ -531,6 +546,7 @@
             status: resp.status,
             detail,
             code: extractErrorCode(parsed),
+            body: parsed.kind === "json" ? parsed.data : null,
             kind: "http",
           });
         }
@@ -1572,6 +1588,7 @@
     gameClockNow,
     sleepLabel,
     filenameFromDisposition,
+    stripEndPunct,
     // v0.12
     formatCount,
     formatTokensCount,

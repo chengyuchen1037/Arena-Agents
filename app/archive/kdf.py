@@ -10,7 +10,11 @@
 
 (bytes are standard base64).  The key is ``scrypt(NFC(password), salt, n=2**17, r=8, p=1) -> 32 bytes``.  The AEAD's
 associated data is the JSON ``{"archive_id", "format", "format_version", "purpose": "secrets"}`` (sorted keys, compact), so
-a ``secrets.enc`` cannot be moved into another archive or be read as another format version.  A wrong password and a
+a ``secrets.enc`` cannot be moved into another archive or be read as another format version.
+
+The ``version`` here is the version of *this blob* (:data:`SECRETS_FORMAT_VERSION`), not of the archive that carries it: the way the keys are
+sealed did not change when the archive format went from 1 to 2 (v0.14), so a v0.13 archive's keys and a v0.14 archive's keys are the same
+format - "API Key 沿用 v0.13 规范".  A wrong password and a
 changed file fail the same way, with the same message: AES-GCM cannot tell them apart and neither may we.
 
 The ``endpoints`` bind every key to the place it may be sent to: ``providers.json`` is not encrypted, so somebody who can
@@ -36,7 +40,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from app.archive.errors import ArchiveFormatError, ArchivePasswordError, ArchivePasswordRuleError
-from app.archive.format import ARCHIVE_ID_RE, FORMAT_NAME, FORMAT_VERSION
+from app.archive.format import ARCHIVE_ID_RE, FORMAT_NAME
 
 # ---------------------------------------------------------------------------------------- password rule
 #: The one rule for a new archive password; ``static/js/archive.js`` implements the same function and both are
@@ -109,6 +113,8 @@ KEY_BYTES = 32
 MAX_KEYS = 1000
 MAX_KEY_CHARS = 8192
 SECRETS_SCHEMA_VERSION = 1
+#: the version of ``secrets.enc`` itself (its header and its associated data): unchanged since v0.13, whatever the archive's format version is
+SECRETS_FORMAT_VERSION = 1
 #: what decides where a request (and so the key in it) goes: sealed together with the key, compared on import
 ENDPOINT_FIELDS = ("protocol", "base_url", "auto_append_path")
 _HEADER_FIELDS = {"format", "version", "kdf", "n", "r", "p", "salt", "cipher", "nonce", "aad", "ciphertext"}
@@ -130,7 +136,7 @@ def _unb64(value: Any, *, length: int | None = None, minimum: int = 0, maximum: 
     return raw
 
 
-def aad_for(archive_id: str, *, format_name: str = FORMAT_NAME, version: int = FORMAT_VERSION) -> bytes:
+def aad_for(archive_id: str, *, format_name: str = FORMAT_NAME, version: int = SECRETS_FORMAT_VERSION) -> bytes:
     """The associated data AES-GCM authenticates together with the ciphertext."""
     return json.dumps(
         {"archive_id": archive_id, "format": format_name, "format_version": version, "purpose": "secrets"},
@@ -170,7 +176,7 @@ def parse_secrets_header(blob: bytes) -> SecretsHeader:
         n, r, p, version = data["n"], data["r"], data["p"], data["version"]
         if (
             data["format"] != FORMAT_NAME
-            or version != FORMAT_VERSION
+            or version != SECRETS_FORMAT_VERSION
             or data["kdf"] != "scrypt"
             or data["cipher"] != "aes-256-gcm"
             or any(isinstance(v, bool) or not isinstance(v, int) for v in (n, r, p, version))
@@ -264,7 +270,7 @@ def seal_secrets(
     ciphertext = AESGCM(cipher_key).encrypt(nonce, plaintext, aad)
     header = {
         "format": FORMAT_NAME,
-        "version": FORMAT_VERSION,
+        "version": SECRETS_FORMAT_VERSION,
         "kdf": "scrypt",
         "n": SCRYPT_N,
         "r": SCRYPT_R,

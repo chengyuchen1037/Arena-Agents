@@ -14,22 +14,33 @@ from typing import Any
 from app.archive.errors import ArchiveFormatError, safe_text
 from app.archive.format import (
     JSON_KINDS,
+    KIND_BOT_FILE,
+    KIND_BOTS_LINEUP,
+    KIND_BOTS_USAGE,
+    KIND_CONTRACT,
+    KIND_CONTRACT_SOURCE,
     KIND_GAME,
     KIND_GAME_PREV,
     KIND_GAMES_INDEX,
+    KIND_LEARNING_LOG,
     KIND_LOG,
     KIND_PRICING,
     KIND_PROVIDERS,
     KIND_ROSTER_JSON,
     KIND_ROSTER_TEXT,
+    KIND_RULES_MATERIAL,
+    KIND_RULES_MATERIAL_META,
+    KIND_RULES_SCENARIO,
+    KIND_RULES_SOURCE,
     KIND_SECRETS,
     KIND_SETTINGS,
+    TEXT_KINDS,
 )
 from app.archive.kdf import ENDPOINT_FIELDS, parse_secrets_header
 
 _SEAT_ID = re.compile(r"^N(?:[1-9]|[1-9][0-9])$")
 _SECRET_FIELD = re.compile(r"^api[_\- ]?key$", re.IGNORECASE)
-_MAX_TEXT_BYTES = 1024 * 1024
+MAX_TEXT_BYTES = 1024 * 1024  # a text member (a roster text, the contract, a scenario, a material, a file of a bot)
 _MAX_JSON_DEPTH = 24
 
 
@@ -45,6 +56,13 @@ class Inventory:
     seat_ids: set[str] = field(default_factory=set)
     log_games: set[str] = field(default_factory=set)
     has_secrets: bool = False
+    # format 2 (v0.14)
+    bot_ids: set[str] = field(default_factory=set)  # the bots that have a ``bot.json``
+    bot_files: int = 0
+    scenario_ids: set[str] = field(default_factory=set)
+    materials: int = 0
+    has_contract: bool = False
+    learning_logs: int = 0
 
 
 def load_json(raw: bytes, label: str) -> Any:
@@ -99,17 +117,19 @@ def providers_of(data: Any, label: str = "providers.json") -> list[dict[str, Any
 
 
 def check_game(raw: bytes, game_id: str, *, label: str) -> dict[str, Any]:
-    """A game file: JSON, save format v5, the ``GameSession`` model, and the directory's id.  Returns its facts."""
-    from app.game.session import SESSION_SCHEMA_VERSION, GameSession
+    """A game file: JSON, a save format this version opens (v5 of v0.13, v6), the ``GameSession`` model, and the directory's id.  Returns
+    its facts."""
+    from app.game.session import SUPPORTED_SCHEMA_VERSIONS, GameSession
 
     payload = load_json(raw, label)
     if not isinstance(payload, dict):
         raise ArchiveFormatError(f"{safe_text(label)} 不是对局文件。")
     schema = payload.get("schema_version")
-    if schema != SESSION_SCHEMA_VERSION:
+    if isinstance(schema, bool) or schema not in SUPPORTED_SCHEMA_VERSIONS:
         raise ArchiveFormatError(
-            f"对局 {safe_text(game_id)} 的存档格式是 v{safe_text(schema, 12)}，需要 v{SESSION_SCHEMA_VERSION}"
-            "（v0.12.1 的对局请先用 tools/migrate_v0121_to_archive.py 转换）。"
+            f"对局 {safe_text(game_id)} 的存档格式是 v{safe_text(schema, 12)}，需要 "
+            + " 或 ".join(f"v{version}" for version in SUPPORTED_SCHEMA_VERSIONS)
+            + "（v0.12.1 的对局请先用 tools/migrate_v0121_to_archive.py 转换）。"
         )
     try:
         session = GameSession.model_validate(payload)
@@ -131,11 +151,35 @@ def check_game(raw: bytes, game_id: str, *, label: str) -> dict[str, Any]:
     }
 
 
+def _utf8_text(raw: bytes, name: str) -> None:
+    if len(raw) > MAX_TEXT_BYTES:
+        raise ArchiveFormatError(f"{safe_text(name)} 太大了。")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ArchiveFormatError(f"{safe_text(name)} 不是 UTF-8 文本。") from None
+    if "\x00" in text:
+        raise ArchiveFormatError(f"{safe_text(name)} 含有空字符。")
+
+
+def check_bot_file(name: str, rel: str, raw: bytes) -> None:
+    """One file of a bot (``bot.json``, ``core/*.md``, ``arch/notes.md`` ... ``rel`` is its path inside the bot's directory): UTF-8 text of a
+    sane size, and for the ``.json`` ones an object.  What the text *means* (the limits of the L0, the format of a playbook ...) is
+    :class:`app.storage.bots.BotStore`'s business (``install_bot_dir`` / ``check_integrity``)."""
+    _utf8_text(raw, name)
+    if rel.endswith(".json"):
+        if not isinstance(load_json(raw, name), dict):
+            raise ArchiveFormatError(f"{safe_text(name)} 不是对象。")
+
+
 def check_member(kind: str, game_id: str | None, name: str, raw: bytes | None, inventory: Inventory) -> None:
     """Check one member whose content is ``raw`` (``None`` for kinds that are only stored: the logs) and add it up."""
     if kind == KIND_LOG:
         if game_id:
             inventory.log_games.add(game_id)
+        return
+    if kind == KIND_LEARNING_LOG:
+        inventory.learning_logs += 1
         return
     if raw is None:
         raise ArchiveFormatError(f"{safe_text(name)} 没有读到内容。")
@@ -143,14 +187,25 @@ def check_member(kind: str, game_id: str | None, name: str, raw: bytes | None, i
         parse_secrets_header(raw)
         inventory.has_secrets = True
         return
-    if kind == KIND_ROSTER_TEXT:
-        if len(raw) > _MAX_TEXT_BYTES:
-            raise ArchiveFormatError(f"{safe_text(name)} 太大了。")
-        try:
-            raw.decode("utf-8")
-        except UnicodeDecodeError:
-            raise ArchiveFormatError(f"{safe_text(name)} 不是 UTF-8 文本。") from None
-        inventory.seat_ids.add(name.split("/", 1)[1].split(".", 1)[0])
+    if kind in TEXT_KINDS:
+        _utf8_text(raw, name)
+        if kind == KIND_ROSTER_TEXT:
+            inventory.seat_ids.add(name.split("/", 1)[1].split(".", 1)[0])
+        elif kind == KIND_CONTRACT:
+            inventory.has_contract = True
+        elif kind == KIND_RULES_SCENARIO:
+            assert game_id is not None  # (the scenario id)
+            inventory.scenario_ids.add(game_id)
+        elif kind == KIND_RULES_MATERIAL:
+            inventory.materials += 1
+        return
+    if kind == KIND_BOT_FILE:
+        assert game_id is not None  # (the bot id)
+        rel = name.split("/", 2)[2]
+        check_bot_file(name, rel, raw)
+        inventory.bot_files += 1
+        if rel == "bot.json":
+            inventory.bot_ids.add(game_id)
         return
     if kind not in JSON_KINDS:
         return
@@ -177,6 +232,6 @@ def check_member(kind: str, game_id: str | None, name: str, raw: bytes | None, i
     elif kind == KIND_GAMES_INDEX:
         if not isinstance(data, (dict, list)):
             raise ArchiveFormatError(f"{safe_text(name)} 的结构不对。")
-    elif kind in (KIND_SETTINGS, KIND_PRICING):
+    elif kind in (KIND_SETTINGS, KIND_PRICING, KIND_CONTRACT_SOURCE, KIND_RULES_SOURCE, KIND_RULES_MATERIAL_META, KIND_BOTS_LINEUP, KIND_BOTS_USAGE):
         if not isinstance(data, dict):
             raise ArchiveFormatError(f"{safe_text(name)} 不是对象。")

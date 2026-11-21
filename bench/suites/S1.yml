@@ -1,0 +1,19 @@
+# 套件 S1（docs/v0.14-plan.md §6.5）。档位：smoke = CI / 第一眼；quick = 改了提示词或记忆之后自查（全部套件加起来约 300 次调用）；full = 发版。
+# `python -m bench suites` 列出题数与预计调用数；`python -m bench run --suite S1 --tier quick` 运行（真模型要 --real 和 --max-calls）。
+format: arena-bench-suite
+version: 1
+id: S1
+title: 发言形态
+purpose: 不分点、不用 markdown、不自报座位、长度落在自己声明的篇幅里。数字取自 S2 的发言（同一批样本），不另外出题。
+acceptance: true
+uses: S2
+decision: speech
+sources: [S2]
+metrics: [form.list_rate, form.markdown_rate, form.self_prefix_rate, form.report_rate, form.in_band_rate]
+gates: [S1a, S1b, S1c, S1d]
+baseline: [legacy]
+candidate: ["bot:Alice"]
+tiers:
+  smoke: {samples: 1, bots: [legacy, "bot:Alice"], situations: 2}
+  quick: {samples: 1, bots: [legacy, "bot:Alice"], situations: 5}
+  full: {samples: 3, bots: [legacy, "bot:Alice", "bot:Bob", "bot:Carol", "bot:David"]}

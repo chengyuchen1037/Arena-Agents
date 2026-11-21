@@ -1214,6 +1214,34 @@ test("the game clock estimate runs only while the game runs; seconds / countdown
   assert.equal(Core.formatTokensCount(272900), "272.9K Tokens");
 });
 
+// --- v0.14: a sentence of the server inside the page's own punctuation ------------------------------------------
+test("stripEndPunct takes the stops off the end of a sentence - and only the stops", () => {
+  const strip = Core.stripEndPunct;
+  assert.equal(strip("原来的文件没有改动。"), "原来的文件没有改动");
+  assert.equal(strip("原来的文件没有改动。。 "), "原来的文件没有改动", "stops and blanks, however many");
+  assert.equal(strip("先写好，再重试；"), "先写好，再重试");
+  assert.equal(strip("原因：、 "), "原因");
+  assert.equal(strip("Could not save."), "Could not save");
+  assert.equal(strip("Could not save. "), "Could not save");
+  assert.equal(strip("没写完。."), "没写完", "a Chinese stop and an ASCII one");
+  // what is not a stop stays: a bracket that belongs to the sentence, a question, an exclamation, an ellipsis, a quote
+  assert.equal(strip("底层设定不完整（原来的文件没有改动）。"), "底层设定不完整（原来的文件没有改动）");
+  assert.equal(strip("要继续吗？"), "要继续吗？");
+  assert.equal(strip("超时了！"), "超时了！");
+  assert.equal(strip("还在写……"), "还在写……");
+  assert.equal(strip("还在写..."), "还在写...");
+  assert.equal(strip("缺少「身份」。"), "缺少「身份」");
+  assert.equal(strip("v0.14.0"), "v0.14.0", "a dot inside is no stop");
+  assert.equal(strip("1.5"), "1.5");
+  // nothing / not a string
+  assert.equal(strip(""), "");
+  assert.equal(strip("。"), "");
+  assert.equal(strip(null), "");
+  assert.equal(strip(undefined), "");
+  assert.equal(strip(42), "42");
+  assert.equal(`（${strip("原因。")}）`, "（原因）", "what it is for: a sentence put into a bracket");
+});
+
 // --- v0.12.1: downloads / raw uploads (the memory pack) -----------------------------------------------------
 test("filenameFromDisposition prefers filename*=UTF-8'' and copes with quotes and nothing", () => {
   assert.equal(Core.filenameFromDisposition('attachment; filename="arena-memory.zip"'), "arena-memory.zip");

@@ -1,8 +1,8 @@
 "use strict";
-// Playing a seat (v0.13, F1-F19) in the page: the viewpoint bar [视角▾][切换][接管], the confirmations, the takeover
-// bar, the reshuffle reminder, the input box of every channel, the floor / ability buttons, the answers of request
+// Playing a seat (v0.13, F1-F19; v0.14, H27) in the page: the viewpoint label and its menu (全局视角 / 以 X 的视角观看 / 接管 X / 退出接管),
+// the confirmations, the takeover bar, the input box of every channel, the floor / ability buttons, the answers of request
 // cards and the "待你操作" marks - static/js/app.js + takeover.js + composer.js against the fake DOM and the fake
-// backend (see harness.js).  The pure view model: test_takeover_view.js.
+// backend (see harness.js).  The pure view model: test_takeover_view.js.  (v0.14, H52: the reshuffle reminder is gone with the re-deal.)
 // Run: node tests/frontend/test_takeover_ui.js
 const assert = require("node:assert/strict");
 const H = require("./harness.js");
@@ -20,6 +20,14 @@ async function live(over = {}, overrides = {}, envOpts = {}) {
   return ctx;
 }
 
+/** A game that has not started: nobody is dealt yet (H52) - `dealt` is false and no seat has a tag. */
+async function liveIdle(over = {}, overrides = {}, envOpts = {}) {
+  const session = F.undealt(F.makeSession({ event_id: 500, status: "idle", ...over }));
+  const ctx = await bootLive({ session, ...overrides }, envOpts);
+  ctx.env.sse("snapshot", { session }, 500);
+  return ctx;
+}
+
 /** A game in which `seat` is played (paused unless `over` says otherwise). */
 function playedOver(seat, over = {}, takeoverOver = {}) {
   return { status: "paused", participants: F.makeParticipants({ [seat]: { state: "human" } }), takeover: F.makeTakeover(seat, takeoverOver), ...over };
@@ -32,10 +40,21 @@ const flush = async (env, n = 25) => {
 };
 const text = (html) => html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
 const html = (env, id) => env.el(id).innerHTML;
-const pick = (env, id) => {
-  env.el("select-viewpoint").value = id;
-  env.el("select-viewpoint").dispatch("change");
+/** An item of the viewpoint menu (opened first, like a user does): `attrName` = data-vp-view | data-vp-take | data-vp-release. */
+const menuItem = (env, attrName, value = "") => {
+  if (env.el("viewpoint-menu").hidden) env.el("btn-viewpoint").dispatch("click");
+  env.el("viewpoint-menu").dispatch("click", { target: target({ [`[${attrName}]`]: { [attrName]: value } }) });
 };
+const takeSeat = (env, seat) => menuItem(env, "data-vp-take", seat);
+const viewAs = (env, id) => menuItem(env, "data-vp-view", id);
+/** The opening tag of the button `attrName="value"` of the (open) menu (`value` null: a button whose attribute has no value, like data-vp-release). */
+const menuButton = (env, attrName, value) => {
+  if (env.el("viewpoint-menu").hidden) env.el("btn-viewpoint").dispatch("click");
+  const re = value === null ? new RegExp(`<button[^>]*${attrName}[^>]*>`) : new RegExp(`<button[^>]*${attrName}="${value}"[^>]*>`);
+  return (html(env, "viewpoint-menu").match(re) || [""])[0];
+};
+const isDisabled = (tag) => / disabled(?:[ >=])/.test(tag);
+const chipText = (env) => env.el("viewpoint-text").textContent;
 const dialogOpen = (env) => env.el("dialog-modal").style.display === "flex";
 const dialogOk = async (env) => {
   env.el("btn-dialog-ok").dispatch("click");
@@ -67,38 +86,37 @@ const enter = (env, extra = {}) => {
 const speakCalls = (backend) => (backend.seatCalls || []).filter((c) => c.kind === "speak").map((c) => c.body);
 
 // =====================================================================================================
-// the viewpoint bar
+// the viewpoint label and its menu (v0.14, H27)
 // =====================================================================================================
-test("viewpoint bar: god view cannot take over; a chosen player can - only while the game has not started or is paused", async () => {
+test("the menu's 接管 buttons: only while the game has not started or is paused; each says why on hover (F2)", async () => {
   for (const [status, enabled] of [["idle", true], ["paused", true], ["running", false], ["finished", false]]) {
     const { env } = await live({ status });
-    assert.equal(env.el("btn-takeover").disabled, true, `${status}: nobody chosen`);
-    assert.match(attr(env, "btn-takeover", "title"), /上帝视角不能接管/);
-    pick(env, "N3");
-    assert.equal(env.el("btn-takeover").disabled, !enabled, status);
-    if (!enabled) assert.match(attr(env, "btn-takeover", "title"), status === "running" ? /对局进行中不能接管：请先点「暂停」/ : /对局已结束/);
-    else assert.match(attr(env, "btn-takeover", "title"), /接管 3 · Carol/);
+    const take = menuButton(env, "data-vp-take", "N3");
+    assert.equal(isDisabled(take), !enabled, status);
+    if (!enabled) assert.match(take, status === "running" ? /对局进行中不能接管：请先点「暂停」/ : /对局已结束/);
+    else assert.match(take, /接管 3 · Carol/);
     assert.equal(env.el("viewpoint-bar").hidden, false);
     assert.equal(env.el("takeover-bar").hidden, true);
+    assert.equal(chipText(env), "全局视角");
   }
 });
 
-test("the status of the game decides at once: a running game disables 接管 even with a choice pending", async () => {
+test("the status of the game decides at once: a running game disables every 接管 of an open menu - 观看 still works", async () => {
   const { env } = await live({ status: "paused" });
-  pick(env, "N3");
-  assert.equal(env.el("btn-takeover").disabled, false);
+  assert.equal(isDisabled(menuButton(env, "data-vp-take", "N3")), false);
   env.sse("game.status", { status: "running", reason: "continued", winner: null });
-  assert.equal(env.el("btn-takeover").disabled, true);
-  assert.equal(env.el("select-viewpoint").value, "N3", "the pending choice is kept");
-  assert.equal(env.el("btn-viewpoint-switch").disabled, false, "切换 still works while the game runs");
+  assert.equal(env.el("viewpoint-menu").hidden, false, "the menu stays open");
+  assert.equal(isDisabled(menuButton(env, "data-vp-take", "N3")), true);
+  assert.equal(isDisabled(menuButton(env, "data-vp-view", "N3")), false, "以 X 的视角观看 works while the game runs");
+  assert.match(html(env, "viewpoint-menu"), /对局进行中不能接管：请先点「暂停」/, "the menu says why once, in a sentence (a phone has no hover)");
 });
 
 test("接管 asks first (what happens), does nothing on cancel, and POSTs the chosen seat on confirm", async () => {
   const { env, backend } = await live({ status: "paused" });
   backend.takeoverResult = F.makePlayedSession("N3", { event_id: 501, status: "paused" });
-  pick(env, "N3");
-  env.el("btn-takeover").click();
+  takeSeat(env, "N3");
   await flush(env);
+  assert.equal(env.el("viewpoint-menu").hidden, true, "choosing an item closes the menu");
   assert.equal(dialogOpen(env), true);
   assert.equal(env.el("dialog-title").textContent, "接管 3 · Carol？");
   const body = text(html(env, "dialog-body"));
@@ -113,44 +131,46 @@ test("接管 asks first (what happens), does nothing on cancel, and POSTs the ch
   assert.equal(backend.takeoverCalls, undefined, "cancelled: nothing was sent");
   assert.equal(env.app().state.viewpoint, "god");
 
-  env.el("btn-takeover").click();
+  takeSeat(env, "N3");
   await flush(env);
   await dialogOk(env);
   assert.deepEqual(backend.takeoverCalls, [{ seat: "N3" }]);
   assert.equal(env.app().state.session.takeover.seat, "N3");
   assert.equal(env.app().state.viewpoint, "N3", "the viewpoint is locked to the seat");
+  assert.equal(chipText(env), "Carol视角（接管）");
   assert.match(lastToast(env), /已接管 3 · Carol/);
 });
 
-test("a takeover before the start tells the person that the identity is known - and offers the re-deal", async () => {
-  const { env, backend } = await live({ status: "idle" });
-  backend.takeoverResult = F.makePlayedSession("N3", { event_id: 501, status: "idle" }, { reshuffle_available: true });
-  pick(env, "N3");
-  env.el("btn-takeover").click();
+test("a takeover before the start: the identity is dealt when the game starts (nothing to re-deal - H52); the seat cannot be moved meanwhile", async () => {
+  const { env, backend } = await liveIdle();
+  backend.takeoverResult = F.makePlayedSession("N3", { event_id: 501, status: "idle", dealt: false });
+  takeSeat(env, "N3");
   await flush(env);
-  assert.match(text(html(env, "dialog-body")), /对局还没有开始：接管后你会先看到自己的身份，可以重新发牌/);
+  const body = text(html(env, "dialog-body"));
+  assert.match(body, /对局还没有开始：身份在点击「开始」时才发牌，开始后你会在自己的座位上看到它/);
+  assert.match(body, /接管期间不能调整座位/);
+  assert.doesNotMatch(body, /重新发牌/);
   await dialogOk(env);
-  assert.equal(env.el("takeover-reminder").hidden, false);
-  assert.equal(env.el("takeover-reminder-text").textContent, "你已经知道自己的身份，建议点击「重新发牌」");
+  assert.equal(env.app().state.session.takeover.seat, "N3");
+  assert.ok(!backend.calls.some((c) => /shuffle/.test(c.url)), "no re-deal request exists any more");
+  assert.equal(html(env, "participants-grid").includes("pcard-tag"), false, "the played seat sees no identity before the deal either");
 });
 
 test("a refused takeover shows the server's reason and re-reads the state", async () => {
   const { env, backend } = await live({ status: "paused" });
   backend.failures["POST /api/takeover"] = [409, "对局进行中不能接管：请先暂停对局。"];
-  pick(env, "N3");
-  env.el("btn-takeover").click();
+  takeSeat(env, "N3");
   await flush(env);
   await dialogOk(env);
   assert.match(lastToast(env), /对局进行中不能接管/);
   assert.equal(env.app().state.session.takeover.seat, null);
   assert.ok(backend.calls.filter((c) => c.method === "GET" && c.url.endsWith("/api/state")).length >= 2, "the state was fetched again");
-  assert.equal(env.el("btn-takeover").disabled, false, "the button is usable again");
+  assert.equal(isDisabled(menuButton(env, "data-vp-take", "N3")), false, "the button is usable again");
 });
 
 test("the game may start while the confirmation is open: nothing is sent", async () => {
   const { env, backend } = await live({ status: "paused" });
-  pick(env, "N3");
-  env.el("btn-takeover").click();
+  takeSeat(env, "N3");
   await flush(env);
   env.sse("game.status", { status: "running", reason: "continued", winner: null }); // somebody pressed 继续 meanwhile
   await dialogOk(env);
@@ -161,10 +181,13 @@ test("the game may start while the confirmation is open: nothing is sent", async
 // =====================================================================================================
 // the takeover bar and the lock
 // =====================================================================================================
-test("a played seat: the bar says who, the viewpoint bar is gone, the viewpoint is the seat's, the card says 人类操作中", async () => {
+test("a played seat: the bar says who, the label says 🎮 Carol视角（接管） and is locked, the viewpoint is the seat's, the card says 人类操作中", async () => {
   const { env } = await livePlayed("N3");
   assert.equal(env.el("takeover-bar").hidden, false);
-  assert.equal(env.el("viewpoint-bar").hidden, true);
+  assert.equal(env.el("viewpoint-bar").hidden, false, "the label stays (v0.14): it carries the 🎮 and the lock");
+  assert.deepEqual([chipText(env), env.el("viewpoint-icon").textContent], ["Carol视角（接管）", "🎮"]);
+  assert.equal(attr(env, "btn-viewpoint", "data-kind"), "played");
+  assert.equal(env.el("btn-viewpoint").classList.contains("is-played"), true);
   assert.equal(env.el("takeover-seat").textContent, "3 · Carol");
   assert.equal(attr(env, "html", "x"), null);
   assert.equal(env.document.documentElement.getAttribute("data-takeover"), "1");
@@ -178,10 +201,18 @@ test("a played seat: the bar says who, the viewpoint bar is gone, the viewpoint 
   assert.doesNotMatch(other, /pcard-state/);
 });
 
-test("the viewpoint stays locked: the drop-down hidden, 切换 and the detail panel's 以 X 的视角观看 do nothing", async () => {
+test("the viewpoint stays locked: every viewpoint of the menu is off (only 退出接管 works) and the detail panel's 以 X 的视角观看 does nothing", async () => {
   const { env } = await livePlayed("N3");
-  assert.equal(env.el("btn-viewpoint-switch").disabled, true);
-  assert.match(attr(env, "btn-viewpoint-switch", "title"), /已锁定/);
+  assert.match(attr(env, "btn-viewpoint", "title"), /视角已锁定为这个座位/);
+  for (const id of ["god", "N1", "N5"]) {
+    assert.equal(isDisabled(menuButton(env, "data-vp-view", id)), true, `view ${id}`);
+    assert.match(menuButton(env, "data-vp-view", id), /接管期间视角已锁定/);
+  }
+  for (const id of ["N1", "N3", "N5"]) assert.equal(isDisabled(menuButton(env, "data-vp-take", id)), true, `take ${id}`);
+  assert.match(html(env, "viewpoint-menu"), /data-vp-release[^>]*>退出接管（3 · Carol）</);
+  viewAs(env, "N5"); // a click that gets through anyway
+  assert.equal(env.app().state.viewpoint, "N3");
+  assert.match(lastToast(env), /接管期间视角已锁定/);
   env.app().setViewpoint("N5");
   assert.equal(env.app().state.viewpoint, "N3");
   cardClick(env, "N5");
@@ -203,16 +234,16 @@ test("a takeover in another tab arrives as takeover.updated: this page locks, an
   const { env } = await live({ status: "paused" });
   env.app().setViewpoint("N1");
   assert.equal(env.storage.get("arena_viewpoint_v1"), "N1");
+  assert.equal(chipText(env), "Alice视角");
   takeover(env, "N3");
   assert.equal(env.app().state.viewpoint, "N3");
   assert.equal(env.el("takeover-bar").hidden, false);
-  assert.equal(env.el("viewpoint-bar").hidden, true);
+  assert.equal(chipText(env), "Carol视角（接管）");
   assert.equal(env.storage.get("arena_viewpoint_v1"), "N1", "the user's own choice is not overwritten by the lock");
-  env.sse("takeover.updated", { takeover: { seat: null, reshuffle_available: false } });
+  env.sse("takeover.updated", { takeover: { seat: null } });
   assert.equal(env.app().state.viewpoint, "N1", "back to what the user had");
   assert.equal(env.el("takeover-bar").hidden, true);
-  assert.equal(env.el("viewpoint-bar").hidden, false);
-  assert.equal(env.el("select-viewpoint").value, "N1");
+  assert.equal(chipText(env), "Alice视角");
   assert.equal(env.document.documentElement.getAttribute("data-takeover"), "0");
   assert.equal(env.el("composer").hidden, true);
 });
@@ -252,9 +283,25 @@ test("退出接管: not while the game runs (tooltip says pause first); when pau
   assert.equal(backend.releaseCalls, 1);
   assert.equal(env.app().state.session.takeover.seat, null);
   assert.equal(env.el("takeover-bar").hidden, true);
-  assert.equal(env.el("viewpoint-bar").hidden, false);
+  assert.equal(chipText(env), "全局视角", "the label is the global view again");
   assert.equal(env.app().state.viewpoint, "god");
   assert.match(lastToast(env), /已退出接管：3 · Carol 交还给 agent/);
+});
+
+test("退出接管 is also in the menu of the label - the same question, the same request (H27)", async () => {
+  const { env, backend } = await livePlayed("N3", { status: "paused" });
+  menuItem(env, "data-vp-release");
+  await flush(env);
+  assert.equal(env.el("viewpoint-menu").hidden, true, "choosing an item closes the menu");
+  assert.equal(env.el("dialog-title").textContent, "退出接管 3 · Carol？");
+  await dialogOk(env);
+  assert.equal(backend.releaseCalls, 1);
+  assert.equal(chipText(env), "全局视角");
+  // while the game runs the item is greyed and says why
+  const running = await livePlayed("N3", { status: "running" });
+  const tag = menuButton(running.env, "data-vp-release", null);
+  assert.equal(isDisabled(tag), true);
+  assert.match(tag, /对局进行中不能退出接管：请先点「暂停」/);
 });
 
 test("the handlers check the state again: a release or a takeover that gets through to a running game sends nothing", async () => {
@@ -319,67 +366,22 @@ test("a refused release shows the reason; the seat stays played", async () => {
 });
 
 // =====================================================================================================
-// the re-deal reminder
+// there is no re-deal any more (v0.14, H52): the cards are dealt when the game starts
 // =====================================================================================================
-test("the reminder: only for a played seat before the start; the button re-deals once, however often it is clicked", async () => {
-  const { env, backend } = await livePlayed("N3", { status: "idle" }, { reshuffle_available: true });
-  assert.equal(env.el("takeover-reminder").hidden, false);
-  assert.equal(env.el("btn-shuffle-identities").disabled, false);
-  env.el("btn-shuffle-identities").click();
-  env.el("btn-shuffle-identities").click(); // a double click
-  env.el("btn-shuffle-identities").click();
-  await flush(env);
-  assert.equal(backend.shuffleCalls, 1, "one request, however often it was clicked");
-  assert.match(lastToast(env), /已重新发牌/);
-  await flush(env);
-  env.el("btn-shuffle-identities").click(); // again, later: allowed (still not started)
-  await flush(env);
-  assert.equal(backend.shuffleCalls, 2);
-});
-
-test("the reminder is hidden - and its button cannot re-deal - once the game has started, however it got there", async () => {
-  for (const [name, over, tk] of [
-    ["running", { status: "running" }, { reshuffle_available: false }],
-    ["paused", { status: "paused" }, { reshuffle_available: false }],
-    ["finished", { status: "finished" }, { reshuffle_available: false }],
-    ["a start record while idle", { status: "idle" }, { reshuffle_available: false }],
-    ["the flag is stale", { status: "running" }, { reshuffle_available: true }],
-  ]) {
-    const { env, backend } = await livePlayed("N3", over, tk);
-    assert.equal(env.el("takeover-reminder").hidden, true, name);
-    assert.equal(env.el("btn-shuffle-identities").disabled, true, name);
-    env.el("btn-shuffle-identities").dispatch("click"); // a click that gets through anyway
-    await flush(env);
-    assert.equal(backend.shuffleCalls, undefined, name);
+test("no re-deal anywhere: not in the page, not in the scripts, not in the styles, not in what the app asks the server", async () => {
+  for (const gone of ["takeover-reminder", "btn-shuffle-identities", "shuffle-identities", "重新发牌", "reshuffle"]) {
+    assert.ok(!H.HTML_SRC.includes(gone), `index.html still has ${gone}`);
+    for (const [name, src] of Object.entries(H.SRC)) assert.ok(!src.includes(gone), `${name}.js still has ${gone}`);
   }
-  // not played: nothing to remind of
-  const { env } = await live({ status: "idle" });
-  assert.equal(env.el("takeover-reminder").hidden, true);
-});
-
-test("the start overtakes the click: a reminder that is still on screen cannot re-deal a game that has started", async () => {
-  const { env, backend } = await livePlayed("N3", { status: "idle" }, { reshuffle_available: true });
-  assert.equal(env.el("takeover-reminder").hidden, false);
-  env.app().state.session.status = "running"; // the start arrived; the page has not been repainted yet
-  env.el("btn-shuffle-identities").dispatch("click");
+  assert.ok(!/\.takeover-reminder/.test(H.CSS_SRC), "no rule for the reminder");
+  // a seat taken over before the start: the whole round trip asks for no re-deal
+  const { env, backend } = await liveIdle();
+  backend.takeoverResult = F.makePlayedSession("N3", { event_id: 501, status: "idle", dealt: false });
+  takeSeat(env, "N3");
   await flush(env);
-  assert.equal(backend.shuffleCalls, undefined);
-  assert.match(lastToast(env), /对局已经开始，不能再重新发牌/);
-  // the real thing: the start arrives as events
-  const second = await livePlayed("N3", { status: "idle" }, { reshuffle_available: true });
-  second.env.sse("game.status", { status: "running", reason: "started", winner: null });
-  assert.equal(second.env.el("takeover-reminder").hidden, true);
-  second.env.sse("takeover.updated", { takeover: F.makeTakeover("N3", { reshuffle_available: false }) });
-  assert.equal(second.env.el("takeover-reminder").hidden, true);
-});
-
-test("a re-deal the server refuses (it has started) shows why and removes the reminder", async () => {
-  const { env, backend } = await livePlayed("N3", { status: "idle" }, { reshuffle_available: true });
-  backend.failures["POST /api/control/shuffle-identities"] = [409, "对局已经开始，不能再重新发牌。"];
-  env.el("btn-shuffle-identities").click();
-  await flush(env);
-  assert.match(lastToast(env), /对局已经开始，不能再重新发牌/);
-  assert.ok(backend.calls.filter((c) => c.url.endsWith("/api/state")).length >= 2, "the state was read again");
+  await dialogOk(env);
+  assert.ok(!backend.calls.some((c) => /shuffle/.test(c.url)));
+  assert.equal(env.app().state.session.takeover.seat, "N3");
 });
 
 // =====================================================================================================
@@ -437,17 +439,18 @@ test("the input box follows the selected channel; every channel keeps its own dr
   // a message arriving does not touch what is being typed
   env.sse("message.committed", { ...F.msg(900, "wolves", "N6", "我也在", "speech", ["moderator", ...F.WOLVES]) });
   assert.equal(env.el("composer-input").value, "狼人的悄悄话");
-  // over the limit the counter turns red - the tail is cut by the server when it is sent
+  // over the limit (v0.14, H16) the counter turns red and the box cannot be sent: a speech is refused whole, never cut (see test_v014_play_ui.js)
   type(env, "字".repeat(130));
   assert.equal(env.el("composer-count").textContent, "130/120");
   assert.equal(env.el("composer-count").classList.contains("over"), true);
-  assert.match(attr(env, "composer-count", "title"), /超出 10 字/);
+  assert.match(attr(env, "composer-count", "title"), /这条发言 130 个字，超过了单条上限 120 字：请删减 10 字后再发送/);
+  assert.equal(env.el("btn-composer-send").disabled, true);
 });
 
 test("the drafts belong to the seat: another game or another seat starts with empty boxes", async () => {
   const { env } = await livePlayed("N3", { status: "running" }, writable());
   type(env, "写到一半");
-  env.sse("takeover.updated", { takeover: { seat: null, reshuffle_available: false } });
+  env.sse("takeover.updated", { takeover: { seat: null } });
   takeover(env, "N5", writable());
   assert.equal(env.el("composer-input").value, "", "N5's box is empty");
   assert.equal(env.el("composer").hidden, false);
@@ -526,7 +529,7 @@ test("the draft remembers what the person had seen when it was begun (based_on_s
   assert.equal(env.el("composer-notice").hidden, true);
 });
 
-test("a refused send keeps the draft and says why; a cut message says how much was cut", async () => {
+test("a refused send keeps the draft and says why; a message is never cut (v0.14, H16: TOO_LONG is a refusal, see test_v014_play_ui.js)", async () => {
   const { env, backend } = await livePlayed("N3", { status: "running" }, writable());
   backend.seatReply = { speak: { accepted: false, seq: null, code: "NO_FLOOR", message: "该频道当前没有进行中的发言权。" } };
   type(env, "我想说");
@@ -537,11 +540,11 @@ test("a refused send keeps the draft and says why; a cut message says how much w
   // typing again clears the old notice
   type(env, "我想说什么");
   assert.equal(env.el("composer-notice").hidden, true);
-  backend.seatReply = { speak: { accepted: true, seq: 9, code: null, message: "已发送，但超出字数上限", truncated: { dropped_chars: 12, kept_chars: 300 } } };
+  backend.seatReply = { speak: { accepted: true, seq: 9, code: null, message: "已发送。" } };
   enter(env);
   await flush(env);
   assert.equal(env.el("composer-input").value, "");
-  assert.match(lastToast(env), /发言超出字数上限，末尾 12 个字被截掉了/);
+  assert.ok(!env.toasts.some((t) => /截掉/.test(t.textContent)), "nothing is cut, so nothing says it was");
   // a network error: nothing is lost
   backend.failures["POST /api/seat/speak"] = [409, "对局已暂停，不能操作：请先点「继续」。"];
   type(env, "又一句");
@@ -1395,11 +1398,12 @@ test("a text typed in the game before is not put into the new game's input of th
 // =====================================================================================================
 // the phone
 // =====================================================================================================
-test("phone: the takeover bar stays in the first row, the viewpoint bar goes into ⋯; the input box lives in the feed pane above the tab bar", async () => {
+test("phone: the viewpoint label and the takeover bar stay in the first row (v0.14: nothing of them goes into ⋯); the input box lives in the feed pane above the tab bar", async () => {
   const css = H.CSS_SRC.replace(/\r\n/g, "\n");
-  // the takeover bar takes the place of the title: it stays in the first row (never moved into the ⋯ menu)
+  // the label and the takeover bar take the place of the title: they stay in the first row (never moved into the ⋯ menu); the bar is a line of its own
   assert.match(css, /html\[data-layout="phone"\]\[data-takeover="1"\] \.brand-group \{\s*display: none/);
-  assert.match(css, /html\[data-layout="phone"\] \.takeover-bar \{[^}]*flex: 1 1 auto/);
+  assert.match(css, /html\[data-layout="phone"\] \.takeover-bar \{[^}]*flex: 1 1 100%/);
+  assert.match(css, /html\[data-layout="phone"\] \.takeover-bar \.takeover-badge \{\s*display: none/, "the label already says whose seat it is");
   assert.match(css, /html\[data-layout="phone"\] \.composer \{[^}]*padding: 6px 10px 8px/);
   assert.match(css, /html\[data-layout="phone"\] \.composer-input \{[^}]*font-size: 16px/, "iOS does not zoom into 16 px fields");
   // the soft keyboard: the page is as tall as what is left, and only what is needed to write stays
@@ -1458,11 +1462,18 @@ test("a touch screen has no Shift+Enter: the placeholder is short there, the ful
 test("a saved game on screen (a replay) cannot be taken over, and the person's input box is not part of it", async () => {
   const { env } = await livePlayed("N3", { status: "paused" }, writable());
   assert.equal(env.el("composer").hidden, false);
-  env.app().state.replay = { live: env.app().state.session, installing: false };
+  const live = env.app().state.session;
+  env.app().state.replay = { live, installing: false };
+  // what a replay shows is a session that says so (replay.js decorates it): nothing can be taken over meanwhile - the menu's 接管 buttons are off
+  env.app().state.session = { ...live, takeover: { seat: null }, replay: { title: "旧对局", session_id: "old-1", duration_gt: 41 } };
   env.app().renderAll(true);
-  assert.equal(env.el("btn-takeover").disabled, true);
-  assert.match(attr(env, "btn-takeover", "title"), /重放中不能接管/);
+  env.el("btn-viewpoint").dispatch("click");
+  assert.equal(isDisabled(menuButton(env, "data-vp-take", "N5")), true);
+  assert.match(menuButton(env, "data-vp-take", "N5"), /重放中不能接管/);
+  assert.equal(await env.app().takeover().takeover("N5"), false, "and the handler refuses as well");
+  assert.match(lastToast(env), /重放中不能接管/);
   env.app().state.replay = null;
+  env.app().state.session = live;
 });
 
 // -------------------------------------------------------------------------------------------------

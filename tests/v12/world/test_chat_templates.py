@@ -102,9 +102,11 @@ def test_a_template_is_not_truncated_but_still_costs_a_message_and_its_chars() -
     token = world.channel("c1").group.tokens[0]
     assert token.messages_used == 1 and token.chars_used == len(text)
     assert receipt.floor_left == {"messages": 1, "chars": 50 - len(text), "seconds": 60.0}
-    # the free text that follows can only use what is left of the total
+    # the free text that follows can only use what is left of the total: longer than that, it is sent back (v0.14, H16)
+    left = 50 - len(text)
     follow_up = speak(world, "N1", "c1", "字" * 20)
-    assert follow_up.truncated == {"dropped_chars": 20 - (50 - len(text)), "kept_chars": 50 - len(text)}
+    assert follow_up.code == Code.TOO_LONG and follow_up.data == {"chars": 20, "limit": left}
+    assert speak(world, "N1", "c1", "字" * left).ok
 
 
 def test_templates_use_up_the_token_like_any_message() -> None:

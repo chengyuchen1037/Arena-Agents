@@ -18,8 +18,9 @@ Nobody is told (F6): the moderator and the other players cannot tell a person fr
 the seat is not told afterwards either - when the seat is given back its conversation starts again from the full
 board and history, in which the person's words stand as its own.
 
-The *control lock* of the orchestrator (``_control()``) serialises start / resume, the re-deal and taking over /
-giving back a seat, so a re-deal can never overtake a start (F5).
+The *control lock* of the orchestrator (``_control()``) serialises start / resume and taking over / giving back a seat
+(v0.14, H52: the identities are dealt when the game starts, so there is no re-deal any more - and no way for a re-deal to
+overtake a start).
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ SEAT_QUIET_EVENTS = frozenset(
 
 
 class TakeoverError(RuntimeError):
-    """The game refuses a takeover, a seat action or a re-deal; ``status`` is the HTTP status the API answers with."""
+    """The game refuses a takeover or a seat action; ``status`` is the HTTP status the API answers with."""
 
     def __init__(self, message: str, status: int = 409) -> None:
         super().__init__(message)
@@ -67,7 +68,7 @@ class TakeoverRuntimeMixin:
 
     # ------------------------------------------------------------------ the control lock ---
     def _control(self) -> asyncio.Lock:
-        """The lock that serialises start / resume, the re-deal and taking a seat over / giving it back."""
+        """The lock that serialises start / resume and taking a seat over / giving it back."""
         if self._control_lock_obj is None:
             self._control_lock_obj = asyncio.Lock()
         return self._control_lock_obj
@@ -80,8 +81,7 @@ class TakeoverRuntimeMixin:
         return str(seat) if seat else None
 
     def game_has_started(self) -> bool:
-        """The game has been started at least once (F5): it has a ``started_at``, or the ledger recorded a
-        ``running`` status.  A re-deal is never allowed after that."""
+        """The game has been started at least once: it has a ``started_at``, or the ledger recorded a ``running`` status."""
         if self.session.started_at:  # type: ignore[attr-defined]
             return True
         return any(
@@ -89,22 +89,19 @@ class TakeoverRuntimeMixin:
             for e in self.world.ledger  # type: ignore[attr-defined]
         )
 
-    def reshuffle_available(self) -> bool:
-        """The identities may still be dealt again: the game is idle and has never been started."""
-        return self.session.status == "idle" and not self.game_has_started()  # type: ignore[attr-defined]
-
     def takeover_payload(self) -> dict[str, Any]:
-        """``PublicSession.takeover`` (contract §11.7): ``{"seat", "reshuffle_available"}`` and, while a seat is
-        played, the whole state of that seat (``seq``, ``channels``, ``requests``, ``abilities``, ``attention``)."""
+        """``PublicSession.takeover`` (contract §11.7): ``{"seat"}`` and, while a seat is played, the whole state of that seat
+        (``seq``, ``channels``, ``requests``, ``abilities``, ``attention``).  (v0.14, H52: there is no re-deal any more, so no
+        ``reshuffle_available``.)"""
         seat = self.takeover_seat
-        payload: dict[str, Any] = {"seat": seat, "reshuffle_available": self.reshuffle_available()}
+        payload: dict[str, Any] = {"seat": seat}
         if seat is None:
             return payload
         try:
             state = seat_status(self.world, seat)  # type: ignore[attr-defined]
         except KeyError:  # a seat the world does not have (a damaged save): nothing to show
             logger.warning("The seat taken over (%s) does not exist in the world", seat)
-            return {"seat": None, "reshuffle_available": payload["reshuffle_available"]}
+            return {"seat": None}
         except Exception:  # noqa: BLE001 - this document is part of every snapshot: it must never break /api/state
             # Fail closed: the seat is played, but nothing is offered (the page shows "禁言中" everywhere).
             logger.exception("Could not compute the state of the seat %s", seat)
@@ -138,7 +135,7 @@ class TakeoverRuntimeMixin:
         """Tell the world which seat a person plays: its floor in a public channel has no deadline (v0.13.1, G10 / G14).
 
         Called whenever the played seat changes or a world / session becomes the live one (a new game, a restored or
-        imported one, a re-deal).  A floor the seat holds at that moment is re-judged by the world.  With ``publish``
+        imported one, a table that was set up again).  A floor the seat holds at that moment is re-judged by the world.  With ``publish``
         (taking over / giving back, when somebody is looking) the ``floor.changed`` events of that are published."""
         world = world if world is not None else getattr(self, "world", None)
         session = getattr(self, "session", None)
@@ -238,7 +235,7 @@ class TakeoverRuntimeMixin:
             session.takeover.seat = None
             self.agent_state[seat] = "sleeping"  # type: ignore[attr-defined]
             self._book.reset(seat)  # type: ignore[attr-defined]
-            brain = self._brain  # type: ignore[attr-defined]
+            brain = (self._brains or {}).get(seat)  # type: ignore[attr-defined]  # (v0.14: every seat has a brain of its own)
             if brain is not None:
                 brain.reset_conversation(seat)
             self._sync_untimed_holders(publish=True)  # (v0.13.1) a floor it holds is timed again, with the time it had left
@@ -267,12 +264,6 @@ class TakeoverRuntimeMixin:
             ledger = (loaded.world or {}).get("ledger") or []
             last = ledger[-1].get("seq", 0) if ledger and isinstance(ledger[-1], dict) else 0
             loaded.human_spans.append(HumanSpan(seat=seat, from_seq=int(last or 0)))
-
-    # ----------------------------------------------------------------------- re-deal ---
-    def _guard_reshuffle(self) -> None:
-        """The identities are only dealt again before the game has ever started (F5): anything else is a 409."""
-        if self.session.status != "idle" or self.game_has_started():  # type: ignore[attr-defined]
-            raise TakeoverError("对局已经开始，不能再重新发牌。")
 
     # ------------------------------------------------------------------ seat actions ---
     def _seat_actor(self) -> str:

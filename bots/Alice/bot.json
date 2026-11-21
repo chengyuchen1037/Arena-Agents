@@ -1,0 +1,15 @@
+{
+ "format": 1,
+ "name": "Alice",
+ "avatar": {
+  "v": 1,
+  "face": "f12",
+  "skin": "s03",
+  "hair": "h37",
+  "hair_color": "c12",
+  "eyes": "e08",
+  "mouth": "m16",
+  "accessory": "a02",
+  "accessory_color": "k08"
+ }
+}

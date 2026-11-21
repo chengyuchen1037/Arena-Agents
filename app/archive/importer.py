@@ -23,23 +23,18 @@ exception message.
 from __future__ import annotations
 
 import errno
-import hashlib
 import json
 import logging
 import os
 import re
 import shutil
-import stat
-import struct
 import time
 import uuid
-import zipfile
-import zlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 from app.archive.errors import (
     ArchiveError,
@@ -48,28 +43,24 @@ from app.archive.errors import (
     ArchiveKeysMismatchError,
     ArchiveLimitError,
     ArchivePasswordError,
-    ArchiveStateError,
     safe_text,
 )
 from app.archive.format import (
-    CHUNK_BYTES,
     DEFAULT_LIMITS,
     JSON_KINDS,
-    KIND_MANIFEST,
-    KIND_ROSTER_TEXT,
+    KIND_BOT_FILE,
     KIND_SECRETS,
-    KIND_SETTINGS,
-    MANIFEST_NAME,
     SECRETS_NAME,
+    TEXT_KINDS,
     ArchiveLimits,
-    FileEntry,
     Manifest,
     classify,
     parse_manifest,
 )
 from app.archive.kdf import open_secrets_bound
 from app.archive.ports import ProgressFn, SecretsPort, default_secrets, no_progress
-from app.archive.validate import Inventory, check_member, endpoint_of, providers_of
+from app.archive.validate import MAX_TEXT_BYTES, Inventory, check_member, endpoint_of, providers_of
+from app.archive.zipcheck import OpenedZip, human_bytes, restore_mtime, stream_member
 
 logger = logging.getLogger(__name__)
 
@@ -87,9 +78,7 @@ IMPORT_PHASES = (PHASE_VERIFY, PHASE_VALIDATE, PHASE_BACKUP, PHASE_REPLACE, PHAS
 KEEP_IN_PLACE = frozenset({".lock", "master.v1.dpapi", "backups", "exports", "tmp"})
 KEEP_BACKUPS = 3
 _BACKUP_NAME = re.compile(r"^[0-9]{8}-[0-9]{6}(?:-[0-9]+)?$")
-_ALLOWED_COMPRESSION = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
 _MAX_GAMES_LISTED = 100
-_DECOMPRESS_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError, RuntimeError)
 
 
 # ------------------------------------------------------------------------------------------------ summary
@@ -97,7 +86,10 @@ _DECOMPRESS_ERRORS = (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedEr
 
 @dataclass
 class ArchiveSummary:
-    """What the user is shown before an import (and what the API returns): facts of the archive, never its content."""
+    """What the user is shown before an import (and what the API returns): facts of the archive, never its content.
+
+    A format 1 archive (v0.13) has ``roster_seats``; a format 2 archive has ``bots``, ``contract`` (is the official contract in it) and
+    ``rules`` (the number of scenarios); the fields of the other format are ``None`` and are left out of ``to_dict()``."""
 
     archive_id: str
     format_version: int
@@ -108,16 +100,19 @@ class ArchiveSummary:
     file_count: int
     games: int
     providers: int
-    roster_seats: int
+    roster_seats: int | None
     has_secrets: bool
     has_logs: bool
     provider_names: list[str] = field(default_factory=list)
     game_list: list[dict[str, Any]] = field(default_factory=list)
     games_listed: int = 0
     warnings: list[str] = field(default_factory=list)
+    bots: int | None = None
+    contract: bool | None = None
+    rules: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data: dict[str, Any] = {
             "archive_id": self.archive_id,
             "format_version": self.format_version,
             "app_version": self.app_version,
@@ -127,236 +122,27 @@ class ArchiveSummary:
             "file_count": self.file_count,
             "games": self.games,
             "providers": self.providers,
-            "roster_seats": self.roster_seats,
-            "has_secrets": self.has_secrets,
-            "has_logs": self.has_logs,
-            "provider_names": list(self.provider_names),
-            "game_list": [dict(item) for item in self.game_list],
-            "games_listed": self.games_listed,
-            "warnings": list(self.warnings),
         }
+        if self.format_version >= 2:
+            data.update(bots=self.bots or 0, contract=bool(self.contract), rules=self.rules or 0)
+        else:
+            data["roster_seats"] = self.roster_seats or 0
+        data.update(
+            has_secrets=self.has_secrets,
+            has_logs=self.has_logs,
+            provider_names=list(self.provider_names),
+            game_list=[dict(item) for item in self.game_list],
+            games_listed=self.games_listed,
+            warnings=list(self.warnings),
+        )
+        return data
 
 
-def human_bytes(value: int) -> str:
-    size = float(value)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{value} B"
-
-
-# ------------------------------------------------------------------------------------- opening an archive
-
-
-def _declared_entries(handle: BinaryIO, file_size: int) -> tuple[int, int]:
-    """``(entry count, central directory size)`` as the end-of-central-directory record claims, read *before* the zip
-    module gets to allocate an object per entry (a hostile file can declare tens of millions)."""
-    tail_len = min(file_size, 22 + 65535)
-    handle.seek(file_size - tail_len)
-    tail = handle.read(tail_len)
-    pos = tail.rfind(b"PK\x05\x06")
-    if pos < 0 or pos + 22 > len(tail):
-        raise ArchiveFormatError("这不是有效的存档文件（不是 zip，或者文件不完整）。")
-    _sig, _disk, _cd_disk, _entries_here, entries, cd_size, cd_offset, _comment = struct.unpack("<4sHHHHIIH", tail[pos : pos + 22])
-    if entries == 0xFFFF or cd_size == 0xFFFFFFFF or cd_offset == 0xFFFFFFFF:
-        locator = pos - 20
-        if locator < 0 or tail[locator : locator + 4] != b"PK\x06\x07":
-            raise ArchiveFormatError("这不是有效的存档文件（zip64 记录不完整）。")
-        _sig, _disk, record_offset, _disks = struct.unpack("<4sIQI", tail[locator : locator + 20])
-        if record_offset + 56 > file_size:
-            raise ArchiveFormatError("这不是有效的存档文件（zip64 记录越界）。")
-        handle.seek(record_offset)
-        record = handle.read(56)
-        if len(record) < 56 or record[:4] != b"PK\x06\x06":
-            raise ArchiveFormatError("这不是有效的存档文件（zip64 记录损坏）。")
-        fields = struct.unpack("<4sQHHIIQQQQ", record)
-        entries, cd_size = fields[7], fields[8]
-    return int(entries), int(cd_size)
-
-
-class _Opened:
-    """An archive whose structure, member names and manifest have been checked (no member has been read yet)."""
+class _Opened(OpenedZip):
+    """An archive of the total format whose structure, member names and manifest have been checked (no member has been read yet)."""
 
     def __init__(self, path: Path, limits: ArchiveLimits) -> None:
-        self.path = Path(path)
-        self.limits = limits
-        self.zf: zipfile.ZipFile | None = None
-        self.manifest: Manifest
-        self.infos: dict[str, zipfile.ZipInfo] = {}
-        self.size_bytes = 0
-        self.uncompressed_bytes = 0
-
-    def __enter__(self) -> "_Opened":
-        try:
-            self._open()
-        except BaseException:
-            self.close()
-            raise
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.close()
-
-    def close(self) -> None:
-        if self.zf is not None:
-            try:
-                self.zf.close()
-            except Exception:  # noqa: BLE001
-                pass
-            self.zf = None
-
-    # ------------------------------------------------------------------------------------------------
-    def _open(self) -> None:
-        limits = self.limits
-        try:
-            info = self.path.lstat()
-        except OSError:
-            raise ArchiveFormatError("找不到要导入的存档文件。") from None
-        if not stat.S_ISREG(info.st_mode):
-            raise ArchiveFormatError("要导入的存档必须是普通文件。")
-        self.size_bytes = info.st_size
-        if self.size_bytes < 22:
-            raise ArchiveFormatError("这不是有效的存档文件（文件太小）。")
-        try:
-            with open(self.path, "rb") as handle:
-                entries, cd_size = _declared_entries(handle, self.size_bytes)
-        except OSError:
-            raise ArchiveIOError("读取存档文件失败。") from None
-        if entries > limits.max_entries or cd_size > limits.max_entries * 400:
-            raise ArchiveLimitError(f"存档里的文件条目太多（声明了 {entries} 条，最多 {limits.max_entries} 条）。")
-        try:
-            self.zf = zipfile.ZipFile(self.path, "r")
-        except (zipfile.BadZipFile, ValueError, struct.error, OverflowError, UnicodeError):
-            raise ArchiveFormatError("这不是有效的存档文件（不是 zip，或者文件已损坏）。") from None
-        except OSError:
-            raise ArchiveIOError("读取存档文件失败。") from None
-        self._scan()
-        self._read_manifest()
-
-    def _scan(self) -> None:
-        assert self.zf is not None
-        limits = self.limits
-        infos = self.zf.infolist()
-        if len(infos) > limits.max_entries:
-            raise ArchiveLimitError(f"存档里的文件条目太多（{len(infos)} 条，最多 {limits.max_entries} 条）。")
-        seen_lower: set[str] = set()
-        total = 0
-        packed = 0
-        for info in infos:
-            name = info.filename
-            classify(name)
-            if name in self.infos or name.lower() in seen_lower:
-                raise ArchiveFormatError(f"存档里有重复的文件：{safe_text(name)}")
-            seen_lower.add(name.lower())
-            if info.flag_bits & 0x1 or info.flag_bits & 0x40:
-                raise ArchiveFormatError(f"存档里的文件被 zip 密码加密了：{safe_text(name)}")
-            if info.compress_type not in _ALLOWED_COMPRESSION:
-                raise ArchiveFormatError(f"存档里的文件用了不支持的压缩方式：{safe_text(name)}")
-            mode = info.external_attr >> 16
-            # Unix ``ZipFile.writestr(name, ...)`` stores permission bits without an explicit S_IFREG.  No file-type
-            # bits is an ordinary file; reject only an explicit non-regular type (and the DOS directory flag).
-            file_type = stat.S_IFMT(mode) if info.create_system == 3 else 0
-            if file_type not in (0, stat.S_IFREG) or info.external_attr & 0x10:
-                raise ArchiveFormatError(f"存档里有符号链接或特殊文件：{safe_text(name)}")
-            if info.file_size > limits.max_file_bytes:
-                raise ArchiveLimitError(f"存档里的文件太大：{safe_text(name)}")
-            if info.file_size > limits.ratio_floor_bytes and info.file_size > max(info.compress_size, 1) * limits.max_ratio:
-                raise ArchiveLimitError(f"存档里的文件压缩比异常（疑似压缩炸弹）：{safe_text(name)}")
-            total += info.file_size
-            packed += info.compress_size
-            if total > limits.max_total_bytes:
-                raise ArchiveLimitError(f"存档解压后太大（超过 {human_bytes(limits.max_total_bytes)}）。")
-            self.infos[name] = info
-        if packed > self.size_bytes:
-            raise ArchiveFormatError("存档里的文件互相重叠，文件已损坏。")
-        self.uncompressed_bytes = total
-
-    def _read_manifest(self) -> None:
-        assert self.zf is not None
-        info = self.infos.get(MANIFEST_NAME)
-        if info is None:
-            raise ArchiveFormatError("存档里没有 manifest.json。")
-        if info.file_size > self.limits.max_manifest_bytes:
-            raise ArchiveLimitError("manifest.json 太大。")
-        raw = _read_all(self.zf, info, self.limits.max_manifest_bytes)
-        self.manifest = parse_manifest(raw)
-        listed = {entry.path for entry in self.manifest.files}
-        actual = set(self.infos) - {MANIFEST_NAME}
-        if listed - actual:
-            raise ArchiveFormatError(f"存档缺少清单里记载的文件：{safe_text(sorted(listed - actual)[0])}")
-        if actual - listed:
-            raise ArchiveFormatError(f"存档里多出清单没有记载的文件：{safe_text(sorted(actual - listed)[0])}")
-        for entry in self.manifest.files:
-            if self.infos[entry.path].file_size != entry.size:
-                raise ArchiveFormatError(f"{safe_text(entry.path)} 的大小与清单不符。")
-        if not self.manifest.files:
-            raise ArchiveFormatError("存档里没有任何数据。")
-        self.uncompressed_bytes = sum(entry.size for entry in self.manifest.files)
-
-
-def _read_all(zf: zipfile.ZipFile, info: zipfile.ZipInfo, limit: int) -> bytes:
-    chunks: list[bytes] = []
-    size = 0
-    try:
-        with zf.open(info, "r") as stream:
-            while True:
-                chunk = stream.read(CHUNK_BYTES)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > limit:
-                    raise ArchiveLimitError(f"{safe_text(info.filename)} 太大。")
-                chunks.append(chunk)
-    except _DECOMPRESS_ERRORS:
-        raise ArchiveFormatError(f"{safe_text(info.filename)} 已损坏（压缩数据或 CRC 校验失败）。") from None
-    except OSError:
-        raise ArchiveIOError("读取存档文件失败。") from None
-    return b"".join(chunks)
-
-
-def _stream_member(
-    zf: zipfile.ZipFile,
-    info: zipfile.ZipInfo,
-    entry: FileEntry,
-    *,
-    keep: bool,
-    sink: BinaryIO | None,
-    on_bytes: Callable[[int], None],
-) -> bytes | None:
-    """Read one member, checking its size and SHA-256 against the manifest as the bytes go by; optionally keep the
-    bytes (for content checks) and/or write them to ``sink``.  Never reads more than the manifest says."""
-    digest = hashlib.sha256()
-    size = 0
-    chunks: list[bytes] = []
-    try:
-        with zf.open(info, "r") as stream:
-            while True:
-                chunk = stream.read(CHUNK_BYTES)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > entry.size:
-                    raise ArchiveFormatError(f"{safe_text(entry.path)} 比清单记载的大：存档已损坏或被改动。")
-                digest.update(chunk)
-                if sink is not None:
-                    sink.write(chunk)
-                if keep:
-                    chunks.append(chunk)
-                on_bytes(len(chunk))
-    except ArchiveError:
-        raise
-    except _DECOMPRESS_ERRORS:
-        raise ArchiveFormatError(f"{safe_text(entry.path)} 已损坏（压缩数据或 CRC 校验失败）。") from None
-    except OSError as exc:
-        if exc.errno == errno.ENOSPC:
-            raise ArchiveIOError("磁盘空间不足，解压已中止。") from None
-        raise ArchiveIOError("读取存档或写入临时文件失败。") from None
-    if size != entry.size:
-        raise ArchiveFormatError(f"{safe_text(entry.path)} 的大小与清单不符：存档已损坏或被改动。")
-    if digest.hexdigest() != entry.sha256:
-        raise ArchiveFormatError(f"{safe_text(entry.path)} 的 SHA-256 校验值与清单不符：存档已损坏或被改动。")
-    return b"".join(chunks) if keep else None
+        super().__init__(path, limits, classify=classify, parse_manifest=parse_manifest)
 
 
 def _walk(
@@ -383,9 +169,10 @@ def _walk(
     for entry in entries:
         kind, game_id = classify(entry.path)
         info = opened.infos[entry.path]
-        keep = kind in JSON_KINDS or kind in (KIND_ROSTER_TEXT, KIND_SECRETS)
+        small_text = kind in TEXT_KINDS or kind == KIND_BOT_FILE
+        keep = kind in JSON_KINDS or small_text or kind == KIND_SECRETS
         if keep:
-            cap = limits.max_secrets_bytes if kind == KIND_SECRETS else limits.max_json_bytes
+            cap = limits.max_secrets_bytes if kind == KIND_SECRETS else (MAX_TEXT_BYTES if small_text else limits.max_json_bytes)
             if entry.size > cap:
                 raise ArchiveLimitError(f"{safe_text(entry.path)} 太大，无法检查。")
         if stage is not None and kind != KIND_SECRETS:
@@ -394,42 +181,45 @@ def _walk(
             if os.name != "nt":
                 target.parent.chmod(0o700)
             with open(target, "xb") as sink:
-                data = _stream_member(opened.zf, info, entry, keep=keep, sink=sink, on_bytes=on_bytes)
+                data = stream_member(opened.zf, info, entry, keep=keep, sink=sink, on_bytes=on_bytes)
             if os.name != "nt":
                 target.chmod(0o600)
-            _restore_mtime(target, info)
+            restore_mtime(target, info)
         else:
-            data = _stream_member(opened.zf, info, entry, keep=keep, sink=None, on_bytes=on_bytes)
+            data = stream_member(opened.zf, info, entry, keep=keep, sink=None, on_bytes=on_bytes)
         check_member(kind, game_id, entry.path, data if keep else None, inventory)
     progress(PHASE_VERIFY, total, total)
     return inventory
 
 
-def _restore_mtime(target: Path, info: zipfile.ZipInfo) -> None:
-    """Give an unpacked file the modification time it had when it was exported (the zip stores it, to the second, as
-    local time): the history list orders and shows games by it.  Best effort."""
-    try:
-        stamp = time.mktime((*info.date_time, 0, 0, -1))
-        os.utime(target, (stamp, stamp))
-    except (OverflowError, ValueError, OSError):
-        pass
-
-
 def _crosscheck(manifest: Manifest, inventory: Inventory) -> None:
     contents = manifest.contents
-    if (
-        contents.games != len(inventory.games)
-        or contents.providers != len(inventory.provider_ids)
-        or contents.roster_seats != len(inventory.seat_ids)
-    ):
-        raise ArchiveFormatError("清单的内容统计（对局数、Provider 数、名册座位数）与实际内容不符。")
+    if contents.games != len(inventory.games) or contents.providers != len(inventory.provider_ids):
+        raise ArchiveFormatError("清单的内容统计（对局数、Provider 数）与实际内容不符。")
+    if manifest.format_version >= 2:
+        if (
+            contents.bots != len(inventory.bot_ids)
+            or contents.rules != len(inventory.scenario_ids)
+            or contents.contract != inventory.has_contract
+        ):
+            raise ArchiveFormatError("清单的内容统计（bot 数、剧本数、是否含契约）与实际内容不符。")
+    elif contents.roster_seats != len(inventory.seat_ids):
+        raise ArchiveFormatError("清单的内容统计（名册座位数）与实际内容不符。")
     for game_id in inventory.prev_games - set(inventory.games):
         raise ArchiveFormatError(f"对局 {safe_text(game_id)} 只有备份副本，没有 game.json。")
+
+
+#: What a summary says of a v0.13 archive: its roster is turned into bots when it is imported (H45).
+LEGACY_ROSTER_NOTE = "这是 v0.13 的旧格式存档：名册里的 {seats} 个座位会在导入时迁移成 bot（性格设定变成底层设定，记忆会整理成印象）。"
 
 
 def _summary(opened: _Opened, inventory: Inventory) -> ArchiveSummary:
     manifest = opened.manifest
     games = sorted(inventory.games.values(), key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    legacy = manifest.format_version < 2
+    warnings: list[str] = []
+    if legacy and inventory.seat_ids:
+        warnings.append(LEGACY_ROSTER_NOTE.format(seats=len(inventory.seat_ids)))
     return ArchiveSummary(
         archive_id=manifest.archive_id,
         format_version=manifest.format_version,
@@ -440,12 +230,16 @@ def _summary(opened: _Opened, inventory: Inventory) -> ArchiveSummary:
         file_count=len(manifest.files),
         games=len(inventory.games),
         providers=len(inventory.provider_ids),
-        roster_seats=len(inventory.seat_ids),
+        roster_seats=len(inventory.seat_ids) if legacy else None,
         has_secrets=manifest.contents.has_secrets,
         has_logs=manifest.contents.has_logs,
         provider_names=list(inventory.provider_names),
         game_list=games[:_MAX_GAMES_LISTED],
         games_listed=min(len(games), _MAX_GAMES_LISTED),
+        warnings=warnings,
+        bots=None if legacy else len(inventory.bot_ids),
+        contract=None if legacy else inventory.has_contract,
+        rules=None if legacy else len(inventory.scenario_ids),
     )
 
 
@@ -468,7 +262,7 @@ def _member_bytes(opened: "_Opened", name: str, limit: int) -> bytes | None:
     if entry.size > limit:
         raise ArchiveLimitError(f"{safe_text(name)} 太大，无法检查。")
     assert opened.zf is not None
-    return _stream_member(opened.zf, opened.infos[name], entry, keep=True, sink=None, on_bytes=lambda _n: None)
+    return stream_member(opened.zf, opened.infos[name], entry, keep=True, sink=None, on_bytes=lambda _n: None)
 
 
 def _open_bound_keys(opened: "_Opened", password: str) -> dict[str, str]:
@@ -539,6 +333,47 @@ def _fix_last_session(stage: Path, game_ids: set[str], warnings: list[str]) -> N
     warnings.append("存档里没有「上次对局」所指的对局，已清除这条记录（导入后会从一局新的空白对局开始）。")
 
 
+SEATS = 12  # the table of the application (``BotStore`` fills a table of this size)
+
+
+def _prepare_bots(stage: Path, version: int, warnings: list[str], *, seats: int) -> None:
+    """The bots of the unpacked data (``stage``), before they are swapped in.
+
+    * format 1 (v0.13): the roster - names, avatars, personas, memories, the records - becomes the bots of the table, like the first start
+      of v0.14 on such a data directory does (:meth:`app.storage.bots.BotStore.import_legacy_roster`, H45, H59; no model is called);
+      the default bindings saved by seat move to the bots.  An archive without a roster gets the default bots when the application
+      reloads.
+    * format 2: ``bots/`` has to be a table that works - ``lineup.json`` there, naming ``seats`` bots that all exist, no name twice
+      (``BotStore.check_integrity``).  A bot whose *texts* are over a limit (somebody edited a file by hand) is no reason to refuse the
+      archive: the application tolerates it and the start check says what to fix, so it is only mentioned in ``warnings``.  An archive with
+      no bots at all (no line-up, no bot folder) is fine, too: the default bots are made when the application reloads."""
+    from app.storage.bots import BotStore
+
+    store = BotStore(stage, seats=seats)
+    try:
+        if version < 2:
+            roster = stage / "roster"
+            if not roster.is_dir():
+                return
+            store.import_legacy_roster(roster)
+            problems = store.check_integrity(content=False)
+        else:
+            bots = stage / "bots"
+            if not (bots / "lineup.json").is_file() and not any(entry.is_dir() for entry in (bots.iterdir() if bots.is_dir() else ())):
+                return
+            problems = store.check_integrity(content=False)
+            if not problems:
+                warnings.extend(store.check_integrity())  # (the table works: what is left to say is about the limits of the texts)
+    except ArchiveError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - a storage / validation failure of the bots is a problem of the archive's content
+        logger.warning("The bots of an archive could not be prepared: %s", type(exc).__name__, exc_info=True)
+        raise ArchiveFormatError("存档里的名册或 bot 数据无法使用（详情见服务端日志）。") from None
+    if problems:
+        shown = " ".join(problems[:4]) + (f"（另有 {len(problems) - 4} 项）" if len(problems) > 4 else "")
+        raise ArchiveFormatError(f"存档里的玩家（bot）数据有问题：{shown}")
+
+
 def _check_settings(stage: Path) -> None:
     """The real settings reader must accept the unpacked ``settings.json`` (it is stricter than a JSON check)."""
     if not (stage / "settings.json").is_file():
@@ -564,6 +399,7 @@ def prepare(
     limits: ArchiveLimits = DEFAULT_LIMITS,
     progress: ProgressFn = no_progress,
     work_dir: Path | None = None,
+    seats: int = SEATS,
 ) -> PreparedImport:
     """Unpack and verify an archive into ``<data>/tmp/import-<id>/stage``; the data directory itself is not changed.
 
@@ -596,6 +432,7 @@ def prepare(
             warnings: list[str] = []
             _fix_last_session(stage, set(inventory.games), warnings)
             _check_settings(stage)
+            _prepare_bots(stage, manifest.format_version, warnings, seats=seats)
             progress(PHASE_VALIDATE, 1, 1)
             summary = _summary(opened, inventory)
             if import_keys is not None:

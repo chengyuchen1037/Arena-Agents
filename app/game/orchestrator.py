@@ -7,8 +7,12 @@ save files, the SSE event bus and the HTTP API (``app.api``).
 
 v0.12.1: every message injected into an agent wakes it; token use is managed by the actors (one
 persistent conversation per agent, kept across pause / resume in ``self._book`` and reset for a new
-game, an import or a restore), never by calling the model less.  The user's spending limit and the
-roster (names, avatars, persona, memory) live in :mod:`app.game.roster_runtime`.
+game, an import or a restore), never by calling the model less.
+
+v0.14: the players are *bots* (:mod:`app.game.bots_runtime`): the seats of a game come from the line-up of the bot store, every seat
+has a ``BotBrain`` of its own built from the snapshot of the bot taken when the game starts, the identities are dealt when the game
+starts - after the start check - and the learning runs (initialization, review) are :mod:`app.game.learning_runtime`.  The user's
+spending limit lives in :mod:`app.game.budget_runtime`.
 """
 
 from __future__ import annotations
@@ -24,22 +28,25 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from app.agents.brain import ArenaBrain
 from app.config import load_config
 from app.engine.llm import LLMClient
 from app.game.bindings import BindingError
+from app.game.bots_runtime import BotsRuntimeMixin, NotReadyError
+from app.game.budget_runtime import BudgetRuntimeMixin
+from app.game.learning_runtime import LearningRuntimeMixin
 from app.game.observe_runtime import ObserveRuntimeMixin
-from app.game.roster_runtime import RosterRuntimeMixin
 from app.game.session import (
     APP_ENGINE_VERSION,
     MODERATOR_ID,
     SESSION_SCHEMA_VERSION,
+    SUPPORTED_SCHEMA_VERSIONS,
     GameSession,
     Participant,
     utc_now_iso,
 )
 from app.game.session_runtime import OLD_SAVE_LOAD_NOTICE, SessionRuntimeMixin
 from app.game.softpause_runtime import SoftPauseRuntimeMixin
+from app.game.sources import Sources
 from app.game.takeover_runtime import TakeoverError, TakeoverRuntimeMixin
 from app.runtime.agent import Agent, AgentConfig
 from app.runtime.bus import EventBus
@@ -62,6 +69,7 @@ __all__ = [
     "BindingError",
     "ConfigReloadError",
     "GameOrchestrator",
+    "NotReadyError",
     "SessionLoadError",
     "TakeoverError",
     "get_orchestrator",
@@ -105,6 +113,8 @@ class _CallableSink:
 
 
 def load_config_spec(cfg: dict[str, Any]) -> ScenarioSpec:
+    """The scenario ``config.yml`` names (the default source of the scenario: the engine itself reads the one in the data directory,
+    :class:`~app.game.sources.Sources`)."""
     scenario_cfg = cfg.get("scenario") or {}
     path = scenario_cfg.get("path") or scenario_cfg.get("document")
     if not path:
@@ -113,20 +123,28 @@ def load_config_spec(cfg: dict[str, Any]) -> ScenarioSpec:
 
 
 class GameOrchestrator(
-    SoftPauseRuntimeMixin, ObserveRuntimeMixin, TakeoverRuntimeMixin, RosterRuntimeMixin, SessionRuntimeMixin
+    SoftPauseRuntimeMixin,
+    ObserveRuntimeMixin,
+    TakeoverRuntimeMixin,
+    LearningRuntimeMixin,
+    BotsRuntimeMixin,
+    BudgetRuntimeMixin,
+    SessionRuntimeMixin,
 ):
     # Class-level defaults so partially initialized instances (tests) stay valid.
     _supervisor: Supervisor | None = None
     _reload_deferred: bool = False
     llm_port_factory: Callable[["GameOrchestrator"], Any] | None = None
     demo_mode: bool = False
-    _brain: ArenaBrain | None = None
+    _brains: dict[str, Any] | None = None
     _stall_notice: str = ""
-    _roster_io_suspended: bool = False
 
     def __init__(self) -> None:
         self.cfg = load_config()
-        self.default_spec = load_config_spec(self.cfg)
+        # The first game is built before the data directory is locked (``startup()``): it must not read or create bot files yet
+        # (nor the contract / rules stores); ``startup()`` reloads it afterwards.
+        self._table_io_suspended = True
+        self.default_spec = self._load_default_spec(self.cfg)
         self.spec = self.default_spec
         self.llm = LLMClient(self.cfg)
         self.bus = EventBus()
@@ -135,37 +153,37 @@ class GameOrchestrator(
         self._supervisor = None
         self._reload_deferred = False
         self._book = ConversationBook()
-        self._brain = None
+        self._brains = {}
         self._stall_notice = ""
         self.session: GameSession
         self.world: World
         self.clock: GameClock
         self.usage: UsageBook
-        # The first game is built before the data directory is locked (``startup()``): it must not read or
-        # create roster files yet; ``startup()`` reloads it afterwards.
-        self._roster_io_suspended = True
         try:
             self._reset_game(default_bindings=None)
         finally:
-            self._roster_io_suspended = False
+            self._table_io_suspended = False
 
     # ------------------------------------------------------------------ config ---
     def _is_active(self) -> bool:
         return self._supervisor is not None or self.session.status == "running"
 
+    def _load_default_spec(self, cfg: dict[str, Any]) -> ScenarioSpec:
+        """The scenario of the next new game: the one in force in the data directory (the rules store), else the one ``config.yml`` names."""
+        return Sources(lambda: cfg, self._table_io_allowed).spec()
+
     def reload_config(self) -> bool:
         """Re-read config.yml / the scenario.  Returns False when deferred (a game is running).
 
-        The running (or restored) game keeps the scenario it started with (it is stored in the
-        session); the reload only affects the next new game.  The new configuration is built first
-        and swapped in only when it loaded completely.
+        The running (or restored) game keeps the scenario it started with (it is stored in the session); the reload only affects the next
+        new game.  The new configuration is built first and swapped in only when it loaded completely.
         """
         if self._is_active():
             self._reload_deferred = True
             return False
         try:
             cfg = load_config()
-            spec = load_config_spec(cfg)
+            spec = self._load_default_spec(cfg)
         except (FileNotFoundError, ScenarioError, yaml.YAMLError, OSError, ValueError) as exc:
             raise ConfigReloadError(f"配置加载失败：{exc}") from exc
         self.cfg = cfg
@@ -179,34 +197,20 @@ class GameOrchestrator(
         return True
 
     # ------------------------------------------------------------- game creation ---
-    def _config_players(self) -> list[dict[str, Any]]:
-        """The seats exactly as ``config.yml`` lists them (defaults; the roster overrides name / avatar / texts)."""
-        players = []
-        for index, item in enumerate(self.cfg.get("participants", []), start=1):
-            players.append(
-                {
-                    "id": str(item["id"]),
-                    "seat": str(item.get("seat", index)),
-                    "name": str(item.get("name") or item["id"]),
-                    "persona": str(item.get("persona", "")),
-                    "memory": "",
-                    "avatar": None,
-                }
-            )
-        return players
-
     def _new_world(
         self, spec: ScenarioSpec, seed: int | None = None, players: list[dict[str, Any]] | None = None
     ) -> tuple[World, GameClock]:
+        """A world for the seats of the table: nothing is dealt (H52) - the identities are dealt when the game starts."""
         clock = GameClock()
         clock.pause()
         world = World.new_game(
             spec,
-            players if players is not None else self._roster_players(),
+            players if players is not None else self._lineup_players(),
             clock,
             seed=seed if seed is not None else random.SystemRandom().randrange(1, 2**31),
+            deal=False,
         )
-        # (v0.13.1) A re-dealt / renamed game keeps the seat a person plays.  The seat is read from the session that is live
+        # (v0.13.1) A rebuilt / renamed game keeps the seat a person plays.  The seat is read from the session that is live
         # *now*: for a brand-new game (``_reset_game``) that is still the old one, which is why ``_set_session`` - called right
         # after, with the new session - tells the world again and has the last word.
         self._sync_untimed_holders(world)
@@ -217,7 +221,7 @@ class GameOrchestrator(
     def _reset_game(self, *, default_bindings: dict[str, Any] | None = None) -> None:
         """Replace the live game with a fresh, idle one (the caller guarantees nothing is running)."""
         self.spec = self.default_spec
-        players = self._roster_players()
+        players = self._lineup_players()
         world, clock = self._new_world(self.spec, players=players)
         defaults = self._load_defaults() if default_bindings is None else default_bindings
         allowed = {MODERATOR_ID, *(p["id"] for p in players)}
@@ -226,12 +230,13 @@ class GameOrchestrator(
             scenario_name=self.spec.id,
             scenario_title=self.spec.title,
             participants=[Participant(**p) for p in players],
+            lineup=[p["bot_id"] for p in players if p["bot_id"]],
             tag_styles=copy.deepcopy(self.cfg.get("tag_styles") or {}),
             scenario_spec=self.spec.model_dump(mode="json"),
             model_bindings={a: b.model_copy(deep=True) for a, b in defaults.items() if a in allowed},
             budget=self._load_budget_defaults(),
-            memory_enabled=bool(getattr(self, "_memory_enabled_snapshot", True)),
-            moderator_avatar=getattr(self, "_moderator_avatar_snapshot", None),
+            memory_enabled=bool(self._memory_enabled_snapshot),
+            moderator_avatar=self._moderator_avatar_snapshot,
         )
         self.world, self.clock = world, clock
         self.usage = UsageBook()
@@ -242,14 +247,16 @@ class GameOrchestrator(
         self._attach_budget()
 
     def _reset_conversations(self) -> None:
-        """A new game / import / restore starts with no conversations (the book and the brain are the
+        """A new game / import / restore starts with no conversations (the book and the brains are the
         actors' memory of the *previous* game)."""
         self._book = ConversationBook()
-        self._brain = None
+        self._brains = {}
         self._stall_notice = ""
 
     async def new_game(self, *, randomize_identities: bool | None = None) -> GameSession:
-        """Start a fresh game (identities are always dealt anew)."""
+        """Start a fresh game: the seats are the table as it is now, nothing is dealt until it starts (H52).
+        (``randomize_identities`` is accepted for old callers and means nothing: every game is dealt anew when it starts.)"""
+        self._refuse_while_learning("新建对局")
         if self._autosave_enabled and not self._recovery_pending and self.world.seq > 0:
             await self.flush_autosave("pre-new-game")
         await self._halt()
@@ -260,37 +267,15 @@ class GameOrchestrator(
         await self.broadcast_state("new_game")
         return self.session
 
-    async def shuffle_identities(self) -> GameSession:
-        """Re-deal the identities of a game that has not started (F5).
-
-        Refused (:class:`TakeoverError`, HTTP 409) as soon as the game is not ``idle`` or has a start record
-        (``started_at`` / a ``running`` entry in the ledger).  It shares the control lock with
-        :meth:`start_or_resume`, so a re-deal can never overtake a start.
-        """
-        async with self._control():
-            self._guard_reshuffle()
-            self.world, self.clock = self._new_world(self.spec, players=self._session_players())
-            self._reset_conversations()
-            await self.broadcast_state("identities_shuffled")
-            return self.session
-
-    def _session_players(self) -> list[dict[str, Any]]:
-        """The seats of the *current* game (kept when only the identities are re-dealt)."""
-        return [p.model_dump() for p in self.session.participants]
-
     # ------------------------------------------------------------------ lifecycle ---
-    def _ensure_brain(self, *, fresh: bool) -> ArenaBrain:
-        """The brain of this game.  It is kept across pause / resume (its prompts stay byte-identical, which
-        is what the provider's prompt cache needs); ``fresh`` rebuilds it for a game that is starting, so
-        the persona / memory edits made while it was still idle are taken."""
-        brain = self._brain
-        if fresh or brain is None or brain.world is not self.world:
-            personas = {p.id: p.persona for p in self.session.participants}
-            memories = (
-                {p.id: p.memory for p in self.session.participants if p.memory} if self.session.memory_enabled else {}
-            )
-            brain = self._brain = ArenaBrain(self.world, self.spec, self.cfg, personas=personas, memories=memories)
-        return brain
+    def _ensure_brains(self, *, fresh: bool) -> dict[str, Any]:
+        """The brains of this game, one per agent.  They are kept across pause / resume (their prompts stay byte-identical, which is what
+        the provider's prompt cache needs); ``fresh`` rebuilds them for a game that is starting - from the snapshots the start has just
+        written into the session, so the same snapshot always gives the same prompts."""
+        brains = self._brains
+        if fresh or not brains or any(getattr(brain, "world", None) is not self.world for brain in brains.values()):
+            brains = self._brains = self.build_brains()
+        return brains
 
     def _context_window_of(self, agent_id: str) -> Callable[[], int]:
         def window() -> int:
@@ -320,7 +305,7 @@ class GameOrchestrator(
                 call_log=call_log,
                 soft_gate=soft_gate,
             )
-        brain = self._ensure_brain(fresh=fresh)
+        brains = self._ensure_brains(fresh=fresh)
         trace = TraceLog(self._logs_root(), self.session.session_id)
         self._register_trace_secrets(trace)
         trace = self._observe_trace(trace)  # (v0.13.1) the agents' errors become lines of the error log, too
@@ -332,15 +317,15 @@ class GameOrchestrator(
         sink = _CallableSink(self._publish)
         # v0.13 (F2, F9): the seat a person plays gets no agent - nothing calls a model for it, nothing is
         # counted for it, and what the world addresses to it is dropped by the supervisor.  (Its model binding
-        # is still required: ``ensure_bindings_ready`` runs before this, and the seat's agent comes back, and
-        # reviews the game, when the seat is given back.)
+        # is still required: the start check runs before this, and the seat's agent comes back, and
+        # reviews the game, when the seat is given back.)  v0.14: every agent has the brain of its own seat.
         human_seat = self.takeover_seat
         agents = [
             Agent(
                 agent_id,
                 "moderator" if agent_id == MODERATOR_ID else "player",
                 self.world,
-                brain,
+                brains[agent_id],
                 llm_port,
                 self.usage,
                 trace,
@@ -395,24 +380,52 @@ class GameOrchestrator(
         return get_data_dir() / "logs"
 
     async def start_or_resume(self) -> GameSession:
-        # (F5) one lock for starting and for the re-deal: a re-deal can never overtake a start
+        # one lock for starting / resuming and for taking a seat over / giving it back
         async with self._control():
             return await self._start_or_resume()
 
     async def _start_or_resume(self) -> GameSession:
+        """Start the game (``idle``), resume it (``paused``) or continue it (``finished``).
+
+        Starting a v6 game (H25, H52): the game plays the scenario in force, the start check runs (:class:`NotReadyError`, nothing is
+        dealt), what every bot carries into the game and the official contract are written into it (H11), the brains are built from
+        that - and only then are the identities dealt and the game opened.  Anything that goes wrong before the identities are dealt
+        leaves the game exactly as it was.  Resuming / continuing builds the brains from the snapshots the game was started with; a
+        v5 game (H58) starts / resumes / continues with the v0.13.1 brain and no start check."""
         if self._is_active():
             return self.session
-        self.reload_config()
-        # Every actor that will call a model must have a usable binding (never a silent fallback).
-        self.ensure_bindings_ready()
-        self._refuse_when_over_budget()
-        self._recovery_pending = False
+        self._refuse_while_learning("继续对局")
         session = self.session
         reason = {"idle": "started", "finished": "continued"}.get(self.world.state.status, "resumed")
-        if reason == "started":
-            # persona / memory are plain files that may have been edited outside the app while the game was idle:
-            # the game starts with what they say now (a resumed game keeps the copy it started with)
-            self._refresh_idle_texts()
+        first_start = reason == "started" and not session.legacy
+        snapshots = None
+        if first_start:
+            self.sync_idle_game()  # (the game plays the scenario that is in force now, H39)
+            problems = self.check_ready(refresh=True)
+            if problems:
+                raise NotReadyError(problems)
+            snapshots = self.take_snapshots()
+        else:
+            self.reload_config()
+            # Every actor that will call a model must have a usable binding (never a silent fallback).
+            self.ensure_bindings_ready()
+        self._refuse_when_over_budget()
+        undo = self.apply_snapshots(snapshots) if snapshots is not None else None
+        deal = reason == "started" and not self.world.state.dealt
+        try:
+            # Everything that can fail is built before anything of the game changes: a game that does not start stays what it was.
+            supervisor = self._build_runtime(fresh=reason == "started")
+            if deal:
+                try:
+                    self.world.game.check_pool()  # (the engine's own check of "identity pool = players"; the start check made it already)
+                except ValueError as exc:
+                    raise NotReadyError([self._problem("scenario", "scenario_invalid", str(exc), "import_rules")]) from exc
+        except Exception:
+            if undo is not None:
+                undo()  # (the snapshots are written into the game only for a game that starts)
+            raise
+        self._recovery_pending = False
+        self._stall_notice = ""
         session.restored_from_save = False
         session.restore_notice = ""
         session.pause_reason = ""
@@ -421,10 +434,22 @@ class GameOrchestrator(
             session.started_at = utc_now_iso()  # (F22) the first time the game is started
         if reason == "continued":
             session.finished_at = None  # a continued game is not finished any more
-        self._stall_notice = ""
-        self._supervisor = self._build_runtime(fresh=reason == "started")
+        self._supervisor = supervisor
         self.clock.resume()
-        self.world.set_running(True, reason)
+        try:
+            self.world.set_running(True, reason)
+            if deal:
+                self.world.deal_identities()  # (H52) the cards are dealt when the game starts - right after the gate opens, nothing in between
+        except Exception:  # noqa: BLE001 - cannot happen after the checks above; if it does, nothing runs half-dealt
+            logger.exception("The game could not be started")
+            self._supervisor = None
+            self.clock.pause()
+            if self.world.running:
+                self.world.set_running(False, "start failed")
+            self.world.state.status = "idle"
+            if undo is not None:
+                undo()
+            raise
         session.status = "running"
         wake = Envelope(kind="notice", priority="urgent", payload={"event": f"game.{reason}"})
         await self._supervisor.start({MODERATOR_ID: [wake]})
@@ -509,9 +534,9 @@ class GameOrchestrator(
 
     async def broadcast_state(self, event_type: str = "state_update") -> None:
         """Tell spectators that session-level state changed (the world publishes its own events)."""
-        if event_type in {"new_game", "session_loaded", "identities_shuffled"}:
+        if event_type in {"new_game", "session_loaded", "table_changed"}:
             self.bus.publish(UiEvent(type="snapshot", data={"session": self.public_session()}))
-            if event_type != "identities_shuffled":
+            if event_type != "table_changed":  # (a rebuilt table of a game that has not started: no autosave churn)
                 self.schedule_autosave(event_type)
             return
         s = self.session
@@ -525,6 +550,8 @@ class GameOrchestrator(
                     "winner": self.world.state.winner,
                     "summary": self.world.state.summary,
                     "active_status_text": self._status_text(),
+                    "system_status": self.system_status(),
+                    "dealt": bool(self.world.state.dealt),
                     "model_bindings": {k: v.model_dump(mode="json") for k, v in s.model_bindings.items()},
                     "binding_issues": [i.model_dump() for i in s.binding_issues],
                     "restored_from_save": s.restored_from_save,
@@ -564,17 +591,40 @@ class GameOrchestrator(
         }.get(s.pause_reason, "已暂停")
         return f"{why}{('：' + s.hold_reason) if s.hold_reason else ''}"
 
+    def _read_table_or_none(self) -> Any | None:
+        """The table, read once for the public session (``None`` while it cannot be read: before the data directory is locked, or when the
+        bot files are not usable)."""
+        if not self._table_io_allowed():
+            return None
+        try:
+            return self.read_table()
+        except Exception:  # noqa: BLE001 - the state of the page must stay available
+            logger.warning("Could not read the bots for the public session", exc_info=True)
+            return None
+
     def public_session(self) -> dict[str, Any]:
-        """The PublicSession v3 document (docs/v0.12-contracts.md §8.1): everything a spectator sees,
+        """The PublicSession document (docs/v0.12-contracts.md §8.1 / §13.8): everything a spectator sees,
         never thoughts or tool calls."""
         s = self.session
         snap = world_snapshot(self.world)
         avatars = {p.id: p.avatar for p in s.participants}
+        bot_of = {p.id: p.bot_id for p in s.participants}
+        table = self._read_table_or_none()
+        statuses = table.init_statuses() if table is not None and not s.legacy else {}
+        bots = None
+        if table is not None:
+            try:
+                bots = self.bots_payload(table=table)
+            except Exception:  # noqa: BLE001 - the state of the page must stay available
+                logger.warning("Could not build the bots of the public session", exc_info=True)
         taken = self.takeover_seat
         participants = [
             {
                 **p,
                 "avatar": avatars.get(str(p.get("id"))),
+                # v0.14 (H3, H22): the bot in the seat (``""`` in a v5 game) and its initialization state (✔ ⚠ ✖ ⏳ of the card)
+                "bot_id": bot_of.get(str(p.get("id")), ""),
+                "init_status": statuses.get(bot_of.get(str(p.get("id")), "")),
                 # v0.13 (F6): the seat a person plays says "human" (no agent: nothing sleeps or wakes there)
                 "state": self._agent_state_of(str(p.get("id"))),
                 "sleep_until": None if str(p.get("id")) == taken else self._sleep_until(str(p.get("id"))),
@@ -595,6 +645,11 @@ class GameOrchestrator(
             "summary": snap.get("summary", ""),
             "phase_text": snap.get("phase") or "未开始 · 等待主持人开局",
             "active_status_text": self._status_text(),
+            # v0.14 (H26, H52, §13.8): the label of the top bar, whether the identities have been dealt (nothing about them is shown
+            # before), the bots of the table
+            "system_status": self.system_status(table),
+            "dealt": bool(self.world.state.dealt),
+            "bots": bots,
             "seq": snap.get("seq", 0),
             "event_id": self.bus.last_id,
             "clock": snap.get("now", 0.0),
@@ -652,7 +707,7 @@ class GameOrchestrator(
         """Validate an imported payload completely, without touching any live state."""
         if not isinstance(data, dict):
             raise SessionLoadError("存档必须是 JSON 对象")
-        if data.get("schema_version") != SESSION_SCHEMA_VERSION:
+        if data.get("schema_version") not in SUPPORTED_SCHEMA_VERSIONS:
             raise SessionLoadError(OLD_SAVE_LOAD_NOTICE)  # (startup restore has its own notice: OLD_SAVE_NOTICE)
         try:
             loaded = GameSession.model_validate(data)
@@ -692,6 +747,7 @@ class GameOrchestrator(
         self._reset_conversations()  # conversations are not saved: a restored game starts them from the board
         self._set_session(loaded)
         self._attach_budget()
+        self._adopt_table_of_idle_game()
         self.refresh_binding_issues()
 
     async def load_session_data(self, data: dict[str, Any], *, notice_prefix: str = "已导入存档") -> GameSession:
@@ -700,6 +756,7 @@ class GameOrchestrator(
         Validate first; on failure (:class:`SessionLoadError`, a ``ValueError``) the running game is
         not paused, reset or otherwise modified.  Nothing is saved here: the caller saves the old game first.
         """
+        self._refuse_while_learning("导入对局")
         return await self._replace_game(self._validate_session_data(data), notice_prefix)
 
     async def _replace_game(self, loaded: GameSession, notice_prefix: str) -> GameSession:
@@ -740,7 +797,7 @@ def get_orchestrator() -> GameOrchestrator:
         if demo_mode_enabled():
             from app.game.demo import install_demo
 
-            install_demo(_instance)
+            install_demo(_instance, prepare=False)  # (the bots are prepared by ``startup()``, once the data directory is locked)
     return _instance
 
 

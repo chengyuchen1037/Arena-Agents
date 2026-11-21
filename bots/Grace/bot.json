@@ -1,0 +1,15 @@
+{
+ "format": 1,
+ "name": "Grace",
+ "avatar": {
+  "v": 1,
+  "face": "f02",
+  "skin": "s18",
+  "hair": "h11",
+  "hair_color": "c21",
+  "eyes": "e16",
+  "mouth": "m13",
+  "accessory": "a02",
+  "accessory_color": "k09"
+ }
+}

@@ -17,7 +17,7 @@ import pytest
 from app.archive import importer
 from app.archive.errors import ArchiveError, ArchiveFormatError, ArchiveLimitError, ArchiveVersionError
 from app.archive.export import ExportOptions, export_archive
-from app.archive.format import ArchiveLimits
+from app.archive.format import FORMAT_VERSION, ArchiveLimits
 
 from .helpers import (
     GAME_A,
@@ -335,7 +335,7 @@ def test_another_programs_zip_is_not_an_archive(tmp_path: Path) -> None:
 
 def test_a_newer_archive_format_asks_for_an_upgrade(archive: Path, tmp_path: Path) -> None:
     def newer(members: dict[str, bytes], manifest: dict[str, Any]) -> None:
-        manifest["format_version"] = 2
+        manifest["format_version"] = FORMAT_VERSION + 1
         manifest["something_new"] = {"a": 1}
 
     with pytest.raises(ArchiveVersionError, match="升级"):

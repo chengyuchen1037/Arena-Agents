@@ -160,3 +160,8 @@ class WorldState(_S):
     status: Literal["idle", "running", "paused", "finished"] = "idle"
     winner: str | None = None
     summary: str = ""
+    # v0.14 (H52): the identities are dealt when the game *starts*, not when it is created.  ``False`` until
+    # ``World.deal_identities()`` has run (``World.new_game(..., deal=True)`` does it at creation); a world saved
+    # before v0.14 has no such key - ``World.load`` infers it.  While it is ``False`` no player has a role, a faction,
+    # identity tags or attributes, so no view of the world (board, snapshot, ledger) carries any identity.
+    dealt: bool = False

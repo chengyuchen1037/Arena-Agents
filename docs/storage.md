@@ -2,9 +2,13 @@
 
 > **v0.13.** Replaces the v0.12.1 "workspaces" page. In v0.13 there is **one data directory** and nothing to
 > choose; only the API keys are encrypted.
+>
+> **v0.14** keeps the players as **bots** (`bots/`), the official contract and the scenarios in the data directory
+> (`contract/`, `rules/`), and writes save format v6. The roster of v0.13 is migrated into bots the first time v0.14
+> starts on such a directory (or when a v0.13 archive is imported); nothing writes `roster/` any more.
 
-Everything Arena-Agents keeps for you — the providers, the settings, the roster, every game, the thinking logs, the
-archives you export — lives in one folder, the **data directory**.
+Everything Arena-Agents keeps for you — the providers, the settings, the bots, the contract and the rules, every game,
+the thinking logs, the archives you export — lives in one folder, the **data directory**.
 
 > **⚠ The data lives inside the program folder (`<program dir>/data/`).** Deleting or re-installing the program
 > folder, a fresh `git clone`, `git clean -xdf` — all of it takes your games with it. 数据在程序目录下：删除程序目录或执行
@@ -46,27 +50,36 @@ that need storage answer 503) and nothing is saved.
 ├─ secrets.v1.enc           {provider id: API key}, AES-256-GCM  ← the only encrypted file
 ├─ master.v1.dpapi          Windows only: the master key, wrapped by DPAPI for the current user
 ├─ pricing.json             the downloaded price table (public data)
-├─ roster/                  names, avatars, persona and memory of the seats (plain files)
-│  ├─ roster.json           names + avatar descriptions + the "load memory" switch
-│  ├─ N1.persona.md  …      persona text of each seat (no text = no file)
-│  └─ N1.memory.md   …      memory of each seat: ## 战绩 / ## 印象 / ## 经验 (v0.13.1; older files are read as before and rewritten on the next save; UTF-8 BOM is accepted)
+├─ contract/                the official contract the bots are initialized with and play by (v0.14)
+│  ├─ contract.md           the contract in force (first start: copied from prompts/contract.md; "restore default" copies it again)
+│  └─ source.json           {"origin": "default" | "imported", "version", "imported_at", "sha256"}
+├─ rules/<scenario id>/     one folder per scenario (v0.14; first start: the one config.yml names, scenario.path)
+│  ├─ scenario.md  source.json
+│  └─ materials/<slug>.md   study material, empty by default (<slug>.json beside it only if the title was given explicitly)
+├─ bots/                    the players (v0.14; the first start copies the default library, or migrates roster/ of v0.13)
+│  ├─ lineup.json           {"order": [12 bot ids], "memory_enabled", "moderator": {"avatar"}}
+│  ├─ usage.json            what the initializations and reviews cost
+│  └─ b-1a2b3c4d/           one bot: bot.json, core/ (L0: identity.md voice.md mind.md [extra-<slug>.md]), arch/notes.md,
+│                           rules/<scenario id>/{digest,playbook,questions}.md, people.md, record.json, staging/<proposal>.json
+├─ roster/                  v0.13's roster: no longer written; read once, when it is migrated into bots (left as it is)
 ├─ games/
-│  ├─ index.json            the history list (a cache: rebuilt whenever it does not match the folders)
-│  └─ <id>/game.json        one game (save format v5, plain JSON)  + game.prev.json, the previous good copy
+│  ├─ index.json            the history list (a cache: rebuilt whenever it does not match the folders; index version 2)
+│  └─ <id>/game.json        one game (save format v6; v5 games of v0.13 are read, too), plain JSON  + game.prev.json, the previous good copy
 ├─ logs/<id>/trace-*.jsonl  the thinking logs of a game
+├─ logs/learning/<job>.jsonl  the logs of the initializations and reviews (v0.14)
 ├─ exports/                 the .arenaagents archives you exported
 ├─ backups/<time>/          what an archive import replaced (the three most recent are kept)
 └─ tmp/                     uploads in progress
 ```
 
-Nothing but the key file is secret; all of it is meant to be readable, editable (the roster, `providers.json`) and
-copyable. A game takes a copy of the roster when it is created, so editing a roster file never changes a game in
-progress.
+Nothing but the key file is secret; all of it is meant to be readable, editable (the bots, the contract, the rules,
+`providers.json`) and copyable. A game takes a snapshot of what every bot carries into it when it starts (and of the contract),
+so editing a bot's file never changes a game in progress.
 
 ## What is encrypted — and what is not
 
-**Only the API keys.** Everything else — providers (name, protocol, address, models, prices), settings, roster, games,
-logs, archives — is plain UTF-8 JSON or text:
+**Only the API keys.** Everything else — providers (name, protocol, address, models, prices), settings, bots, contract, rules,
+games, logs, archives — is plain UTF-8 JSON or text:
 
 - `providers.json` never contains a key. If somebody pastes an `api_key` into it by hand it is ignored (and dropped at
   the next write).
@@ -105,12 +118,18 @@ logs, archives — is plain UTF-8 JSON or text:
   autosave stays off until you start or create a game. If its file is simply *gone* (deleted by hand, not in an imported
   archive) there is nothing to protect: a fresh game is created and autosave continues.
 - A game of an older save format (v0.12.1 and earlier) is not an error: the file stays where it is, a fresh game is
-  created and you are told to convert it (below).
-- Deleting a game in the history removes `games/<id>/` and `logs/<id>/`. The roster and with it the agents' memory are
-  not touched.
-- `games/index.json` holds the summaries for the history list (status, winner, duration, cost, whether a person played).
-  It is updated by every save and rebuilt from the game files when it is missing, damaged or out of step with the
-  folders (a copied-in game, an imported archive, a crash between the two writes).
+  created and you are told to convert it (below). A game of v0.13 (save format v5) is read and can be continued and
+  replayed (it plays on with the brain of v0.13 and cannot be reviewed); new games are written as v6.
+- Deleting a game in the history removes `games/<id>/` and `logs/<id>/`. The bots - and with them what they learned from a
+  review - are not touched. The game that is on screen can be deleted too (unless it is being played): a new blank game is made first,
+  then the old files go.
+- `games/index.json` holds the summaries for the history list (status, winner, duration, cost, whether a person played, whether
+  this version can read the game, the names at the table, how many reviews are done). It is updated by every save and rebuilt
+  from the game files when it is missing, damaged, of an older index version or out of step with the folders (a copied-in
+  game, an imported archive, a crash between the two writes). The size of a game's logs is not in it: the list reads it from
+  the disk every time, because logs grow while a game is played.
+- One game can leave and enter as a `.arenagame` file (the history's export / import); an id that is taken is asked about
+  (overwrite, keep both). See [archive.md](archive.md) §8 (Chinese).
 
 ## Docker
 
@@ -186,8 +205,8 @@ Keep the old volume until the imported data looks right.
 
 ## Backup and moving to another machine
 
-- **Export an archive** (settings dialog): one file with settings, providers, roster, games and (optionally) the logs,
-  and — if you ask for it, protected by a password — the API keys. It can be exported while a game runs. Keep the file
+- **Export an archive** (settings dialog): one file with the whole data directory - settings, providers, contract, rules, bots,
+  games (with their previous copies) and all the logs - and, if you ask for it, protected by a password, the API keys. It can be exported while a game runs. Keep the file
   somewhere other than the program folder.
 - **Import an archive** replaces the data as a whole. The data it replaced is moved to `backups/<time>/` first (the
   three newest are kept; the keys in there are still bound to this machine's master key), and a failed import rolls
@@ -207,4 +226,5 @@ Keep the old volume until the imported data looks right.
 | *无法解密已保存的 API Key* | the master key changed or is missing; restore it, or delete `secrets.v1.enc` and type the keys again |
 | *不能保存 API Key：没有可用的主密钥* | Linux / Docker without `ARENA_MASTER_KEY_FILE` / `ARENA_MASTER_KEY`; provide a master key |
 | *无法恢复上次对局* | the last game's file is damaged; it is kept as it is, `game.prev.json` may still hold the previous save |
+| *上次的对局文件已经不存在，已为你新建了一局。* | the last game was deleted (or is not in an imported archive): nothing to protect, a fresh game was made |
 | a provider shows *未设置 API Key* | it was imported without keys (or its key was never saved): edit the provider and type the key |

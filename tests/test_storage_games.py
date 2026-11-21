@@ -12,14 +12,27 @@ from typing import Any
 import pytest
 
 from app.storage.errors import StorageError
-from app.storage.games import GAME_FILE, INDEX_FILE, PREVIOUS_FILE, UNREADABLE_STATUS, GameStore, get_game_store, reset_game_store
+from app.storage.games import (
+    GAME_FILE,
+    INDEX_FILE,
+    INDEX_SCHEMA_VERSION,
+    PREVIOUS_FILE,
+    UNREADABLE_STATUS,
+    GameStore,
+    get_game_store,
+    reset_game_store,
+)
 from app.storage.paths import get_data_dir
 
+#: what an index entry (``GameStore.summarize``) says of a game: v0.13's fields and - v0.14, contract 13.7 - ``readable``,
+#: ``participants_brief`` and ``review``
 SUMMARY_KEYS = {
     "session_id", "title", "scenario_name", "scenario_title", "status", "winner", "created_at", "started_at",
     "finished_at", "updated_at", "duration_gt", "players", "tokens", "cost_usd", "human_involved", "schema_version",
-    "size_bytes",
+    "size_bytes", "readable", "participants_brief", "review",
 }
+#: ... and what the listing adds to each: the size of the game's logs, read from the disk every time (they grow while a game is played)
+LISTED_KEYS = SUMMARY_KEYS | {"log_bytes"}
 
 
 def make(session_id: str = "g1", **changes: Any) -> dict[str, Any]:
@@ -180,14 +193,14 @@ def test_concurrent_saves_leave_valid_files_and_a_valid_index(store: GameStore, 
     assert sorted(item["session_id"] for item in store.list_games()) == ["g0", "g1", "g2", "g3"]
     for i in range(4):
         assert store.load(f"g{i}")["version"] == 14
-    assert json.loads((root / "games" / INDEX_FILE).read_text(encoding="utf-8"))["schema_version"] == 1
+    assert json.loads((root / "games" / INDEX_FILE).read_text(encoding="utf-8"))["schema_version"] == INDEX_SCHEMA_VERSION
 
 
 # ------------------------------------------------------------------------------------- the summary
 def test_the_summary_has_exactly_the_contract_fields(store: GameStore, root: Path) -> None:
     store.save("g1", make())
     (summary,) = store.list_games()
-    assert set(summary) == SUMMARY_KEYS
+    assert set(summary) == LISTED_KEYS
     assert summary["session_id"] == "g1" and summary["title"] == "Arena-Agents"
     assert (summary["scenario_name"], summary["scenario_title"]) == ("werewolf_12p", "狼人杀 12 人局")
     assert (summary["status"], summary["winner"], summary["players"], summary["schema_version"]) == ("paused", None, 12, 5)
@@ -217,6 +230,7 @@ def test_the_summary_reads_the_game_the_way_the_history_list_needs_it() -> None:
 def test_a_game_of_another_version_or_a_partial_one_still_has_a_summary() -> None:
     old = GameStore.summarize({"session_id": "old", "schema_version": 4, "status": "paused", "records": [{"id": 1}]})
     assert set(old) == SUMMARY_KEYS and old["schema_version"] == 4 and old["players"] == 0 and old["tokens"] == 0
+    assert old["readable"] is False and old["review"] == {"done": 0, "total": None}  # (v0.12.1 saves cannot be opened)
     empty = GameStore.summarize({})
     assert set(empty) == SUMMARY_KEYS and empty["schema_version"] is None and empty["status"] == "paused"
     junk = GameStore.summarize({"world": "x", "usage_stats": [1], "participants": "nope", "human_spans": None, "schema_version": True})
@@ -229,8 +243,9 @@ def test_a_real_game_of_the_orchestrator_has_a_summary(monkeypatch: pytest.Monke
     payload = real_orch(monkeypatch).session_payload()
     store.save(payload["session_id"], payload)
     (summary,) = store.list_games()
-    assert set(summary) == SUMMARY_KEYS
-    assert summary["status"] == "idle" and summary["players"] == 4 and summary["schema_version"] == 5
+    assert set(summary) == LISTED_KEYS
+    assert summary["status"] == "idle" and summary["players"] == 4 and summary["schema_version"] in (5, 6)
+    assert summary["readable"] is True and len(summary["participants_brief"]) == 4
     assert summary["scenario_name"] == "minimal_test" and summary["created_at"]
 
 
@@ -244,7 +259,7 @@ def test_the_index_is_updated_by_every_save_and_lists_the_newest_first(store: Ga
     set_mtime(game_dir(root, "new") / GAME_FILE, 1_700_200_000)
 
     index = json.loads((root / "games" / INDEX_FILE).read_text(encoding="utf-8"))
-    assert index["schema_version"] == 1 and {item["session_id"] for item in index["games"]} == {"old", "mid", "new"}
+    assert index["schema_version"] == INDEX_SCHEMA_VERSION and {item["session_id"] for item in index["games"]} == {"old", "mid", "new"}
     # the files got new times: the list notices (the index no longer matches) and rebuilds itself
     assert [item["session_id"] for item in store.list_games()] == ["new", "mid", "old"]
     assert [item["session_id"] for item in store.list_games()] == ["new", "mid", "old"]  # (and the rebuilt index is stable)
@@ -267,6 +282,20 @@ def test_a_missing_or_damaged_index_is_rebuilt_from_the_game_files(store: GameSt
         index.write_bytes(damage)
         assert store.list_games() == expected
         assert json.loads(index.read_text(encoding="utf-8"))["games"], damage
+
+
+def test_the_index_of_v013_is_rebuilt_so_that_its_games_get_the_new_summary_fields(store: GameStore, root: Path) -> None:
+    """A well-formed index of the previous version (every entry valid, none of ``readable`` / ``participants_brief`` / ``review``) must not be
+    trusted: it would make the history list show games without them.  The first listing after the upgrade rebuilds it."""
+    store.save("a", make("a"))
+    index = root / "games" / INDEX_FILE
+    old_entry = {k: v for k, v in store.list_games()[0].items() if k not in {"readable", "participants_brief", "review", "log_bytes"}}
+    index.write_text(json.dumps({"schema_version": 1, "games": [old_entry]}), encoding="utf-8")
+
+    (summary,) = store.list_games()
+    assert {"readable", "participants_brief", "review"} <= set(summary)
+    rewritten = json.loads(index.read_text(encoding="utf-8"))
+    assert rewritten["schema_version"] == INDEX_SCHEMA_VERSION and "review" in rewritten["games"][0]
 
 
 def test_an_index_that_does_not_match_the_folders_is_rebuilt(store: GameStore, root: Path) -> None:

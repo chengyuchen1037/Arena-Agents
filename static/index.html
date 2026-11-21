@@ -6,9 +6,9 @@
   <meta name="theme-color" content="#ffffff" />
   <title>Arena-Agents</title>
   <!-- 相对路径：本地 "/" 与子路径反代（如 /arena/）均可用；页面需带结尾斜杠访问 -->
-  <link rel="stylesheet" href="static/css/style.css?v=0.13.1" />
+  <link rel="stylesheet" href="static/css/style.css?v=0.14.0" />
   <!-- v0.12.1: 平台检测放在 head 里同步执行，首屏就按设备（手机 / 平板 / 桌面）布局，不会闪一下 -->
-  <script src="static/js/platform.js?v=0.13.1"></script>
+  <script src="static/js/platform.js?v=0.14.0"></script>
   <script>
     (function () {
       var P = window.ArenaPlatform;
@@ -17,8 +17,8 @@
   </script>
 </head>
 <body>
-  <!-- 顶部导航与控制栏：第一行是主控制，第二行是对局状态（状态 / 阶段 / 请求进度 / 主持人）。
-       手机上第一行只保留标题、对局状态和开始/暂停/继续，其余按钮收进「⋯」菜单（app.js 把真实按钮移进菜单）。 -->
+  <!-- 顶部导航与控制栏：第一行是主控制（含视角标签），第二行是对局状态（系统状态标签 / 阶段 / 请求进度 / 主持人）。
+       手机上第一行只保留标题、视角标签和开始/暂停/继续，其余按钮收进「⋯」菜单（app.js 把真实按钮移进菜单）。 -->
   <header class="topbar" id="topbar">
     <div class="topbar-main">
       <div class="topbar-left">
@@ -41,24 +41,23 @@
           <span class="theme-icon">◐</span><span class="theme-label">明暗主题</span>
         </button>
 
-        <!-- v0.12 / v0.13: 观战视角（上帝视角 / 某名玩家）。纯前端过滤，切换不会重新请求服务器。
-             v0.13：下拉框只选“要看谁”，点「切换」才生效；「接管」让你扮演所选座位（对局未开始或已暂停时可用）。
-             手机上整条视角栏被搬进「⋯」菜单（app.js RELOCATIONS） -->
+        <!-- v0.14 (H27)：视角标签，替换 v0.13 的 [视角▾][切换][接管]。显示“全局视角”“Alice视角”“Alice视角（接管）”（接管时带 🎮 并锁定）；
+             点击打开菜单：全局视角 / 以 X 的视角观看 / 接管 X / 退出接管（接管沿用 v0.13 的规则：对局未开始或已暂停时可用）。
+             纯前端状态：由选择的视角与 takeover.seat 算出，切换视角不会请求服务器。手机上它同样留在第一行（不收进「⋯」菜单） -->
         <div class="viewpoint-bar" id="viewpoint-bar">
-          <label class="viewpoint-picker" id="viewpoint-picker" for="select-viewpoint"
-                 title="观战视角：上帝视角看到全部；选择某名玩家后，只显示该玩家能看到的消息、频道、标签与请求。选好后点「切换」">
-            <span class="viewpoint-icon" aria-hidden="true">👁</span>
-            <select id="select-viewpoint" class="viewpoint-select">
-              <option value="god" selected>上帝视角</option>
-            </select>
-          </label>
-          <button type="button" class="btn btn-xs" id="btn-viewpoint-switch" title="切换到所选的视角">切换</button>
-          <button type="button" class="btn btn-xs btn-takeover" id="btn-takeover" title="接管所选的座位">接管</button>
+          <button type="button" class="viewpoint-chip" id="btn-viewpoint" data-kind="god" aria-haspopup="menu" aria-expanded="false" aria-controls="viewpoint-menu"
+                  title="全局视角：看到全部消息、频道和（开局后的）身份。点击切换视角，或接管一个座位">
+            <span class="viewpoint-icon" id="viewpoint-icon" aria-hidden="true">👁</span>
+            <span class="viewpoint-text" id="viewpoint-text">全局视角</span>
+            <span class="viewpoint-caret" aria-hidden="true">▾</span>
+          </button>
+          <!-- 菜单是 position: fixed（takeover.js 把它放在标签下面）；内容由 takeover.js 渲染 -->
+          <div class="dropdown viewpoint-menu" id="viewpoint-menu" role="menu" aria-label="视角" hidden></div>
         </div>
 
-        <!-- v0.13: 接管期间代替视角栏；手机上它留在第一行，不收进「⋯」菜单 -->
+        <!-- v0.13: 接管期间出现在视角标签旁：暂停 agent / 继续、退出接管；手机上它留在第一行，不收进「⋯」菜单 -->
         <div class="takeover-bar" id="takeover-bar" hidden>
-          <span class="takeover-badge" id="takeover-badge" title="你正在以这个座位参与对局；它的 agent 已暂停">🎮 正在扮演 <strong id="takeover-seat"></strong></span>
+          <span class="takeover-badge" id="takeover-badge" title="你正在以这个座位参与对局；它的 agent 已暂停">正在扮演 <strong id="takeover-seat"></strong></span>
           <!-- v0.13.1 (G1-G5)：软暂停——在途的回答照常做完，然后所有 agent 停下、计时冻结；你仍可阅读、发言、作答。
                「收尾中（还有 N 个回答）」→「agent 已暂停」；收尾中可以「立即暂停」（= 顶栏的硬暂停，会取消在途的调用） -->
           <span class="softpause" id="softpause">
@@ -96,9 +95,11 @@
     </div>
 
     <div class="topbar-status" id="topbar-status">
-      <div class="status-pill" id="active-status-pill">
+      <!-- v0.14 (H26)：系统状态标签，第二行最前面，读 session.system_status：未初始化 / 初始化中 / 对局前 / 对局中 / 已暂停（附原因）/ 已结束 / 复盘中；
+           软暂停显示为“对局中 · agent 已暂停”。原来的状态文字并入这个标签（鼠标悬停时是完整的一句） -->
+      <div class="status-pill" id="active-status-pill" data-code="before_game" role="status">
         <span class="status-dot idle" id="active-status-dot"></span>
-        <span id="active-status-text">未开始 · 点击「开始」由主持人初始化对局</span>
+        <span id="active-status-text">对局前</span>
       </div>
 
       <div class="phase-pill" id="phase-pill">
@@ -159,12 +160,6 @@
     <button class="btn btn-xs" id="btn-legacy-dismiss">忽略</button>
   </div>
 
-  <!-- v0.13 (F5)：对局未开始时接管了座位——你已经知道自己的身份，可以重新发牌。开始后这条消失，按钮不可点 -->
-  <div class="notice-bar takeover-reminder" id="takeover-reminder" hidden>
-    <span id="takeover-reminder-text">你已经知道自己的身份，建议点击「重新发牌」</span>
-    <button class="btn btn-xs btn-primary-outline" id="btn-shuffle-identities" title="重新给所有座位发身份（只在对局开始前可用）">重新发牌</button>
-  </div>
-
   <!-- 主体容器；手机上 data-phone-tab 决定显示哪一块（信息流 / 频道 / 玩家） -->
   <main class="main-container" id="main-container" data-phone-tab="feed">
     <!-- 上半部分：参与者栏（12 张玩家卡片 + 末尾的阵营摘要条） -->
@@ -172,19 +167,23 @@
       <div class="board-header" id="board-header">
         <div class="board-header-left">
           <h2 class="section-title">参与者</h2>
-          <button class="btn btn-xs" id="btn-regen-all-avatars" title="重新生成全部玩家的头像（仅对局未开始时可用）">🎲 重新生成全部头像</button>
+          <!-- v0.14 (H19)：全局初始化——默认只处理未初始化 / 需重新初始化 / 失败的 bot；旁边是各状态的个数（✔ ⚠ ✖ ⏳ ○），运行中显示进度。由 bots.js 驱动 -->
+          <button class="btn btn-xs btn-primary-outline" id="btn-init-all" title="让还没有初始化（或需要重新初始化）的玩家读契约和规则，写出自己的笔记和打法；也可以全部重做">⚙ 全局初始化</button>
+          <span class="init-summary" id="init-summary" hidden></span>
           <div class="menu-wrap">
             <button class="btn btn-xs" id="btn-roster-menu" aria-haspopup="true" aria-expanded="false" aria-controls="roster-menu"
-                    title="名册：清除全部记忆，设置本局是否加载记忆（备份请用「设置」里的导出存档）">名册 ▾</button>
+                    title="名册：本局是否加载记忆、清除全部学到的记忆、重新生成全部头像（备份请用「设置」里的导出存档）">名册 ▾</button>
             <div class="dropdown" id="roster-menu" role="menu" hidden>
-              <button type="button" class="dropdown-item danger" id="btn-roster-clear" role="menuitem" data-roster-action="clear">清除全部记忆…</button>
               <label class="dropdown-item check" title="关闭后，本局的系统提示词不包含记忆段（记忆文件本身不受影响）">
                 <input type="checkbox" id="chk-memory-enabled" />
                 <span>本局加载记忆</span>
               </label>
+              <button type="button" class="dropdown-item" id="btn-roster-regen" role="menuitem" data-roster-action="regen">🎲 重新生成全部头像</button>
+              <button type="button" class="dropdown-item danger" id="btn-roster-clear" role="menuitem" data-roster-action="clear">清除全部学到的记忆…</button>
+              <div class="dropdown-note form-hint" id="roster-usage"></div>
             </div>
           </div>
-          <button class="btn btn-xs btn-primary-outline" id="btn-review-all" hidden title="对局结束后，让每名玩家用自己的模型复盘本局：计入战绩，更新对其他玩家的印象和自己的经验">复盘全部</button>
+          <button class="btn btn-xs btn-primary-outline" id="btn-review-all" hidden title="对局结束后，让每名玩家用自己的模型复盘本局（最多 60 秒）：更新自己的记忆，也可能提出对底层设定的修改">复盘全部</button>
         </div>
         <div class="board-header-right" id="board-header-right">
           <button class="btn btn-xs" id="btn-open-history-modal" title="历史对局：重放、继续或删除保存过的对局">📜 历史对局</button>
@@ -199,7 +198,7 @@
       <!-- 由 JS 渲染：12 张玩家卡片（编号 · 像素头像 · 昵称 · 身份；点击打开详情） -->
       <div class="participants-grid" id="participants-grid"></div>
 
-      <!-- 上帝视角：阵营摘要「狼 2/4 · 神 4/4 · 民 3/4 · 警长 Grace」 -->
+      <!-- 全局视角：阵营摘要「狼 2/4 · 神 4/4 · 民 3/4 · 警长 Grace」（开局前没有身份，也就没有这条摘要） -->
       <div class="board-summary" id="board-summary" hidden></div>
     </section>
 
@@ -232,7 +231,7 @@
             <span class="feed-channel-label" id="feed-channel-label"></span>
           </div>
           <div class="feed-header-right">
-            <span class="feed-viewing" id="feed-viewing">视角：上帝视角</span>
+            <span class="feed-viewing" id="feed-viewing">视角：全局视角</span>
           </div>
         </div>
 
@@ -476,7 +475,7 @@
     </div>
   </div>
 
-  <!-- v0.12.1: 通用确认对话框（清除全部记忆、完善草稿、旧数据说明…由 roster.js 的 openDialog 填充内容） -->
+  <!-- v0.12.1: 通用确认对话框（初始化、清除记忆、改名换头像、旧数据说明…由 bots.js 的 openDialog 填充内容） -->
   <div class="modal-backdrop" id="dialog-modal" style="display: none">
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
       <div class="modal-header">
@@ -491,7 +490,24 @@
     </div>
   </div>
 
-  <!-- v0.13 (F26)：设置——里面只有「导出存档」和「导入存档」。向导的各个步骤由 archive.js 渲染到 settings-body / settings-footer -->
+  <!-- v0.14 (H31–H33)：终局复盘——“这局结束了，是否让 bot 复盘？”列出 12 个 bot（默认全选；被人类接管过的座位标“有人类代打”，带开关“学习接管者的风格”）。
+       点「复盘」后同一个窗口显示每个 bot 的 60 秒倒计时，结束后是改动摘要和待确认的提案数；「暂不」记在 localStorage["arena_review_dismissed_v1"]。内容由 endreview.js 渲染 -->
+  <div class="modal-backdrop" id="review-modal" style="display: none">
+    <div class="modal-card review-card" role="dialog" aria-modal="true" aria-labelledby="review-title">
+      <div class="modal-header">
+        <span class="modal-title" id="review-title">这局结束了，是否让 bot 复盘？</span>
+        <button class="btn btn-xs" id="btn-close-review" aria-label="关闭（暂不）">✕</button>
+      </div>
+      <div class="modal-body review-body" id="review-body"></div>
+      <div class="modal-footer review-footer">
+        <span class="form-hint review-count" id="review-count"></span>
+        <button class="btn btn-default" id="btn-review-later">暂不</button>
+        <button class="btn btn-primary-outline" id="btn-review-start">复盘</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- v0.14 (H35)：设置——五栏（① 总存档 ② 底层设定 ③ 官方契约 ④ 规则 ⑤ 对局管理），每栏可折叠；① 的向导（导出 / 导入存档）由 archive.js 渲染，五栏的框架和 ②–⑤ 由 settings.js 渲染到 settings-body -->
   <div class="modal-backdrop" id="settings-modal" style="display: none">
     <div class="modal-card modal-wide settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
       <div class="modal-header">
@@ -503,6 +519,10 @@
     </div>
   </div>
   <input type="file" id="file-archive-import" accept=".arenaagents,application/octet-stream" style="display: none" />
+  <!-- v0.14 (H30 / H41)：玩家面板里的「导入 .arenabot」和「导入底层设定 .md」选文件（bots.js / botedit.js） -->
+  <input type="file" id="file-settings-import" style="display: none" />
+  <input type="file" id="file-bot-import" accept=".arenabot,application/octet-stream" style="display: none" />
+  <input type="file" id="file-core-import" accept=".md,.markdown,text/markdown,text/plain" style="display: none" />
 
   <!-- v0.13 (F34 / F35)：历史对局——列表、重放、继续、删除（取代旧的「会话」窗口） -->
   <div class="modal-backdrop" id="history-modal" style="display: none">
@@ -516,7 +536,8 @@
         <div class="history-list" id="history-list"></div>
       </div>
       <div class="modal-footer">
-        <span class="form-hint history-footer-note">删除对局不会影响 agent 的记忆（性格与记忆单独保存在名册里）。</span>
+        <span class="form-hint history-footer-note">删除对局不会删除 bot 的记忆（记忆属于 bot，不属于某一局）。</span>
+        <button class="btn btn-default" id="btn-history-manage" title="删除、导出、导入对局：设置里的「对局管理」">对局管理…</button>
         <button class="btn btn-default" id="btn-refresh-history">刷新</button>
       </div>
     </div>
@@ -594,22 +615,26 @@
     </div>
   </div>
 
-  <script src="static/js/core.js?v=0.13.1"></script>
-  <script src="static/js/avatar.js?v=0.13.1"></script>
-  <script src="static/js/store.js?v=0.13.1"></script>
-  <script src="static/js/view.js?v=0.13.1"></script>
-  <script src="static/js/layout.js?v=0.13.1"></script>
-  <script src="static/js/providers.js?v=0.13.1"></script>
-  <script src="static/js/roster.js?v=0.13.1"></script>
-  <script src="static/js/thoughts.js?v=0.13.1"></script>
-  <script src="static/js/calllog.js?v=0.13.1"></script>
-  <script src="static/js/budget.js?v=0.13.1"></script>
-  <script src="static/js/archive.js?v=0.13.1"></script>
-  <script src="static/js/marks.js?v=0.13.1"></script>
-  <script src="static/js/takeover.js?v=0.13.1"></script>
-  <script src="static/js/composer.js?v=0.13.1"></script>
-  <script src="static/js/history.js?v=0.13.1"></script>
-  <script src="static/js/replay.js?v=0.13.1"></script>
-  <script src="static/js/app.js?v=0.13.1"></script>
+  <script src="static/js/core.js?v=0.14.0"></script>
+  <script src="static/js/avatar.js?v=0.14.0"></script>
+  <script src="static/js/store.js?v=0.14.0"></script>
+  <script src="static/js/view.js?v=0.14.0"></script>
+  <script src="static/js/layout.js?v=0.14.0"></script>
+  <script src="static/js/providers.js?v=0.14.0"></script>
+  <script src="static/js/botlib.js?v=0.14.0"></script>
+  <script src="static/js/botedit.js?v=0.14.0"></script>
+  <script src="static/js/bots.js?v=0.14.0"></script>
+  <script src="static/js/thoughts.js?v=0.14.0"></script>
+  <script src="static/js/calllog.js?v=0.14.0"></script>
+  <script src="static/js/budget.js?v=0.14.0"></script>
+  <script src="static/js/archive.js?v=0.14.0"></script>
+  <script src="static/js/marks.js?v=0.14.0"></script>
+  <script src="static/js/takeover.js?v=0.14.0"></script>
+  <script src="static/js/composer.js?v=0.14.0"></script>
+  <script src="static/js/endreview.js?v=0.14.0"></script>
+  <script src="static/js/history.js?v=0.14.0"></script>
+  <script src="static/js/settings.js?v=0.14.0"></script>
+  <script src="static/js/replay.js?v=0.14.0"></script>
+  <script src="static/js/app.js?v=0.14.0"></script>
 </body>
 </html>

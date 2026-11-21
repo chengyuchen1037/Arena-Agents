@@ -348,7 +348,7 @@ def test_the_end_of_the_game_and_a_new_game_clear_the_soft_pause() -> None:
         assert other.soft is None and other.soft_task is None
         fresh = other.snapshot_payload()
         assert (fresh["status"], fresh["soft_pause"], fresh["clock_running"]) == ("idle", None, False)
-        assert fresh["takeover"] == {"seat": None, "reshuffle_available": True}
+        assert fresh["takeover"] == {"seat": None}  # (v0.14: no "reshuffle_available" any more)
 
     run(scenario)
 

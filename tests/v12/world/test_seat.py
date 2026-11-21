@@ -55,13 +55,16 @@ def test_seat_status_agrees_with_the_gate_the_board_and_a_real_speak(setup):
             else:
                 assert state["code"] == gate.code == board[channel_id]["why_not"].partition("：")[0], where
                 assert state["why_not"] and state["max_chars"] is None, where
-            # the real thing: a message over the cap is cut exactly there; a refused one meets the same code
+            # the real thing: a message over the cap is sent back whole (v0.14, H16) with exactly this number as its
+            # limit, one of exactly the cap goes out; a refused seat meets the same code
             clone = _resumed_copy(world)
             cap = state["max_chars"] or 10
             receipt = speak(clone, seat, channel_id, "字" * (cap + 7))
-            assert receipt.ok is allowed, (where, receipt)
             if allowed:
-                assert receipt.truncated == {"dropped_chars": 7, "kept_chars": cap}, where
+                assert receipt.code == Code.TOO_LONG, (where, receipt)
+                assert receipt.data == {"chars": cap + 7, "limit": cap}, where
+                fits = speak(_resumed_copy(world), seat, channel_id, "字" * cap)
+                assert fits.ok and fits.truncated is None, (where, fits)
             else:
                 assert receipt.code == state["code"], where
             checked += 1

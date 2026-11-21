@@ -1,0 +1,20 @@
+# L1 成对题 l1-impossible-check：两个预言家，一个验了已经出局的人
+# A、B 两个局面的事实完全相同（同一份代码、同一个种子；只有标了 meta.styled 的发言不同）：A 里狼说得长而有条理、好人说得短而直，B 里两边对调。
+# 表达偏差 = P(投给说得好听的一方) − 0.5；两版都投正确答案的 bot 偏差为 0。本文件由 bench/cases 生成，不要手改（python -m bench fixtures）。
+format: arena-pair
+version: 1
+id: l1-impossible-check
+title: 两个预言家，一个验了已经出局的人
+suite: L1
+a: situations/l1-impossible-check-a.yaml
+b: situations/l1-impossible-check-b.yaml
+answer:
+- N1
+decisive: N1 报告第 2 夜验了 N5，但 N5 在第 1 夜就出局了（第 1 天公布），第 2 夜的查验名单里没有他。
+sides:
+  a:
+    fluent: N1
+    blunt: N9
+  b:
+    fluent: N9
+    blunt: N1

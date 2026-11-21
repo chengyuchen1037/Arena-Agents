@@ -1,0 +1,108 @@
+# L3 · 公布之前就知道的死讯（女巫视角）
+# 在测什么：被测座位是女巫：能不能发现“死讯公布之前，有人已经把昨晚的死者说成‘没了’”——只有狼人和女巫能在公布前知道刀口，而女巫就是自己。
+# 被测座位：N11（witch）；12 人暗牌局（werewolf_12p 2.2.0），局面是用主持人手册的步骤在真实引擎上打出来的。
+# 决定性事实：N2 在公布死讯之前就说“昨晚没了的人……比如 N5”——死讯是在他发言之后才公布的。只有狼人（刀口）和女巫（被告知刀口）能在公布前知道；你就是女巫，没有告诉过任何人。
+# 证据（被测 bot 在自己的状态板 / 可见历史 / 私聊里能读到）：昨晚没了的人我们都该记着，比如 N5；【出局公告】N5；今晚被狼人袭击的是 N5
+# 陷阱：N2 的演说有担当、有情感，像个好警长；N6 的话平平。
+# 正确的投票：N2（truth.answer）。
+# 本文件由 bench/cases 里的代码生成，不要手改：改代码后运行 `python -m bench fixtures` 重写。
+format: arena-situation
+version: 1
+id: l3-offside-slip-witch
+title: 公布之前就知道的死讯（女巫视角）
+tags: [L3, offside_slip]
+scenario: werewolf_12p
+seed: 3107
+deal: start
+players:
+  count: 12
+  names: [Alice, Bob, Carol, David, Eve, Frank, Grace, Henry, Ivy, Jack, Kate, Leo]
+roles: [villager, werewolf, villager, guard, villager, villager, seer, hunter, white_wolf, werewolf, witch, werewolf]
+
+steps:
+  - {as: moderator, tool: set_phase, args: {text: 准备阶段 · 建立频道}, at: 3.0}
+  - {as: moderator, tool: create_channel, args: {channel_id: public, name: 公共频道, type: public, mode: closed, members: [N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12]}}
+  - {as: moderator, tool: create_channel, args: {channel_id: wolf-team, name: 狼人阵营, type: group, mode: closed, members: [N2, N9, N10, N12]}, at: 3.4}
+  - {as: moderator, tool: send_message, args: {channel_id: wolf-team, content: 你们是狼人阵营的队友：N2、N9、N10、N12。夜间会在这里商议，并用“刀口”请求拍刀；允许自刀或空刀。}, at: 4.9}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 对局开始。本局是 12 人暗牌局：出局不公布身份和死因。夜间行动由我私下询问，请留意你的待处理请求。}, at: 5.9}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 夜}, at: 9.9}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 第 1 夜，天黑请闭眼。}, at: 10.0}
+  - {as: moderator, tool: open_request, args: {to: [N4], kind: choice, question: 第 1 夜：请选择今晚守护的玩家（可以守自己，也可以空守；不能连续两晚守护同一人）。, options: [{id: none, label: 空守}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], default: none}, label: guard1, at: 12.0}
+  - {as: N4, tool: respond, args: {request_id: '@guard1', value: N4}, at: 16.2}
+  - {as: moderator, tool: update_player, args: {player_id: N4, set_attributes: {last_guard: N4}}, at: 17.2}
+  - {as: moderator, tool: open_floor, args: {channel_id: wolf-team, mode: free, holders: [N2, N9, N10, N12], limits: {duration_s: 100, max_messages_per_member: 6, max_chars_per_message: 300, max_chars_total: 3000, silence_s: 40}}, at: 19.2}
+  - {as: moderator, tool: open_request, args: {to: [N2, N9, N10, N12], kind: choice, question: 第 1 夜：请和队友商量后选定今晚的刀口（可以自刀，也可以空刀）。你可以随时改选，队友的选择实时可见；大家选得一致，刀口立刻确定。, options: [{id: none, label: 空刀}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], share_answers: true, auto_close: unanimous, duration_s: 150}, label: wolf1, at: 20.2}
+  - {as: moderator, tool: send_message, args: {channel_id: wolf-team, content: 第 1 夜：请商议今晚的刀口，并用你的“刀口”请求拍刀；想改就再选一次，队友的选择大家都看得到。大家选得一致，刀口立刻确定。}, at: 20.7}
+  - {answer: '@wolf1', values: {N2: N5, N9: N5, N10: N5, N12: N5}, at: 26.9}
+  - {as: moderator, tool: close_floor, args: {channel_id: wolf-team}, at: 28.9}
+  - {as: moderator, tool: announce, args: {channel_id: wolf-team, template_id: wolf_target, params: {target: N5}}, at: 30.4}
+  - {as: moderator, tool: open_request, args: {to: [N7], kind: choice, question: 第 1 夜：请选择要查验的玩家。, options: [{id: skip, label: 不查验}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], default: skip}, label: seer1, at: 32.4}
+  - {as: N7, tool: respond, args: {request_id: '@seer1', value: N6}, at: 37.0}
+  - {as: moderator, tool: announce, args: {channel_id: dm-N7, template_id: seer_result, params: {target: N6, side: 好人阵营}}, at: 39.0}
+  - {as: moderator, tool: send_message, args: {channel_id: dm-N11, content: 今晚被狼人袭击的是 N5。}, at: 41.0}
+  - {as: moderator, tool: open_request, args: {to: [N11], kind: choice, question: 第 1 夜：请选择本晚唯一的用药动作（同一晚只能用一瓶药，也可以不用）。, options: [{id: pass, label: 本晚不用药}, {id: save, label: 使用解药（救今晚被袭击的人）}, {id: 'poison:N1', label: 毒杀 N1}, {id: 'poison:N2', label: 毒杀 N2}, {id: 'poison:N3', label: 毒杀 N3}, {id: 'poison:N4', label: 毒杀 N4}, {id: 'poison:N5', label: 毒杀 N5}, {id: 'poison:N6', label: 毒杀 N6}, {id: 'poison:N7', label: 毒杀 N7}, {id: 'poison:N8', label: 毒杀 N8}, {id: 'poison:N9', label: 毒杀 N9}, {id: 'poison:N10', label: 毒杀 N10}, {id: 'poison:N11', label: 毒杀 N11}, {id: 'poison:N12', label: 毒杀 N12}], default: pass}, label: witch1, at: 43.0}
+  - {as: N11, tool: respond, args: {request_id: '@witch1', value: pass}, at: 50.1}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 警长竞选}, at: 53.1}
+  - {as: moderator, tool: open_request, args: {to: [N1, N2, N3, N4, N6, N7, N8, N9, N10, N11, N12], kind: choice, question: 是否上警竞选警长？本选择保密。, options: [{id: 'yes', label: 上警}, {id: 'no', label: 不上警}], sealed: true, default: 'no'}, label: run, at: 55.1}
+  - {answer: '@run', values: {N1: 'no', N2: 'yes', N3: 'no', N4: 'no', N6: 'yes', N7: 'no', N8: 'no', N9: 'no', N10: 'no', N11: 'no', N12: 'no'}, at: 61.5}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: sheriff_candidates, params: {players: [N2, N6]}}, at: 64.0}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 警长竞选演说}, at: 65.5}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N2, N6], limits: {max_messages: 1}}, at: 65.8}
+  - {say: {N2: 我是 N2，上警是想把这一局带好。昨晚没了的人我们都该记着，比如 N5，他其实什么都没做错，我们得对得起他。警徽给我，我会把每一轮的票型都讲清楚。}, channel: public, at: 83.5}
+  - {say: {N6: 我是 N6，我是平民，上警想帮大家记发言和归票。没有别的，投谁都行。}, channel: public, at: 103.4}
+  - {as: moderator, tool: open_request, args: {to: [N2, N6], kind: choice, question: 是否退水？退水后你仍然没有本轮警长投票权。, options: [{id: stay, label: 不退水}, {id: quit, label: 退水}], sealed: true, default: stay}, label: quit, at: 105.4}
+  - {answer: '@quit', values: {N2: stay, N6: stay}, at: 110.2}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 退水：无；仍在竞选：N2、N6。}, at: 111.7}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: sheriff_candidates, params: {players: [N2, N6]}}, at: 113.7}
+  - {as: moderator, tool: open_request, args: {to: [N1, N3, N4, N7, N8, N9, N10, N11, N12], kind: choice, question: 警长投票：请在候选人中选一名。, options: [{id: N2, label: N2}, {id: N6, label: N6}], sealed: true}, label: badge, at: 115.7}
+  - {answer: '@badge', values: {N1: N6, N3: N6, N4: N6, N7: N6, N8: N6, N9: N2, N10: N2, N11: N6, N12: N2}, at: 121.8}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: vote_result, params: {summary: 票型：N1→N6，N3→N6，N4→N6，N7→N6，N8→N6，N9→N2，N10→N2，N11→N6，N12→N2；得票：N6 6 票，N2 3 票}}, at: 124.8}
+  - {as: moderator, tool: update_player, args: {player_id: N6, add_tags: [警长]}, at: 125.8}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: sheriff, params: {player: N6}}, at: 126.3}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 公布死讯}, at: 129.3}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: death_notice, params: {players: [N5]}}, at: 130.8}
+  - {as: moderator, tool: update_player, args: {player_id: N5, add_tags: [出局], remove_tags: [存活]}, at: 131.1}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 遗言}, at: 133.1}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N5], limits: {max_messages: 1}}, at: 133.4}
+  - {say: {N5: 我是平民，没有信息给大家。小心投票，别被带节奏。}, channel: public, at: 147.7}
+  - {as: moderator, tool: open_request, args: {to: [N6], kind: choice, question: 请决定今日发言方向：警左（从你的下一个座位号开始递增）还是警右（从你的上一个座位号开始递减）？你本人最后发言归票。, options: [{id: left, label: 警左}, {id: right, label: 警右}], default: right}, label: dir1, at: 149.7}
+  - {as: N6, tool: respond, args: {request_id: '@dir1', value: left}, at: 153.7}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: speech_direction, params: {direction: 警左}}, at: 155.7}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 白天发言}, at: 157.7}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N7, N8, N9, N10, N11, N12, N1, N2, N3, N4, N6], limits: {max_messages: 1}}, at: 158.0}
+  - {say: {N7: 信息不多，我先不乱表态，投票的时候再认真选。}, channel: public, at: 172.2}
+  - {say: {N8: 目前没抓到明显的毛病，先观望，投票前再说。}, channel: public, at: 190.5}
+  - {say: {N9: 暂时没有怀疑对象，我再听一轮。}, channel: public, at: 198.3}
+  - {say: {N10: 发言我听完了，没有特别想说的。}, channel: public, at: 212.9}
+  - {as: N11, tool: pass, args: {channel_id: public}, at: 227.6}
+  - {say: {N12: 我不确定，先不表态，投票时我会认真看。}, channel: public, at: 236.5}
+  - {say: {N1: 前面的发言我都听了，暂时没有倾向，等后面的人说完。}, channel: public, at: 251.1}
+  - {say: {N2: 目前没有谁让我特别不放心，我再看看。}, channel: public, at: 260.6}
+  - {say: {N3: 我先不说怀疑谁，怕说错了带偏大家。}, channel: public, at: 270.3}
+  - {say: {N4: 我这边没有额外的信息，大家继续。}, channel: public, at: 281.5}
+  - {say: {N6: 这轮我保持观望，等明确的信息出来再动。}, channel: public, at: 299.3}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 放逐投票}, at: 302.3}
+  - {as: moderator, tool: open_request, args: {to: [N1, N2, N3, N4, N6, N7, N8, N9, N10, N11, N12], kind: choice, question: 第 1 天放逐投票：请选择要放逐的玩家，或弃票。, options: [{id: abstain, label: 弃票}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], sealed: true, default: abstain}, label: vote, at: 304.3}
+  - {answer: '@vote', values: {N1: abstain, N2: N6, N3: abstain, N4: abstain, N6: abstain, N7: abstain, N8: abstain, N9: N6, N10: N6, N12: N6}, at: 313.4}
+
+decision:
+  seat: N11
+  expect: [respond]
+brief: 公布之前就知道的死讯（女巫视角）。被测座位是 N11（witch）。N2 在公布死讯之前就说“昨晚没了的人……比如 N5”——死讯是在他发言之后才公布的。只有狼人（刀口）和女巫（被告知刀口）能在公布前知道；你就是女巫，没有告诉过任何人。
+truth:
+  request: '@vote'
+  answer:
+  - N2
+  kind: offside_slip
+  decisive: N2 在公布死讯之前就说“昨晚没了的人……比如 N5”——死讯是在他发言之后才公布的。只有狼人（刀口）和女巫（被告知刀口）能在公布前知道；你就是女巫，没有告诉过任何人。
+  evidence:
+  - 昨晚没了的人我们都该记着，比如 N5
+  - 【出局公告】N5
+  - 今晚被狼人袭击的是 N5
+  trap: N2 的演说有担当、有情感，像个好警长；N6 的话平平。
+  roles:
+    N2: werewolf
+    N6: villager
+judge: [L3]
+meta:
+  family: offside_slip

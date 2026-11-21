@@ -1,12 +1,12 @@
 ---
 schema_version: 2
 id: werewolf_12p
-version: 2.1.0
+version: 2.2.0
 title: 12 人标准局狼人杀（暗牌局）
 manual_heading: 主持人手册
 
 # ============================================================================
-# 开局配置：引擎按身份池发牌，并把每个玩家的身份写进其状态板（主持人不需要告知身份）。
+# 开局配置：引擎在点击“开始”时按身份池发牌，并把每个玩家的身份写进其状态板（主持人不需要告知身份）。
 # 存活状态以“出局”标签为准（见 ui.out_tags），不再单独维护 alive 属性。
 # ============================================================================
 setup:
@@ -74,6 +74,9 @@ defaults:
 # ============================================================================
 # 模板：敏感公告只能用模板（出局、投票结果、查验结果、今晚刀口、警长归属、终局、猎人开枪）。
 # 文本中立：不写身份、不写死因（暗牌局）。
+# record（v0.14）：进状态板的“硬事实台”。fact = 规则产生的事实（主持人的公告：谁出局了、谁投了谁、查验结果、刀口……，
+# 可信）；claim = 玩家自己公开说的话（报查验、表明投票意向……，真假自负，只是他的一面之词）。
+# 没有 record 的模板不进硬事实台。（能力发动时的公开宣言一律算 fact，引擎自己处理。）
 # ============================================================================
 templates:
   death_notice:
@@ -81,90 +84,106 @@ templates:
     params: {players: player_ids}
     users: moderator
     sensitive: true
+    record: fact
     description: 公布出局名单（只报玩家，不报身份和死因）。
   peaceful_night:
     text: "【昨夜平安】昨夜无人出局。"
     users: moderator
     sensitive: true
+    record: fact
     description: 昨夜没有人出局时使用。
   vote_result:
     text: "【投票结果】{{summary}}"
     params: {summary: "text(400)"}
     users: moderator
     sensitive: true
+    record: fact
     description: 公布票型（谁投了谁，按座位顺序）和得票结果。
   no_exile:
     text: "【放逐结果】本轮无人被放逐。"
     users: moderator
     sensitive: true
+    record: fact
     description: 全员弃票或平票 PK 后仍并列时使用。
   tie_pk:
     text: "【平票】{{players}} 得票并列最高，进入 PK 发言，随后重新投票。"
     params: {players: player_ids}
     users: moderator
     sensitive: true
+    record: fact
     description: 宣布并列最高票者进入 PK（放逐投票与警长投票都用它）。
   seer_result:
     text: "【查验结果】{{target}} 属于{{side}}。"
     params: {target: player_id, side: "enum(好人阵营,狼人阵营)"}
     users: moderator
     sensitive: true
+    record: fact
     description: 只能发到预言家的私聊频道（dm-玩家id）。
   wolf_target:
     text: "【刀口】今晚刀口：{{target}}。"
     params: {target: player_id}
     users: moderator
     sensitive: true
+    record: fact
     description: 公布狼人商议的结果（只能发到狼人频道 wolf-team，不要发到公共频道）。
   wolf_empty:
     text: "【刀口】今晚空刀。"
     users: moderator
     sensitive: true
+    record: fact
     description: 狼人最终选择空刀（或没有任何人选择）时使用（只能发到狼人频道 wolf-team）。
   sheriff_candidates:
     text: "【警长竞选】候选人：{{players}}。"
     params: {players: player_ids}
     users: moderator
     sensitive: true
+    record: fact
     description: 公布警长竞选的候选人名单（上警后、退水后各一次）。
   sheriff:
     text: "【警长】{{player}} 当选/继任警长，放逐投票中拥有 1.5 票，并决定发言方向、最后发言归票。"
     params: {player: player_id}
     users: moderator
     sensitive: true
+    record: fact
     description: 警长当选或警徽移交时使用。
   no_sheriff:
     text: "【警长】本局不设警长（警徽作废）。"
     users: moderator
     sensitive: true
+    record: fact
     description: 无人上警、全部退水、警长投票再次并列、警徽被撕毁或被吞时使用。
   speech_direction:
     text: "【发言顺序】警长决定：{{direction}}发言，警长最后发言归票。"
     params: {direction: "enum(警左,警右)"}
     users: moderator
     sensitive: true
+    record: fact
     description: 公布警长选择的发言方向。
   hunter_shot:
     text: "【猎人开枪】{{hunter}} 亮明猎人身份并开枪，带走 {{target}}。"
     params: {hunter: player_id, target: player_id}
     users: moderator
     sensitive: true
+    record: fact
     description: 猎人选择开枪时使用（这是技能主动亮明身份的例外）。
   game_over:
     text: "【终局】{{winner}} 获胜。{{summary}}"
     params: {winner: "text(20)", summary: "text(300)"}
     users: moderator
     sensitive: true
+    record: fact
     description: 宣布终局，随后再调用 end_game。
   vote_declare:
     text: "我投 {{target}}。{{reason}}"
     params: {target: player_id, reason: "text(60)?"}
     users: players
+    record: claim
     description: 玩家公开表明自己的投票意向（正式投票仍须用请求作答）。
   check_report:
     text: "我报查验：{{target}} 是{{side}}。"
     params: {target: player_id, side: "enum(好人阵营,狼人阵营)"}
     users: players
+    record: claim
     description: 玩家公开报查验结果（任何人都可以发，真假自负）。
 
 # ============================================================================
@@ -216,6 +235,23 @@ constraints: []
 
 # 状态或阶段变化会让正在思考的发言草稿作废（STALE）：所以主持人要先更新状态再开放发言权。
 invalidates_drafts: [player.updated, phase.changed]
+
+# ============================================================================
+# 情境标签（v0.14）：引擎只做解析与校验；玩家 bot 在“轮到发言 / 收到请求”时，按下面的条件算出此刻的情境标签，
+# 再用标签去检索自己记忆里的打法（打法条目上的 #标签 就取自这里）。
+# 条件为空 = 不限，写了的条件必须全部满足才命中；同一个标签可以有几条规则（任一条命中即可）。
+#   phase_contains：状态板“当前阶段”文字里含有这段字（阶段文字取自主持人手册里 set_phase 的原文，手册要求照原文写，只替换 N）
+#   channel_type / channel_id：这次唤醒说的是哪种 / 哪个频道   events：这次唤醒的事件名（任一）   request_kind：请求的类型
+# ============================================================================
+situations:
+  - {tag: 警上, phase_contains: 警长竞选}  # 首日警长竞选的全过程：上警、竞选演说、退水、警下投票、警长平票 PK
+  - {tag: 发言, channel_type: public, events: [floor.granted]}  # 轮到我在公共频道发言（白天发言、竞选演说、遗言、PK 发言）
+  - {tag: 投票, phase_contains: 放逐投票, events: [request.opened], request_kind: choice}  # 放逐投票
+  - {tag: 投票, phase_contains: 平票, events: [request.opened], request_kind: choice}  # 平票后的重投（放逐与警长）
+  - {tag: 夜晚, phase_contains: 夜}  # 夜间的一切：守卫 / 狼人 / 预言家 / 女巫的请求，狼人频道里的商议
+  - {tag: 遗言, phase_contains: 遗言}  # 遗言环节
+  - {tag: 狼队, channel_id: wolf-team}  # 狼人频道里的动静（队友的发言、主持人的提示）
+  - {tag: 平票, phase_contains: 平票}  # 平票 PK 的发言与重投
 
 ui:
   out_tags: [出局]
@@ -298,10 +334,6 @@ ui:
 
 除了自由发言，你还可以用 `speak_template` 发结构化消息（同样需要发言权，同样计入条数）：`vote_declare`（公开表明投票意向，之后仍须用请求正式投票）和 `check_report`（公开报一条查验结果，真假自负）。
 
-## 十、参考资料
-
-可以用 `list_documents` / `read_document` 查阅参考资料：规则手册 `rules_12p_standard.md`，以及两个阵营的策略资料 `strategy_good_faction.md`、`strategy_wolf_faction.md`。请只阅读与你自己阵营相关的策略资料。
-
 # 主持人手册
 
 > 这是你的操作清单，请逐步照做。引擎只保证物理规则（谁能写、限额、请求、计时），**不会替你决定下一步**：每一步做完，由你发起下一步；所有等待都靠事件唤醒你。示例里的 id 只是演示，请换成状态板里的真实 id；工具参数里用的永远是 id（如 N3），不是名字。
@@ -357,6 +389,7 @@ ui:
 - **发言队列**：`set_floor_queue(channel_id="public", order=[……])` 按顺序依次把发言权交给每个人（默认每人 1 条、≤ 300 字、120 秒），整轮结束你会被唤醒（`floor.completed`，含每人的结果）。公共发言只用它；它没有内容参数，你也不要用 `send_message` 替玩家开场或点名。
 - **限额 `limits`**：`open_floor` 和 `update_channel` 的限额都写在同一个 `limits` 里，**能写哪些键取决于 `mode`**：`mode="turn"` 只接受 `max_messages`、`max_chars_per_message`、`max_chars_total`、`duration_s`；`mode="free"` 只接受 `duration_s`、`max_messages_per_member`、`max_chars_per_message`、`max_chars_total`、`silence_s`。写了不适用的键会被拒绝（回执会列出该模式接受的键和一个正确示例）。自由讨论的 `duration_s` / `max_chars_total` / `silence_s` 只是提示：到点或用尽时引擎唤醒你（`free.advisory`，每种原因只提示一次），**不会自动关闭**，由你用 `close_floor` 收尾；`update_channel` 的 `limits` 只用于正在进行的自由讨论，数值是“整场”的绝对上限。**开放自由讨论本身不会唤醒任何人**，请随后用 `send_message` 开场。
 - **先更新状态，再开放发言权**：`update_player`、`set_phase` 会让正在思考发言的玩家的草稿作废（STALE）。所以先把这类更新做完，再开放发言权；发言进行中不要调用它们。
+- **阶段文字照原文写**：`set_phase` 的文字请用本手册里写明的原文（只把 N 换成数字）：`准备阶段 · 建立频道`、`第 N 夜`、`第 1 天 · 警长竞选`、`第 1 天 · 警长竞选演说`、`第 1 天 · 警长竞选 · 平票 PK`、`第 N 天 · 公布死讯`、`第 N 天 · 白天发言`、`第 N 天 · 放逐投票`、`第 N 天 · 平票 PK`、`第 N 天 · 遗言`。系统靠这些文字认出此刻是什么场合（警长竞选、白天发言、投票、平票、遗言、夜晚），玩家会据此回想相应的打法；自己换说法会让这个识别失效。
 - **能力开关**：`enable_ability(ability_id="white_wolf_explode")` / `disable_ability(ability_id="white_wolf_explode")` 不带 `holders` 就是对全部持有者生效；带了 `holders=[……]` 只对这些人生效（不能传空列表）。
 - **检查项**：`evaluate(check_id="speech_order", args={"start":"N7", "direction":"left"})`。args 的键就是表达式里的变量名，每个检查项需要哪些 args 见第十节速查表。结果只是辅助，最终裁决由你做出。
 - **找回信息**：需要重新看某个请求的答案时用 `get_ledger(types=["request.closed"], limit=3)`；要看某个频道最近的内容时加上 `channel_id`。
@@ -476,7 +509,7 @@ ui:
    - leaders 只有 1 人 → 当选（同上）。
    - leaders 为空（没有任何有效选票）→ `announce(channel_id="public", template_id="no_sheriff", params={})`。
    - leaders 有多人（并列）→ **PK**（只有一次）：
-     1. `announce(channel_id="public", template_id="tie_pk", params={"players": leaders})`。
+     1. `announce(channel_id="public", template_id="tie_pk", params={"players": leaders})`，接着 `set_phase(text="第 1 天 · 警长竞选 · 平票 PK")`（先更新阶段，再开放发言权）。
      2. 白狼王存活时 `enable_ability`；`evaluate(check_id="order_of", args={"members": leaders})` 得到顺序，`set_floor_queue` 让并列者依次 PK 发言，并提醒白狼王（同 D4 第 4 步）。《进度》：D1 PK 发言中 → `sleep()`。
      3. `floor.completed`：`disable_ability`（如启用过）。V 在并列者中重投：`open_request(to=V, kind="choice", question="警长投票（PK）：请在并列的候选人中选一名。", options=[并列者……], sealed=true)`。
      4. `request.closed`：公布票型（`vote_result`）；只有 1 个最高票者 → 当选（同上）；仍并列或没人投 → `announce(channel_id="public", template_id="no_sheriff", params={})`。
@@ -520,7 +553,7 @@ ui:
 
 ### D6 平票 PK（并列者 L）
 
-1. `announce(channel_id="public", template_id="tie_pk", params={"players": L})`。
+1. `announce(channel_id="public", template_id="tie_pk", params={"players": L})`，接着 `set_phase(text="第 N 天 · 平票 PK")`（先更新阶段，再开放发言权；重投也在这个阶段里进行，不用再改）。
 2. 白狼王存活时 `enable_ability`，`evaluate(check_id="order_of", args={"members": L})`，`set_floor_queue(channel_id="public", order=……)`，提醒白狼王（同 D4 第 4 步）。《进度》：D6 PK 发言中 → `sleep()`。
 3. `floor.completed`：`disable_ability`（如启用过）。重投：`open_request(to=存活且不在 L 里的玩家, kind="choice", question="平票重投：请在并列者中选择要放逐的人，或弃票。", options=[{"id":"abstain","label":"弃票"}, L 里每个人……], sealed=true, default="abstain")`。
 4. `request.closed`：同 D5 第 3、4 步（`weighted_vote`，警长若在投票人里仍然 1.5 票；公布票型）。

@@ -1,0 +1,20 @@
+# 套件 R（docs/v0.14-plan.md §6.5）。档位：smoke = CI / 第一眼；quick = 改了提示词或记忆之后自查（全部套件加起来约 300 次调用）；full = 发版。
+# `python -m bench suites` 列出题数与预计调用数；`python -m bench run --suite R --tier quick` 运行（真模型要 --real 和 --max-calls）。
+format: arena-bench-suite
+version: 1
+id: R
+title: 运行健康
+purpose: 发言长度被退回（TOO_LONG / FORMAT）之后 bot 能不能自己重写成功；发言不被截断。用限额很紧的发言局面逼出退回。
+acceptance: true
+fixtures: ["fixtures/situations/r-*.yaml"]
+decision: speech
+metrics: [form.truncated_rate, runtime.speak.rewrite_success_rate, runtime.floor_timeout_rate]
+gates: [R1, R2, R3]
+notes: 世界在决策点上冻住，发言权不会在 bot 思考时超时；整局的超时率要看联赛 G 或真实存档的 audit
+baseline: [legacy]
+candidate: ["bot:Alice"]
+calls_per_sample: 1.6
+tiers:
+  smoke: {samples: 1, bots: [legacy], situations: 1}
+  quick: {samples: 1, bots: [legacy, "bot:Alice"]}
+  full: {samples: 5, bots: [legacy, "bot:Alice", "bot:Bob", "bot:Carol"]}

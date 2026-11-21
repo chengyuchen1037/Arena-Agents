@@ -1,6 +1,12 @@
 #!/usr/bin/env python
-"""Mock UI server for the v0.13.1 front end (docs/v0.12-contracts.md §8 + §10.3 / §10.4 / §10.6:
-SSE v2 events, PublicSession v3, roster / budget / price-source APIs).
+"""Mock UI server for the v0.14 front end (docs/v0.12-contracts.md §8 + §10.3 / §10.6 + §13:
+SSE v2 events, PublicSession v6, bots / contract / rules / games / budget / price-source APIs).
+
+v0.14: a player is a **bot** (``tools/mock_ui_bots.py``: name, avatar, L0, what it learned, an initialization record; the twelve of them are
+seated by the line-up) - ``/api/roster/**`` is gone.  ``tools/mock_ui_hub.py`` ties the bots to the game (payloads, the start check ``NOT_READY``,
+the status label, initialization jobs, reviews) and serves ``/api/bots/**``, ``/api/contract``, ``/api/rules/**`` and the new ``/api/games/**``
+routes.  The identities are dealt when the game starts (``session.dealt``); before that no card has any.  See the notes of ``create_app`` for the
+``/api/mock/*`` switches (``bots``, ``files``, ``learning``) that put the mock into the situations the page has to show.
 
 It serves ``static/`` and replays one scripted 12-player game (about 60 s) over the SAME wire format
 the real backend uses, so the front end can be developed, screenshotted and tested without any
@@ -61,15 +67,22 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
+TOOLS_DIR = Path(__file__).resolve().parent
+if str(TOOLS_DIR) not in sys.path:  # the sibling modules of the mock (the tests load this file by its path)
+    sys.path.insert(0, str(TOOLS_DIR))
+import mock_ui_bots as mb  # noqa: E402  (the bot store, the contract, the rules)
+import mock_ui_hub as hubmod  # noqa: E402  (the bots at the table: payloads, jobs, the API)
+
 STATIC_DIR = ROOT / "static"
 PARTS_REAL = STATIC_DIR / "avatar" / "parts.json"
 PARTS_FIXTURE = ROOT / "tests" / "frontend" / "fixtures" / "parts.min.json"
 DEFAULT_PORT = 8731
-APP_VERSION = "v0.13.1-mock"
+APP_VERSION = "v0.14.0-mock"
 PACE = 1.0  # plot seconds -> game seconds at speed=1 (the whole script is about 60 s)
 MODERATOR = "moderator"
 ENGINE = "engine"
 DEMO_BUDGET_TOKENS = 150_000  # the demo budget: warns at 80 % (120K), pauses at 100 % (see the notes above)
+MOCK_EPOCH = 1_763_600_000  # "now" of a game made alone (the clock of the bots' files stands still there: replays are deterministic)
 
 # --------------------------------------------------------------------------------------------------
 # the cast (docs/v0.12.1-plan.md E13: ids N1..N12, default names without numbers)
@@ -228,7 +241,8 @@ def price_tuple(m: dict[str, Any]) -> tuple[float, float, float, float]:
 PRICE = {m["id"]: price_tuple(m) for p in PROVIDERS for m in p["models"]}
 ANTHROPIC_MODELS = {"claude-sonnet"}  # the only protocol that bills cache writes
 
-# a long speech: the engine cuts it at the per-message limit (D19) and the feed shows a trailing "…"
+# a long speech that fits the per-message limit (300): the feed shows it whole.  (v0.14, H16: a speech over the limit is not cut any more - it is sent back
+# with TOO_LONG and the player writes it again.)
 LONG_SPEECH = (
     "我是猎人。昨晚没有任何信息，但我想先把场上的发言逻辑理一遍：N1 的发言太圆滑，几乎没有任何立场；"
     "N2 只是附和，没有独立判断；N9 一直在转移话题。从票型和发言顺序看，N10 的站边最不自然，"
@@ -242,7 +256,7 @@ def now_iso() -> str:
 
 
 # --------------------------------------------------------------------------------------------------
-# the roster: names, avatars, persona, memory (persisted by the real backend, in memory here)
+# the sprite library the avatar descriptions are drawn from
 # --------------------------------------------------------------------------------------------------
 
 
@@ -309,338 +323,44 @@ def roster_avatars(rng: random.Random, parts: dict[str, Any] | None, n: int = 12
 
 
 # --------------------------------------------------------------------------------------------------
-# v0.13.1 (G37-G44, contract §12.5): memory = the impressions of the other seats + a few lessons (no more recaps that
-# are appended), persona = a fixed format.  A small mirror of app/storage/roster.py: the same limits, the same canonical
-# text, the same refusals (400 = something is over its limit, 422 = the request makes no sense).
+# the avatars of the bots (v0.14: a bot owns its avatar; the bot store asks the sprite library for descriptions)
 # --------------------------------------------------------------------------------------------------
 
-LIMITS = {
-    "impression_chars": 80,
-    "experience_items": 3,
-    "experience_chars": 300,
-    "memory_chars": 1500,
-    "legacy_chars": 600,
-    "persona_chars": 500,
-    "persona_item_chars": 40,
-}
-NO_IMPRESSION = "（暂无）"
-LEGACY_TITLE = "旧记忆（待整理）"
-_PLACEHOLDERS = (NO_IMPRESSION, "(暂无)", "暂无")
-_HEADING_RE = re.compile(r"^##[ \t]+(.+?)[ \t]*$")
-_IMPRESSION_LINE_RE = re.compile(r"^\s*(?:[-*•·]+\s*|\d{1,2}[.)、．]\s*)?[Nn]([1-9][0-9]?)(?![0-9])(.*)$")
-_BULLET_RE = re.compile(r"^\s*(?:[-*•·]+|\d{1,2}[.)、．]|[（(]\d{1,2}[）)])\s*")
 
-
-class RosterRefusal(Exception):
-    """A roster write the server refuses: ``status`` 400 (over a limit) or 422 (makes no sense); ``detail`` is Chinese."""
-
-    def __init__(self, status: int, detail: str) -> None:
-        super().__init__(detail)
-        self.status = status
-        self.detail = detail
-
-
-def _one_line(value: Any) -> str:
-    return re.sub(r"\s+", " ", str(value if value is not None else "")).strip()
-
-
-def _clip(text: str, limit: int) -> str:
-    """At most ``limit`` characters; a text that had to be cut ends with an ellipsis."""
-    return text if len(text) <= limit else text[: max(0, limit - 1)].rstrip() + "…"
-
-
-def clean_impression(value: Any) -> str:
-    text = _one_line(value)
-    return "" if text in _PLACEHOLDERS else text
-
-
-def clean_experience(items: Any) -> list[str]:
-    if isinstance(items, str):
-        items = items.splitlines()
-    out: list[str] = []
-    for item in items or []:
-        text = _one_line(_BULLET_RE.sub("", str(item if item is not None else ""), count=1))
-        if text and text not in _PLACEHOLDERS:
-            out.append(text)
-    return out
-
-
-def clean_text(value: Any, what: str, limit: int) -> str:
-    """Text for a file: line ends normalized, surrounding blank lines dropped; longer than ``limit`` is refused (400)."""
-    text = str(value if value is not None else "").replace("\r\n", "\n").replace("\r", "\n")
-    if "\x00" in text:
-        raise RosterRefusal(400, f"{what}不能包含空字符。")
-    text = text.strip("\n") if text.strip() else ""
-    if len(text) > limit:
-        raise RosterRefusal(400, f"{what}最多 {limit} 个字符（现在 {len(text)} 个），请精简。")
-    return text
-
-
-def empty_parts(owner: str) -> dict[str, Any]:
-    """The structured memory of seat ``owner``: the record, an impression per OTHER seat, lessons, the legacy text."""
-    return {"record": "", "impressions": {pid: "" for pid in PLAYER_IDS if pid != owner}, "experience": [], "legacy": ""}
-
-
-def _label(pid: str, names: dict[str, str]) -> str:
-    return f"{pid} {names[pid]}" if names.get(pid) else pid
-
-
-def memory_body(parts: dict[str, Any], owner: str, names: dict[str, str]) -> str:
-    """The ``## 印象`` and ``## 经验`` sections as they are written: this is what ``memory_chars`` counts."""
-    lines = "\n".join(f"- {_label(pid, names)}：{parts['impressions'].get(pid) or NO_IMPRESSION}" for pid in PLAYER_IDS if pid != owner)
-    lessons = "\n".join(f"- {item}" for item in parts["experience"])
-    return f"## 印象\n{lines}\n\n## 经验" + (f"\n{lessons}" if lessons else "")
-
-
-def render_memory(parts: dict[str, Any], owner: str, names: dict[str, str]) -> str:
-    """The canonical text of a memory file ("" when there is nothing to remember)."""
-    if not (parts["record"].strip() or any(parts["impressions"].values()) or parts["experience"] or parts["legacy"].strip()):
-        return ""
-    blocks = []
-    if parts["record"].strip():
-        blocks.append("## 战绩\n" + parts["record"].strip("\n"))
-    blocks.append(memory_body(parts, owner, names))
-    if parts["legacy"].strip():
-        blocks.append(f"## {LEGACY_TITLE}\n" + parts["legacy"].strip("\n"))
-    return "\n\n".join(blocks)
-
-
-def split_memory(text: str) -> dict[str, str]:
-    chunks: dict[str, list[str]] = {}
-    current = ""
-    for line in (text or "").splitlines():
-        match = _HEADING_RE.match(line)
-        if match:
-            current = match.group(1)
-            chunks.setdefault(current, [])
-        else:
-            chunks.setdefault(current, []).append(line)
-    bodies = {title: "\n".join(lines).strip("\n") for title, lines in chunks.items()}
-    return {title: body for title, body in bodies.items() if title or body.strip()}
-
-
-def parse_memory(text: str, owner: str) -> dict[str, Any]:
-    """A memory text -> its parts.  An old-format or free text (no ``## 印象``) becomes the legacy text, nothing is lost."""
-    sections = split_memory(text)
-    parts = empty_parts(owner)
-    parts["record"] = sections.get("战绩", "")
-    for line in sections.get("印象", "").splitlines():
-        match = _IMPRESSION_LINE_RE.match(line)
-        if not match:
-            continue
-        sid = f"N{int(match.group(1))}"
-        labelled = re.match(r"\s*[^：:\n]{0,24}[：:]\s*(.*)$", match.group(2))
-        if sid in parts["impressions"] and labelled:
-            parts["impressions"][sid] = clean_impression(labelled.group(1))
-    parts["experience"] = clean_experience(sections.get("经验", ""))
-    pieces = []
-    for title, body in sections.items():
-        if title in ("战绩", "印象", "经验") or not body.strip():
-            continue
-        plain = title in ("", "对局记忆", "经验与印象", LEGACY_TITLE)
-        pieces.append(body.strip("\n") if plain else f"【{title}】\n{body.strip(chr(10))}")
-    parts["legacy"] = "\n\n".join(pieces)
-    return parts
-
-
-def check_memory(parts: dict[str, Any], owner: str, names: dict[str, str]) -> None:
-    """A SAVE does not cut anything: refuse (400) the first part that is too long, saying which, how long and the limit."""
-    for pid in PLAYER_IDS:
-        n = len(parts["impressions"].get(pid, ""))
-        if pid != owner and n > LIMITS["impression_chars"]:
-            raise RosterRefusal(400, f"{_label(pid, names)} 的印象最多 {LIMITS['impression_chars']} 字（现在 {n} 字），请精简。")
-    if len(parts["experience"]) > LIMITS["experience_items"]:
-        raise RosterRefusal(400, f"经验最多 {LIMITS['experience_items']} 条（现在 {len(parts['experience'])} 条），请精简。")
-    n = sum(len(item) for item in parts["experience"])
-    if n > LIMITS["experience_chars"]:
-        raise RosterRefusal(400, f"经验合计最多 {LIMITS['experience_chars']} 字（现在 {n} 字），请精简。")
-    n = len(parts["legacy"].strip())
-    if n > LIMITS["legacy_chars"]:
-        raise RosterRefusal(400, f"旧记忆最多 {LIMITS['legacy_chars']} 字（现在 {n} 字），请精简，或交给主持人模型整理。")
-    n = len(memory_body(parts, owner, names))
-    if n > LIMITS["memory_chars"]:
-        raise RosterRefusal(400, f"整份记忆（印象和经验两段，含序号与符号）最多 {LIMITS['memory_chars']} 字（现在 {n} 字），请精简。")
-
-
-def memory_after_parts(owner: str, names: dict[str, str], current: dict[str, Any], spec: Any) -> dict[str, Any]:
-    """The memory after a ``PUT`` with ``memory_parts``: only the parts given change (the record is the engine's: ignored)."""
-    if not isinstance(spec, dict) or set(spec) - {"impressions", "experience", "legacy", "record"}:
-        raise RosterRefusal(422, "memory_parts 只能有 impressions、experience、legacy（record 会被忽略）。")
-    parts = copy.deepcopy(current)
-    imps = spec.get("impressions")
-    if imps is not None:
-        if not isinstance(imps, dict) or not all(isinstance(v, str) for v in imps.values()):
-            raise RosterRefusal(422, "impressions 必须是 {座位 id: 文字}。")
-        for sid, text in imps.items():
-            if sid == owner:
-                raise RosterRefusal(422, f"不能给自己（{sid}）写印象。")
-            if sid not in PLAYER_IDS:
-                raise RosterRefusal(422, f"没有这个座位：{sid}")
-            parts["impressions"][sid] = clean_impression(text)
-    exp = spec.get("experience")
-    if exp is not None:
-        if not isinstance(exp, list) or not all(isinstance(v, str) for v in exp):
-            raise RosterRefusal(422, "experience 必须是文字列表。")
-        parts["experience"] = clean_experience(exp)
-    legacy = spec.get("legacy")
-    if legacy is not None:
-        if not isinstance(legacy, str):
-            raise RosterRefusal(422, "legacy 必须是文字。")
-        parts["legacy"] = clean_text(legacy, "旧记忆", 20000).strip()
-    check_memory(parts, owner, names)
-    return parts
-
-
-def memory_changes(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
-    """What changed between two states of one memory: the impressions that differ, the lessons (None when the same)."""
-    impressions = [
-        {"id": sid, "before": before["impressions"].get(sid, ""), "after": text}
-        for sid, text in after["impressions"].items()
-        if before["impressions"].get(sid, "") != text
-    ]
-    experience = {"before": list(before["experience"]), "after": list(after["experience"])} if before["experience"] != after["experience"] else None
-    return {"impressions": impressions, "experience": experience}
-
-
-IMPRESSION_BANK = [
-    "发言短，站边快，可信度中。",
-    "逻辑细，抓细节准，值得多听他的。",
-    "爱带节奏，票型和发言常对不上，要留意。",
-    "话少，关键时才开口，看不透。",
-    "容易被带着走，附和多于判断。",
-    "喜欢强攻，风险偏好高，拿到好牌时更爱悍跳。",
-]
-LESSON_BANK = ["第一天先听完警上发言再站边。", "女巫第一晚救人收益高。", "票型比发言可靠，记票型。"]
-
-
-def bump_record(record: str, won: bool) -> str:
-    """The engine-kept ``## 战绩`` line: games, wins, win rate."""
-    m = re.search(r"场次\s*(\d+)\s*·\s*胜\s*(\d+)", record or "")
-    games, wins = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
-    games += 1
-    wins += 1 if won else 0
-    return f"场次 {games} · 胜 {wins} · 胜率 {round(100 * wins / games)}%"
-
-
-PERSONA_HEADS = ("定位", "说话风格", "思考方式", "决策偏好", "压力下", "口头禅")
-
-
-def persona_draft(notes: str) -> str:
-    """The fixed format of G43: one-line position, then bullets (every line <= 40 characters, the whole <= 500)."""
-    lines = [_one_line(ln) for ln in notes.splitlines() if _one_line(ln)] or ["冷静的观察者"]
-    position = _clip(lines[0], LIMITS["persona_item_chars"])
-    style = [_clip(ln, LIMITS["persona_item_chars"]) for ln in lines[1:3]] or ["句子短，先结论后理由。"]
-    text = (
-        f"【定位】{position}\n【说话风格】\n" + "\n".join(f"- {s}" for s in style) + "\n"
-        "【思考方式】\n- 每轮复盘票型，找出跟票异常的人。\n"
-        "【决策偏好】\n- 证据不足时宁可弃票，也不乱投。\n"
-        "【压力下】\n- 被怀疑时摆出完整时间线，不情绪化。\n"
-        "【口头禅】我们看票。"
-    )
-    return text
-
-
-class MockRoster:
-    """The 12 seats: nickname, avatar description, persona and memory (structured, v0.13.1); plus the "load memory" switch."""
+class MockAvatars(mb.AvatarPicker):
+    """Random avatar descriptions from the library (a new one differs from every other in at least three fields when the library is big enough)."""
 
     def __init__(self, rng: random.Random, parts: dict[str, Any] | None) -> None:
         self.rng = rng
         self.parts = parts
-        self.memory_enabled = True
-        avatars = roster_avatars(rng, parts, len(PLAYER_IDS) + 1)  # the last one is the moderator's
-        # the moderator is not a seat: it only has an avatar of its own (random like the players')
-        self.moderator: dict[str, Any] = {"id": MODERATOR, "name": "主持人", "avatar": avatars[len(PLAYER_IDS)]}
-        self.seats: dict[str, dict[str, Any]] = {
-            pid: {
-                "seat": i + 1,
-                "id": pid,
-                "name": DEFAULT_NAMES[i],
-                "default_name": DEFAULT_NAMES[i],
-                "avatar": avatars[i],
-                "persona": "",
-                "memory_parts": empty_parts(pid),  # (the canonical text is computed: memory_text / entry)
-            }
-            for i, pid in enumerate(PLAYER_IDS)
-        }
 
-    def name(self, pid: str) -> str:
-        return self.seats[pid]["name"] if pid in self.seats else pid
-
-    def ref(self, pid: str) -> str:
-        """What the models (and the moderator's messages) call a player: "N3 Carol"."""
-        return f"{pid} {self.name(pid)}" if pid in self.seats else pid
-
-    def names(self) -> dict[str, str]:
-        return {pid: s["name"] for pid, s in self.seats.items()}
-
-    def memory_text(self, pid: str) -> str:
-        """The memory file of a seat in its canonical form (names are labels: a rename shows in every file)."""
-        return render_memory(self.seats[pid]["memory_parts"], pid, self.names())
-
-    def entry(self, pid: str) -> dict[str, Any]:
-        """One seat as GET /api/roster / PUT answer: ``memory`` (the text) and ``memory_parts`` (the same, structured)."""
-        s = self.seats[pid]
-        out = {k: copy.deepcopy(v) for k, v in s.items() if k != "memory_parts"}
-        out["memory"] = self.memory_text(pid)
-        out["memory_parts"] = copy.deepcopy(s["memory_parts"])
-        return out
-
-    def entries(self) -> list[dict[str, Any]]:
-        return [self.entry(pid) for pid in PLAYER_IDS]
-
-    def public(self, pid: str) -> dict[str, Any]:
-        s = self.seats[pid]
-        return {"id": pid, "name": s["name"], "avatar": copy.deepcopy(s["avatar"])}
-
-    def validate_name(self, pid: str, name: Any) -> str | None:
-        """Why a NEW name is refused (a message: the write answers 422), or ``None``; a colon raises :class:`RosterRefusal` instead -
-        the real server answers that one with 400 and exactly these words (app/storage/roster.py ``clean_name``: ``:`` and ``：``,
-        nothing else - no normalizing - after the length check and before uniqueness).  The names the roster already holds are
-        never run through this: an old name with a colon still loads and shows."""
-        if not isinstance(name, str):
-            return "名字必须是文字"
-        n = name.strip()
-        if not n:
-            return "名字不能为空"
-        if len(n) > 20:
-            return "名字最多 20 个字符"
-        if re.search("[:\uff1a]", n):
-            raise RosterRefusal(400, "名字不能包含冒号（: 或 ：）。")
-        if any(s["name"] == n and p != pid for p, s in self.seats.items()):
-            return f"名字「{n}」已被其他玩家使用"
-        return None
-
-    def regenerate(self, pid: str | None = None) -> list[str]:
-        """New avatars: everybody (the twelve seats and the moderator, picked together) or one seat / the moderator."""
-        if pid is None:
-            avatars = roster_avatars(self.rng, self.parts, len(PLAYER_IDS) + 1)
-            for p, a in zip(PLAYER_IDS, avatars):
-                self.seats[p]["avatar"] = a
-            self.moderator["avatar"] = avatars[len(PLAYER_IDS)]
-            return [*PLAYER_IDS, MODERATOR]
-        others = [s["avatar"] for p, s in self.seats.items() if p != pid and s["avatar"]]
-        if pid != MODERATOR and self.moderator["avatar"]:
-            others.append(self.moderator["avatar"])
+    def one(self, taken: Any) -> dict[str, Any] | None:
         best = None
         for _ in range(300):
             cand = random_avatar(self.rng, self.parts)
             if cand is None:
-                break
-            if all(_differences(cand, o) >= 3 for o in others):
-                best = cand
-                break
+                return None
+            if all(_differences(cand, o) >= 3 for o in taken):
+                return cand
             best = best or cand
-        if pid == MODERATOR:
-            self.moderator["avatar"] = best
-        else:
-            self.seats[pid]["avatar"] = best
-        return [pid]
+        return best
 
-    def clear(self, include_persona: bool) -> None:
-        for pid, s in self.seats.items():
-            s["memory_parts"] = empty_parts(pid)
-            if include_persona:
-                s["persona"] = ""
+    def batch(self, n: int, taken: Any) -> list[dict[str, Any] | None]:
+        out: list[dict[str, Any] | None] = []
+        for _ in range(n):
+            out.append(self.one([*taken, *[o for o in out if o]]))
+        return out
+
+    def problems(self, desc: Any) -> list[str]:
+        """Why a description is refused (``[]``: fine): the shape of §10.6 (``v`` = 1, the eight fields are texts)."""
+        if desc is None:
+            return []
+        if not isinstance(desc, dict):
+            return ["头像描述必须是对象"]
+        problems = [] if desc.get("v") == 1 else ["v 必须是 1"]
+        problems += [f"{f} 缺少或不是文字" for f in AVATAR_FIELDS if not isinstance(desc.get(f), str)]
+        return problems
+
 
 
 # --------------------------------------------------------------------------------------------------
@@ -652,7 +372,9 @@ MOCK_DATA_DIR = "D:\\Arena-Agents\\data"
 MOCK_LEGACY_WORKSPACE = "C:\\Users\\you\\Arena-Agents\\Default"
 MOCK_PASSWORD = "Correct-Horse-9"  # opens every mock archive that holds API keys (a file name with "keys")
 MOCK_MAX_ARCHIVE_BYTES = 2 * 1024**3
-MOCK_APP_VERSION = "v0.13.1"
+MOCK_APP_VERSION = "v0.14.0"
+V1_ARCHIVE_WARNING = "这是 v0.13 的旧格式存档：名册里的 {n} 个座位会在导入时迁移成 bot（性格设定变成底层设定，记忆会整理成印象）。"
+ARCHIVE_FORMAT_VERSION = 2  # v0.14 (§13.9): the total archive is format 2 (the bots, the contract, the rules ...); a format 1 archive is still read
 MAX_PASSWORD_ATTEMPTS = 10
 EXPORT_NAME_RE = re.compile(r"^arena-[0-9]{8}-[0-9]{6}\.arenaagents$")
 WRONG_PASSWORD = "密码错误或 API Key 部分已损坏"
@@ -662,7 +384,8 @@ MISMATCH_TEXT = (
     "存档里 Provider「DeepSeek」的协议或地址与加密 API Key 时不一致：存档在导出之后被改动过。为了安全，不导入 API Key；"
     "可以选择「跳过 API Key」导入其余内容，再在 Provider 里重新填写 Key。"
 )
-ARCHIVE_SCENARIOS = "demo（正常）/ keys（含 API Key，密码 " + MOCK_PASSWORD + "）/ mismatch（Key 与地址不一致）/ fail（导入中途失败）/ newer（版本太新）/ corrupt（校验失败）/ huge（太大）"
+ARCHIVE_SCENARIOS = ("demo（正常）/ v1（v0.13 的旧格式：名册在导入时迁移成 bot）/ keys（含 API Key，密码 " + MOCK_PASSWORD
+                     + "）/ mismatch（Key 与地址不一致）/ fail（导入中途失败）/ newer（版本太新）/ corrupt（校验失败）/ huge（太大）")
 
 
 def mock_password_problem(password: Any) -> str | None:
@@ -800,7 +523,8 @@ class MockArchive:
         self.spawn(self.run_export(job, include_keys, include_logs))
         return 202, {"job_id": job["job_id"], "kind": "export"}
 
-    async def run_export(self, job: dict[str, Any], include_keys: bool, include_logs: bool) -> None:
+    async def run_export(self, job: dict[str, Any], include_keys: bool, include_logs: bool = True) -> None:
+        include_logs = True  # v0.14 (H36): the logs are always part of the archive; ``include_logs`` of the request is ignored
         pack_bytes = 48_000_000 if include_logs else 1_400_000
         plan = [("flush", 1, 1), ("collect", 1, 1)] + ([("encrypt", 1, 1)] if include_keys else []) + [("pack", 12, pack_bytes), ("finalize", 1, 1)]
         try:
@@ -810,9 +534,11 @@ class MockArchive:
             while name in self.exports:  # two exports in the same second
                 now = now.replace(second=(now.second + 1) % 60)
                 name = f"arena-{now:%Y%m%d-%H%M%S}.arenaagents"
-            contents = {"games": 3, "providers": 2, "roster_seats": 12, "has_secrets": include_keys, "has_logs": include_logs}
+            contents = {"games": 3, "providers": 2, "bots": 12, "contract": True, "rules": 1, "has_secrets": include_keys, "has_logs": include_logs}
             result = {
                 "name": name,
+                # (H42) the name the user's browser saves it under; ``name`` is the fixed internal name in data/exports/ (the download URL keeps it)
+                "download_name": f"arena-agents-{now:%Y%m%d-%H%M%S}.arenaagents",
                 "path": f"{MOCK_DATA_DIR}\\exports\\{name}",
                 "display_path": f"data/exports/{name}",
                 "size_bytes": 9_800_000 if include_logs else 310_000,
@@ -833,7 +559,7 @@ class MockArchive:
     def tiny_archive(result: dict[str, Any]) -> bytes:
         """A small valid zip with a manifest (the mock's idea of the downloaded file)."""
         manifest = {
-            "format": "arenaagents", "format_version": 1, "app_version": result["app_version"], "archive_id": result["archive_id"],
+            "format": "arenaagents", "format_version": ARCHIVE_FORMAT_VERSION, "app_version": result["app_version"], "archive_id": result["archive_id"],
             "created_at": result["created_at"], "contents": result["contents"], "files": [], "files_sha256": "0" * 64,
         }
         buf = io.BytesIO()
@@ -844,19 +570,31 @@ class MockArchive:
     def export_file(self, name: str) -> bytes | None:
         return self.exports.get(name) if EXPORT_NAME_RE.fullmatch(name or "") else None
 
+    @staticmethod
+    def download_name_of(name: str) -> str:
+        """The name a browser saves an export under: ``arena-20251119-121530.arenaagents`` -> ``arena-agents-20251119-121530.arenaagents`` (H42)."""
+        return name.replace("arena-", "arena-agents-", 1) if name.startswith("arena-") and not name.startswith("arena-agents-") else name
+
     # ----------------------------------------------------------------------------------------- import
-    def demo_summary(self, size: int, *, has_secrets: bool, created_at: str | None = None) -> dict[str, Any]:
+    def demo_summary(self, size: int, *, has_secrets: bool, created_at: str | None = None, v1: bool = False) -> dict[str, Any]:
+        """What the import shows of a file: v2 counts the bots, the contract and the rules; a v1 archive (v0.13) still has a roster of seats, which
+        the import turns into bots (H45)."""
         games = [
             {"session_id": "g3demo000003", "title": "Arena-Agents", "scenario_title": "狼人杀 12 人局", "status": "finished", "winner": "好人阵营", "created_at": "2026-11-17T09:00:00+00:00", "human_involved": False, "players": 12},
             {"session_id": "g2demo000002", "title": "Arena-Agents", "scenario_title": "狼人杀 12 人局", "status": "paused", "winner": None, "created_at": "2026-11-16T09:00:00+00:00", "human_involved": True, "players": 12},
             {"session_id": "g1demo000001", "title": "Arena-Agents", "scenario_title": "狼人杀 12 人局", "status": "finished", "winner": "狼人阵营", "created_at": "2026-11-15T09:00:00+00:00", "human_involved": False, "players": 12},
         ]
-        return {
-            "archive_id": uuid.uuid4().hex, "format_version": 1, "app_version": MOCK_APP_VERSION,
+        out = {
+            "archive_id": uuid.uuid4().hex, "format_version": 1 if v1 else ARCHIVE_FORMAT_VERSION, "app_version": MOCK_APP_VERSION,
             "created_at": created_at or "2026-11-18T00:42:07-08:00", "size_bytes": size, "uncompressed_bytes": size * 6, "file_count": 31,
-            "games": 3, "providers": 2, "roster_seats": 12, "has_secrets": has_secrets, "has_logs": True,
+            "games": 3, "providers": 2, "has_secrets": has_secrets, "has_logs": True,
             "provider_names": ["DeepSeek", "Claude"], "game_list": games, "games_listed": 3, "warnings": [],
         }
+        if v1:
+            out.update(roster_seats=12, warnings=[V1_ARCHIVE_WARNING.format(n=12)])
+        else:
+            out.update(bots=12, contract=True, rules=1)
+        return out
 
     def read_manifest(self, data: bytes) -> dict[str, Any] | None:
         """The summary of a REAL archive (what its manifest says); ``None`` when ``data`` is none."""
@@ -868,12 +606,18 @@ class MockArchive:
         if not isinstance(manifest, dict) or manifest.get("format") != "arenaagents" or not isinstance(manifest.get("contents"), dict):
             return None
         c = manifest["contents"]
-        summary = self.demo_summary(len(data), has_secrets=bool(c.get("has_secrets")), created_at=str(manifest.get("created_at") or "2026-11-18T00:00:00+00:00"))
+        v1 = manifest.get("format_version") == 1
+        summary = self.demo_summary(len(data), has_secrets=bool(c.get("has_secrets")), created_at=str(manifest.get("created_at") or "2026-11-18T00:00:00+00:00"), v1=v1)
         summary.update(
             archive_id=str(manifest.get("archive_id") or summary["archive_id"]), app_version=str(manifest.get("app_version") or "?"),
-            games=int(c.get("games") or 0), providers=int(c.get("providers") or 0), roster_seats=int(c.get("roster_seats") or 0),
+            games=int(c.get("games") or 0), providers=int(c.get("providers") or 0),
             has_logs=bool(c.get("has_logs")), file_count=len(manifest.get("files") or []),
         )
+        if v1:
+            summary["roster_seats"] = int(c.get("roster_seats") or 0)
+            summary["warnings"] = [V1_ARCHIVE_WARNING.format(n=summary["roster_seats"])]
+        else:
+            summary.update(bots=int(c.get("bots") or 0), contract=bool(c.get("contract")), rules=int(c.get("rules") or 0))
         summary["game_list"] = summary["game_list"][: summary["games"]]
         summary["games_listed"] = len(summary["game_list"])
         return summary
@@ -889,11 +633,11 @@ class MockArchive:
             return archive_error(422, "invalid_archive", "上传的文件是空的。")
         lowered = name.lower()
         if "newer" in lowered:
-            return archive_error(422, "unsupported_version", "这份存档使用更新的格式（v2），当前程序只支持到 v1。请先把 Arena-Agents 升级到较新的版本再导入。")
+            return archive_error(422, "unsupported_version", f"这份存档使用更新的格式（v{ARCHIVE_FORMAT_VERSION + 1}），当前程序只支持到 v{ARCHIVE_FORMAT_VERSION}。请先把 Arena-Agents 升级到较新的版本再导入。")
         if "corrupt" in lowered:
             return archive_error(422, "invalid_archive", "games/g2demo000002/game.json 的 SHA-256 校验值与清单不符：存档已损坏或被改动。")
-        if any(word in lowered for word in ("demo", "keys", "fail", "mismatch")):
-            summary: dict[str, Any] | None = self.demo_summary(len(data), has_secrets="keys" in lowered or "mismatch" in lowered)
+        if any(word in lowered for word in ("demo", "keys", "fail", "mismatch", "v1")):
+            summary: dict[str, Any] | None = self.demo_summary(len(data), has_secrets="keys" in lowered or "mismatch" in lowered, v1="v1" in lowered)
         else:
             summary = self.read_manifest(data)
         if summary is None:
@@ -969,7 +713,7 @@ REQUEST_KINDS = {"choice", "text"}
 AUTO_CLOSE = {"all_answered", "unanimous", "deadline"}
 CLOSE_REASONS = {"all_answered", "unanimous", "deadline", "cancelled"}
 BUDGET_STATES = {"ok", "warning", "reached"}
-REVIEW_STATES = {"running", "done", "error"}
+REVIEW_STATES = hubmod.REVIEW_STATES  # v0.14 (§13.8): queued / running / done / error / timeout
 SESSION_UPDATED_KEYS = {
     "status",
     "pause_reason",
@@ -986,6 +730,8 @@ SESSION_UPDATED_KEYS = {
     "budget",
     "memory_enabled",
     "review",
+    "system_status",  # v0.14 (§13.8): {"code", "text", "reason"}
+    "dealt",  # v0.14 (§13.3 / §13.8): have the identities been dealt (the game has started)?
     "stall_notice",
     "clock",  # the real backend adds the game clock (seconds) to every session.updated (contracts §10.8)
     "soft_pause",  # v0.13.1 (§12.2): null | {"state": "draining" | "held", "in_flight": n} - in every session.updated
@@ -1199,9 +945,8 @@ def validate_budget(b: Any, where: str = "budget") -> list[str]:
 
 
 def validate_review(r: Any, where: str = "review") -> list[str]:
-    if not (isinstance(r, dict) and isinstance(r.get("available"), bool) and _str_list(r.get("done")) and isinstance(r.get("running"), bool)):
-        return [where]
-    return []
+    """``PublicSession.review`` (v0.14, §13.8): ``{"available", "done", "running", "supported", "deadline_s": 60, "seconds_left"}``."""
+    return hubmod.validate_review_view(r, where)
 
 
 def validate_avatar(a: Any, where: str = "avatar") -> list[str]:
@@ -1214,7 +959,7 @@ def validate_avatar(a: Any, where: str = "avatar") -> list[str]:
 
 CALL_KINDS = {"call", "event"}
 CALL_STATUSES = {"ok", "retry", "timeout", "error", "cancelled"}
-CALL_PURPOSES = {"turn", "review", "refine", "runtime"}
+CALL_PURPOSES = {"turn", "review", "refine", "runtime", "init"}  # v0.14 (H24): "init" = a bot's initialization (actor_id = the bot id)
 CALL_INT_FIELDS = ("attempt", "elapsed_ms", "prompt_tokens", "completion_tokens", "cache_read_tokens", "cache_write_tokens", "http_status")
 CALL_STR_FIELDS = ("provider_id", "model_id", "finish_reason", "error_class", "message")
 CALL_KEYS = {"id", "ts", "gt", "kind", "status", "actor_id", "actor_name", "purpose", *CALL_INT_FIELDS, *CALL_STR_FIELDS}
@@ -1257,28 +1002,26 @@ def validate_call(c: Any, where: str = "call") -> list[str]:
 
 
 def validate_review_changes(ch: Any, where: str = "changes") -> list[str]:
-    """``review.progress.changes`` of a finished review (contract §12.5): only what changed."""
-    if not isinstance(ch, dict) or set(ch) != {"impressions", "experience"}:
+    """``review.progress.changes`` of a finished review (v0.14, §13.8): ``{"files": [{"file", "before", "after"}], "proposals": n}`` - what the review
+    wrote into the memory (``file`` is one of the memory parts) and how many L0 proposals it made."""
+    if not (isinstance(ch, dict) and set(ch) == {"files", "proposals"} and _is_int(ch["proposals"]) and ch["proposals"] >= 0 and isinstance(ch["files"], list)):
         return [where]
     errs: list[str] = []
-    imps = ch["impressions"]
-    if not (isinstance(imps, list) and all(isinstance(i, dict) and set(i) == {"id", "before", "after"} and all(isinstance(v, str) for v in i.values()) for i in imps)):
-        errs.append(f"{where}.impressions")
-    exp = ch["experience"]
-    if exp is not None and not (isinstance(exp, dict) and set(exp) == {"before", "after"} and _str_list(exp["before"]) and _str_list(exp["after"])):
-        errs.append(f"{where}.experience")
+    for i, f in enumerate(ch["files"]):
+        if not (isinstance(f, dict) and set(f) == {"file", "before", "after"} and f["file"] in mb.MEMORY_PARTS and isinstance(f["before"], str) and isinstance(f["after"], str)):
+            errs.append(f"{where}.files[{i}]")
     return errs
 
 
 def validate_takeover(t: Any, where: str = "takeover") -> list[str]:
-    """``PublicSession.takeover`` / the ``takeover.updated`` payload (contract §11.7)."""
+    """``PublicSession.takeover`` / the ``takeover.updated`` payload (contract §11.7; v0.14 removed ``reshuffle_available``, F5)."""
     errs: list[str] = []
     if not isinstance(t, dict):
         return [f"{where}: not an object"]
     if not _opt_str(t.get("seat")):
         errs.append(f"{where}.seat")
-    if not isinstance(t.get("reshuffle_available"), bool):
-        errs.append(f"{where}.reshuffle_available")
+    if "reshuffle_available" in t:
+        errs.append(f"{where}.reshuffle_available: removed in v0.14 (the identities are dealt when the game starts)")
     if t.get("seat") is None:
         return errs
     if not _is_int(t.get("seq")):
@@ -1326,13 +1069,24 @@ def validate_takeover(t: Any, where: str = "takeover") -> list[str]:
     return errs
 
 
+INIT_STATUSES = {"uninitialized", "initializing", "ready", "stale", "failed"}
+
+
 def validate_session(s: Any) -> list[str]:
-    """PublicSession v3 (§10.6)."""
+    """PublicSession (§10.6, v0.14: schema 6 - ``dealt``, ``system_status``, ``bots``, ``participants[i].bot_id`` / ``init_status``, §13.8)."""
     errs: list[str] = []
     if not isinstance(s, dict):
         return ["session: not an object"]
     if "takeover" in s:
         errs += validate_takeover(s["takeover"], "session.takeover")
+    if s.get("schema_version") != 6:
+        errs.append("session.schema_version: 6")
+    if not isinstance(s.get("dealt"), bool):
+        errs.append("session.dealt")
+    elif not s["dealt"] and any(isinstance(p, dict) and p.get("tags") for p in s.get("participants") or []):
+        errs.append("session.dealt: before the deal no seat has a tag (an identity) - not even the public ones")
+    errs += hubmod.validate_system_status(s.get("system_status"), "session.system_status")
+    errs += hubmod.validate_bots_payload(s.get("bots"), "session.bots")
     for k in ("session_id", "scenario_name", "phase_text", "active_status_text", "summary", "hold_reason", "pause_reason", "stall_notice"):
         if not isinstance(s.get(k), str):
             errs.append(f"session.{k}")
@@ -1351,7 +1105,8 @@ def validate_session(s: Any) -> list[str]:
         for i, p in enumerate(s["participants"]):
             if not (isinstance(p, dict) and isinstance(p.get("id"), str) and (_is_int(p.get("seat")) or isinstance(p.get("seat"), str))
                     and isinstance(p.get("name"), str) and _str_list(p.get("tags")) and isinstance(p.get("out"), bool)
-                    and p.get("state") in AGENT_STATES and _opt_num(p.get("sleep_until"))):
+                    and p.get("state") in AGENT_STATES and _opt_num(p.get("sleep_until"))
+                    and isinstance(p.get("bot_id"), str) and (p.get("init_status") is None or p["init_status"] in INIT_STATUSES)):
                 errs.append(f"session.participants[{i}]")
             else:
                 errs += validate_avatar(p.get("avatar"), f"session.participants[{i}].avatar")
@@ -1534,15 +1289,15 @@ def validate_event(ev: Any) -> list[str]:
                                     and not validate_avatar(mod.get("avatar"))):
             errs.append(f"{w}.moderator")
     elif etype == "review.progress":
-        if not (isinstance(data.get("id"), str) and data.get("state") in REVIEW_STATES and isinstance(data.get("message"), str)):
-            errs.append(w)
-        # v0.13.1 (contract §12.5): a finished review always says what it changed in the memory; the others carry nothing of the kind
-        if data.get("state") == "done":
-            errs += validate_review_changes(data.get("changes"), f"{w}.changes")
-        elif "changes" in data:
-            errs.append(f"{w}.changes: only a finished review has them")
-        if set(data) - {"id", "state", "message", "changes"}:
-            errs.append(f"{w}: keys {sorted(set(data) - {'id', 'state', 'message', 'changes'})}")
+        # v0.14 (§13.8): {"id": seat, "bot_id", "name", "state", "message", "seconds_left", "deadline_s": 60, "changes": null | {"files", "proposals"}}
+        errs += hubmod.validate_review_progress(data, w)
+    elif etype == "bots.updated":
+        # v0.14 (§13.8): {"bots": BotsPayload - the live part, no limits / defaults}
+        if set(data) != {"bots"}:
+            errs.append(f"{w}: keys {sorted(set(data) ^ {'bots'})}")
+        errs += hubmod.validate_bots_payload(data.get("bots"), f"{w}.bots")
+    elif etype == "bot.init.progress":
+        errs += hubmod.validate_init_progress(data, w)
     elif etype == "llm.call":
         # v0.13.1 (G35, contract §12.3): one line of the error log; an ordinary event that only carries the summary
         errs += validate_call(data.get("call"), f"{w}.call")
@@ -1557,6 +1312,10 @@ def validate_event(ev: Any) -> list[str]:
             errs += validate_budget(data["budget"], f"{w}.budget")
         if "review" in data:
             errs += validate_review(data["review"], f"{w}.review")
+        if "system_status" in data:
+            errs += hubmod.validate_system_status(data["system_status"], f"{w}.system_status")
+        if "dealt" in data and not isinstance(data["dealt"], bool):
+            errs.append(f"{w}.dealt")
         # v0.13.1 (§12.2): both travel in every session.updated (the soft pause freezes the clock: it comes along)
         if "soft_pause" in data:
             errs += validate_soft_pause(data["soft_pause"], f"{w}.soft_pause")
@@ -1709,15 +1468,19 @@ def default_budget(max_tokens: int | None = DEMO_BUDGET_TOKENS, force_stop: bool
     }
 
 
-def build_session(session_id: str, bindings: dict[str, Any], roster: MockRoster, budget: dict[str, Any], *, demo: bool = False) -> dict[str, Any]:
-    """A fresh (idle) game: players dealt by the engine (D9/D24) and a system DM per player (D23)."""
+def build_session(session_id: str, bindings: dict[str, Any], hub: "hubmod.MockHub", budget: dict[str, Any], *, demo: bool = False) -> dict[str, Any]:
+    """A fresh (idle) game (v0.14): a system DM per player (D23), the bots of the line-up in the seats - and NO identities: they are dealt when the
+    game starts (H52, ``dealt``), so before that no seat has a tag, not even a public one.  ``bots``, ``system_status`` and every participant's
+    ``bot_id`` / ``init_status`` are filled in by ``hub.sync_session`` (the caller does it once the session is the game's)."""
     participants = [
         {
             "id": pid,
             "seat": i + 1,
-            "name": roster.name(pid),
-            "avatar": copy.deepcopy(roster.seats[pid]["avatar"]),
-            "tags": [ROLES[pid], "存活"],
+            "name": hub.seat_name(pid),
+            "avatar": hub.seat_avatar(pid),
+            "bot_id": hub.bots.bot_at(pid) or "",
+            "init_status": None,
+            "tags": [],
             "out": False,
             "state": "sleeping",
             "sleep_until": None,
@@ -1729,8 +1492,8 @@ def build_session(session_id: str, bindings: dict[str, Any], roster: MockRoster,
     b.update({"used_tokens": 0, "used_cost_usd": 0.0, "state": "ok"})
     return {
         "session_id": session_id,
-        "schema_version": 5,
-        "version": "v0.13.1",
+        "schema_version": 6,
+        "version": MOCK_APP_VERSION,
         "title": "Arena-Agents",
         "scenario_name": "werewolf_12p",
         "scenario_title": "狼人杀 12 人局（模拟数据）",
@@ -1748,7 +1511,7 @@ def build_session(session_id: str, bindings: dict[str, Any], roster: MockRoster,
         "moderator": {
             "id": MODERATOR,
             "name": "主持人",
-            "avatar": copy.deepcopy(roster.moderator["avatar"]),
+            "avatar": copy.deepcopy(hub.bots.moderator.get("avatar")),
             "state": "sleeping",
             "sleep_until": None,
         },
@@ -1767,12 +1530,16 @@ def build_session(session_id: str, bindings: dict[str, Any], roster: MockRoster,
         "restore_notice": "",
         "autosave_error": "",
         "budget": b,
-        "memory_enabled": roster.memory_enabled,
-        "review": {"available": False, "done": [], "running": False},
+        "memory_enabled": bool(hub.bots.memory_enabled),
+        # v0.14 (§13.8): who reviews what, and whether it can (the mock's games all have bots: ``supported``)
+        "review": {"available": False, "done": [], "running": False, "supported": True, "deadline_s": mb.REVIEW_TIMEOUT_S, "seconds_left": None},
+        "dealt": False,  # (H52) the identities are dealt when the game starts
+        "bots": {},  # (hub.sync_session fills in BotsPayload's live part and the status label)
+        "system_status": {"code": "before_game", "text": "对局前", "reason": ""},
         "stall_notice": "",
         "demo": demo,
-        # v0.13 (F2, F10): nobody plays a seat yet; "reshuffle_available": the game has not started (F5)
-        "takeover": {"seat": None, "reshuffle_available": True},
+        # v0.13 (F2, F10): nobody plays a seat yet (v0.14: no re-dealing any more - F5 is gone)
+        "takeover": {"seat": None},
         # v0.13.1 (§12.2): no soft pause; the game clock does not run before the start
         "soft_pause": None,
         "clock_running": False,
@@ -1815,17 +1582,26 @@ class MockGame:
     events that describe every change (so a client that applies the events ends up with the same
     session as :attr:`session`; ``tests/frontend/test_mock_server.py`` checks exactly that)."""
 
-    def __init__(self, bus: EventBus, *, speed: float = 1.0, seed: int = 7, roster: MockRoster | None = None,
+    def __init__(self, bus: EventBus, *, speed: float = 1.0, seed: int = 7, hub: "hubmod.MockHub | None" = None,
                  budget: dict[str, Any] | None = None, demo: bool = False) -> None:
         self.bus = bus
         self.speed = max(0.01, float(speed))
         self.seed = seed
         self.rng = random.Random(seed)
         self.demo = demo
-        self.roster = roster if roster is not None else MockRoster(random.Random(seed + 101), load_parts())
+        # v0.14: the bots (names, avatars, memory, initialization) and what ties them to the game live in the hub; it outlives a game
+        # (a new game keeps the bots).  A game made alone (a test) gets a hub of its own, the way the roster used to be.
+        # (its clock stands still: the replays of a game alone are the same, event for event, every time - ``core.updated_at`` and the like included)
+        self.hub = hub if hub is not None else hubmod.MockHub(
+            hubmod.Stores(seed + 101, avatars=MockAvatars(random.Random(seed + 101), load_parts()), clock=lambda: MOCK_EPOCH), providers_fn=lambda: PROVIDERS
+        )
+        self.hub.attach(self)
+        if not self.hub.bot_bindings:  # (the model bindings follow the bots, H4: kept by bot id, the seats are the view)
+            self.hub.load_seat_bindings(default_bindings())
         self.budget_limits = copy.deepcopy(budget if budget is not None else default_budget())
-        self.bindings = default_bindings()
-        self.session = build_session(uuid.uuid4().hex[:12], self.bindings, self.roster, self.budget_limits, demo=demo)
+        self.bindings = self.hub.seat_bindings()
+        self.session = build_session(uuid.uuid4().hex[:12], self.bindings, self.hub, self.budget_limits, demo=demo)
+        self.hub.sync_session(self.session)
         self.gate = asyncio.Event()
         self.task: asyncio.Task[None] | None = None
         self.bg: set[asyncio.Task[None]] = set()
@@ -1862,7 +1638,8 @@ class MockGame:
     def _reset_human(self) -> None:
         """v0.13: a person may play one seat (F2).  The script waits for them where their seat would act."""
         self.takeover_seat: str | None = None
-        self.started = False  # a game.status "running" was recorded: no more re-dealing (F5)
+        self.human_seats: set[str] = set()  # every seat a person played in this game (the review offers to learn their style, H34)
+        self.started = False  # a game.status "running" was recorded (the identities are dealt then, H52)
         self.invalidating_seq = 0  # the seq of the last phase change: older drafts are STALE (F11)
         self.token: dict[str, Any] | None = None  # the played seat's active token in a queue
         self.ability_open = False  # the moderator enabled the ability for the played seat
@@ -1889,6 +1666,7 @@ class MockGame:
         # v0.13.1 (§12.2): a snapshot always says whether a soft pause holds the game and whether the clock runs
         self.session["soft_pause"] = None if self.soft is None else dict(self.soft)
         self.session["clock_running"] = self.clock_running()
+        self.hub.sync_session(self.session)  # v0.14: the bots, the status label, the review - as they are now
         return copy.deepcopy(self.session)
 
     @property
@@ -1914,10 +1692,10 @@ class MockGame:
             return "主持人"
         if pid == ENGINE:
             return "系统"
-        return self.roster.name(pid)
+        return self.hub.seat_name(pid)  # (the bot that sits in the seat)
 
     def ref(self, pid: str) -> str:
-        return self.roster.ref(pid)
+        return self.hub.seat_ref(pid)
 
     def player(self, pid: str) -> dict[str, Any]:
         return next(p for p in self.session["participants"] if p["id"] == pid)
@@ -1948,6 +1726,7 @@ class MockGame:
     # ----------------------------------------------------------------------------- session-level
     def publish_session_updated(self, *extra: str) -> None:
         s = self.session
+        self.hub.refresh_status(s)  # v0.14: the status label, the review (``supported`` / ``seconds_left``) and the memory switch follow the bots
         data = {
             "status": s["status"],
             "pause_reason": s["pause_reason"],
@@ -1964,6 +1743,8 @@ class MockGame:
             "budget": copy.deepcopy(s["budget"]),
             "memory_enabled": s["memory_enabled"],
             "review": copy.deepcopy(s["review"]),
+            "system_status": copy.deepcopy(s["system_status"]),
+            "dealt": s["dealt"],
             "stall_notice": s["stall_notice"],
             # v0.13.1 (§12.2): like the real backend, every session.updated carries the game clock (frozen the moment a
             # soft pause begins), the soft pause itself and whether the clock runs - the page's countdown follows them
@@ -1979,16 +1760,29 @@ class MockGame:
         self.session["active_status_text"] = text
         self.publish_session_updated()
 
+    def deal_identities(self) -> None:
+        """H52: the identities are dealt when the game starts - before that no card has any, in any view (``dealt`` is false and no seat has a
+        tag).  One ``player.updated`` per seat (what the engine's ledger shows); ``dealt`` travels in the next ``session.updated``."""
+        s = self.session
+        if s["dealt"]:
+            return
+        s["dealt"] = True
+        for pid in PLAYER_IDS:
+            p = self.player(pid)
+            p["tags"] = [ROLES[pid], "存活"]
+            self.emit("player.updated", player_id=pid, tags=list(p["tags"]), out=bool(p["out"]))
+
     def set_status(self, status: str, *, reason: str = "", pause_reason: str = "", hold_reason: str = "") -> None:
         s = self.session
+        if status == "running" and reason == "started":
+            self.deal_identities()  # (the start check has passed: ``start`` raised NotReady otherwise)
         s["status"] = status
         s["pause_reason"] = pause_reason
         s["hold_reason"] = hold_reason
         if status == "running":
             s["winner"] = None
             s["summary"] = ""
-            s["review"]["available"] = False
-            self.started = True  # (F5) from now on nobody can re-deal
+            self.started = True  # a game.status "running" was recorded
         self.emit("game.status", status=status, reason=reason, winner=s["winner"], summary=s["summary"])
         text = {
             "running": "对局进行中",
@@ -2191,7 +1985,9 @@ class MockGame:
             return "名册"
         if actor_id == ENGINE:
             return "系统"
-        return self.roster.name(actor_id)
+        if purpose == "init":  # (H24) an initialization belongs to no game: the actor is the bot (its id), not a seat
+            return self.hub.bots.bots[actor_id]["name"] if actor_id in self.hub.bots.bots else actor_id
+        return self.hub.seat_name(actor_id)
 
     def call_counts(self) -> tuple[int, int]:
         """(errors, retries) of the log: the red badge counts ``timeout`` + ``error``."""
@@ -2822,11 +2618,10 @@ class MockGame:
         self.announce("public", "speech_order", f"【发言顺序】从警长 {ref('N4')} 开始，按座位顺序依次发言，每人一次。")
         self.moderator_idle()
         order = ["N4", "N5", "N6", "N7", "N8", "N9", "N10", "N11", "N12", "N1", "N2", "N3"]
-        long_cut = {"dropped_chars": len(LONG_SPEECH) - 300, "kept_chars": 300}  # the engine cut it (D19)
         speeches = {
             "N4": (f"我是预言家。昨晚查验了 {ref('N3')}，他是狼人阵营。请大家今天出掉 N3。", 1.1),
             "N6": ("N4 的发言有点急，我是好人，想先听听其他人的意见。", 0.9),
-            "N7": (LONG_SPEECH[:300], 1.2, long_cut),
+            "N7": (LONG_SPEECH, 1.2),  # (a long speech that fits: one over the limit is sent back - TOO_LONG - and the player writes it again, never cut, H16)
             "N8": ("我昨晚守了 N4，没有被击中。预言家的身份我倾向于相信。", 0.8),
             "N9": ("我是平民，没有信息，跟随预言家的归票。", 0.7),
             "N10": ("N4 的跳身份太巧了，我反对盲从。N3 可能是被陷害的。", 0.9),
@@ -2893,9 +2688,9 @@ class MockGame:
                     1.6,
                     self.challenge(
                         "N8",
-                        "主持人，N7 的发言被截断了，最后一句没有说完，请允许他补充。",
+                        "主持人，N7 在公共频道里把自己的身份和准备开枪的对象都说了出来，这样会泄露信息，请裁决要不要提醒他。",
                         "upheld",
-                        "质询成立：已记录 N7 的发言被截断，大家请注意这一点。",
+                        "质询成立：已提醒 N7，白天发言请不要透露开枪对象，大家请注意这一点。",
                         think=1.0,
                         resolve_after=2.6,
                     ),
@@ -2999,9 +2794,8 @@ class MockGame:
         s["pause_reason"] = ""
         s["hold_reason"] = ""
         s["active_status_text"] = "对局已结束"
-        s["review"]["available"] = True  # E21: reviewing is manual and only possible after the end
         self.emit("game.status", status="finished", reason="end_game", winner=winner, summary=summary)
-        self.publish_session_updated()
+        self.publish_session_updated()  # (``review.available`` = the game is over: the hub derives it, E21 / H31)
         self.set_all_agents("sleeping")  # D8: after end_game every agent sleeps
 
     async def epilogue(self) -> None:
@@ -3022,43 +2816,15 @@ class MockGame:
         await self.drain_bg()
         self.finish("好人阵营", "终局后继续：幸存者感言结束，好人阵营获胜（模拟对局）。")
 
-    # ----------------------------------------------------------------------------- review (E21)
-    async def review(self, ids: list[str]) -> None:
-        """Manual review after the verdict (v0.13.1, G39 / G40): the player REVISES his impressions of the other seats and
-        his lessons (a seat with nothing new keeps its impression, the old legacy text is tidied away), the record counts
-        the game; the file is overwritten, never appended to.  ``review.progress`` says what changed."""
-        s = self.session
-        s["review"]["running"] = True
-        self.publish_session_updated()
-        winner = s["winner"] or "好人阵营"
-        try:
-            for pid in ids:
-                self.emit("review.progress", id=pid, state="running", message="正在复盘…")
-                await asyncio.sleep(0.45 / self.speed)
-                role = ROLES[pid]
-                wolfish = role in ("狼人", "白狼王")
-                won = (winner == "好人阵营") != wolfish
-                parts = self.roster.seats[pid]["memory_parts"]
-                before = copy.deepcopy(parts)
-                parts["record"] = bump_record(parts["record"], won)
-                for other in parts["impressions"]:
-                    # no identity conclusions (the identities are dealt anew every game): style, habits, how far to trust
-                    keep = bool(parts["impressions"][other]) and (int(other[1:]) + int(pid[1:])) % 3 == 0
-                    if not keep:
-                        parts["impressions"][other] = IMPRESSION_BANK[(int(other[1:]) * 7 + int(pid[1:]) * 3) % len(IMPRESSION_BANK)]
-                parts["experience"] = LESSON_BANK[: min(LIMITS["experience_items"], len(parts["experience"]) + 1)]
-                parts["legacy"] = ""
-                self.log_call(pid, purpose="review", status="ok", attempt=1, elapsed_ms=self.call_rng.randint(1500, 9000),
-                              prompt_tokens=self.call_rng.randint(1800, 3200), completion_tokens=self.call_rng.randint(250, 600),
-                              cache_read_tokens=0, cache_write_tokens=0, finish_reason="stop")
-                self.reviewed[pid] = True
-                s["review"]["done"] = [p for p in PLAYER_IDS if self.reviewed.get(p)]
-                self.emit("review.progress", id=pid, state="done", message="已更新印象与战绩", changes=memory_changes(before, parts))
-        finally:
-            s["review"]["running"] = False
-            self.publish_session_updated()
+    # ----------------------------------------------------------------------------- review (H31-H34)
+    async def review(self, ids: list[str], learn_style: dict[str, bool] | None = None) -> None:
+        """The review after the verdict (v0.14): every bot of ``ids`` goes through the game on its own for at most 60 s (the mock plays that in a few
+        seconds), writes what it learned into its memory at once (the user's edit and a review's write are the same thing, C9) and may PROPOSE a change
+        of its L0 (``learn_style``: the style of the person who played the seat).  ``review.progress`` counts the seconds down and, at the end, says
+        what changed; the hub does the work (``MockHub.run_review``)."""
+        await self.hub.run_review(self, ids, learn_style)
 
-    def start_review(self, ids: list[str] | None) -> list[str]:
+    def start_review(self, ids: list[str] | None, learn_style: dict[str, bool] | None = None) -> list[str]:
         if self.session["status"] != "finished":
             raise ValueError("对局结束后才能复盘")
         if self.review_task is not None and not self.review_task.done():
@@ -3066,7 +2832,7 @@ class MockGame:
         targets = [p for p in (ids or PLAYER_IDS) if p in PLAYER_IDS and not self.reviewed.get(p)]
         if not targets:
             raise ValueError("所选玩家本局都已复盘")
-        self.review_task = asyncio.get_running_loop().create_task(self.review(targets))
+        self.review_task = asyncio.get_running_loop().create_task(self.review(targets, learn_style))
         return targets
 
     # ----------------------------------------------------------------------------- lifecycle
@@ -3108,6 +2874,9 @@ class MockGame:
             self.gate.set()
             self._spawn(self.epilogue())
             return
+        problems = self.hub.check_ready()  # (H25) the start check: every L0, every initialization, the contract, the scenario, every model
+        if problems:
+            raise hubmod.NotReady(problems)  # nothing is dealt, nothing starts
         self.set_status("running", reason="started")
         self.gate.set()
         self._spawn(self.play())
@@ -3168,7 +2937,9 @@ class MockGame:
         self._reset_human()
         self._reset_observe()  # v0.13.1: a new game has an empty error log and no thinking record
         self._reset_soft()  # ... and no soft pause
-        self.session = build_session(uuid.uuid4().hex[:12], self.bindings, self.roster, self.budget_limits, demo=self.demo)
+        self.bindings = self.hub.seat_bindings()  # (the bindings follow the bots, H4: a new game takes them as they are now)
+        self.session = build_session(uuid.uuid4().hex[:12], self.bindings, self.hub, self.budget_limits, demo=self.demo)
+        self.hub.sync_session(self.session)
         self.session["event_id"] = self.bus.latest_id + 1  # the id the snapshot event is about to get
         self.bus.publish("snapshot", {"session": copy.deepcopy(self.session)})
 
@@ -3179,19 +2950,7 @@ class MockGame:
             self.finish("好人阵营", "（模拟）直接跳到终局。")
         self.gate.clear()
 
-    # ----------------------------------------------------------------------------- roster events
-    def roster_changed(self, ids: list[str]) -> None:
-        """Names / avatars were edited (idle only): update the session and tell every client (roster.updated)."""
-        seats = [pid for pid in ids if pid != MODERATOR]
-        for pid in seats:
-            p = self.player(pid)
-            p["name"] = self.roster.name(pid)
-            p["avatar"] = copy.deepcopy(self.roster.seats[pid]["avatar"])
-        data: dict[str, Any] = {"participants": [self.roster.public(pid) for pid in seats]}
-        if MODERATOR in ids:  # the moderator's avatar travels as ``moderator`` (it is not a participant)
-            self.session["moderator"]["avatar"] = copy.deepcopy(self.roster.moderator["avatar"])
-            data["moderator"] = {"id": MODERATOR, "avatar": copy.deepcopy(self.roster.moderator["avatar"])}
-        self.emit("roster.updated", **data)
+    # (v0.14: the table changes - names, avatars, the line-up - go through ``self.hub.bots_changed``: ``roster.updated`` + ``bots.updated``)
 
     # ----------------------------------------------------------------------------- v0.13: a person plays a seat
     # The real backend computes this with app/world/seat.py (``seat_status``); the mock re-implements the same
@@ -3295,7 +3054,7 @@ class MockGame:
     def compute_takeover(self) -> dict[str, Any]:
         s = self.session
         seat = self.takeover_seat
-        out: dict[str, Any] = {"seat": seat, "reshuffle_available": s["status"] == "idle" and not self.started}
+        out: dict[str, Any] = {"seat": seat}  # (v0.14: no "reshuffle_available": the identities are dealt when the game starts, F5 is gone)
         if seat is None:
             return out
         now = self.clock
@@ -3385,14 +3144,18 @@ class MockGame:
         if not state["can_write"]:
             return receipt(False, state["why_not"] or "现在不能发言。", code=state["code"] or "NO_FLOOR")
         cap = int(state["max_chars"])
-        kept, truncated = text[:cap], None
-        if len(text) > cap:
-            truncated = {"dropped_chars": len(text) - cap, "kept_chars": cap}
-        msg = self.commit(channel_id, seat, kept, "speech", truncated=truncated)
+        chars = len(text)
+        if chars > cap:
+            # v0.14 (H16): a speech over the limit is sent back WHOLE - never cut: nothing is written, nothing is booked, the floor stays where it was
+            # (the checks of the floor come first, like the engine's gate); the receipt says how long it was and what the limit is
+            return receipt(
+                False, f"这条发言 {chars} 个字，超过了单条上限 {cap} 字，没有发出，发言权还在。请删减后重发。", code="TOO_LONG", chars=chars, limit=cap
+            )
+        msg = self.commit(channel_id, seat, text, "speech")
         if ch["mode"] in ("queue", "turn") and self.token and self.token["cid"] == channel_id:
             tok = self.token
             tok["used"] += 1
-            tok["chars_used"] += len(kept)
+            tok["chars_used"] += chars
             for q in (ch["floor"]["queue"], tok["queue"]):
                 q[tok["index"]]["messages_used"] = tok["used"]
             if tok["used"] >= TOKEN_MAX_MESSAGES or tok["chars_used"] >= TOKEN_MAX_CHARS:
@@ -3400,15 +3163,14 @@ class MockGame:
             self.emit("floor.changed", channel_id=channel_id, floor=copy.deepcopy(ch["floor"]))
         elif ch["mode"] == "free" and ch["floor"]["free"] is not None:
             free = ch["floor"]["free"]
-            free["chars_used"] += len(kept)
+            free["chars_used"] += chars
             free["message_counts"][seat] = free["message_counts"].get(seat, 0) + 1
             self.emit("floor.changed", channel_id=channel_id, floor=copy.deepcopy(ch["floor"]))
         if channel_id == "public" and ch["mode"] == "free":
             self.free_spoken = True
         if channel_id in ("public", "wolves"):
             self.stir({seat}, 3)  # everybody who can read it wakes up (E1)
-        note = "已发送。" + (f"超出字数上限：末尾 {truncated['dropped_chars']} 个字被截掉（保留了 {truncated['kept_chars']} 个字）。" if truncated else "")
-        return receipt(True, note, seq=msg["seq"], truncated=truncated)
+        return receipt(True, "已发送。", seq=msg["seq"])
 
     def seat_pass(self, channel_id: str) -> dict[str, Any]:
         seat = self._played_seat()
@@ -3474,7 +3236,7 @@ class MockGame:
         self.emit("channel.updated", channel=copy.deepcopy(pub))
         return receipt(True, f"已发动能力 {ability_id}（剩余 0 次）。后续裁决由主持人完成。", seq=msg["seq"], ability_id=ability_id, uses_left=0)
 
-    # --- takeover / release / re-deal
+    # --- takeover / release (v0.14: no re-deal - the identities are dealt when the game starts, H52)
     def take_over(self, seat: Any) -> None:
         if not isinstance(seat, str) or not seat:
             raise TakeoverError(422, "请选择要接管的座位。")
@@ -3492,6 +3254,7 @@ class MockGame:
         if status == "finished":
             raise TakeoverError(409, "对局已结束，不能接管。")
         self.takeover_seat = seat
+        self.human_seats.add(seat)  # (the review of the game offers to learn this person's style, H34; ``human_involved`` in the lists)
         node = self.player(seat)
         node["state"] = "human"
         node["sleep_until"] = None
@@ -3514,18 +3277,6 @@ class MockGame:
         self.session["takeover"] = payload
         ev = self.bus.publish("takeover.updated", {"takeover": copy.deepcopy(payload)})
         self.session["event_id"] = ev["id"]
-
-    def reshuffle(self) -> None:
-        """Re-deal the identities (idle only, F5).  The mock only mixes the identity tags shown on the cards."""
-        if self.session["status"] != "idle" or self.started:
-            raise TakeoverError(409, "对局已经开始，不能再重新发牌。")
-        roles = [p["tags"][0] for p in self.session["participants"]]
-        self.rng.shuffle(roles)
-        for p, role in zip(self.session["participants"], roles):
-            p["tags"] = [role, *p["tags"][1:]]
-        self.session["takeover"] = self.compute_takeover()
-        self.session["event_id"] = self.bus.latest_id + 1  # the id the snapshot event is about to get
-        self.bus.publish("snapshot", {"session": copy.deepcopy(self.session)})
 
 
 # --------------------------------------------------------------------------------------------------
@@ -3610,21 +3361,9 @@ def history_replay(seed: int = 7) -> dict[str, Any]:
 
 
 def mock_saved_games() -> list[dict[str, Any]]:
-    """Three older games for the history list (the summaries of ``GameStore``, contract section 11.3)."""
-    from datetime import timedelta
-
-    def when(days: float) -> str:
-        return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-
-    base = {"title": "Arena-Agents", "scenario_name": "werewolf_12p", "scenario_title": "狼人杀 12 人局（模拟数据）", "players": 12, "schema_version": 5}
-    return [
-        {**base, "session_id": "mock-old-1", "status": "finished", "winner": "好人阵营", "created_at": when(1.0), "started_at": when(1.0),
-         "finished_at": when(0.98), "updated_at": when(0.98), "duration_gt": 1523.0, "tokens": 1250000, "cost_usd": 0.52, "human_involved": False, "size_bytes": 91000},
-        {**base, "session_id": "mock-old-2", "status": "paused", "winner": None, "created_at": when(2.0), "started_at": when(2.0),
-         "finished_at": None, "updated_at": when(1.9), "duration_gt": 600.0, "tokens": 320000, "cost_usd": 0.11, "human_involved": True, "size_bytes": 40000},
-        {**base, "session_id": "mock-old-3", "status": "finished", "winner": "狼人阵营", "created_at": when(5.0), "started_at": when(5.0),
-         "finished_at": when(4.95), "updated_at": when(4.95), "duration_gt": 2210.0, "tokens": 2410000, "cost_usd": 0.97, "human_involved": False, "size_bytes": 120000},
-    ]
+    """The older games of the history list and of "对局管理" (the summaries of ``GameStore`` with the v0.14 fields, §13.7): v6 and v5 games, one that is
+    paused with a person in it, one that cannot be read; the sample lives in ``mock_ui_hub.MockGames``."""
+    return hubmod.MockGames().sample()
 
 
 # --------------------------------------------------------------------------------------------------
@@ -3632,7 +3371,10 @@ def mock_saved_games() -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------------------------------
 
 
-def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None = DEMO_BUDGET_TOKENS, demo: bool = False, legacy: bool = False) -> Any:
+def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None = DEMO_BUDGET_TOKENS, demo: bool = False, legacy: bool = False,
+               bots: str = "ready") -> Any:
+    """``bots``: the state the twelve bots start in - ``ready`` (every one ✔, the way the default library comes), ``fresh`` (L0 only: nobody initialized),
+    ``mixed`` (✔ ⚠ ✖ and a bot without an L0), ``empty`` (no L0 at all); ``POST /api/mock/bots`` changes it later (idle game only)."""
     from fastapi import FastAPI, HTTPException, Query, Request
     from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
     from fastapi.staticfiles import StaticFiles
@@ -3640,29 +3382,33 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
     bus = EventBus()
     holder: dict[str, Any] = {}
     parts = load_parts()
-    roster = MockRoster(random.Random(seed + 101), parts)
     store: dict[str, Any] = {
         "providers": copy.deepcopy(PROVIDERS),
         "templates": [
             {"slot": 1, "name": "旗舰", "provider_id": "mock-claude", "model_id": "claude-sonnet", "reasoning_depth": "high", "valid": True},
         ],
         "sessions": [],
-        "games": mock_saved_games(),  # v0.13: the older games of the history list
         "pricing": {"url": DEFAULT_PRICING_URL, "default_url": DEFAULT_PRICING_URL, "fetched_at": now_iso(), "entries": 2345, "error": None},
     }
+    # v0.14: the bots, the contract, the rules and the older games (they outlive a game); the hub ties them to the game
+    stores = hubmod.Stores(seed + 101, avatars=MockAvatars(random.Random(seed + 101), parts), preset=bots)
+    games_files = hubmod.MockGames([stores.bots.name_of(i) for i in stores.bots.order])
+    hub = hubmod.MockHub(stores, games=games_files, game_fn=lambda: game(), providers_fn=lambda: store["providers"])
     initial_budget = default_budget(budget_tokens if budget_tokens else None, True)
 
     app = FastAPI(title="Arena-Agents UI mock", version=APP_VERSION)
     app.state.mock_holder = holder  # tests reach the MockGame (created on the first request) through this
-    app.state.mock_roster = roster
+    app.state.mock_hub = hub
+    app.state.mock_stores = stores
 
     def game() -> MockGame:
         if "game" not in holder:  # created lazily: the asyncio primitives need a running loop
-            holder["game"] = MockGame(bus, speed=speed, seed=seed, roster=roster, budget=initial_budget, demo=demo)
+            holder["game"] = MockGame(bus, speed=speed, seed=seed, hub=hub, budget=initial_budget, demo=demo)
         return holder["game"]
 
     archive = MockArchive(bus, game, speed=speed)  # v0.13: export / import jobs and the "old data found" notice
     archive.legacy["found"] = bool(legacy)
+    games_files.busy_hook = lambda: archive.busy is not None  # (an archive export / import running: no game import)
     app.state.mock_archive = archive
 
     @app.middleware("http")
@@ -3758,9 +3504,11 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         return {"ok": True, "session": session_payload()}
 
     @app.post("/api/control/start")
-    async def control_start() -> dict[str, Any]:
+    async def control_start() -> Any:
         try:
             game().start()
+        except hubmod.NotReady as exc:  # (H25) 409 NOT_READY with the structured reasons; nothing was dealt
+            return JSONResponse(status_code=409, content={"detail": str(exc), "code": "NOT_READY", "problems": exc.problems})
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True, "session": session_payload()}
@@ -3796,13 +3544,7 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             raise refuse(exc) from exc
         return {"ok": True, "session": session_payload()}
 
-    @app.post("/api/control/shuffle-identities")
-    async def control_shuffle_identities() -> dict[str, Any]:
-        try:
-            game().reshuffle()
-        except TakeoverError as exc:
-            raise refuse(exc) from exc
-        return {"ok": True, "session": session_payload()}
+    # (v0.14: POST /api/control/shuffle-identities is gone - the identities are dealt when the game starts, H52)
 
     @app.post("/api/takeover")
     async def takeover(body: dict[str, Any]) -> dict[str, Any]:
@@ -3858,38 +3600,36 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             raise HTTPException(status_code=422, detail="需要 ability_id 与 params")
         return seat_action(lambda: game().seat_ability(body["ability_id"], body.get("params") or {}))
 
-    # ---- v0.13 (F34-F36): the history of games - list, delete, continue, replay (contract sections 11.3, 11.5, 11.8)
-    def live_game_summary() -> dict[str, Any]:
-        s = game().session
-        return {
-            "session_id": s["session_id"], "title": s["title"], "scenario_name": s["scenario_name"], "scenario_title": s["scenario_title"],
-            "status": s["status"], "winner": s["winner"], "created_at": now_iso(), "started_at": None, "finished_at": None,
-            "updated_at": now_iso(), "duration_gt": round(float(s["clock"]), 1), "players": len(s["participants"]),
-            "tokens": int((s.get("usage_stats") or {}).get("total_tokens") or 0), "cost_usd": float((s.get("usage_stats") or {}).get("total_cost_usd") or 0.0),
-            "human_involved": game().takeover_seat is not None, "schema_version": 5, "size_bytes": 0,
-        }
+    # ---- v0.13 (F34-F36) + v0.14 (H40): the history of games - list, delete, continue, replay (contract sections 11.3, 11.5, 11.8, 13.7).  What the
+    # "对局管理" of the settings adds (the detail of a game, the .arenagame export / import) is in ``mock_ui_hub.register_routes``.
+    games_files = hub.games
 
     def games_checked(game_id: str) -> str:
-        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", game_id):
-            raise HTTPException(status_code=400, detail="无效的对局 id。")
-        return game_id
+        try:
+            return games_files.checked(game_id)
+        except mb.Refusal as exc:
+            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
 
     @app.get("/api/games")
     async def list_games() -> dict[str, Any]:
-        live = live_game_summary()
-        saved = [g for g in store["games"] if g["session_id"] != live["session_id"]]
-        games = [{**live, "current": True}, *({**g, "current": False} for g in saved)]
-        return {"games": games, "current": live["session_id"]}
+        return games_files.listing(game())
 
     @app.delete("/api/games/{session_id}")
-    async def delete_game(session_id: str) -> dict[str, Any]:
-        games_checked(session_id)
-        if session_id == game().session["session_id"]:
-            raise HTTPException(status_code=409, detail="当前对局不能删除：请先新建或载入另一局。")
-        if not any(g["session_id"] == session_id for g in store["games"]):
-            raise HTTPException(status_code=404, detail="对局不存在。")
-        store["games"] = [g for g in store["games"] if g["session_id"] != session_id]
-        return {"ok": True, "session_id": session_id}  # (the roster - names, avatars, memory - is not part of a game)
+    async def delete_game(session_id: str) -> Any:
+        """Deletes the save and the logs of a game and says what it does NOT delete (``note``: what the bots learned stays).  The current game
+        can be deleted too unless it runs: a new empty game takes its place (``new_game`` / ``new_session_id``; a snapshot follows)."""
+        try:
+            out = games_files.delete(game(), session_id)
+            in_use = bool(out.pop("in_use", False))
+            if out.get("new_game"):
+                await game().reset()  # (publishes the new game's snapshot)
+                out["new_session_id"] = game().session["session_id"]
+            if in_use:
+                # the current game's file could not be removed for the moment: the empty new game exists all the same
+                raise mb.Refusal(409, "这局的文件现在被占用，暂时删不掉；已经新建了一局空白对局，旧的这局稍后可以再删。", "in_use", new_game=True, new_session_id=out["new_session_id"])
+            return out
+        except mb.Refusal as exc:
+            return JSONResponse(status_code=exc.status, content=exc.body)
 
     @app.post("/api/games/{session_id}/load")
     async def load_game(session_id: str) -> dict[str, Any]:
@@ -3897,8 +3637,11 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         g = game()
         if session_id == g.session["session_id"]:
             raise HTTPException(status_code=409, detail="这就是当前对局，无需载入。")
-        if not any(x["session_id"] == session_id for x in store["games"]):
+        found = games_files.find(session_id)
+        if found is None:
             raise HTTPException(status_code=404, detail="对局不存在。")
+        if not found.get("readable", True):
+            raise HTTPException(status_code=400, detail=hubmod.UNREADABLE_LOAD)
         if g.session["status"] == "running":
             raise HTTPException(status_code=409, detail="对局进行中，不能载入其他对局：请先暂停。")
         # (the mock cannot rebuild a stored game: it deals a fresh one that carries the requested id)
@@ -3911,13 +3654,15 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
     async def replay_of_game(session_id: str) -> dict[str, Any]:
         games_checked(session_id)
         g = game()
-        known = next((x for x in store["games"] if x["session_id"] == session_id), None)
+        known = games_files.find(session_id)
         if session_id == g.session["session_id"]:
-            known = live_game_summary()
+            known = games_files.live_item(g)
             if g.session["status"] == "running" or g.takeover_seat is not None:
                 raise HTTPException(status_code=409, detail="对局进行中或正在接管一个座位，不能重放当前对局：请先暂停并退出接管。")
         if known is None:
             raise HTTPException(status_code=404, detail="对局不存在。")
+        if not known.get("readable", True):
+            raise HTTPException(status_code=422, detail=hubmod.UNREADABLE_SAVE)
         if "history_replay" not in holder:  # the script, played once offline in a worker thread (own event loop)
             holder["history_replay"] = await asyncio.to_thread(history_replay, seed)
         data = holder["history_replay"]
@@ -3935,151 +3680,10 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             "duration_gt": data["duration_gt"],
         }
 
-    # ---- roster (E13-E16, E21, E24): contract §10.4; {id} is the internal id ("N3")
-    def seat_or_404(pid: str, *, moderator_ok: bool = False) -> str:
-        if pid not in roster.seats and not (moderator_ok and pid == MODERATOR):
-            raise HTTPException(status_code=404, detail="名册里没有这个座位")
-        return pid
-
-    def require_idle(what: str) -> None:
-        if game().session["status"] != "idle":
-            raise HTTPException(status_code=409, detail=f"对局已开始，不能{what}")
-
-    @app.get("/api/roster")
-    async def get_roster() -> dict[str, Any]:
-        return {
-            "memory_enabled": roster.memory_enabled,
-            "editable": game().session["status"] == "idle",
-            "limits": dict(LIMITS),  # v0.13.1 (contract §12.5): the limits of persona and memory
-            "seats": roster.entries(),
-            "moderator": copy.deepcopy(roster.moderator),
-        }
-
-    @app.put("/api/roster/memory-enabled")
-    async def put_memory_enabled(body: dict[str, Any]) -> dict[str, Any]:
-        require_idle("修改「本局加载记忆」")
-        roster.memory_enabled = bool(body.get("enabled"))
-        g = game()
-        g.session["memory_enabled"] = roster.memory_enabled
-        g.publish_session_updated()
-        return {"enabled": roster.memory_enabled}
-
-    @app.post("/api/roster/memory:clear")
-    async def clear_memory(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        roster.clear(bool((body or {}).get("include_persona")))
-        return {"ok": True}
-
-    @app.post("/api/roster/avatars:regenerate")
-    async def regenerate_all() -> dict[str, Any]:
-        require_idle("重新生成头像")
-        ids = roster.regenerate(None)
-        game().roster_changed(ids)
-        return {"seats": roster.entries(), "moderator": copy.deepcopy(roster.moderator)}
-
-    @app.put("/api/roster/{pid}")
-    async def put_seat(pid: str, body: dict[str, Any]) -> dict[str, Any]:
-        seat_or_404(pid, moderator_ok=True)
-        if pid == MODERATOR:  # the moderator only has an avatar to change
-            if set(body) - {"avatar"}:
-                raise HTTPException(status_code=400, detail="主持人只能更换头像，名字、性格设定和记忆都是固定的。")
-            require_idle("修改头像")
-            if validate_avatar(body.get("avatar")) or body.get("avatar") is None:
-                raise HTTPException(status_code=422, detail="头像描述不合法")
-            roster.moderator["avatar"] = body["avatar"]
-            game().roster_changed([MODERATOR])
-            return copy.deepcopy(roster.moderator)
-        if set(body) - {"name", "avatar", "persona", "memory", "memory_parts"}:
-            raise HTTPException(status_code=422, detail=f"不认识的字段：{'、'.join(sorted(set(body) - {'name', 'avatar', 'persona', 'memory', 'memory_parts'}))}")
-        if "memory" in body and "memory_parts" in body:
-            raise HTTPException(status_code=422, detail="memory 和 memory_parts 只能给一个。")
-        for kind in ("persona", "memory"):
-            if kind in body and not isinstance(body[kind], str):
-                raise HTTPException(status_code=422, detail=f"{kind} 必须是文字")
-        # v0.13.1: a request is applied as a whole or not at all - everything is checked (400 = over a limit, 422 = makes
-        # no sense) before the first thing changes
-        names = roster.names()
-        persona = None
-        new_parts = None
-        try:
-            if "persona" in body:
-                persona = clean_text(body["persona"], "性格设定", LIMITS["persona_chars"])
-            if "memory" in body:  # a whole memory text: parsed (an old-format or free text becomes the legacy text) and checked
-                new_parts = parse_memory(clean_text(body["memory"], "记忆", 20000), pid)
-                check_memory(new_parts, pid, names)
-            elif "memory_parts" in body:  # only the parts that are given change
-                new_parts = memory_after_parts(pid, names, roster.seats[pid]["memory_parts"], body["memory_parts"])
-        except RosterRefusal as exc:
-            raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
-        changed = False
-        if "name" in body or "avatar" in body:
-            require_idle("修改名字或头像")
-        if "name" in body:
-            try:
-                err = roster.validate_name(pid, body["name"])
-            except RosterRefusal as exc:  # (a colon: refused like the real server does - 400, its exact words)
-                raise HTTPException(status_code=exc.status, detail=exc.detail) from exc
-            if err:
-                raise HTTPException(status_code=422, detail=err)
-        if "avatar" in body and validate_avatar(body["avatar"]):
-            raise HTTPException(status_code=422, detail="头像描述不合法")
-        if "name" in body:
-            roster.seats[pid]["name"] = body["name"].strip()
-            changed = True
-        if "avatar" in body:
-            roster.seats[pid]["avatar"] = body["avatar"]
-            changed = True
-        if persona is not None:
-            roster.seats[pid]["persona"] = persona
-        if new_parts is not None:
-            roster.seats[pid]["memory_parts"] = new_parts
-        if changed:
-            game().roster_changed([pid])
-        return roster.entry(pid)
-
-    @app.post("/api/roster/{pid}/avatar:regenerate")
-    async def regenerate_one(pid: str) -> dict[str, Any]:
-        seat_or_404(pid, moderator_ok=True)
-        require_idle("重新生成头像")
-        ids = roster.regenerate(pid)
-        game().roster_changed(ids)
-        return copy.deepcopy(roster.moderator) if pid == MODERATOR else roster.entry(pid)
-
-    @app.post("/api/roster/{pid}/refine")
-    async def refine(pid: str, body: dict[str, Any]) -> dict[str, Any]:
-        if pid == MODERATOR:
-            raise HTTPException(status_code=400, detail="主持人没有性格设定和记忆。")
-        seat_or_404(pid)
-        kind = body.get("kind")
-        text = str(body.get("text") or "").strip()
-        if kind not in ("persona", "memory"):
-            raise HTTPException(status_code=422, detail="kind 必须是 persona 或 memory")
-        if not text:
-            raise HTTPException(status_code=422, detail="请先写几个要点")
-        if len(text) > 6000:
-            raise HTTPException(status_code=400, detail="要点太长了（上限 6000 字）。")
-        g = game()
-        if kind == "persona":  # (G43) the fixed format: one-line position, a few bullets, every line cut to its limit
-            result: dict[str, Any] = {"draft": persona_draft(text)}
-        else:  # (G42) the notes are merged into what the seat remembers now: "N5 Eve：…" lines are impressions, the rest lessons
-            parts = copy.deepcopy(roster.seats[pid]["memory_parts"])
-            lessons: list[str] = []
-            for line in text.splitlines():
-                labelled = re.match(r"\s*[Nn]([1-9][0-9]?)(?![0-9])[^：:\n]{0,24}[：:]\s*(.+)$", line)
-                if labelled and f"N{int(labelled.group(1))}" in parts["impressions"]:
-                    parts["impressions"][f"N{int(labelled.group(1))}"] = _clip(clean_impression(labelled.group(2)), LIMITS["impression_chars"])
-                elif _one_line(line):
-                    lessons.append(_clip(_one_line(line), 90))
-            if lessons:
-                parts["experience"] = [*lessons, *parts["experience"]][: LIMITS["experience_items"]]
-            result = {
-                "draft": memory_body(parts, pid, roster.names()),
-                # what the answer is: the impressions of every other seat and the lessons (the legacy text is not touched)
-                "memory_parts": {"impressions": dict(parts["impressions"]), "experience": list(parts["experience"])},
-            }
-        g.log_call("roster", purpose="refine", status="ok", attempt=1, elapsed_ms=g.call_rng.randint(1200, 6000),
-                   prompt_tokens=g.call_rng.randint(900, 2400), completion_tokens=g.call_rng.randint(120, 500), cache_read_tokens=0,
-                   cache_write_tokens=0, finish_reason="stop")
-        return result
+    # ---- v0.14: the bots (names, avatars, L0, memory, initialization, the line-up), the official contract, the rules, the new games routes
+    # (/api/bots/**, /api/moderator, /api/contract, /api/rules/**, /api/games/{id}/detail | export, /api/games/import and the /api/mock/{bots,files,learning}
+    # switches); /api/roster/** is gone (H55)
+    hubmod.register_routes(app, hub, game)
 
     # ---- v0.13.1: the error log (G32-G36, contract §12.3) and the thinking record (G21-G26, §12.4)
     @app.get("/api/llm/calls")
@@ -4097,15 +3701,20 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         except TakeoverError as exc:
             raise refuse(exc) from exc
 
-    # ---- game review (E21)
+    # ---- game review (E21, v0.14 H31-H34): {"ids"?: ["N1", ...], "learn_style"?: {"N1": true}} -> {"started": [seat ids], "deadline_s": 60}
     @app.post("/api/game/review")
-    async def game_review(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        ids = (body or {}).get("ids")
+    async def game_review(body: dict[str, Any] | None = None) -> Any:
+        body = body if isinstance(body, dict) else {}
+        ids, learn = body.get("ids"), body.get("learn_style")
+        if ids is not None and (not isinstance(ids, list) or any(not isinstance(i, str) for i in ids)):
+            raise HTTPException(status_code=422, detail="ids 必须是座位 id 的列表。")
+        if learn is not None and (not isinstance(learn, dict) or any(not isinstance(v, bool) for v in learn.values())):
+            raise HTTPException(status_code=422, detail="learn_style 必须是 {座位 id: true / false} 的对象。")
         try:
-            started = game().start_review(ids if isinstance(ids, list) else None)
+            started = game().start_review(ids, learn)
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {"started": started}
+        return {"started": started, "deadline_s": mb.REVIEW_TIMEOUT_S}
 
     # ---- budget (E10 / E22)
     @app.get("/api/budget")
@@ -4133,7 +3742,8 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
     @app.post("/api/archive/export")
     async def archive_export(body: dict[str, Any] | None = None) -> Any:
         body = body or {}
-        return archive_reply(archive.start_export(bool(body.get("include_keys")), body.get("password"), body.get("include_logs", True) is not False))
+        # (v0.14, H36: ``include_logs`` is accepted - a v0.13 page still sends it - and ignored: the logs are always in the archive)
+        return archive_reply(archive.start_export(bool(body.get("include_keys")), body.get("password"), True))
 
     @app.get("/api/archive/jobs/{job_id}")
     async def archive_job(job_id: str) -> Any:
@@ -4144,7 +3754,7 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         data = archive.export_file(name)
         if data is None:
             return archive_reply(archive_error(404, "not_found", "找不到这个导出文件。"))
-        return Response(data, media_type="application/octet-stream", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+        return Response(data, media_type="application/octet-stream", headers={"Content-Disposition": hubmod.content_disposition(archive.download_name_of(name))})
 
     @app.post("/api/archive/import")
     async def archive_upload(request: Request, name: str = "") -> Any:
@@ -4290,9 +3900,11 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
         g = game()
         if g.session["status"] == "running":
             raise HTTPException(status_code=409, detail="对局运行中，不能修改模型绑定")
-        g.bindings = body.get("bindings") or {}
+        # (v0.14, H4: the API still speaks in seats - N1..N12 and moderator - and the hub keeps the bindings by bot id: they follow the bots)
+        hub.load_seat_bindings(body.get("bindings") or {})
+        g.bindings = hub.seat_bindings()
         g.session["model_bindings"] = copy.deepcopy(g.bindings)
-        g.publish_session_updated()
+        hub.publish_bots_updated()  # (the model of every bot, the start check, ``session.updated`` with the bindings)
         return {"bindings": g.bindings, "providers": store["providers"]}
 
     @app.get("/api/settings/templates")
@@ -4314,9 +3926,10 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             a: {"provider_id": tpl["provider_id"], "model_id": tpl["model_id"], "reasoning_depth": tpl["reasoning_depth"]}
             for a in body.get("actor_ids", [])
         }
-        g.bindings.update(updated)
+        hub.update_seat_bindings(updated)  # (kept by bot id, H4)
+        g.bindings = hub.seat_bindings()
         g.session["model_bindings"] = copy.deepcopy(g.bindings)
-        g.publish_session_updated()
+        hub.publish_bots_updated()
         return {"bindings": updated, "providers": store["providers"], "locked": False, "issues": []}
 
     # ---- mock-only helpers ----------------------------------------------------------------------
@@ -4433,19 +4046,6 @@ def create_app(*, speed: float = 1.0, seed: int = 7, budget_tokens: int | None =
             raise HTTPException(status_code=422, detail="drop_every 必须是 0–1000 的整数，jitter_ms 必须是 0–10000 的整数")
         return game().rebuild_calls(drop_every=int(drop), jitter_ms=int(jitter))
 
-    @app.post("/api/mock/legacy-memory")
-    async def mock_legacy_memory(body: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Put a v0.13.0-style memory text into a seat (default N3): it is migrated when it is READ - the old text lands in the
-        legacy section ``旧记忆（待整理）`` (the newest 600 characters), nothing else is touched."""
-        b = body or {}
-        pid = seat_or_404(str(b.get("id") or "N3"))
-        text = str(b.get("text") or "## 对局记忆\n- 第 1 局：我是狼人，悍跳失败。\n\n## 经验与印象\n- Bob 总是附和别人。")
-        parts = parse_memory(text, pid)
-        if len(parts["legacy"]) > LIMITS["legacy_chars"]:
-            parts["legacy"] = "…" + parts["legacy"][-(LIMITS["legacy_chars"] - 1):].lstrip()
-        roster.seats[pid]["memory_parts"] = parts
-        return {"ok": True, "seat": roster.entry(pid)}
-
     @app.post("/api/mock/emit")
     async def mock_emit(body: dict[str, Any]) -> dict[str, Any]:
         """Publish an arbitrary event (e.g. {"type": "archive.progress", "data": {...}}); validated first."""
@@ -4490,6 +4090,7 @@ REQUIRED_EVENTS = {
     "request.progress", "request.answer", "request.closed", "challenge.opened", "challenge.resolved", "ability.used",
     "phase.changed", "dashboard.updated", "game.status", "agent.status", "agent.metrics", "session.updated",
     "budget.updated", "budget.warning", "budget.reached", "review.progress", "llm.call",
+    "bots.updated",  # v0.14: a review changes what the bots remember (an initialization is not part of the scripted game: see tests/frontend/test_mock_bots.py)
 }
 
 
@@ -4520,8 +4121,11 @@ def selfcheck() -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Arena-Agents v0.13.1 UI mock server")
+    parser = argparse.ArgumentParser(description="Arena-Agents v0.14 UI mock server")
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--bots", default="ready", choices=["ready", "fresh", "mixed", "empty"],
+                        help="the state the twelve bots start in: ready = every one initialized (✔); fresh = L0 only, nobody initialized; "
+                             "mixed = ✔ ⚠ ✖ and a bot without an L0; empty = no L0 at all (POST /api/mock/bots changes it later)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--speed", type=float, default=1.0, help="replay speed multiplier (default 1.0 ≈ 60 s per game)")
     parser.add_argument("--seed", type=int, default=7)
@@ -4537,7 +4141,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Mock UI server: http://{args.host}:{args.port}/  (speed x{args.speed}, seed {args.seed}, "
           f"demo budget {args.budget_tokens or 'off'} tokens)")
-    uvicorn.run(create_app(speed=args.speed, seed=args.seed, budget_tokens=args.budget_tokens, demo=args.demo, legacy=args.legacy),
+    uvicorn.run(create_app(speed=args.speed, seed=args.seed, budget_tokens=args.budget_tokens, demo=args.demo, legacy=args.legacy, bots=args.bots),
                 host=args.host, port=args.port, log_level="warning")
     return 0
 

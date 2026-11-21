@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-SCANNED_PACKAGES = ("app/world", "app/runtime", "app/agents", "app/orchestrator")  # ``app/game`` is exempt
+#: ``app/game`` is exempt.  v0.14 (contract §13): the bot packages are game-agnostic too (``app/bots`` = shared types,
+#: ``app/learning`` = the init / review jobs; the game's words reach them only through the scenario and the contract).
+SCANNED_PACKAGES = ("app/world", "app/runtime", "app/agents", "app/orchestrator", "app/bots", "app/learning")
 
 FORBIDDEN_TERMS = (
     "白狼王", "预言家", "女巫", "猎人", "守卫", "平民", "狼人", "警长", "上警", "退水", "警左",
@@ -46,7 +48,10 @@ def test_v12_engine_packages_do_not_embed_game_specific_terms() -> None:
 
 def test_the_scan_covers_the_engine_packages() -> None:
     names = {path.relative_to(ROOT).as_posix() for path in _python_files()}
-    assert {"app/world/chat.py", "app/world/core.py", "app/world/game.py", "app/runtime/agent.py", "app/agents/brain.py"} <= names
+    assert {
+        "app/world/chat.py", "app/world/core.py", "app/world/game.py", "app/runtime/agent.py", "app/agents/brain.py",
+        "app/bots/types.py",
+    } <= names
     assert not any(name.startswith("app/game/") for name in names)  # the orchestrator package (demo bots) is exempt
 
 

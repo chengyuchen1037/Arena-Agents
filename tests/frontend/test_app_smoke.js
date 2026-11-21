@@ -19,10 +19,10 @@ function ids(src) {
 // ---- wiring --------------------------------------------------------------------
 test("every id used by the frontend modules exists in index.html", () => {
   const htmlIds = new Set([...HTML_SRC.matchAll(/\bid="([^"]+)"/g)].map((m) => m[1]));
-  const combined = SRC.app + SRC.providers + SRC.layout + SRC.archive + SRC.roster + SRC.budget + SRC.takeover + SRC.composer;
+  const combined = SRC.app + SRC.providers + SRC.layout + SRC.archive + SRC.bots + SRC.botedit + SRC.budget + SRC.takeover + SRC.composer + SRC.endreview;
   // the modules also read ids through their `$ = (id) => getElementById(id)` helper
   const viaHelper = new Set(
-    [SRC.app, SRC.roster, SRC.budget, SRC.providers, SRC.archive, SRC.takeover, SRC.composer].flatMap((src) =>
+    [SRC.app, SRC.bots, SRC.botedit, SRC.budget, SRC.providers, SRC.archive, SRC.takeover, SRC.composer, SRC.endreview].flatMap((src) =>
       [...src.matchAll(/\$\(\s*[`"]([^`"$]+)[`"]\s*\)/g)].map((m) => m[1])
     )
   );
@@ -38,7 +38,9 @@ test("every id used by the frontend modules exists in index.html", () => {
 test("index.html uses relative asset paths and loads the scripts in dependency order", () => {
   assert.ok(!/(?:src|href)="\/(?:static|api)/.test(HTML_SRC));
   // (v0.13: takeover.js and composer.js come after the panels they share the dialog with, and before app.js)
-  const order = ["platform", "core", "avatar", "store", "view", "layout", "providers", "roster", "budget", "archive", "takeover", "composer", "app"].map((n) =>
+  // (v0.14: roster.js became botlib.js -> botedit.js -> bots.js)
+  // (v0.14: endreview.js - the question at the end of a game - comes after the composer and before app.js)
+  const order = ["platform", "core", "avatar", "store", "view", "layout", "providers", "botlib", "botedit", "bots", "budget", "archive", "takeover", "composer", "endreview", "app"].map((n) =>
     HTML_SRC.indexOf(`static/js/${n}.js`)
   );
   assert.ok(order.every((i) => i >= 0), "every script is referenced");
@@ -46,7 +48,7 @@ test("index.html uses relative asset paths and loads the scripts in dependency o
 });
 
 test("frontend modules have no absolute /api or /static URLs", () => {
-  for (const src of [SRC.app, SRC.providers, SRC.layout, SRC.archive, SRC.roster, SRC.budget, SRC.platform, SRC.avatar, SRC.takeover, SRC.composer]) {
+  for (const src of [SRC.app, SRC.providers, SRC.layout, SRC.archive, SRC.botlib, SRC.botedit, SRC.bots, SRC.budget, SRC.platform, SRC.avatar, SRC.takeover, SRC.composer, SRC.endreview]) {
     assert.ok(!/["'`]\/(api|static)\//.test(src));
   }
 });
@@ -92,16 +94,21 @@ test("v0.11 / v0.12.0-only UI is gone: card sizes, force pause, tool toggle, fol
   }
   // ... and the v0.12 widgets
   for (const id of [
-    "select-viewpoint",
-    // v0.13: the viewpoint bar [视角▾][切换][接管], the takeover bar, the reshuffle reminder, the input box
-    // ("btn-shuffle-identities" was a v0.11 button that v0.12 removed: it is the reminder's button now)
+    // v0.14 (H27): the viewpoint label and its menu replace the viewpoint bar [视角▾][切换][接管]; the takeover bar and the input box stay.
+    // (v0.14, H52: the reshuffle reminder and its button are gone - the cards are dealt when the game starts)
     "viewpoint-bar",
-    "btn-viewpoint-switch",
-    "btn-takeover",
+    "btn-viewpoint",
+    "viewpoint-text",
+    "viewpoint-menu",
     "takeover-bar",
     "btn-release-takeover",
-    "takeover-reminder",
-    "btn-shuffle-identities",
+    // v0.14 (H26): the system status label; (H31) the question at the end of a game
+    "active-status-pill",
+    "active-status-text",
+    "review-modal",
+    "review-body",
+    "btn-review-start",
+    "btn-review-later",
     "composer",
     "composer-input",
     "composer-count",
@@ -118,9 +125,16 @@ test("v0.11 / v0.12.0-only UI is gone: card sizes, force pause, tool toggle, fol
     // v0.12.1
     "btn-open-budget-modal",
     "budget-modal",
-    "btn-regen-all-avatars",
+    // v0.14: the initialization lives in the bar; the roster menu got the avatars (the standalone 🎲 button is gone)
+    "btn-init-all",
+    "init-summary",
     "btn-roster-menu",
+    "btn-roster-regen",
+    "btn-roster-clear",
+    "roster-usage",
     "chk-memory-enabled",
+    "file-bot-import",
+    "file-core-import",
     "btn-review-all",
     "input-pricing-url",
     "btn-refresh-pricing",
@@ -147,9 +161,9 @@ test("no token needed: no modal, no header, sub-path prefix, first SSE connect c
   assert.deepEqual(
     calls.map((c) => c.url).sort(),
     [
+      "/arena/api/bots", // v0.14: the limits and the default library of the bot panel (the live part comes with the session)
       "/arena/api/llm/calls?errors_only=true&limit=2000", // v0.13.1 (G32): the failed lines of the error log - the red badge needs them after a reload
       "/arena/api/providers",
-      "/arena/api/roster",
       "/arena/api/settings/bindings",
       "/arena/api/state",
       "/arena/static/avatar/parts.json", // the sprite library: a public static file, fetched under the sub-path prefix
@@ -690,6 +704,28 @@ test("restored session shows a notice, never auto-starts, and can be dismissed",
   assert.equal(env.el("restore-notice").hidden, true);
 });
 
+test("the binding issues in the notice bar: the server's sentence stands alone when it names the actor already, a bare reason gets the name; no full stop before a bracket or a '；'", async () => {
+  const noticeOf = async (issues) => {
+    const { env } = await H.bootLive({ session: F.makeSession({ status: "idle", binding_issues: issues }) });
+    return env.el("restore-notice-text").textContent;
+  };
+  // three issues, one of each kind: the server's words name the actor (the real server writes "Alice（N1）尚未选择模型"); the same with a full stop at its end; a bare reason
+  const text = await noticeOf([
+    { actor_id: "N1", message: "Alice（N1）尚未选择模型" },
+    { actor_id: "moderator", message: "主持人 的模型绑定无效：Invalid model configuration。" },
+    { actor_id: "N3", message: "Provider 已被删除。" },
+  ]);
+  assert.equal(text, "有 3 项模型绑定需要处理：Alice（N1）尚未选择模型；主持人 的模型绑定无效：Invalid model configuration；Carol（Provider 已被删除）");
+  assert.doesNotMatch(text, /。）|。；|。…/, "no full stop where the bar puts a bracket or a semicolon");
+  assert.doesNotMatch(text, /Alice（Alice|主持人（主持人/, "the name is not said twice");
+  // more than three: three are named, then an ellipsis
+  const many = await noticeOf(["N1", "N2", "N3", "N4"].map((id) => ({ actor_id: id, message: "没有 API Key。" })));
+  assert.equal(many, "有 4 项模型绑定需要处理：Alice（没有 API Key）；Bob（没有 API Key）；Carol（没有 API Key）…");
+  // no words at all: the name alone; a bracket that ends the sentence is part of it and stays
+  assert.equal(await noticeOf([{ actor_id: "N4", message: "" }]), "有 1 项模型绑定需要处理：David");
+  assert.equal(await noticeOf([{ actor_id: "N5", message: "Eve（N5）的 Provider「X」未设置 API Key（已保存的密钥无法解密：主密钥缺失或不匹配）" }]), "有 1 项模型绑定需要处理：Eve（N5）的 Provider「X」未设置 API Key（已保存的密钥无法解密：主密钥缺失或不匹配）");
+});
+
 test("a notice the server sends WITHOUT a restore (old save, unreadable save, data directory failure) is shown too", async () => {
   // v0.12.1 starts a blank game and says why when the last game was saved by an older version (the save is kept)
   const notice = "上次的对局来自旧版本引擎（v0.12.0 及更早），v0.12.1 不兼容，已保留在存档列表中、未被改动；已为你新建了一局。";
@@ -787,13 +823,13 @@ test("v0.13: the folder / save / import-JSON / memory-pack entries are gone from
     "file-import-memory",
   ]) {
     assert.ok(!HTML_SRC.includes(`id="${gone}"`), `index.html still has #${gone}`);
-    for (const name of ["app", "roster", "providers", "layout", "budget"]) {
+    for (const name of ["app", "bots", "botedit", "providers", "layout", "budget"]) {
       assert.ok(!SRC[name].includes(`"${gone}"`), `${name}.js still refers to #${gone}`);
     }
   }
   assert.equal(SRC.workspace, undefined, "static/js/workspace.js is deleted");
   for (const gone of ["api/workspaces", "api/session/save", "api/session/import", "memory:export", "memory:import"]) {
-    for (const name of ["app", "roster", "providers", "archive"]) assert.ok(!SRC[name].includes(gone), `${name}.js still calls ${gone}`);
+    for (const name of ["app", "bots", "botedit", "providers", "archive"]) assert.ok(!SRC[name].includes(gone), `${name}.js still calls ${gone}`);
   }
   for (const gone of ["ArenaWorkspaceUI", "workspace.changed", "normalizeWorkspaces", "validateWorkspacePath"]) {
     for (const name of ["app", "core", "store"]) assert.ok(!SRC[name].includes(gone), `${name}.js still has ${gone}`);

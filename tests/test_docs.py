@@ -2,7 +2,7 @@
 
 What is checked, and why:
 
-* every relative link and image of README.md, README.en.md, CHANGELOG.md and docs/**/*.md resolves to a file;
+* every relative link and image of README.md, README.en.md, CHANGELOG.md, docs/**/*.md, bench/README.md and bots/README.md resolves to a file;
 * every repository path that a *current* document names in backticks (`app/runtime/agent.py`, `tools/make_diagrams.py`,
   `static/js/*.js` ...) exists - a renamed or deleted file must not live on in the documentation;
 * the architecture pictures (docs/images/arch-*.{zh,en}.svg) are well-formed, self-contained SVG, are exactly what
@@ -10,7 +10,9 @@ What is checked, and why:
   and each README / architecture page embeds the four pictures of its own language;
 * the numbers that the pictures and the architecture pages quote (retries, grace period, 60 % / 90 % ...) are the
   defaults of the code;
-* every tool the agents have is named in both architecture pages;
+* every tool the agents have (the moderator's, a v0.14 bot's - ``jot`` and ``read_contract`` included) is named in both architecture pages;
+* the numbers that docs/bots.md and the READMEs quote about a bot (limits of the core files and of the memory, the Composer's budgets, the
+  120 s / 60 s of an initialization and a review ...) are the constants of the code;
 * the version number is the same in the code, config.yml, docker-compose.yml, the READMEs, the CHANGELOG, index.html
   and the contract;
 * the shipped documents and tools carry no local path or user name.
@@ -41,7 +43,11 @@ README_EN = ROOT / "README.en.md"
 ARCH_ZH = ROOT / "docs" / "architecture.md"
 ARCH_EN = ROOT / "docs" / "architecture.en.md"
 
-ALL_DOCS = sorted({README_ZH, README_EN, ROOT / "CHANGELOG.md", *(ROOT / "docs").rglob("*.md")})
+BENCH_README = ROOT / "bench" / "README.md"
+BOTS_README = ROOT / "bots" / "README.md"  # the default bot library
+BOTS_DOC = ROOT / "docs" / "bots.md"
+
+ALL_DOCS = sorted({README_ZH, README_EN, ROOT / "CHANGELOG.md", BENCH_README, BOTS_README, *(ROOT / "docs").rglob("*.md")})
 #: documents that describe the CURRENT state of the code (everything else is history)
 CURRENT_DOCS = [
     README_ZH,
@@ -52,6 +58,10 @@ CURRENT_DOCS = [
     ROOT / "docs" / "providers.md",
     ROOT / "docs" / "storage.md",
     ROOT / "docs" / "archive.md",
+    BOTS_DOC,
+    ROOT / "docs" / "real-model-runs.md",
+    BENCH_README,
+    BOTS_README,
 ]
 
 DIAGRAMS = ("overview", "actor", "worker", "timeline")
@@ -117,7 +127,7 @@ def test_both_readmes_show_the_same_screenshots() -> None:
 
 # ------------------------------------------------------------------------------------ repository paths
 _REPO_PATH = re.compile(
-    r"`((?:app|tools|static|tests|docs|scenarios|prompts|knowledge)/[^`\s]*"
+    r"`((?:app|tools|static|tests|docs|scenarios|prompts|knowledge|bench)/[^`\s]*"
     r"|config\.yml|docker-compose\.yml|requirements(?:-dev)?\.txt|Dockerfile|CHANGELOG\.md|README(?:\.en)?\.md)`"
 )
 
@@ -247,13 +257,81 @@ def test_architecture_pages_quote_the_runtime_defaults() -> None:
 
 
 def test_architecture_pages_name_every_agent_tool() -> None:
-    from app.agents.schemas import MODERATOR_TOOL_INTENTS, PLAYER_TOOL_INTENTS, SHARED_TOOL_NAMES, SLEEP_TOOL
+    from app.agents.schemas import BOT_SHARED_TOOL_NAMES, MODERATOR_TOOL_INTENTS, PLAYER_TOOL_INTENTS, SHARED_TOOL_NAMES, SLEEP_TOOL
 
-    names = {*MODERATOR_TOOL_INTENTS, *PLAYER_TOOL_INTENTS, *SHARED_TOOL_NAMES, SLEEP_TOOL}
+    # (the moderator's tools, the player's, the shared ones - and what a v0.14 bot has besides: ``jot`` and ``read_contract``)
+    names = {*MODERATOR_TOOL_INTENTS, *PLAYER_TOOL_INTENTS, *SHARED_TOOL_NAMES, *BOT_SHARED_TOOL_NAMES, SLEEP_TOOL}
+    assert {"jot", "read_contract"} <= names
     for doc in (ARCH_ZH, ARCH_EN):
         text = _read(doc)
         missing = sorted(n for n in names if f"`{n}`" not in text)
         assert not missing, f"{_rel(doc)} does not mention the tools {missing}"
+
+
+# ----------------------------------------------------------------------------------- the numbers about a bot
+def _table_row(text: str, first_cell: str) -> str:
+    """The one table row of ``text`` that starts with ``| <first_cell> |``."""
+    rows = [line for line in text.splitlines() if line.startswith(f"| {first_cell} |")]
+    assert len(rows) == 1, f"expected one table row starting with {first_cell!r}, found {len(rows)}"
+    return rows[0]
+
+
+def test_the_bot_document_quotes_the_limits_of_the_code() -> None:
+    """docs/bots.md says "every number comes from ``app/bots/types.py``": here is the proof, row by row."""
+    from app.agents.composer import ComposerBudgets
+    from app.archive.arenabot import LIMITS as ARENABOT_LIMITS
+    from app.bots import types as t
+    from app.storage.bots import MAX_STAGING
+    from app.storage.roster import MAX_NAME_CHARS
+    from app.storage.rules import MAX_MATERIAL_BYTES, MAX_MATERIALS
+
+    doc = _read(BOTS_DOC)
+    # L0
+    assert _table_row(doc, "身份").endswith(f"| {t.CORE_LIMITS['identity']} 字 |")
+    assert _table_row(doc, "说话方式").endswith(f"| {t.CORE_LIMITS['voice']} 字 |")
+    assert _table_row(doc, "分析方式").endswith(f"| {t.CORE_LIMITS['mind']} 字 |")
+    extra = _table_row(doc, "附加（可选）")
+    assert f"最多 {t.CORE_EXTRA_MAX} 份" in extra and extra.endswith(f"| 每份 {t.CORE_EXTRA_CHARS} 字 |")
+    # the memory of a bot
+    assert _table_row(doc, "操作笔记（L1）").endswith(f"| {t.ARCH_NOTES_CHARS} 字 |")
+    assert _table_row(doc, "规则要点（L2）").endswith(f"| {t.DIGEST_CHARS} 字 |")
+    assert _table_row(doc, "打法（L2）").endswith(f"| {t.PLAYBOOK_MAX} 条，每条正文 {t.PLAYBOOK_ENTRY_CHARS} 字 |")
+    assert _table_row(doc, "待解问题（L2）").endswith(f"| {t.QUESTIONS_CHARS} 字 |")
+    assert _table_row(doc, "印象（L2）").endswith(f"| {t.PEOPLE_MAX} 人，每条 {t.IMPRESSION_CHARS} 字 |")
+    # the contract, the clock of the learning runs, the proposals, the study materials, the names, the file of a bot
+    assert f"**≤ {t.CONTRACT_MUST_READ_CHARS} 字**" in doc and f"整份 ≤ {t.CONTRACT_MAX_CHARS} 字" in doc
+    assert f"最多 **{t.INIT_TIMEOUT_S} 秒**" in doc and f"最多 **{t.REVIEW_TIMEOUT_S} 秒**" in doc
+    assert f"最多同时有 {MAX_STAGING} 条待确认" in doc
+    assert f"每个剧本最多 {MAX_MATERIALS} 份、每份 ≤ {MAX_MATERIAL_BYTES // 1024} KiB" in doc
+    assert f"1–{MAX_NAME_CHARS} 个字" in doc
+    assert f"最大 {ARENABOT_LIMITS.max_total_bytes // 2**20} MiB" in doc
+    # the budgets of the Composer (table of section 6)
+    budgets = ComposerBudgets()
+    assert f"约 {budgets.understanding} 字" in _table_row(doc, "③")
+    assert _table_row(doc, "④").endswith(f"| {budgets.people} 字 |")
+    assert f"契约 {budgets.contract} 字、笔记 {budgets.notes} 字" in _table_row(doc, "⑥")
+    assert f"各约 {budgets.anchor_sentence} 字" in _table_row(doc, "⑦")
+    assert f"1–{budgets.hint_entries} 条" in _read(ARCH_ZH)  # (the architecture page: "1–2 条自己的打法")
+
+
+def test_the_readmes_and_the_architecture_pages_quote_the_clock_of_the_learning_runs() -> None:
+    from app.bots.types import INIT_TIMEOUT_S, REVIEW_TIMEOUT_S
+
+    for doc in (README_ZH, ARCH_ZH):
+        text = _read(doc)
+        assert f"{INIT_TIMEOUT_S} 秒" in text and f"{REVIEW_TIMEOUT_S} 秒" in text, _rel(doc)
+    for doc in (README_EN, ARCH_EN):
+        text = _read(doc)
+        assert f"{INIT_TIMEOUT_S} s" in text and f"{REVIEW_TIMEOUT_S} s" in text, _rel(doc)
+
+
+def test_the_default_library_readme_quotes_the_limits_of_the_core_files() -> None:
+    from app.bots.types import CORE_LIMITS
+
+    text = _read(BOTS_README)
+    for section, label in (("identity", "身份"), ("voice", "说话方式"), ("mind", "分析方式")):
+        line = next((ln for ln in text.splitlines() if f"{section}.md" in ln and ln.lstrip(" │├└─").startswith(f"{section}.md")), None)
+        assert line is not None and f"≤ {CORE_LIMITS[section]} 字" in line, f"bots/README.md: the limit of {label} ({section}.md)"
 
 
 # ------------------------------------------------------------------------------------------- version

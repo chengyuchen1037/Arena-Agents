@@ -1,0 +1,19 @@
+# 套件 S3（docs/v0.14-plan.md §6.5）。档位：smoke = CI / 第一眼；quick = 改了提示词或记忆之后自查（全部套件加起来约 300 次调用）；full = 发版。
+# `python -m bench suites` 列出题数与预计调用数；`python -m bench run --suite S3 --tier quick` 运行（真模型要 --real 和 --max-calls）。
+format: arena-bench-suite
+version: 1
+id: S3
+title: 同质化
+purpose: 跨 bot 共用的 6 字片段占比、套话每条的命中数。数字取自 S2 的发言（同一批样本）。
+acceptance: true
+uses: S2
+decision: speech
+sources: [S2]
+metrics: [homogeneity.shared_occurrence_share, cliches.hits_per_speech]
+gates: [S3a, S3b]
+baseline: [legacy]
+candidate: ["bot:Alice"]
+tiers:
+  smoke: {samples: 1, bots: ["bot:Alice", "bot:Bob", "bot:Carol"], situations: 2}
+  quick: {samples: 1, bots: [default12], situations: 5}
+  full: {samples: 3, bots: [default12]}

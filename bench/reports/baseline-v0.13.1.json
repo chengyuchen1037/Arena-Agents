@@ -1,0 +1,2265 @@
+{
+ "format": "arena-bench-baseline",
+ "games": [
+  {
+   "agent_speeches": 36,
+   "cliches": {
+    "hits_per_speech": 2.25,
+    "phrases": {
+     "不接": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "交作业": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "兑现": {
+      "seats": 9,
+      "speeches": 12
+     },
+     "别只": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "口径": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "可验证": {
+      "seats": 10,
+      "speeches": 18
+     },
+     "对账": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "归票": {
+      "seats": 6,
+      "speeches": 8
+     },
+     "我记着": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "打脸": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "死磕": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬点": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬证据": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "站边": {
+      "seats": 3,
+      "speeches": 3
+     },
+     "自证": {
+      "seats": 3,
+      "speeches": 4
+     },
+     "警徽流": {
+      "seats": 8,
+      "speeches": 10
+     },
+     "记一笔": {
+      "seats": 5,
+      "speeches": 6
+     },
+     "这点不让": {
+      "seats": 6,
+      "speeches": 6
+     },
+     "闭环": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "顺位": {
+      "seats": 6,
+      "speeches": 11
+     }
+    },
+    "phrases_in_4_or_more_seats": [
+     "兑现",
+     "可验证",
+     "归票",
+     "警徽流",
+     "记一笔",
+     "这点不让",
+     "顺位"
+    ],
+    "speeches": 36
+   },
+   "form": {
+    "chars_max": 300,
+    "chars_mean": 289.2,
+    "chars_median": 300.0,
+    "chars_p90": 300.0,
+    "in_band_rate": null,
+    "inline_enum_rate": 0.2222,
+    "list_rate": 0.1111,
+    "markdown_rate": 0.1389,
+    "multi_paragraph_rate": 1.0,
+    "n": 36,
+    "report_rate": 0.3611,
+    "self_prefix_rate": 0.0,
+    "truncated_rate": 0.6389
+   },
+   "homogeneity": {
+    "min_seats": 4,
+    "n": 6,
+    "ngram_occurrences": 7750,
+    "seats": 11,
+    "shared_distinct": 33,
+    "shared_occurrence_share": 0.0206,
+    "top_shared": [
+     {
+      "count": 9,
+      "ngram": "可验证的东西",
+      "seats": 7
+     },
+     {
+      "count": 9,
+      "ngram": "友是8和11",
+      "seats": 5
+     },
+     {
+      "count": 9,
+      "ngram": "队友是8和1",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "全场唯一投N",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "笃定毒落在N",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "为什么验验完",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "么验验完怎么",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "什么验验完怎",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "出N这点不让",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "没有夜间信息",
+      "seats": 5
+     }
+    ]
+   },
+   "homogeneity_loose": {
+    "min_seats": 4,
+    "n": 4,
+    "ngram_occurrences": 7818,
+    "seats": 11,
+    "shared_distinct": 97,
+    "shared_occurrence_share": 0.0687,
+    "top_shared": [
+     {
+      "count": 16,
+      "ngram": "可验证的",
+      "seats": 10
+     },
+     {
+      "count": 15,
+      "ngram": "夜间信息",
+      "seats": 8
+     },
+     {
+      "count": 9,
+      "ngram": "一刀一毒",
+      "seats": 8
+     },
+     {
+      "count": 10,
+      "ngram": "毒落在N",
+      "seats": 7
+     },
+     {
+      "count": 9,
+      "ngram": "唯一投N",
+      "seats": 7
+     },
+     {
+      "count": 9,
+      "ngram": "证的东西",
+      "seats": 7
+     },
+     {
+      "count": 9,
+      "ngram": "验证的东",
+      "seats": 7
+     },
+     {
+      "count": 8,
+      "ngram": "全场唯一",
+      "seats": 7
+     },
+     {
+      "count": 7,
+      "ngram": "今天出N",
+      "seats": 6
+     },
+     {
+      "count": 7,
+      "ngram": "场唯一投",
+      "seats": 6
+     }
+    ]
+   },
+   "human_speeches": 4,
+   "id": "0fa7",
+   "runtime": {
+    "agent_speeches": 36,
+    "dropped_chars_median": 33.0,
+    "floor_ends": {
+     "used": 40
+    },
+    "floor_timeout_rate": 0.0,
+    "refusal_rate": 0.015,
+    "refusals": {
+     "CHANNEL_CLOSED": 1,
+     "NO_FLOOR": 2,
+     "REQUEST_CLOSED": 1,
+     "STALE": 1
+    },
+    "speak": {
+     "accepted": 63,
+     "attempts": 66,
+     "format": 0,
+     "no_floor": 2,
+     "rewrite_success_rate": null,
+     "too_long": 0
+    },
+    "speak_turn_ms": {
+     "max": 35311.0,
+     "median": 6843.0,
+     "n": 66,
+     "p90": 15671.0
+    },
+    "tokens": {
+     "cache_read": 40028672,
+     "calls": 1096,
+     "completion": 384868,
+     "prompt": 723247
+    },
+    "tool_calls": {
+     "announce": 28,
+     "close_floor": 4,
+     "create_channel": 2,
+     "disable_ability": 5,
+     "enable_ability": 5,
+     "end_game": 1,
+     "evaluate": 35,
+     "list_documents": 2,
+     "open_floor": 4,
+     "open_request": 23,
+     "pass": 1,
+     "read_document": 4,
+     "respond": 84,
+     "send_message": 17,
+     "set_floor_queue": 9,
+     "set_phase": 24,
+     "sleep": 757,
+     "speak": 66,
+     "update_dashboard": 9,
+     "update_player": 16,
+     "write_note": 207
+    },
+    "truncated_speeches": 23,
+    "truncation_rate": 0.6389
+   },
+   "scope": "public",
+   "version": "v0.13.0"
+  },
+  {
+   "agent_speeches": 25,
+   "cliches": {
+    "hits_per_speech": 2.08,
+    "phrases": {
+     "不接": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "交作业": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "兑现": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "别只": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "口径": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "可验证": {
+      "seats": 3,
+      "speeches": 4
+     },
+     "对账": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "归票": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "我记着": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "打脸": {
+      "seats": 6,
+      "speeches": 11
+     },
+     "死磕": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬点": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬证据": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "站边": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "自证": {
+      "seats": 4,
+      "speeches": 6
+     },
+     "警徽流": {
+      "seats": 8,
+      "speeches": 10
+     },
+     "记一笔": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "这点不让": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "闭环": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "顺位": {
+      "seats": 6,
+      "speeches": 10
+     }
+    },
+    "phrases_in_4_or_more_seats": [
+     "打脸",
+     "自证",
+     "警徽流",
+     "顺位"
+    ],
+    "speeches": 25
+   },
+   "form": {
+    "chars_max": 300,
+    "chars_mean": 285.4,
+    "chars_median": 300.0,
+    "chars_p90": 300.0,
+    "in_band_rate": null,
+    "inline_enum_rate": 0.56,
+    "list_rate": 0.48,
+    "markdown_rate": 0.04,
+    "multi_paragraph_rate": 1.0,
+    "n": 25,
+    "report_rate": 0.6,
+    "self_prefix_rate": 0.0,
+    "truncated_rate": 0.64
+   },
+   "homogeneity": {
+    "min_seats": 4,
+    "n": 6,
+    "ngram_occurrences": 4980,
+    "seats": 9,
+    "shared_distinct": 3,
+    "shared_occurrence_share": 0.0024,
+    "top_shared": [
+     {
+      "count": 4,
+      "ngram": "N是真好人他",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "打脸的查验并",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "被打脸的查验",
+      "seats": 4
+     }
+    ]
+   },
+   "homogeneity_loose": {
+    "min_seats": 4,
+    "n": 4,
+    "ngram_occurrences": 5021,
+    "seats": 9,
+    "shared_distinct": 19,
+    "shared_occurrence_share": 0.0169,
+    "top_shared": [
+     {
+      "count": 6,
+      "ngram": "被打脸的",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "最后一只",
+      "seats": 4
+     },
+     {
+      "count": 6,
+      "ngram": "警长票投",
+      "seats": 4
+     },
+     {
+      "count": 5,
+      "ngram": "报验N狼",
+      "seats": 4
+     },
+     {
+      "count": 5,
+      "ngram": "挂二顺位",
+      "seats": 4
+     },
+     {
+      "count": 5,
+      "ngram": "的警徽流",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "N是真好",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "为什么把",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "只有信N",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "封N的口",
+      "seats": 4
+     }
+    ]
+   },
+   "human_speeches": 0,
+   "id": "2b91",
+   "runtime": {
+    "agent_speeches": 25,
+    "dropped_chars_median": 66.0,
+    "floor_ends": {
+     "revoked": 1,
+     "used": 25
+    },
+    "floor_timeout_rate": 0.0,
+    "refusal_rate": 0.0208,
+    "refusals": {
+     "ABILITY_DISABLED": 1,
+     "NO_FLOOR": 2,
+     "REQUEST_CLOSED": 1,
+     "UNKNOWN_REQUEST": 2
+    },
+    "speak": {
+     "accepted": 45,
+     "attempts": 47,
+     "format": 0,
+     "no_floor": 2,
+     "rewrite_success_rate": null,
+     "too_long": 0
+    },
+    "speak_turn_ms": {
+     "max": 39577.0,
+     "median": 5468.0,
+     "n": 47,
+     "p90": 15390.0
+    },
+    "tokens": {
+     "cache_read": 28712192,
+     "calls": 883,
+     "completion": 424110,
+     "prompt": 628080
+    },
+    "tool_calls": {
+     "announce": 30,
+     "close_floor": 3,
+     "create_channel": 2,
+     "disable_ability": 2,
+     "enable_ability": 2,
+     "end_game": 1,
+     "evaluate": 31,
+     "list_documents": 1,
+     "open_floor": 2,
+     "open_request": 25,
+     "read_document": 3,
+     "respond": 67,
+     "send_message": 12,
+     "set_floor_queue": 8,
+     "set_phase": 21,
+     "sleep": 567,
+     "speak": 47,
+     "update_dashboard": 10,
+     "update_player": 23,
+     "use_ability": 2,
+     "write_note": 188
+    },
+    "truncated_speeches": 16,
+    "truncation_rate": 0.64
+   },
+   "scope": "public",
+   "version": "v0.13.0"
+  },
+  {
+   "agent_speeches": 37,
+   "cliches": {
+    "hits_per_speech": 1.216,
+    "phrases": {
+     "不接": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "交作业": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "兑现": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "别只": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "口径": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "可验证": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "对账": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "归票": {
+      "seats": 6,
+      "speeches": 8
+     },
+     "我记着": {
+      "seats": 4,
+      "speeches": 4
+     },
+     "打脸": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "死磕": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬点": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬证据": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "站边": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "自证": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "警徽流": {
+      "seats": 11,
+      "speeches": 22
+     },
+     "记一笔": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "这点不让": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "闭环": {
+      "seats": 4,
+      "speeches": 4
+     },
+     "顺位": {
+      "seats": 2,
+      "speeches": 2
+     }
+    },
+    "phrases_in_4_or_more_seats": [
+     "归票",
+     "我记着",
+     "警徽流",
+     "闭环"
+    ],
+    "speeches": 37
+   },
+   "form": {
+    "chars_max": 300,
+    "chars_mean": 288.4,
+    "chars_median": 300.0,
+    "chars_p90": 300.0,
+    "in_band_rate": null,
+    "inline_enum_rate": 0.4054,
+    "list_rate": 0.2162,
+    "markdown_rate": 0.0,
+    "multi_paragraph_rate": 0.973,
+    "n": 37,
+    "report_rate": 0.4324,
+    "self_prefix_rate": 0.0,
+    "truncated_rate": 0.5676
+   },
+   "homogeneity": {
+    "min_seats": 4,
+    "n": 6,
+    "ngram_occurrences": 7621,
+    "seats": 11,
+    "shared_distinct": 32,
+    "shared_occurrence_share": 0.0249,
+    "top_shared": [
+     {
+      "count": 18,
+      "ngram": "开刀带走一个",
+      "seats": 10
+     },
+     {
+      "count": 17,
+      "ngram": "上开刀带走一",
+      "seats": 9
+     },
+     {
+      "count": 17,
+      "ngram": "晚上开刀带走",
+      "seats": 9
+     },
+     {
+      "count": 6,
+      "ngram": "放过晚上开刀",
+      "seats": 6
+     },
+     {
+      "count": 6,
+      "ngram": "警徽流第一晚",
+      "seats": 6
+     },
+     {
+      "count": 6,
+      "ngram": "过晚上开刀带",
+      "seats": 6
+     },
+     {
+      "count": 5,
+      "ngram": "11都放过晚",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "1都放过晚上",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "6和11都放",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "N的人明天逐",
+      "seats": 5
+     }
+    ]
+   },
+   "homogeneity_loose": {
+    "min_seats": 4,
+    "n": 4,
+    "ngram_occurrences": 7689,
+    "seats": 11,
+    "shared_distinct": 72,
+    "shared_occurrence_share": 0.0564,
+    "top_shared": [
+     {
+      "count": 18,
+      "ngram": "刀带走一",
+      "seats": 10
+     },
+     {
+      "count": 18,
+      "ngram": "带走一个",
+      "seats": 10
+     },
+     {
+      "count": 18,
+      "ngram": "开刀带走",
+      "seats": 10
+     },
+     {
+      "count": 17,
+      "ngram": "上开刀带",
+      "seats": 9
+     },
+     {
+      "count": 17,
+      "ngram": "晚上开刀",
+      "seats": 9
+     },
+     {
+      "count": 9,
+      "ngram": "警长票投",
+      "seats": 8
+     },
+     {
+      "count": 8,
+      "ngram": "11都放",
+      "seats": 8
+     },
+     {
+      "count": 8,
+      "ngram": "1都放过",
+      "seats": 8
+     },
+     {
+      "count": 8,
+      "ngram": "NN必出",
+      "seats": 8
+     },
+     {
+      "count": 7,
+      "ngram": "的警徽流",
+      "seats": 6
+     }
+    ]
+   },
+   "human_speeches": 4,
+   "id": "e0f2",
+   "runtime": {
+    "agent_speeches": 37,
+    "dropped_chars_median": 29.0,
+    "floor_ends": {
+     "revoked": 1,
+     "used": 41
+    },
+    "floor_timeout_rate": 0.0,
+    "refusal_rate": 0.0252,
+    "refusals": {
+     "CHANNEL_CLOSED": 1,
+     "NO_FLOOR": 3,
+     "REQUEST_CLOSED": 4,
+     "STALE": 1
+    },
+    "speak": {
+     "accepted": 65,
+     "attempts": 70,
+     "format": 0,
+     "no_floor": 3,
+     "rewrite_success_rate": null,
+     "too_long": 0
+    },
+    "speak_turn_ms": {
+     "max": 33812.0,
+     "median": 5282.0,
+     "n": 70,
+     "p90": 21375.0
+    },
+    "tokens": {
+     "cache_read": 48806400,
+     "calls": 1256,
+     "completion": 507504,
+     "prompt": 707546
+    },
+    "tool_calls": {
+     "announce": 32,
+     "close_floor": 5,
+     "create_channel": 2,
+     "disable_ability": 5,
+     "enable_ability": 5,
+     "end_game": 1,
+     "evaluate": 36,
+     "list_documents": 1,
+     "open_floor": 4,
+     "open_request": 27,
+     "read_document": 8,
+     "respond": 86,
+     "send_message": 19,
+     "set_floor_queue": 10,
+     "set_phase": 26,
+     "sleep": 823,
+     "speak": 70,
+     "update_dashboard": 9,
+     "update_player": 20,
+     "write_note": 202
+    },
+    "truncated_speeches": 21,
+    "truncation_rate": 0.5676
+   },
+   "scope": "public",
+   "version": "v0.13.0"
+  },
+  {
+   "agent_speeches": 34,
+   "cliches": {
+    "hits_per_speech": 2.029,
+    "phrases": {
+     "不接": {
+      "seats": 6,
+      "speeches": 6
+     },
+     "交作业": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "兑现": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "别只": {
+      "seats": 5,
+      "speeches": 6
+     },
+     "口径": {
+      "seats": 3,
+      "speeches": 5
+     },
+     "可验证": {
+      "seats": 3,
+      "speeches": 3
+     },
+     "对账": {
+      "seats": 5,
+      "speeches": 6
+     },
+     "归票": {
+      "seats": 5,
+      "speeches": 8
+     },
+     "我记着": {
+      "seats": 4,
+      "speeches": 4
+     },
+     "打脸": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "死磕": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬点": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬证据": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "站边": {
+      "seats": 4,
+      "speeches": 5
+     },
+     "自证": {
+      "seats": 8,
+      "speeches": 12
+     },
+     "警徽流": {
+      "seats": 7,
+      "speeches": 7
+     },
+     "记一笔": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "这点不让": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "闭环": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "顺位": {
+      "seats": 6,
+      "speeches": 7
+     }
+    },
+    "phrases_in_4_or_more_seats": [
+     "不接",
+     "别只",
+     "对账",
+     "归票",
+     "我记着",
+     "站边",
+     "自证",
+     "警徽流",
+     "顺位"
+    ],
+    "speeches": 34
+   },
+   "form": {
+    "chars_max": 300,
+    "chars_mean": 269.5,
+    "chars_median": 281.0,
+    "chars_p90": 300.0,
+    "in_band_rate": null,
+    "inline_enum_rate": 0.4118,
+    "list_rate": 0.3235,
+    "markdown_rate": 0.0,
+    "multi_paragraph_rate": 0.9412,
+    "n": 34,
+    "report_rate": 0.8824,
+    "self_prefix_rate": 0.7647,
+    "truncated_rate": 0.3824
+   },
+   "homogeneity": {
+    "min_seats": 4,
+    "n": 6,
+    "ngram_occurrences": 6702,
+    "seats": 11,
+    "shared_distinct": 2,
+    "shared_occurrence_share": 0.0015,
+    "top_shared": [
+     {
+      "count": 6,
+      "ngram": "票型定不了N",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "跟N跟得最顺",
+      "seats": 4
+     }
+    ]
+   },
+   "homogeneity_loose": {
+    "min_seats": 4,
+    "n": 4,
+    "ngram_occurrences": 6760,
+    "seats": 11,
+    "shared_distinct": 24,
+    "shared_occurrence_share": 0.018,
+    "top_shared": [
+     {
+      "count": 8,
+      "ngram": "真预言家",
+      "seats": 7
+     },
+     {
+      "count": 7,
+      "ngram": "第一顺位",
+      "seats": 6
+     },
+     {
+      "count": 6,
+      "ngram": "不接受推",
+      "seats": 6
+     },
+     {
+      "count": 6,
+      "ngram": "接受推N",
+      "seats": 6
+     },
+     {
+      "count": 7,
+      "ngram": "警长票投",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "N的查验",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "查N所以",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "N自己的",
+      "seats": 4
+     },
+     {
+      "count": 6,
+      "ngram": "型定不了",
+      "seats": 4
+     },
+     {
+      "count": 6,
+      "ngram": "定不了N",
+      "seats": 4
+     }
+    ]
+   },
+   "human_speeches": 1,
+   "id": "1638",
+   "runtime": {
+    "agent_speeches": 34,
+    "dropped_chars_median": 51.0,
+    "floor_ends": {
+     "used": 35
+    },
+    "floor_timeout_rate": 0.0,
+    "refusal_rate": 0.0363,
+    "refusals": {
+     "ABILITY_DISABLED": 1,
+     "CHANNEL_CLOSED": 1,
+     "NO_FLOOR": 4,
+     "REQUEST_CLOSED": 2,
+     "STALE": 1,
+     "UNKNOWN_REQUEST": 3
+    },
+    "speak": {
+     "accepted": 68,
+     "attempts": 73,
+     "format": 0,
+     "no_floor": 4,
+     "rewrite_success_rate": null,
+     "too_long": 0
+    },
+    "speak_turn_ms": {
+     "max": 56327.0,
+     "median": 6672.0,
+     "n": 73,
+     "p90": 18297.0
+    },
+    "tokens": {
+     "cache_read": 35616768,
+     "calls": 1107,
+     "completion": 525711,
+     "prompt": 782797
+    },
+    "tool_calls": {
+     "announce": 27,
+     "close_floor": 4,
+     "create_channel": 2,
+     "disable_ability": 4,
+     "enable_ability": 4,
+     "end_game": 1,
+     "evaluate": 32,
+     "open_floor": 4,
+     "open_request": 22,
+     "pass": 1,
+     "read_document": 3,
+     "respond": 87,
+     "send_message": 16,
+     "set_floor_queue": 7,
+     "set_phase": 20,
+     "sleep": 781,
+     "speak": 73,
+     "update_dashboard": 9,
+     "update_player": 17,
+     "use_ability": 1,
+     "write_note": 194
+    },
+    "truncated_speeches": 13,
+    "truncation_rate": 0.3824
+   },
+   "scope": "public",
+   "version": "v0.13.1"
+  },
+  {
+   "agent_speeches": 29,
+   "cliches": {
+    "hits_per_speech": 1.172,
+    "phrases": {
+     "不接": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "交作业": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "兑现": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "别只": {
+      "seats": 5,
+      "speeches": 5
+     },
+     "口径": {
+      "seats": 5,
+      "speeches": 5
+     },
+     "可验证": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "对账": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "归票": {
+      "seats": 7,
+      "speeches": 7
+     },
+     "我记着": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "打脸": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "死磕": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬点": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬证据": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "站边": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "自证": {
+      "seats": 4,
+      "speeches": 4
+     },
+     "警徽流": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "记一笔": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "这点不让": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "闭环": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "顺位": {
+      "seats": 3,
+      "speeches": 4
+     }
+    },
+    "phrases_in_4_or_more_seats": [
+     "别只",
+     "口径",
+     "归票",
+     "自证"
+    ],
+    "speeches": 29
+   },
+   "form": {
+    "chars_max": 300,
+    "chars_mean": 261.1,
+    "chars_median": 272.0,
+    "chars_p90": 300.0,
+    "in_band_rate": null,
+    "inline_enum_rate": 0.5517,
+    "list_rate": 0.4138,
+    "markdown_rate": 0.0,
+    "multi_paragraph_rate": 0.9655,
+    "n": 29,
+    "report_rate": 0.7931,
+    "self_prefix_rate": 0.5517,
+    "truncated_rate": 0.4138
+   },
+   "homogeneity": {
+    "min_seats": 4,
+    "n": 6,
+    "ngram_occurrences": 5725,
+    "seats": 11,
+    "shared_distinct": 4,
+    "shared_occurrence_share": 0.003,
+    "top_shared": [
+     {
+      "count": 5,
+      "ngram": "说狼刀了8号",
+      "seats": 5
+     },
+     {
+      "count": 4,
+      "ngram": "正面回答为什",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "面回答为什么",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "验人线569",
+      "seats": 4
+     }
+    ]
+   },
+   "homogeneity_loose": {
+    "min_seats": 4,
+    "n": 4,
+    "ngram_occurrences": 5762,
+    "seats": 11,
+    "shared_distinct": 36,
+    "shared_occurrence_share": 0.0321,
+    "top_shared": [
+     {
+      "count": 9,
+      "ngram": "刀了8号",
+      "seats": 8
+     },
+     {
+      "count": 9,
+      "ngram": "狼刀了8",
+      "seats": 8
+     },
+     {
+      "count": 9,
+      "ngram": "死讯公布",
+      "seats": 7
+     },
+     {
+      "count": 9,
+      "ngram": "讯公布前",
+      "seats": 7
+     },
+     {
+      "count": 8,
+      "ngram": "正面回答",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "我票落N",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "是白狼王",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "第二只狼",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "N票落N",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "为什么投",
+      "seats": 5
+     }
+    ]
+   },
+   "human_speeches": 2,
+   "id": "2bc0",
+   "runtime": {
+    "agent_speeches": 29,
+    "dropped_chars_median": 32.0,
+    "floor_ends": {
+     "revoked": 1,
+     "used": 31
+    },
+    "floor_timeout_rate": 0.0,
+    "refusal_rate": 0.0242,
+    "refusals": {
+     "CHANNEL_CLOSED": 1,
+     "NO_FLOOR": 1,
+     "REQUEST_CLOSED": 2,
+     "STALE": 2,
+     "UNKNOWN_REQUEST": 1
+    },
+    "speak": {
+     "accepted": 53,
+     "attempts": 57,
+     "format": 0,
+     "no_floor": 1,
+     "rewrite_success_rate": null,
+     "too_long": 0
+    },
+    "speak_turn_ms": {
+     "max": 41016.0,
+     "median": 7858.0,
+     "n": 57,
+     "p90": 17422.0
+    },
+    "tokens": {
+     "cache_read": 29041664,
+     "calls": 995,
+     "completion": 335755,
+     "prompt": 583217
+    },
+    "tool_calls": {
+     "announce": 24,
+     "close_floor": 4,
+     "create_channel": 2,
+     "disable_ability": 3,
+     "enable_ability": 3,
+     "end_game": 1,
+     "evaluate": 33,
+     "open_floor": 3,
+     "open_request": 21,
+     "read_document": 1,
+     "respond": 70,
+     "send_message": 14,
+     "set_floor_queue": 8,
+     "set_phase": 22,
+     "sleep": 690,
+     "speak": 57,
+     "update_dashboard": 9,
+     "update_player": 14,
+     "use_ability": 1,
+     "write_note": 175
+    },
+    "truncated_speeches": 12,
+    "truncation_rate": 0.4138
+   },
+   "scope": "public",
+   "version": "v0.13.1"
+  },
+  {
+   "agent_speeches": 25,
+   "cliches": {
+    "hits_per_speech": 2.16,
+    "phrases": {
+     "不接": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "交作业": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "兑现": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "别只": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "口径": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "可验证": {
+      "seats": 9,
+      "speeches": 14
+     },
+     "对账": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "归票": {
+      "seats": 7,
+      "speeches": 8
+     },
+     "我记着": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "打脸": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "死磕": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬点": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "硬证据": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "站边": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "自证": {
+      "seats": 5,
+      "speeches": 7
+     },
+     "警徽流": {
+      "seats": 6,
+      "speeches": 7
+     },
+     "记一笔": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "这点不让": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "闭环": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "顺位": {
+      "seats": 9,
+      "speeches": 12
+     }
+    },
+    "phrases_in_4_or_more_seats": [
+     "可验证",
+     "归票",
+     "自证",
+     "警徽流",
+     "顺位"
+    ],
+    "speeches": 25
+   },
+   "form": {
+    "chars_max": 300,
+    "chars_mean": 285.9,
+    "chars_median": 300.0,
+    "chars_p90": 300.0,
+    "in_band_rate": null,
+    "inline_enum_rate": 0.6,
+    "list_rate": 0.44,
+    "markdown_rate": 0.0,
+    "multi_paragraph_rate": 1.0,
+    "n": 25,
+    "report_rate": 0.64,
+    "self_prefix_rate": 0.04,
+    "truncated_rate": 0.64
+   },
+   "homogeneity": {
+    "min_seats": 4,
+    "n": 6,
+    "ngram_occurrences": 5415,
+    "seats": 11,
+    "shared_distinct": 13,
+    "shared_occurrence_share": 0.0111,
+    "top_shared": [
+     {
+      "count": 6,
+      "ngram": "夜最省的解释",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "安夜最省的解",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "平安夜最省的",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "次验N的结果",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "最省的解释是",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "N的结果实打",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "可验证的东西",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "实打实报出来",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "把次验N的结",
+      "seats": 4
+     },
+     {
+      "count": 4,
+      "ngram": "果实打实报出",
+      "seats": 4
+     }
+    ]
+   },
+   "homogeneity_loose": {
+    "min_seats": 4,
+    "n": 4,
+    "ngram_occurrences": 5460,
+    "seats": 11,
+    "shared_distinct": 35,
+    "shared_occurrence_share": 0.0326,
+    "top_shared": [
+     {
+      "count": 10,
+      "ngram": "可验证的",
+      "seats": 7
+     },
+     {
+      "count": 6,
+      "ngram": "N的结果",
+      "seats": 6
+     },
+     {
+      "count": 8,
+      "ngram": "不可验证",
+      "seats": 5
+     },
+     {
+      "count": 8,
+      "ngram": "最省的解",
+      "seats": 5
+     },
+     {
+      "count": 8,
+      "ngram": "省的解释",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "夜最省的",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "安夜最省",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "平安夜最",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "位和理由",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "次验N的",
+      "seats": 5
+     }
+    ]
+   },
+   "human_speeches": 1,
+   "id": "8e3d",
+   "runtime": {
+    "agent_speeches": 25,
+    "dropped_chars_median": 46.0,
+    "floor_ends": {
+     "revoked": 1,
+     "used": 26
+    },
+    "floor_timeout_rate": 0.0,
+    "refusal_rate": 0.0383,
+    "refusals": {
+     "ABILITY_DISABLED": 1,
+     "CHANNEL_CLOSED": 3,
+     "REQUEST_CLOSED": 1,
+     "STALE": 2,
+     "UNKNOWN_REQUEST": 2
+    },
+    "speak": {
+     "accepted": 42,
+     "attempts": 47,
+     "format": 0,
+     "no_floor": 0,
+     "rewrite_success_rate": null,
+     "too_long": 0
+    },
+    "speak_turn_ms": {
+     "max": 46297.0,
+     "median": 6327.0,
+     "n": 47,
+     "p90": 25891.0
+    },
+    "tokens": {
+     "cache_read": 22412032,
+     "calls": 830,
+     "completion": 384578,
+     "prompt": 643027
+    },
+    "tool_calls": {
+     "announce": 19,
+     "close_floor": 4,
+     "create_channel": 2,
+     "disable_ability": 2,
+     "enable_ability": 2,
+     "end_game": 1,
+     "evaluate": 26,
+     "open_floor": 3,
+     "open_request": 19,
+     "read_document": 4,
+     "respond": 50,
+     "send_message": 13,
+     "set_floor_queue": 7,
+     "set_phase": 17,
+     "sleep": 555,
+     "speak": 47,
+     "update_dashboard": 6,
+     "update_player": 15,
+     "use_ability": 2,
+     "write_note": 142
+    },
+    "truncated_speeches": 16,
+    "truncation_rate": 0.64
+   },
+   "scope": "public",
+   "version": "v0.13.1"
+  },
+  {
+   "agent_speeches": 22,
+   "cliches": {
+    "hits_per_speech": 2.045,
+    "phrases": {
+     "不接": {
+      "seats": 3,
+      "speeches": 3
+     },
+     "交作业": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "兑现": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "别只": {
+      "seats": 3,
+      "speeches": 3
+     },
+     "口径": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "可验证": {
+      "seats": 7,
+      "speeches": 7
+     },
+     "对账": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "归票": {
+      "seats": 4,
+      "speeches": 6
+     },
+     "我记着": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "打脸": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "死磕": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬点": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "硬证据": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "站边": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "自证": {
+      "seats": 5,
+      "speeches": 5
+     },
+     "警徽流": {
+      "seats": 8,
+      "speeches": 11
+     },
+     "记一笔": {
+      "seats": 2,
+      "speeches": 2
+     },
+     "这点不让": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "闭环": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "顺位": {
+      "seats": 2,
+      "speeches": 3
+     }
+    },
+    "phrases_in_4_or_more_seats": [
+     "可验证",
+     "归票",
+     "自证",
+     "警徽流"
+    ],
+    "speeches": 22
+   },
+   "form": {
+    "chars_max": 300,
+    "chars_mean": 274.1,
+    "chars_median": 282.0,
+    "chars_p90": 300.0,
+    "in_band_rate": null,
+    "inline_enum_rate": 0.6364,
+    "list_rate": 0.3636,
+    "markdown_rate": 0.0,
+    "multi_paragraph_rate": 1.0,
+    "n": 22,
+    "report_rate": 0.9545,
+    "self_prefix_rate": 0.8182,
+    "truncated_rate": 0.4545
+   },
+   "homogeneity": {
+    "min_seats": 4,
+    "n": 6,
+    "ngram_occurrences": 4483,
+    "seats": 10,
+    "shared_distinct": 4,
+    "shared_occurrence_share": 0.0045,
+    "top_shared": [
+     {
+      "count": 5,
+      "ngram": "N补不出依据",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "不出依据就是",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "出依据就是狼",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "补不出依据就",
+      "seats": 5
+     }
+    ]
+   },
+   "homogeneity_loose": {
+    "min_seats": 4,
+    "n": 4,
+    "ngram_occurrences": 4527,
+    "seats": 10,
+    "shared_distinct": 22,
+    "shared_occurrence_share": 0.0234,
+    "top_shared": [
+     {
+      "count": 6,
+      "ngram": "N补不出",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "为什么挑",
+      "seats": 5
+     },
+     {
+      "count": 6,
+      "ngram": "什么挑N",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "不出依据",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "依据就是",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "出依据就",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "可验证的",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "夜砍N被",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "据就是狼",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "是预言家",
+      "seats": 5
+     }
+    ]
+   },
+   "human_speeches": 2,
+   "id": "cce5",
+   "runtime": {
+    "agent_speeches": 22,
+    "dropped_chars_median": 35.0,
+    "floor_ends": {
+     "revoked": 1,
+     "used": 24
+    },
+    "floor_timeout_rate": 0.0,
+    "refusal_rate": 0.021,
+    "refusals": {
+     "CHANNEL_CLOSED": 2,
+     "NO_FLOOR": 1,
+     "UNKNOWN_REQUEST": 2
+    },
+    "speak": {
+     "accepted": 39,
+     "attempts": 42,
+     "format": 0,
+     "no_floor": 1,
+     "rewrite_success_rate": null,
+     "too_long": 0
+    },
+    "speak_turn_ms": {
+     "max": 30593.0,
+     "median": 7109.0,
+     "n": 41,
+     "p90": 20625.0
+    },
+    "tokens": {
+     "cache_read": 23031040,
+     "calls": 837,
+     "completion": 280111,
+     "prompt": 536240
+    },
+    "tool_calls": {
+     "announce": 23,
+     "close_floor": 4,
+     "create_channel": 2,
+     "disable_ability": 2,
+     "enable_ability": 2,
+     "end_game": 1,
+     "evaluate": 23,
+     "open_floor": 3,
+     "open_request": 20,
+     "read_document": 2,
+     "respond": 55,
+     "send_message": 15,
+     "set_floor_queue": 6,
+     "set_phase": 16,
+     "sleep": 566,
+     "speak": 42,
+     "update_dashboard": 6,
+     "update_player": 17,
+     "use_ability": 1,
+     "write_note": 149
+    },
+    "truncated_speeches": 10,
+    "truncation_rate": 0.4545
+   },
+   "scope": "public",
+   "version": "v0.13.1"
+  },
+  {
+   "agent_speeches": 41,
+   "cliches": {
+    "hits_per_speech": 2.366,
+    "phrases": {
+     "不接": {
+      "seats": 7,
+      "speeches": 8
+     },
+     "交作业": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "兑现": {
+      "seats": 6,
+      "speeches": 6
+     },
+     "别只": {
+      "seats": 6,
+      "speeches": 9
+     },
+     "口径": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "可验证": {
+      "seats": 8,
+      "speeches": 11
+     },
+     "对账": {
+      "seats": 11,
+      "speeches": 22
+     },
+     "归票": {
+      "seats": 8,
+      "speeches": 10
+     },
+     "我记着": {
+      "seats": 3,
+      "speeches": 3
+     },
+     "打脸": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "死磕": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "硬点": {
+      "seats": 7,
+      "speeches": 9
+     },
+     "硬证据": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "站边": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "自证": {
+      "seats": 4,
+      "speeches": 4
+     },
+     "警徽流": {
+      "seats": 5,
+      "speeches": 7
+     },
+     "记一笔": {
+      "seats": 1,
+      "speeches": 1
+     },
+     "这点不让": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "闭环": {
+      "seats": 0,
+      "speeches": 0
+     },
+     "顺位": {
+      "seats": 7,
+      "speeches": 7
+     }
+    },
+    "phrases_in_4_or_more_seats": [
+     "不接",
+     "兑现",
+     "别只",
+     "可验证",
+     "对账",
+     "归票",
+     "硬点",
+     "自证",
+     "警徽流",
+     "顺位"
+    ],
+    "speeches": 41
+   },
+   "form": {
+    "chars_max": 300,
+    "chars_mean": 286.1,
+    "chars_median": 298.0,
+    "chars_p90": 300.0,
+    "in_band_rate": null,
+    "inline_enum_rate": 0.4878,
+    "list_rate": 0.4146,
+    "markdown_rate": 0.0,
+    "multi_paragraph_rate": 1.0,
+    "n": 41,
+    "report_rate": 0.8537,
+    "self_prefix_rate": 0.7805,
+    "truncated_rate": 0.4878
+   },
+   "homogeneity": {
+    "min_seats": 4,
+    "n": 6,
+    "ngram_occurrences": 8712,
+    "seats": 12,
+    "shared_distinct": 19,
+    "shared_occurrence_share": 0.011,
+    "top_shared": [
+     {
+      "count": 9,
+      "ngram": "判断准能当核",
+      "seats": 7
+     },
+     {
+      "count": 9,
+      "ngram": "断准能当核心",
+      "seats": 7
+     },
+     {
+      "count": 7,
+      "ngram": "N只能被毒死",
+      "seats": 6
+     },
+     {
+      "count": 5,
+      "ngram": "了怎么用技能",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "先核毒账再定",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "核毒账再定票",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "死了怎么用技",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "能马上带节奏",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "自称带刀好人",
+      "seats": 5
+     },
+     {
+      "count": 5,
+      "ngram": "可对账的差别",
+      "seats": 4
+     }
+    ]
+   },
+   "homogeneity_loose": {
+    "min_seats": 4,
+    "n": 4,
+    "ngram_occurrences": 8760,
+    "seats": 12,
+    "shared_distinct": 77,
+    "shared_occurrence_share": 0.0474,
+    "top_shared": [
+     {
+      "count": 15,
+      "ngram": "带刀好人",
+      "seats": 11
+     },
+     {
+      "count": 9,
+      "ngram": "只能被毒",
+      "seats": 8
+     },
+     {
+      "count": 9,
+      "ngram": "能被毒死",
+      "seats": 8
+     },
+     {
+      "count": 9,
+      "ngram": "准能当核",
+      "seats": 7
+     },
+     {
+      "count": 9,
+      "ngram": "判断准能",
+      "seats": 7
+     },
+     {
+      "count": 9,
+      "ngram": "断准能当",
+      "seats": 7
+     },
+     {
+      "count": 9,
+      "ngram": "能当核心",
+      "seats": 7
+     },
+     {
+      "count": 9,
+      "ngram": "可对账的",
+      "seats": 6
+     },
+     {
+      "count": 8,
+      "ngram": "全票出1",
+      "seats": 6
+     },
+     {
+      "count": 8,
+      "ngram": "票出12",
+      "seats": 6
+     }
+    ]
+   },
+   "human_speeches": 2,
+   "id": "fccb",
+   "runtime": {
+    "agent_speeches": 41,
+    "dropped_chars_median": 38.0,
+    "floor_ends": {
+     "revoked": 1,
+     "used": 43
+    },
+    "floor_timeout_rate": 0.0,
+    "refusal_rate": 0.0316,
+    "refusals": {
+     "NO_FLOOR": 2,
+     "REQUEST_CLOSED": 6,
+     "STALE": 1,
+     "UNKNOWN_REQUEST": 2
+    },
+    "speak": {
+     "accepted": 69,
+     "attempts": 72,
+     "format": 0,
+     "no_floor": 2,
+     "rewrite_success_rate": null,
+     "too_long": 0
+    },
+    "speak_turn_ms": {
+     "max": 40093.0,
+     "median": 6797.0,
+     "n": 72,
+     "p90": 17797.0
+    },
+    "tokens": {
+     "cache_read": 48849024,
+     "calls": 1297,
+     "completion": 632703,
+     "prompt": 858167
+    },
+    "tool_calls": {
+     "announce": 29,
+     "close_floor": 6,
+     "create_channel": 2,
+     "disable_ability": 5,
+     "enable_ability": 5,
+     "evaluate": 32,
+     "list_documents": 1,
+     "open_floor": 5,
+     "open_request": 25,
+     "read_document": 2,
+     "read_notes": 1,
+     "respond": 89,
+     "send_message": 19,
+     "set_floor_queue": 8,
+     "set_phase": 24,
+     "sleep": 906,
+     "speak": 72,
+     "update_dashboard": 8,
+     "update_player": 18,
+     "use_ability": 1,
+     "write_note": 231
+    },
+    "truncated_speeches": 20,
+    "truncation_rate": 0.4878
+   },
+   "scope": "public",
+   "version": "v0.13.1"
+  }
+ ],
+ "pooled": {
+  "agent_speeches": 249,
+  "cliche_hits_per_speech": 1.916,
+  "form": {
+   "chars_max": 300,
+   "chars_mean": 280.6,
+   "chars_median": 299.0,
+   "chars_p90": 300.0,
+   "in_band_rate": null,
+   "inline_enum_rate": 0.4659,
+   "list_rate": 0.3333,
+   "markdown_rate": 0.0241,
+   "multi_paragraph_rate": 0.9839,
+   "n": 249,
+   "report_rate": 0.6787,
+   "self_prefix_rate": 0.3735,
+   "truncated_rate": 0.5261
+  },
+  "games": 8,
+  "shared_4gram_occurrence_share": 0.0398,
+  "shared_6gram_occurrence_share": 0.011,
+  "truncated_speeches": 131
+ }
+}

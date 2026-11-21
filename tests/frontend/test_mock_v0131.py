@@ -2,7 +2,7 @@
 
 * the error log (G32-G36, docs/v0.12-contracts.md §12.3): ``llm.call`` events, ``GET /api/llm/calls``, the injectable failed call;
 * the thinking record (G21-G26, §12.4): ``GET /api/agents/{id}/thoughts`` (paging, 409 while another seat is played);
-* memory and persona (G37-G44, §12.5): ``limits``, ``memory_parts``, the new ``PUT``, ``refine``, ``review.progress.changes``.
+* (memory and persona, G37-G44, §12.5: replaced by the bots in v0.14 - see ``test_mock_bots.py``).
 
 The mock is not the backend: ``tests/test_call_log_api.py`` / ``test_thoughts_api.py`` / ``test_roster_api.py`` test the real one.
 These tests keep the two in the same shape, so that a front end built against the mock works against the server.
@@ -68,14 +68,6 @@ def _play(client) -> None:
     """Play the whole scripted game (it takes a few dozen milliseconds at this speed)."""
     assert client.post("/api/control/start").status_code == 200
     _wait_for(lambda: client.get("/api/state").json()["session"]["status"] == "finished")
-
-
-def _put(client, pid="N3", **body):
-    return client.put(f"/api/roster/{pid}", json=body)
-
-
-def _seat(client, pid="N3"):
-    return next(s for s in client.get("/api/roster").json()["seats"] if s["id"] == pid)
 
 
 # ===================================================================================================== error log
@@ -176,7 +168,8 @@ def test_an_injected_failure_is_retries_then_the_error_then_the_agent_giving_up(
         client.post("/api/mock/finish")
         client.post("/api/game/review", json={"ids": ["N1"]})
         _wait_for(lambda: client.get("/api/state").json()["session"]["review"]["done"] == ["N1"])
-        assert client.post("/api/roster/N2/refine", json={"kind": "persona", "text": "爱反问"}).status_code == 200
+        bot_id = client.get("/api/bots").json()["lineup"][1]
+        assert client.post(f"/api/bots/{bot_id}/core:refine", json={"text": "爱反问"}).status_code == 200  # (v0.14: the L0 of a bot is refined)
         by_purpose = {x["purpose"]: x for x in client.get("/api/llm/calls").json()["calls"] if x["purpose"] in ("review", "refine")}
         assert by_purpose["review"]["actor_id"] == "N1" and by_purpose["review"]["status"] == "ok"
         assert by_purpose["refine"]["actor_id"] == "roster" and by_purpose["refine"]["actor_name"] == "名册"
@@ -319,173 +312,7 @@ def test_while_a_seat_is_played_the_others_thoughts_are_closed_until_the_game_is
 
 
 # ============================================================================== memory (impressions) and persona
-def test_the_roster_carries_limits_and_a_structured_memory_per_seat() -> None:
-    app, c = _client()
-    with c as client:
-        roster = client.get("/api/roster").json()
-        assert roster["limits"] == {"impression_chars": 80, "experience_items": 3, "experience_chars": 300, "memory_chars": 1500,
-                                    "legacy_chars": 600, "persona_chars": 500, "persona_item_chars": 40}
-        for seat in roster["seats"]:
-            parts = seat["memory_parts"]
-            assert set(parts) == {"record", "impressions", "experience", "legacy"}
-            assert list(parts["impressions"]) == [p for p in IDS if p != seat["id"]], "every OTHER seat, in seat order, never oneself"
-            assert set(parts["impressions"].values()) == {""} and parts["experience"] == [] and parts["legacy"] == "" and parts["record"] == ""
-            assert seat["memory"] == "", "nothing to remember: the text is empty too"
-        # PUT with memory_parts: only the parts given change; the canonical text has a line per other seat
-        r = _put(client, "N3", memory_parts={"impressions": {"N5": "发言短，站边快。", "N12": "爱悍跳"}, "experience": ["先听完再站边。"]})
-        assert r.status_code == 200
-        seat = r.json()
-        assert seat["memory_parts"]["impressions"]["N5"] == "发言短，站边快。" and seat["memory_parts"]["impressions"]["N1"] == ""
-        lines = seat["memory"].splitlines()
-        assert lines[0] == "## 印象" and "- N5 Eve：发言短，站边快。" in lines and "- N1 Alice：（暂无）" in lines
-        assert lines[-3:] == ["", "## 经验", "- 先听完再站边。"]
-        assert not any(line.startswith("- N3 ") for line in lines), "no impression of oneself"
-        assert _seat(client, "N3") == seat
-        # a second PUT changes the impression it names and leaves the rest (and the lessons) alone
-        again = _put(client, "N3", memory_parts={"impressions": {"N1": "话少"}}).json()
-        assert again["memory_parts"]["impressions"]["N1"] == "话少" and again["memory_parts"]["impressions"]["N5"] == "发言短，站边快。"
-        assert again["memory_parts"]["experience"] == ["先听完再站边。"]
-        assert _put(client, "N3", memory_parts={}).json()["memory_parts"] == again["memory_parts"], "{} changes nothing"
-        # "" is no impression; `record` is accepted and ignored (a client may send back what it read)
-        cleared = _put(client, "N3", memory_parts={"impressions": {"N1": ""}, "record": "场次 99"}).json()
-        assert cleared["memory_parts"]["impressions"]["N1"] == "" and cleared["memory_parts"]["record"] == ""
-        # the whole text of a seat can be saved back as it is: nothing changes (the parse and the render are inverse)
-        assert _put(client, "N3", memory=cleared["memory"]).json()["memory_parts"] == cleared["memory_parts"]
-        # a rename shows in the labels of every file (the key of an impression is the id)
-        assert _put(client, "N5", name="Evelyn").status_code == 200
-        assert "- N5 Evelyn：发言短，站边快。" in _seat(client, "N3")["memory"]
-
-
-def test_a_put_is_applied_as_a_whole_or_not_at_all_and_says_what_is_too_long() -> None:
-    app, c = _client()
-    with c as client:
-        _put(client, "N3", persona="先别动", memory_parts={"experience": ["留着"]})
-        # 400: over a limit; the message names the part, how long it is and the limit
-        r = _put(client, "N3", memory_parts={"impressions": {"N5": "x" * 81}})
-        assert r.status_code == 400 and r.json()["detail"] == "N5 Eve 的印象最多 80 字（现在 81 字），请精简。"
-        assert _put(client, "N3", memory_parts={"impressions": {"N5": "x" * 80}}).status_code == 200
-        r = _put(client, "N3", memory_parts={"experience": ["a", "b", "c", "d"]})
-        assert r.status_code == 400 and r.json()["detail"] == "经验最多 3 条（现在 4 条），请精简。"
-        r = _put(client, "N3", memory_parts={"experience": ["x" * 150, "y" * 151]})
-        assert r.status_code == 400 and r.json()["detail"] == "经验合计最多 300 字（现在 301 字），请精简。"
-        r = _put(client, "N3", memory_parts={"legacy": "z" * 601})
-        assert r.status_code == 400 and "旧记忆最多 600 字（现在 601 字）" in r.json()["detail"]
-        r = _put(client, "N3", persona="p" * 501)
-        assert r.status_code == 400 and r.json()["detail"] == "性格设定最多 500 个字符（现在 501 个），请精简。"
-        assert _put(client, "N3", persona="p" * 500).status_code == 200, "exactly the limit is fine"
-        # 422: the request makes no sense
-        assert _put(client, "N3", memory_parts={"impressions": {"N3": "自己"}}).status_code == 422
-        assert _put(client, "N3", memory_parts={"impressions": {"N99": "没有这个人"}}).status_code == 422
-        assert _put(client, "N3", memory="x", memory_parts={}).status_code == 422
-        assert _put(client, "N3", memory_parts={"mood": "x"}).status_code == 422
-        assert _put(client, "N3", memory_parts={"experience": "not a list"}).status_code == 422
-        assert _put(client, "N3", mood="x").status_code == 422
-        # atomic: the persona of a request that is refused is not applied either (nor a name)
-        before = _seat(client, "N3")
-        r = _put(client, "N3", persona="新的", name="Caroline", memory_parts={"experience": ["a", "b", "c", "d"]})
-        assert r.status_code == 400
-        assert _seat(client, "N3") == before and before["persona"] == "p" * 500
-        # the whole memory (the full text) is checked the same way
-        too_long = "## 印象\n- N5 Eve：" + "x" * 81
-        assert _put(client, "N3", memory=too_long).status_code == 400
-        # the 1500 characters of the whole file: only extreme names get there (eleven full impressions and three full
-        # lessons fit with room to spare when the names are of a usual length)
-        parts = mock.empty_parts("N1")
-        parts["impressions"] = {pid: "y" * 80 for pid in parts["impressions"]}
-        parts["experience"] = ["z" * 100] * 3
-        usual = {pid: "n" * 10 for pid in IDS}
-        mock.check_memory(parts, "N1", usual)
-        assert len(mock.memory_body(parts, "N1", usual)) <= mock.LIMITS["memory_chars"]
-        with pytest.raises(mock.RosterRefusal) as exc:
-            mock.check_memory(parts, "N1", {pid: "n" * 60 for pid in IDS})
-        assert exc.value.status == 400 and "整份记忆" in exc.value.detail and "1500" in exc.value.detail
-
-
-def test_the_old_memory_of_v0_13_0_lands_in_the_legacy_section_and_can_be_tidied_up() -> None:
-    app, c = _client()
-    with c as client:
-        out = client.post("/api/mock/legacy-memory", json={"id": "N3"}).json()["seat"]
-        parts = out["memory_parts"]
-        assert "第 1 局：我是狼人" in parts["legacy"] and "Bob 总是附和别人" in parts["legacy"]
-        assert set(parts["impressions"].values()) == {""} and parts["experience"] == []
-        assert out["memory"].endswith("## 旧记忆（待整理）\n" + parts["legacy"]) and "## 印象" in out["memory"]
-        # "用主持人模型整理": refine with the legacy text, apply what comes back AND delete the legacy section
-        draft = client.post("/api/roster/N3/refine", json={"kind": "memory", "text": "N2 Bob：总是附和别人\n悍跳失败要复盘"}).json()
-        assert set(draft) == {"draft", "memory_parts"}
-        assert set(draft["memory_parts"]) == {"impressions", "experience"}, "no legacy, no record: applying it alone does not delete the old text"
-        assert draft["memory_parts"]["impressions"]["N2"] == "总是附和别人" and "悍跳失败要复盘" in draft["memory_parts"]["experience"]
-        assert list(draft["memory_parts"]["impressions"]) == [p for p in IDS if p != "N3"]
-        assert draft["draft"].startswith("## 印象\n") and "\n\n## 经验\n" in draft["draft"] and "旧记忆" not in draft["draft"]
-        assert _seat(client, "N3")["memory_parts"]["legacy"] == parts["legacy"], "refine saves nothing"
-        saved = _put(client, "N3", memory_parts={**draft["memory_parts"], "legacy": ""}).json()
-        assert saved["memory_parts"]["legacy"] == "" and saved["memory_parts"]["impressions"]["N2"] == "总是附和别人"
-        assert "旧记忆" not in saved["memory"]
-        # a free text without any heading is migrated by PUT too; over the legacy limit the mock cuts the newest 600 (on READ)
-        long_text = "old " * 400
-        migrated = client.post("/api/mock/legacy-memory", json={"id": "N4", "text": long_text}).json()["seat"]
-        assert 590 <= len(migrated["memory_parts"]["legacy"]) <= 600 and migrated["memory_parts"]["legacy"].startswith("…")
-        # clear: everything, the legacy text included
-        client.post("/api/roster/memory:clear", json={})
-        assert _seat(client, "N4")["memory_parts"]["legacy"] == "" and _seat(client, "N3")["memory"] == ""
-
-
-def test_refine_gives_a_persona_in_the_fixed_format_and_memory_in_structure_and_saves_nothing() -> None:
-    app, c = _client()
-    with c as client:
-        draft = client.post("/api/roster/N3/refine", json={"kind": "persona", "text": "冷静的逻辑派，喜欢用票型说话\n句子短，先结论后理由"}).json()
-        assert set(draft) == {"draft"}
-        text = draft["draft"]
-        heads = re.findall(r"^【([^】]+)】", text, flags=re.M)
-        assert heads == list(mock.PERSONA_HEADS), "the headings of the template, in order"
-        assert text.startswith("【定位】冷静的逻辑派，喜欢用票型说话\n") and "- 句子短，先结论后理由" in text
-        assert len(text) <= 500
-        assert all(len(re.sub(r"^(?:- |【[^】]+】)", "", line)) <= 40 for line in text.splitlines()), "every item is cut to 40 characters"
-        long = client.post("/api/roster/N3/refine", json={"kind": "persona", "text": "很长" * 60}).json()["draft"]
-        assert long.splitlines()[0] == "【定位】" + ("很长" * 20)[:39] + "…" and len(long) <= 500, "an item that is too long is cut with an ellipsis"
-        assert _seat(client, "N3")["persona"] == "", "a draft is only a proposal"
-        # the draft of a persona fits the limit it will be saved under
-        assert _put(client, "N3", persona=text).status_code == 200
-        # memory: the notes are merged into what the seat remembers NOW (an impression it has stays unless the notes name it)
-        _put(client, "N3", memory_parts={"impressions": {"N1": "旧印象"}, "experience": ["旧经验"]})
-        m = client.post("/api/roster/N3/refine", json={"kind": "memory", "text": "N5：爱悍跳"}).json()
-        assert m["memory_parts"]["impressions"]["N5"] == "爱悍跳" and m["memory_parts"]["impressions"]["N1"] == "旧印象"
-        assert m["memory_parts"]["experience"] == ["旧经验"] and "- N5 Eve：爱悍跳" in m["draft"]
-        too_long = client.post("/api/roster/N3/refine", json={"kind": "memory", "text": "N5：" + "长" * 200}).json()
-        assert len(too_long["memory_parts"]["impressions"]["N5"]) == 80 and too_long["memory_parts"]["impressions"]["N5"].endswith("…")
-        assert _seat(client, "N3")["memory_parts"]["impressions"]["N5"] == "", "still nothing saved"
-        assert client.post("/api/roster/N3/refine", json={"kind": "persona", "text": "x" * 6001}).status_code == 400
-        assert client.post("/api/roster/moderator/refine", json={"kind": "memory", "text": "x"}).status_code == 400
-
-
-def test_a_finished_review_says_what_it_changed_and_overwrites_the_memory() -> None:
-    app, c = _client()
-    with c as client:
-        client.post("/api/mock/finish")
-        client.post("/api/mock/legacy-memory", json={"id": "N4"})  # an old memory the review is to tidy up
-        _put(client, "N4", memory_parts={"impressions": {"N1": "我手写的印象", "N2": "另一条"}, "experience": []})
-        assert client.post("/api/game/review", json={"ids": ["N4"]}).json() == {"started": ["N4"]}
-        _wait_for(lambda: client.get("/api/state").json()["session"]["review"]["done"] == ["N4"])
-        events = [e["data"] for e in _events(app, "review.progress")]
-        assert [(d["id"], d["state"]) for d in events] == [("N4", "running"), ("N4", "done")]
-        assert "changes" not in events[0], "only a finished review carries them"
-        changes = events[1]["changes"]
-        assert mock.validate_review_changes(changes) == []
-        assert changes["impressions"] and all(c_["before"] != c_["after"] for c_ in changes["impressions"]), "only what changed is listed"
-        assert {c_["id"] for c_ in changes["impressions"]} <= {p for p in IDS if p != "N4"}, "never an impression of oneself"
-        assert changes["experience"] == {"before": [], "after": [mock.LESSON_BANK[0]]}
-        seat = _seat(client, "N4")
-        parts = seat["memory_parts"]
-        assert parts["legacy"] == "", "the review tidied the old text away"
-        assert all(parts["impressions"].values()), "every other seat has an impression after a review"
-        assert parts["record"].startswith("场次 1 · 胜 ") and "胜率" in parts["record"]
-        assert seat["memory"].startswith("## 战绩\n场次 1") and "## 对局记忆" not in seat["memory"], "overwritten, never appended"
-        for c_ in changes["impressions"]:
-            assert parts["impressions"][c_["id"]] == c_["after"]
-        # impressions are about style and habits: no identity conclusions are written (the identities are dealt anew)
-        assert not any(word in text for text in parts["impressions"].values() for word in ("狼人", "预言家", "女巫", "平民"))
-        # the second reviewed player: his own memory, the same shape
-        client.post("/api/game/review", json={"ids": ["N5"]})
-        _wait_for(lambda: client.get("/api/state").json()["session"]["review"]["done"] == ["N4", "N5"])
-        done = [e["data"] for e in _events(app, "review.progress") if e["data"]["state"] == "done"][-1]
-        assert done["id"] == "N5" and len(done["changes"]["impressions"]) == 11, "nothing was remembered yet: all eleven are new"
-        assert [p for e in _events(app, "review.progress") for p in mock.validate_event(e)] == []
+# (v0.14: the five tests that stood here - the per-seat memory with its limits, a PUT that is applied whole or not at all, the v0.13.0 legacy
+# section, "完善" of a persona / memory, a finished review's ``changes`` - tested ``/api/roster/**`` and §12.5, both replaced by the bot
+# (H1, H55; contract §13.7).  Their successors are in ``test_mock_bots.py`` (the L0 and the memory parts of a bot, refine, the limits) and in
+# ``test_mock_server.py`` (the review: queued -> running -> done, ``changes = {files, proposals}``).)

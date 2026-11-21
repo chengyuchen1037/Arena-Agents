@@ -63,18 +63,18 @@ test("annotateIdRefs: 'N3' keeps its characters and gains the hover text 'N3 Car
 });
 
 // ---- viewpoint: options / messages / channels --------------------------------------------------
-test("viewpoint options: god first, then every player by seat; unknown viewpoints fall back to god", () => {
+test("viewpoint menu (v0.14, H27): the global view first, then every player by seat; unknown viewpoints fall back to the global one", () => {
   const s = fresh();
-  const opts = View.viewpointOptions(s);
-  assert.equal(opts.length, 13);
-  assert.deepEqual(opts[0], { id: "god", label: "上帝视角" });
-  assert.deepEqual(opts[3], { id: "N3", label: "3 · Carol" });
+  const menu = View.viewpointMenu(s, "god");
+  assert.deepEqual([menu.god.id, menu.god.label], ["god", "全局视角"]);
+  assert.equal(menu.players.length, 12);
+  assert.deepEqual([menu.players[2].id, menu.players[2].label], ["N3", "3 · Carol"]);
   assert.equal(View.normalizeViewpoint(s, "N3"), "N3");
   assert.equal(View.normalizeViewpoint(s, "ghost"), "god");
   assert.equal(View.normalizeViewpoint(s, ""), "god");
   assert.equal(View.normalizeViewpoint(s, undefined), "god");
   assert.equal(View.viewpointLabel(s, "N3"), "Carol");
-  assert.equal(View.viewpointLabel(s, "ghost"), "上帝视角");
+  assert.equal(View.viewpointLabel(s, "ghost"), "全局视角");
 });
 
 test("god sees every message; a player sees only those whose visible_to_ids contain them", () => {
@@ -602,16 +602,18 @@ test("control buttons: start only when idle; resume when paused OR finished; pau
   assert.deepEqual(View.controlState(null), { start: true, pause: false, resume: false });
 });
 
-test("status dot / text follow the game status; a budget pause says so", () => {
+test("status dot / label follow the game status; a pause says why (v0.14: the label of H26 replaces the status text)", () => {
   assert.equal(View.statusDotClass({ status: "running" }), "active");
   assert.equal(View.statusDotClass({ status: "paused" }), "paused");
   assert.equal(View.statusDotClass({ status: "finished" }), "finished");
   assert.equal(View.statusDotClass({ status: "idle" }), "idle");
-  assert.equal(View.statusText({ status: "running", active_status_text: "公共频道发言中" }), "公共频道发言中");
-  assert.match(View.statusText({ status: "idle" }), /点击「开始」/);
-  assert.match(View.statusText({ status: "paused" }), /暂停/);
-  assert.match(View.statusText({ status: "finished" }), /结束/);
-  assert.equal(View.statusText({ status: "paused", pause_reason: "budget", active_status_text: "已暂停" }), "因预算上限暂停");
+  const label = (s) => View.systemStatus(s).label;
+  assert.equal(label({ status: "running", active_status_text: "公共频道发言中" }), "对局中");
+  assert.equal(label({ status: "idle" }), "对局前");
+  assert.equal(label({ status: "paused" }), "已暂停");
+  assert.equal(label({ status: "finished" }), "已结束");
+  assert.equal(label({ status: "paused", pause_reason: "budget", active_status_text: "已暂停" }), "已暂停 · 已达到预算上限");
+  assert.match(View.systemStatus({ status: "running", active_status_text: "公共频道发言中" }).title, /公共频道发言中/, "what the server's own status text adds is the hover sentence");
 });
 
 test("budget view: ratios of the limits that are set; the server's state wins, the ratio is the fallback", () => {
@@ -639,6 +641,12 @@ test("banners: budget (yellow/red), stall, hold, errors, game over, autosave; ph
   assert.match(hold[0].text, /继续/);
   assert.ok(hold[0].short.includes("请确认警长归属") && !hold[0].short.includes("确认后"));
   assert.equal(View.statusBanners({ status: "paused", pause_reason: "hold", hold_reason: "" })[0].kind, "hold");
+  // the moderator's own sentence may end with a stop: the banner adds one of its own, so two would follow each other ("。。")
+  const stop = View.statusBanners({ status: "paused", pause_reason: "hold", hold_reason: "请确认警长归属。" })[0];
+  assert.equal(stop.text, "⏸ 主持人暂停了对局：请确认警长归属。确认后点击「继续」。");
+  assert.equal(stop.short, "⏸ 主持人暂停了对局：请确认警长归属");
+  assert.equal(View.statusBanners({ status: "paused", pause_reason: "hold", hold_reason: "等一下 ..." })[0].short, "⏸ 主持人暂停了对局：等一下 ...", "an ellipsis is what was said");
+  assert.equal(View.statusBanners({ status: "paused", pause_reason: "hold", hold_reason: "。" })[0].text, "⏸ 主持人暂停了对局。确认后点击「继续」。", "a bare stop is no reason");
   assert.equal(View.statusBanners({ status: "paused", pause_reason: "user" }).length, 0); // a plain user pause needs no banner
   assert.equal(View.statusBanners({ status: "paused", pause_reason: "error" })[0].kind, "error");
   assert.match(View.statusBanners({ status: "paused", pause_reason: "stall" })[0].text, /没有进展/);
@@ -727,11 +735,23 @@ test("review: the buttons only exist after the game is finished; per-player runn
   s.review.progress = { N2: { state: "running", message: "正在复盘…" }, N3: { state: "error", message: "模型不可用" } };
   rv = View.reviewView(s);
   assert.equal(rv.running, true);
-  assert.deepEqual(rv.of("N2"), { state: "running", message: "正在复盘…" });
-  assert.deepEqual(rv.of("N3"), { state: "error", message: "模型不可用" });
+  assert.deepEqual(rv.of("N2"), { state: "running", message: "正在复盘…", secondsLeft: null });
+  assert.deepEqual(rv.of("N3"), { state: "error", message: "模型不可用", secondsLeft: null });
   s.review.done = F.PLAYER_IDS;
   assert.equal(View.reviewView(s).allDone, true);
   assert.equal(View.reviewView(fresh({ status: "finished", review: { available: false, done: [], running: false } })).available, false);
+  // v0.14 (§13.8): a queued review is under way too (the countdown is the last `seconds_left`), and a game of the old format (v5) cannot be reviewed
+  s.review = { available: true, done: ["N1"], running: true, supported: true, deadline_s: 60, seconds_left: 41, progress: {
+    N4: { state: "queued", message: "排队中…", seconds_left: null },
+    N5: { state: "running", message: "", seconds_left: 41 },
+    N6: { state: "timeout", message: "到了 60 秒", seconds_left: 0 },
+  } };
+  rv = View.reviewView(s);
+  assert.deepEqual([rv.of("N4").state, rv.of("N5").state, rv.of("N5").secondsLeft, rv.running], ["running", "running", 41, true]);
+  assert.equal(rv.of("N6").state, "none", "a timed-out review is `done` only once the store listed it in `done` (it does: see test_store.js)");
+  s.review = { available: true, done: [], running: false, supported: false, progress: {} };
+  rv = View.reviewView(s);
+  assert.deepEqual([rv.supported, rv.available], [false, false]);
 });
 
 // ---- runner ----------------------------------------------------------------------------------------------------------------------

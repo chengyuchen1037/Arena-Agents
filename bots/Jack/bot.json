@@ -1,0 +1,15 @@
+{
+ "format": 1,
+ "name": "Jack",
+ "avatar": {
+  "v": 1,
+  "face": "f00",
+  "skin": "s10",
+  "hair": "h44",
+  "hair_color": "c11",
+  "eyes": "e30",
+  "mouth": "m08",
+  "accessory": "a19",
+  "accessory_color": "k11"
+ }
+}

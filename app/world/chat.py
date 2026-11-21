@@ -28,6 +28,10 @@ Where the contract is silent the following (additive) choices were made:
   who is out, broadcasts do not (E23);
 * system DMs never use tokens or free-discussion limits: their only limits are ``defaults.dm`` and the
   moderator-controlled ``mode``; they cannot be given a floor (``open_floor`` / ``set_floor_queue``);
+* (v0.14, H16) a player's ``speak`` longer than the cap of the moment (``speech_gate(...).max_chars``: the token's
+  per-message cap clipped to what is left of its total / the free discussion's / the system DM's) is **sent back**:
+  ``TOO_LONG`` with ``chars`` and ``limit``, nothing written, nothing booked, the floor untouched; it is never cut.
+  Only the moderator's ``send_message`` (2000) is still cut, with ``truncated`` in its receipt;
 * ``resume_queue`` on a channel without a group but frozen (a free discussion) just lifts the freeze;
 * (v0.13.1, G10 / G14) a token held by one of ``world.untimed_holders`` (the seat a person plays) in a channel of
   ``type == "public"`` has **no deadline**: ``deadline`` stays ``None`` and ``remaining`` holds its nominal time
@@ -99,7 +103,10 @@ def _label(world: WorldCore, agent_id: str) -> str:
 
 
 def _clip(text: str, limit: int | None) -> tuple[str, dict[str, int] | None]:
-    """Cut ``text`` to ``limit`` characters (D19).  Returns ``(kept, truncated | None)``."""
+    """Cut ``text`` to ``limit`` characters (D19).  Returns ``(kept, truncated | None)``.
+
+    Only the moderator's free text (``mod.send_message``) is cut this way.  A *player's* speech is never cut (v0.14,
+    H16): over its limit it is refused with ``TOO_LONG`` and the player rewrites it."""
     if limit is None or len(text) <= limit:
         return text, None
     return text[:limit], {"dropped_chars": len(text) - limit, "kept_chars": limit}
@@ -374,9 +381,17 @@ class ChatModule(WorldModule):
             return Receipt.reject(Code.INVALID_PARAMS, "发言内容不能为空。")
         if gate.max_chars is not None and gate.max_chars <= 0:
             return Receipt.reject(Code.NO_FLOOR, "你本次发言权的字数已经用尽。")
-        kept, truncated = _clip(text, gate.max_chars)
-        entry = self.w.post_message(channel.id, actor, kept, kind="speech", truncated=truncated)
-        return self._receipt_for_message(channel, gate, actor, entry, len(kept), truncated)
+        if gate.max_chars is not None and len(text) > gate.max_chars:
+            # v0.14 (H16): a player's speech is never cut - too long, it is sent back whole and the writer rewrites it.
+            # Nothing is written, nothing is booked, the floor stays exactly as it was (the clock keeps running).
+            return Receipt.reject(
+                Code.TOO_LONG,
+                f"这条发言 {len(text)} 个字，超过了单条上限 {gate.max_chars} 字，没有发出，发言权还在。请删减后重发。",
+                chars=len(text),
+                limit=gate.max_chars,
+            )
+        entry = self.w.post_message(channel.id, actor, text, kind="speech")
+        return self._receipt_for_message(channel, gate, actor, entry, len(text), None)
 
     def on_speak_template(self, intent: Intent, p: SpeakTemplate) -> Receipt:
         actor = intent.actor_id

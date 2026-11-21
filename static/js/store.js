@@ -15,7 +15,10 @@
        toast,          // text for the user (error events)
        budgetEvent,    // "warning" | "reached" (budget.warning / budget.reached)
        rosterChanged,  // true when names / avatars changed (roster.updated)
-       reviewEvent,    // {id, state, message, changes} (review.progress; changes: v0.13.1, only for a finished review)
+       reviewEvent,    // {id, state, message, ...} (review.progress; v0.14: bot_id, name, seconds_left, deadline_s and, for a finished
+                       //   or timed-out review, changes {files: [{file, before, after}], proposals})
+       botsEvent,      // the live BotsPayload (bots.updated, v0.14: the line-up, every bot's state / memory stats, the start check), else null
+       initEvent,      // {job_id, bot_id, name, state, seconds_left, deadline_s, files_written, error} (bot.init.progress, v0.14), else null
        archiveEvent,   // the normalized archive.progress payload (v0.13: export / import progress), else null
        llmCall,        // {call, errors} (llm.call, v0.13.1: one line of the error log - not part of the game's state), else null
        replaced,       // true when the whole session was swapped (snapshot)
@@ -46,6 +49,11 @@
   // v0.13 (F6): "human" = a person plays the seat instead of its agent.
   // v0.13.1 (G3): "held" = the agent was woken up and now waits in front of the soft-pause gate (§12.2).
   const AGENT_STATES = ["thinking", "acting", "sleeping", "human", "held"];
+  // v0.14 (H22, §13.7): the initialization status of a bot (derived by the server: initializing = a job runs, stale = the L0 / contract /
+  // scenario / materials changed since it was initialized)
+  const INIT_STATUSES = ["uninitialized", "initializing", "ready", "stale", "failed"];
+  const INIT_PROGRESS_STATES = ["queued", "running", "done", "failed", "timeout", "cancelled"]; // bot.init.progress `state`
+  const REVIEW_STATES = ["queued", "running", "done", "error", "timeout"]; // review.progress `state` (v0.14: + queued, timeout)
   const DIRTY_KEYS = ["topbar", "board", "channels", "feed", "dashboard", "popover"];
   const METRIC_KEYS = [
     "activations",
@@ -68,6 +76,7 @@
     "messages",
     "requests",
     "tickets",
+    "bots", // v0.14: only bots.updated brings it
   ]);
 
   // -------------------------------------------------------------------------
@@ -144,6 +153,10 @@
       out: Boolean(p.out),
       state: agentState(p.state),
       sleep_until: optNum(p.sleep_until),
+      // v0.14 (§13.8): the bot that sits in the seat ("" for a v5 game) and its initialization status (ready / stale / failed /
+      // initializing / uninitialized; null for a v5 game) - what the ✔ ⚠ ✖ ⏳ on the card shows
+      bot_id: str(p.bot_id),
+      init_status: INIT_STATUSES.includes(p.init_status) ? p.init_status : null,
     };
     out.seat = seatOf(p);
     return out;
@@ -325,6 +338,11 @@
     };
   }
 
+  /**
+   * `PublicSession.review` (v0.14, §13.8): {available, done, running, supported, deadline_s, seconds_left}.  `available`: the game is over and a
+   * review can be asked for; `supported`: the game has bots (a v5 game cannot be reviewed - H58; an older server sends nothing: supported);
+   * `seconds_left`: the longest time a running review has left.  `progress` is the client's own live state (review.progress events).
+   */
   function normalizeReview(raw, previous) {
     const r = isObject(raw) ? raw : {};
     const prev = isObject(previous) ? previous : {};
@@ -332,8 +350,187 @@
       available: Boolean(r.available),
       done: strList(r.done),
       running: Boolean(r.running),
+      supported: r.supported !== false,
+      deadline_s: Math.max(1, num(r.deadline_s, 60)),
+      seconds_left: optNum(r.seconds_left),
       // live per-player progress (review.progress events); a new snapshot starts clean
       progress: isObject(prev.progress) ? prev.progress : {},
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // v0.14: the bots at the table (docs/v0.12-contracts.md §13.7 / §13.8): `session.bots` (BotsPayload, the live part), `system_status`
+  // -------------------------------------------------------------------------
+
+  const SYSTEM_STATUS_CODES = ["uninitialized", "initializing", "before_game", "in_game", "paused", "finished", "reviewing"];
+
+  /** `PublicSession.system_status` = {code, text, reason} (H26): the label of the top bar; all empty when the server sends none (an older one). */
+  function normalizeSystemStatus(raw) {
+    const s = isObject(raw) ? raw : {};
+    return { code: SYSTEM_STATUS_CODES.includes(s.code) ? s.code : "", text: str(s.text), reason: str(s.reason) };
+  }
+
+  /** One `Problem` of the start check (§13.7): who / what is not ready and how to fix it (`fix`: edit_core, import_core, init, bind_model, import_contract, import_rules). */
+  function normalizeProblem(raw) {
+    const p = isObject(raw) ? raw : {};
+    return {
+      scope: str(p.scope, "bot"),
+      bot_id: optStr(p.bot_id),
+      seat: optStr(p.seat),
+      name: optStr(p.name),
+      items: (Array.isArray(p.items) ? p.items : [])
+        .filter(isObject)
+        .map((it) => ({ code: str(it.code), message: str(it.message), fix: str(it.fix) })),
+    };
+  }
+
+  /** One `BotSummary` (§13.7): `staging` is the NUMBER of pending L0 proposals here (BotDetail has the list). */
+  function normalizeBotSummary(raw) {
+    const b = isObject(raw) ? raw : {};
+    const core = isObject(b.core) ? b.core : {};
+    const init = isObject(b.init) ? b.init : {};
+    const stats = isObject(b.memory_stats) ? b.memory_stats : {};
+    const binding = isObject(b.binding) ? b.binding : {};
+    return {
+      ...b,
+      id: str(b.id),
+      name: str(b.name),
+      avatar: isObject(b.avatar) ? b.avatar : null,
+      avatar_code: optStr(b.avatar_code),
+      seat: optStr(b.seat),
+      origin: str(b.origin, "user"),
+      core: {
+        ...core,
+        complete: Boolean(core.complete),
+        missing: strList(core.missing),
+        chars: isObject(core.chars) ? core.chars : {},
+        extras: (Array.isArray(core.extras) ? core.extras : []).filter(isObject),
+        updated_at: optNum(core.updated_at),
+      },
+      init: {
+        status: INIT_STATUSES.includes(init.status) ? init.status : "uninitialized",
+        at: optNum(init.at),
+        model: optStr(init.model),
+        duration_s: optNum(init.duration_s),
+        error: optStr(init.error),
+        stale: strList(init.stale),
+      },
+      frozen: Boolean(b.frozen),
+      memory_stats: {
+        ...stats,
+        arch_notes: Math.max(0, num(stats.arch_notes, 0)),
+        digest: Math.max(0, num(stats.digest, 0)),
+        playbook: Math.max(0, num(stats.playbook, 0)),
+        questions: Math.max(0, num(stats.questions, 0)),
+        people: Math.max(0, num(stats.people, 0)),
+        record: str(stats.record),
+      },
+      staging: Math.max(0, num(b.staging, 0)),
+      binding: { ok: Boolean(binding.ok), label: str(binding.label) },
+    };
+  }
+
+  /**
+   * `BotsPayload` (§13.7; the live part - `limits` / `defaults` only come with GET /api/bots and are kept when they are there): the line-up (bot ids in
+   * seat order), every bot's summary, the memory switch, the running initialization job, what the start check says (`ready`) and the learning use.
+   */
+  function normalizeBots(raw) {
+    const b = isObject(raw) ? raw : {};
+    const job = isObject(b.init_job)
+      ? {
+          job_id: str(b.init_job.job_id),
+          state: str(b.init_job.state, "running"),
+          ids: strList(b.init_job.ids),
+          started_at: optNum(b.init_job.started_at),
+          deadline_s: Math.max(1, num(b.init_job.deadline_s, 120)),
+        }
+      : null;
+    const ready = isObject(b.ready) ? b.ready : {};
+    const problems = (Array.isArray(ready.problems) ? ready.problems : []).filter(isObject).map(normalizeProblem);
+    const usage = isObject(b.learning_usage) ? b.learning_usage : {};
+    const out = {
+      lineup: strList(b.lineup),
+      bots: (Array.isArray(b.bots) ? b.bots : []).filter(isObject).map(normalizeBotSummary),
+      memory_enabled: b.memory_enabled !== false,
+      init_job: job,
+      ready: { ok: typeof ready.ok === "boolean" ? ready.ok : problems.length === 0, problems },
+      learning_usage: { calls: Math.max(0, num(usage.calls, 0)), tokens: Math.max(0, num(usage.tokens, 0)), cost_usd: Math.max(0, num(usage.cost_usd, 0)) },
+    };
+    if (isObject(b.limits)) out.limits = b.limits;
+    if (Array.isArray(b.defaults)) out.defaults = b.defaults.filter(isObject);
+    return out;
+  }
+
+  /** The seats' `bot_id` / `init_status` follow `session.bots` (a bot's seat is in its summary): that is how a card learns ✔ ⚠ ✖ ⏳ and a new line-up. */
+  function syncParticipantsFromBots(session) {
+    const bySeat = new Map(session.bots.bots.filter((b) => b.seat).map((b) => [b.seat, b]));
+    for (const p of session.participants) {
+      const b = bySeat.get(p.id);
+      if (!b) continue;
+      p.bot_id = b.id;
+      p.init_status = b.init.status;
+    }
+  }
+
+  /**
+   * The line-up changed (H29): the bots sit in the seats in `order` (bot ids, seat order).  The seats keep their ids (N1..N12) - what changes is the bot
+   * in each: `bot_id`, `name`, `avatar` and `init_status` of every participant, and `bots.lineup` / `bots.bots` (seat order, each bot's `seat`).  This is what
+   * the page shows at once when a card was dropped; the answer of the server (`bots.updated`, `roster.updated`) says the same.
+   * Returns `{undo}` - a function that puts everything back, which a refused `PUT /api/bots/lineup` calls - or null when `order` is not a permutation of the
+   * bots held (nothing changed then).
+   */
+  function applyLineup(session, order) {
+    const s = isObject(session) ? session : {};
+    const bots = isObject(s.bots) ? s.bots : null;
+    const seats = (Array.isArray(s.participants) ? s.participants : []).slice().sort((a, b) => seatOf(a) - seatOf(b));
+    const ids = strList(order);
+    if (!bots || !Array.isArray(bots.bots) || ids.length !== seats.length || ids.length !== bots.bots.length || new Set(ids).size !== ids.length) return null;
+    const byId = new Map(bots.bots.map((b) => [b.id, b]));
+    if (ids.some((id) => !byId.has(id))) return null;
+    const before = {
+      lineup: bots.lineup,
+      list: bots.bots,
+      botSeats: bots.bots.map((b) => [b, b.seat]),
+      seats: seats.map((p) => [p, p.bot_id, p.name, p.avatar, p.init_status]),
+    };
+    bots.lineup = ids.slice();
+    bots.bots = ids.map((id) => byId.get(id));
+    ids.forEach((id, i) => {
+      const bot = byId.get(id);
+      const seat = seats[i];
+      bot.seat = seat.id;
+      seat.bot_id = bot.id;
+      seat.name = bot.name;
+      if (isObject(bot.avatar)) seat.avatar = bot.avatar;
+      seat.init_status = bot.init && INIT_STATUSES.includes(bot.init.status) ? bot.init.status : null;
+    });
+    return {
+      undo() {
+        bots.lineup = before.lineup;
+        bots.bots = before.list;
+        for (const [bot, seat] of before.botSeats) bot.seat = seat;
+        for (const [p, botId, name, avatar, status] of before.seats) {
+          p.bot_id = botId;
+          p.name = name;
+          p.avatar = avatar;
+          p.init_status = status;
+        }
+      },
+    };
+  }
+
+  /** One `bot.init.progress` payload (§13.8) with every field present and typed. */
+  function normalizeInitEvent(raw) {
+    const d = isObject(raw) ? raw : {};
+    return {
+      job_id: str(d.job_id),
+      bot_id: str(d.bot_id),
+      name: str(d.name),
+      state: INIT_PROGRESS_STATES.includes(d.state) ? d.state : "running",
+      seconds_left: optNum(d.seconds_left),
+      deadline_s: Math.max(1, num(d.deadline_s, 120)),
+      files_written: strList(d.files_written),
+      error: optStr(d.error),
     };
   }
 
@@ -354,20 +551,17 @@
   }
 
   /**
-   * v0.13.1 (docs/v0.12-contracts.md §12.5): what a finished review changed in the memory:
-   * {impressions: [{id, before, after}], experience: {before: [...], after: [...]} | null} (only what changed).
-   * null when the event carries nothing of the kind (an older server).
+   * v0.14 (docs/v0.12-contracts.md §13.8): what a finished (or timed-out) review changed: {files: [{file, before, after}], proposals: n} - `file` is
+   * one of the memory parts (arch_notes / digest / playbook / questions / people), `proposals` the number of L0 proposals that now wait for the user
+   * (they are in the bot's detail).  null when the event carries nothing of the kind.
    */
   function normalizeReviewChanges(raw) {
     if (!isObject(raw)) return null;
-    const impressions = (Array.isArray(raw.impressions) ? raw.impressions : [])
+    const files = (Array.isArray(raw.files) ? raw.files : [])
       .filter(isObject)
-      .map((c) => ({ id: str(c.id), before: str(c.before), after: str(c.after) }))
-      .filter((c) => c.id);
-    const experience = isObject(raw.experience)
-      ? { before: strList(raw.experience.before), after: strList(raw.experience.after) }
-      : null;
-    return { impressions, experience };
+      .map((c) => ({ file: str(c.file), before: str(c.before), after: str(c.after) }))
+      .filter((c) => c.file);
+    return { files, proposals: Math.max(0, Math.floor(num(raw.proposals, 0))) };
   }
 
   // -------------------------------------------------------------------------
@@ -375,7 +569,7 @@
   // -------------------------------------------------------------------------
 
   const CALL_STATUSES = ["ok", "retry", "timeout", "error", "cancelled"];
-  const CALL_PURPOSES = ["turn", "review", "refine", "runtime"];
+  const CALL_PURPOSES = ["turn", "review", "refine", "runtime", "init"]; // v0.14 (H24): "init" = a bot's initialization (actor_id = the bot's id)
 
   /**
    * A `CallEntry` with every field present and typed (null = "not known"), or null for something that is no entry.
@@ -471,15 +665,15 @@
   }
 
   /**
-   * `PublicSession.takeover` / the `takeover.updated` payload. Without a played seat only `seat` (null) and
-   * `reshuffle_available` count: everything else is empty, whatever the payload says.
+   * `PublicSession.takeover` / the `takeover.updated` payload. Without a played seat only `seat` (null) counts:
+   * everything else is empty, whatever the payload says.  (v0.14, H52: the identities are dealt when the game starts, so
+   * the old re-deal flag of this payload is gone - one that is still sent is ignored.)
    */
   function normalizeTakeover(raw) {
     const t = isObject(raw) ? raw : {};
     const seat = optStr(t.seat);
     const out = {
       seat,
-      reshuffle_available: Boolean(t.reshuffle_available),
       seq: 0,
       channels: {},
       requests: [],
@@ -559,6 +753,12 @@
     };
     s.budget = normalizeBudget(s.budget);
     s.review = normalizeReview(s.review, s.review);
+    // v0.14 (§13.3, §13.8): `dealt` - have the identities been dealt (the game has started)?  Before that nothing about an identity is shown, not
+    // even a "?" (H52); a server that does not say (an older one) has dealt: its games always show them.  `system_status` is the top bar's label
+    // and `bots` the live BotsPayload (kept up to date by bots.updated).
+    s.dealt = typeof s.dealt === "boolean" ? s.dealt : true;
+    s.system_status = normalizeSystemStatus(s.system_status);
+    s.bots = normalizeBots(s.bots);
     s.takeover = normalizeTakeover(s.takeover);
     // v0.13.1 (G6): a soft pause only exists while the game runs (a hard pause, the end ... clear it on the server);
     // `clock_running`: does the game clock run?  The page counts down locally only while it does (`status` stays
@@ -798,6 +998,9 @@
       // and the game clock only runs while the game does and no soft pause holds it
       if (status !== "running") s.soft_pause = null;
       s.clock_running = status === "running" && !s.soft_pause;
+      // v0.14 (H26): the label of the top bar that was true for the old status is not true for the new one: it is dropped, the page works the label out from what it
+      // holds (view.js systemStatus) until the `session.updated` that follows a status change brings the server's own
+      s.system_status = normalizeSystemStatus(null);
       res.dirty.topbar = res.dirty.board = res.dirty.popover = res.dirty.feed = true;
     },
 
@@ -898,21 +1101,57 @@
       }
     },
 
+    /**
+     * v0.14 (§13.8): {id: the seat, bot_id, name, state: queued | running | done | error | timeout, message, seconds_left, deadline_s, changes}.  A
+     * finished review - and one that ran into its 60 seconds, which keeps what it had written - says what it changed in the memory (`changes`).
+     */
     "review.progress"(res, d) {
       const id = str(d.id);
       if (!id) return;
       const r = res.session.review;
-      const state = ["running", "done", "error"].includes(d.state) ? d.state : "running";
-      const entry = { state, message: str(d.message) };
-      // v0.13.1 (contract §12.5): a finished review says what it changed in the memory (old impression -> new one)
-      if (state === "done") entry.changes = normalizeReviewChanges(d.changes);
+      const state = REVIEW_STATES.includes(d.state) ? d.state : "running";
+      const entry = {
+        state,
+        message: str(d.message),
+        bot_id: str(d.bot_id),
+        name: str(d.name),
+        seconds_left: optNum(d.seconds_left),
+        deadline_s: Math.max(1, num(d.deadline_s, 60)),
+      };
+      const finished = state === "done" || state === "timeout";
+      if (finished) entry.changes = normalizeReviewChanges(d.changes);
       r.progress[id] = entry;
-      if (state === "done" && !r.done.includes(id)) r.done.push(id);
-      r.running = Object.values(r.progress).some((p) => p.state === "running");
-      res.reviewEvent = { id, state, message: str(d.message) };
-      if (state === "done") res.reviewEvent.changes = entry.changes;
+      if (finished && !r.done.includes(id)) r.done.push(id);
+      r.running = Object.values(r.progress).some((p) => p.state === "running" || p.state === "queued");
+      res.reviewEvent = { id, state, message: entry.message, bot_id: entry.bot_id, name: entry.name, seconds_left: entry.seconds_left, deadline_s: entry.deadline_s };
+      if (finished) res.reviewEvent.changes = entry.changes;
       // the 复盘全部 button (progress text) is part of the top-bar controls
       res.dirty.board = res.dirty.popover = res.dirty.topbar = true;
+    },
+
+    /** v0.14 (§13.8): the line-up, the states or the memory statistics of the bots changed - the live BotsPayload replaces what we hold. */
+    "bots.updated"(res, d) {
+      const s = res.session;
+      s.bots = normalizeBots(d.bots);
+      syncParticipantsFromBots(s);
+      res.botsEvent = s.bots;
+      res.dirty.board = res.dirty.popover = res.dirty.topbar = true;
+    },
+
+    /**
+     * v0.14 (§13.8): one bot's initialization (at most one event a second while it runs).  The client keeps the newest event of every bot of the
+     * running job in `session.init_progress` (its own state, never part of a snapshot: a job that was already running when the page came up simply
+     * has no entry until the next second's event); the entries of an older job are dropped when a new one's first event arrives.
+     */
+    "bot.init.progress"(res, d) {
+      const ev = normalizeInitEvent(d);
+      if (!ev.bot_id) return;
+      const s = res.session;
+      const held = isObject(s.init_progress) ? s.init_progress : {};
+      s.init_progress = Object.values(held).some((e) => e.job_id !== ev.job_id) ? {} : held;
+      s.init_progress[ev.bot_id] = ev;
+      res.initEvent = ev;
+      res.dirty.board = res.dirty.popover = true;
     },
 
     /**
@@ -987,6 +1226,8 @@
       budgetEvent: null,
       rosterChanged: false,
       reviewEvent: null,
+      botsEvent: null,
+      initEvent: null,
       archiveEvent: null,
       llmCall: null,
       replaced: false,
@@ -1051,6 +1292,13 @@
     normalizeParticipant,
     normalizeBudget,
     normalizeReview,
+    normalizeBots,
+    normalizeBotSummary,
+    normalizeProblem,
+    normalizeSystemStatus,
+    normalizeInitEvent,
+    applyLineup,
+    INIT_STATUSES,
     normalizeArchiveEvent,
     normalizeReviewChanges,
     normalizeCall,

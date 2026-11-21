@@ -22,7 +22,7 @@ from app.game.orchestrator import GameOrchestrator
 from app.main import app as real_app
 from app.runtime.trace_log import TraceLog, trace_dir
 from app.world.types import MODERATOR_ID
-from game_fakes import CFG, PROVIDER, FakeGames, FakeProviders, FakeSettings, async_test, bound
+from game_fakes import CFG, async_test, make_table_orch
 from v12.bots import BotLlm, Call, simple_player
 
 IDS = ["N1", "N2", "N3", "N4"]
@@ -38,15 +38,7 @@ CLOSED = "接管期间不能查看其他玩家的思考记录，对局结束后�
 
 # ------------------------------------------------------------------------------------------------ helpers
 def make_orch(monkeypatch: pytest.MonkeyPatch) -> GameOrchestrator:
-    monkeypatch.setattr(orchestrator_module, "load_config", lambda *a, **k: copy.deepcopy(CFG4))
-    orch = GameOrchestrator()
-    orch.provider_store = FakeProviders(PROVIDER)
-    orch.settings_store = FakeSettings({a: bound() for a in [MODERATOR_ID, *IDS]})
-    orch.game_store = FakeGames()
-    orch._autosave_delay = 0.01
-    orch._reset_game(default_bindings=orch._load_defaults())
-    orch.refresh_binding_issues()
-    return orch
+    return make_table_orch(monkeypatch)  # (v0.14: the bots of the table are initialized, so that a game can start)
 
 
 @pytest.fixture(autouse=True)

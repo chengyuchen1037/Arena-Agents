@@ -16,20 +16,30 @@ through one shared request that closes when they are unanimous, and a one-shot c
 "complete it for me") is answered with what its prompt asks for (v0.13.1: JSON impressions, a fixed-format persona).
 Token numbers imitate a persistent conversation with
 prompt caching so the usage panel and the spending limit can be tried without a model.
+
+v0.14: the players are bots (``BotBrain``) whose prompts the scripted agents never read - they play from the world, so the new prompts change
+nothing for them - but a game needs bots that are initialized (H25), and the learning runs go through the same tool protocol as with a real
+model: :class:`DemoLlm` answers an *initialization* and a *review* with fixed tool calls (``read_source`` / ``write_memory`` / ``propose_core`` /
+``finish`` - valid memory files, no model, no cost) and "complete this L0 for me" (``core:refine``) with a fixed, valid L0 file.
+:func:`prepare_demo` gives every never-initialized default bot its fixed memory once, so that the demo starts with every card ✔.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import random
 import re
 import uuid
 from collections.abc import Callable, Iterator
 from typing import Any
 
+from app.bots.refine import REFINE_MARKER
 from app.llm.types import LLMResponse, ToolCallData
 from app.world.types import MODERATOR_ID
+
+logger = logging.getLogger(__name__)
 
 Call = tuple[str, dict[str, Any]]
 Step = tuple[str, Any]
@@ -462,37 +472,25 @@ class DemoLlm:
         return total - read, read, self.rng.randint(40, 260)
 
     def _text(self, messages: list[dict[str, Any]]) -> str:
-        """The answer of a one-shot call outside the game loop, no tools.  Which call it is, the prompt says (the
-        sections ``app.agents.review`` builds): the review of a finished game and "complete the memory" are answered with
-        the JSON those prompts ask for (impressions of the other seats, a lesson), "complete the persona" with the
-        fixed-format text."""
+        """The answer of a one-shot call outside the game loop, no tools: "complete this L0 for me" (``core:refine``, the moderator's model,
+        recognised by the marker in its system prompt) is answered with a fixed, valid L0 file; anything else with a short fixed sentence."""
+        system = str(messages[0].get("content", "")) if messages else ""
         user = str(messages[-1].get("content", "")) if messages else ""
-        notes = user.rsplit("要点：\n", 1)[-1].strip() or "（无要点）"
-        found = re.search(r"【其他玩家】([^\n]*)", user)
-        others = [item.strip().partition(" ") for item in (found.group(1) if found else "").split("、")]
-        others = [(sid, name) for sid, _, name in others if sid and sid != "（无）"]
-        lesson = ["（演示）先听后说，别在信息不足时站队。"]
-        if "【你能看到的记录】" in user:  # the post-game review: revise the impression of everybody
-            impressions = {sid: f"（演示）{name}发言平稳，投票与发言基本一致，下次继续观察。" for sid, name in others}
-            return json.dumps({"impressions": impressions, "experience": lesson}, ensure_ascii=False)
-        if "【当前印象】" in user:  # "complete the memory": the notes become the impression of the first seat
-            impressions = {others[0][0]: f"（演示）{notes}"[:80]} if others else {}
-            return json.dumps({"impressions": impressions, "experience": lesson}, ensure_ascii=False)
-        return (  # "complete the persona"
-            f"【定位】（演示）{notes[:30]}的玩家。\n"
-            f"【说话风格】\n- 你说话{notes[:20]}，语速平稳。\n"
-            "【思考方式】\n- 先观察再表态，不急着站队。\n"
-            "【决策偏好】\n- 证据不足时宁可弃票，也不乱投。\n"
-            "【压力下】\n- 放慢语速，把话说得更短、更稳。\n"
-            "【口头禅】我们再看看。"
-        )
+        if REFINE_MARKER in system:
+            found = re.search(r"（玩家名：(.+?)）", user)
+            notes = user.rsplit("【要点】\n", 1)[-1].strip()
+            return demo_core_markdown(found.group(1) if found else "", notes)
+        return "（演示）这是演示模式的固定回答。"
 
     async def complete(
         self, agent_id: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, *, max_tokens: int | None = None
     ) -> LLMResponse:
         self.calls += 1
+        learning = bool(tools) and any(t.get("function", {}).get("name") == "write_memory" for t in tools or [])
         if self.delay:  # make the game watchable: "thinking" takes a moment
             top = 1.1 if agent_id == MODERATOR_ID else 0.8
+            if learning:
+                top = 0.5  # (a learning run is a handful of rounds: 12 bots at once, a few seconds in all)
             await asyncio.sleep(self.rng.uniform(0.15, top) * self.delay)
         fresh, read, out = self._usage(agent_id)
         common: dict[str, Any] = dict(
@@ -505,11 +503,18 @@ class DemoLlm:
         )
         if tools is None:  # a one-shot call outside the game loop
             return LLMResponse(content=self._text(messages), finish_reason="stop", **common)
+        if learning:  # an initialization or a review: the same tool protocol as with a model, fixed answers
+            calls = demo_learning_calls(messages, tools or [])
+            return self._response(calls, "（演示脚本）按固定的步骤读资料、写记忆。", common)
         policy = self.policies.get(agent_id)
         calls = policy(self.world, agent_id) if policy else []
         calls = calls or [("sleep", {})]
+        return self._response(calls, "（演示脚本）按当前状态决定下一步。", common)
+
+    @staticmethod
+    def _response(calls: list[Call], thought: str, common: dict[str, Any]) -> LLMResponse:
         return LLMResponse(
-            thought="（演示脚本）按当前状态决定下一步。",
+            thought=thought,
             content="",
             tool_calls=[
                 ToolCallData(id=f"call_{uuid.uuid4().hex[:10]}", name=name, arguments_json=json.dumps(args, ensure_ascii=False))
@@ -520,8 +525,170 @@ class DemoLlm:
         )
 
 
-def install_demo(orchestrator: Any, *, delay: float = 1.0, seed: int | None = None) -> None:
-    """Switch ``orchestrator`` to scripted agents and relax the model-binding checks."""
+# ------------------------------------------------------------------------------ learning runs (v0.14): fixed answers
+_SCENARIO_RE = re.compile(r"《(.+?)》")
+_TAGS_RE = re.compile(r"这个剧本声明的情境标签：(.+?)。(?:\n|$)", re.DOTALL)
+_SEAT_RE = re.compile(r"本局编号 (\S+?)）")
+_OTHER_RE = re.compile(r"^- (\S+) (.+?)：", re.MULTILINE)
+_ENTRY_RE = re.compile(r"^\s*- \[.*\]", re.MULTILINE)
+DEMO_MODEL_LABEL = "演示模式"
+
+
+def _scenario_title(messages: list[dict[str, Any]]) -> str:
+    for message in messages:
+        found = _SCENARIO_RE.search(str(message.get("content") or ""))
+        if found and message.get("role") in ("user", "system"):
+            return found.group(1)
+    return "这个游戏"
+
+
+def _tags_in(messages: list[dict[str, Any]]) -> list[str]:
+    """The situation tags the scenario declared, as ``read_source("rules")`` listed them (``标签（什么时候）；…``)."""
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        found = _TAGS_RE.search(str(message.get("content") or ""))
+        if found:
+            return [re.split(r"[（(]", part.strip())[0] for part in found.group(1).split("；") if part.strip()]
+    return []
+
+
+def _entry(source: str, tag: str, text: str) -> str:
+    """One line of a playbook: a hypothesis nobody has tested yet (``把握:低``, no support, no counter-example), tagged when the scenario has a tag."""
+    return f"- [把握:低|支持:0|反例:0|来源:{source}{('|#' + tag) if tag else ''}] {text}"
+
+
+def _pick_tags(tags: list[str]) -> tuple[str, str]:
+    """``(for speaking, for choosing)``: the scenario's own tags for those moments when it has them, else the first ones, else none."""
+    speak = "发言" if "发言" in tags else (tags[0] if tags else "")
+    choose = "投票" if "投票" in tags else (next((t for t in tags if t != speak), speak) if tags else "")
+    return speak, choose
+
+
+def demo_init_files(title: str, tags: list[str]) -> dict[str, str]:
+    """The fixed memory of an initialization in demo mode: valid files (``arch_notes`` / ``digest`` / ``playbook`` / ``questions``), written as
+    hypotheses in the first person like a real one, with the scenario's own situation tags on the playbook."""
+    speak, choose = _pick_tags(tags)
+    return {
+        "arch_notes": (
+            "我读了平台契约。我理解：被唤醒不等于必须行动，没有事要做就休眠；要说话只能调用发言工具，要先想清楚再一次说完整；"
+            "发言被退回时，按回执说的原因改好再发。我打算用笔记记下关键的事实，思考的内容不会出现在别人眼前。"
+        ),
+        "digest": (
+            f"我读了《{title}》的规则。我理解：对局由主持人推进，我只知道自己看得到的事；有的结果是规则直接给出的事实，"
+            "有的只是别人的一面之词，两者要分开看。我还没有打过这个游戏，下面的打算都只是假设。"
+        ),
+        "playbook": "\n".join(
+            [
+                _entry("初始化", speak, "开口之前先想清楚我依据的是哪一个事实，再表态。"),
+                _entry("初始化", choose, "做选择之前先问自己：我认定的最硬的事实是什么。"),
+            ]
+        ),
+        "questions": "我还不确定：别人的发言是长是短、条理清不清楚，和他说的是不是真话有没有关系，要用以后的对局来看。",
+    }
+
+
+def demo_core_markdown(name: str, notes: str) -> str:
+    """The fixed answer of "complete this L0 for me" in demo mode: a valid merged L0 file built around the user's notes."""
+    cleaned = " ".join((notes or "").split())[:60] or "一名普通的玩家"
+    return (
+        "---\n"
+        "format: arena-core\n"
+        "version: 1\n"
+        f"name: {name or '名字'}\n"
+        "---\n"
+        f"# 身份\n你是一个{cleaned}的人，来参加游戏只是想和大家好好玩一局。\n\n"
+        "# 说话方式\n你说话平和，不抢话，习惯先听别人说完再开口，常把结论放在话的最后。"
+        "「我先听听大家怎么说。」「这一点我不太确定，再看看。」「我倾向这样想，不过随时可以改。」\n篇幅：40–100 字\n\n"
+        "# 分析方式\n你先看已经确定的事实，再看别人说过的话前后是否一致；看错了就坦率承认，换个角度重新想。\n"
+    )
+
+
+def _rounds_done(messages: list[dict[str, Any]]) -> int:
+    return sum(1 for m in messages if m.get("role") == "assistant" and m.get("tool_calls"))
+
+
+def _tool_text(messages: list[dict[str, Any]], marker: str) -> str:
+    """The text of the last tool result that starts with ``marker`` (``""`` when there is none), without its heading line."""
+    for message in reversed(messages):
+        content = str(message.get("content") or "")
+        if message.get("role") == "tool" and content.startswith(marker):
+            return content.split("\n", 1)[1] if "\n" in content else ""
+    return ""
+
+
+def demo_learning_calls(messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> list[Call]:
+    """The tool calls of the next answer of a scripted bot in a learning run (an initialization when there is no ``read_record`` tool, else a
+    review).  The steps are fixed; a run that is asked once more after its steps are over only finishes."""
+    names = {t.get("function", {}).get("name") for t in tools}
+    step = _rounds_done(messages)
+    title = _scenario_title(messages)
+    if "read_record" not in names:  # ---- an initialization: read, write the memory, finish
+        files = demo_init_files(title, _tags_in(messages))
+        if step == 0:
+            return [("read_source", {"source": "contract", "part": "must_read"}), ("read_source", {"source": "rules"})]
+        if step == 1:
+            return [("write_memory", {"file": "arch_notes", "content": files["arch_notes"]}), ("write_memory", {"file": "digest", "content": files["digest"]})]
+        if step == 2:
+            return [("write_memory", {"file": "playbook", "content": files["playbook"]}), ("write_memory", {"file": "questions", "content": files["questions"]})]
+        return [("finish", {"summary": "（演示）读完了契约和规则，写好了记忆。"})]
+    # ---- a review: look at the record, write impressions of the others and one more hypothesis, finish
+    first = next((str(m.get("content") or "") for m in messages if m.get("role") == "user"), "")
+    system = str(messages[0].get("content") or "") if messages else ""
+    if step == 0:
+        return [("read_record", {"limit": 20}), ("read_source", {"source": "my_memory", "part": "playbook"})]
+    if step == 1:
+        me = (_SEAT_RE.search(system) or [None, ""])[1]
+        lines = [f"- {name}：（演示）发言平稳，说的话和后来的事实基本对得上，下次继续观察。" for seat, name in _OTHER_RE.findall(first) if seat != me]
+        calls: list[Call] = []
+        if lines:
+            calls.append(("write_memory", {"file": "people", "content": "\n".join(lines[:11])}))
+        existing = [line.strip() for line in _tool_text(messages, "【我的记忆·打法】").splitlines() if _ENTRY_RE.match(line)]
+        added = _entry("复盘", _pick_tags(_tags_in(messages))[0], "（演示）开口之前先把别人说过的话和事实对一遍，再决定信不信。")
+        if added not in existing:
+            existing.append(added)
+        calls.append(("write_memory", {"file": "playbook", "content": "\n".join(existing[-20:])}))
+        if "学习那个人说话的方式" in system:  # the user asked it to learn the voice of the person who played its seat
+            core = _tool_text(messages, "【我的底层设定】")
+            voice = re.search(r"# 说话方式\n(.*?)(?:\n\n# |\Z)", core, re.DOTALL)
+            current = voice.group(1).strip() if voice else ""
+            if current and len(current) <= 520:
+                lines_ = current.splitlines()
+                at = next((i for i, line in enumerate(lines_) if line.strip().startswith("篇幅")), len(lines_))
+                lines_.insert(at, "也学一点那个人的节奏：句子短，先给结论，再补一句理由。")
+                calls.append(("propose_core", {"section": "voice", "content": "\n".join(lines_), "reason": "（演示）这一局里那个人的说话节奏更干脆，值得学。"}))
+        return calls
+    return [("finish", {"summary": "（演示）复盘完了。"})]
+
+
+def prepare_demo(orchestrator: Any) -> list[str]:
+    """Demo mode: give every default bot that was never initialized its fixed memory (no model), so that the demo starts with every card ✔
+    (its hashes are those of the contract and the scenario in force).  Bots that are stale, failed or already initialized are left as they
+    are - the demo shows those states too.  Returns the ids that were prepared; never raises."""
+    prepared: list[str] = []
+    try:
+        store = orchestrator._bots()
+        hub = orchestrator.sources
+        scenario_id = hub.current_scenario_id()
+        spec = hub.spec(scenario_id)
+        sources = hub.hashes(scenario_id)
+        tags = [str(getattr(rule, "tag", "")) for rule in (getattr(spec, "situations", None) or []) if getattr(rule, "tag", "")]
+        files = demo_init_files(str(getattr(spec, "title", "") or scenario_id), list(dict.fromkeys(tags)))
+        for bot_id in store.lineup():
+            if store.summary(bot_id, sources=sources)["init"]["status"] != "uninitialized" or not store.core(bot_id).complete:
+                continue
+            store.commit_init(bot_id, scenario_id, files, model=DEMO_MODEL_LABEL, duration_s=0.0, sources=sources)
+            prepared.append(bot_id)
+    except Exception:  # noqa: BLE001 - a demo that cannot prepare its bots still comes up: the start check says what is missing
+        logger.warning("Could not prepare the bots of the demo", exc_info=True)
+    return prepared
+
+
+def install_demo(orchestrator: Any, *, delay: float = 1.0, seed: int | None = None, prepare: bool = True) -> None:
+    """Switch ``orchestrator`` to scripted agents and relax the model-binding checks.
+
+    ``prepare`` (default): the bots that were never initialized get their fixed memory now (:func:`prepare_demo`).  ``get_orchestrator()``
+    passes ``False`` - the data directory is not locked yet - and ``startup()`` does it (``demo_prepare``) once it is."""
     cache: dict[int, DemoLlm] = {}
 
     def factory(orch: Any) -> DemoLlm:
@@ -531,11 +698,14 @@ def install_demo(orchestrator: Any, *, delay: float = 1.0, seed: int | None = No
             cache[key] = DemoLlm(orch.world, delay=delay, seed=seed)
         return cache[key]
 
-    # ``demo_mode`` is what the API layer looks at to skip the model-binding checks (``routes._require_complete_bindings``,
-    # ``providers.binding_issues``): nothing process-global is replaced, so installing the demo on one orchestrator
-    # (a test, say) cannot change how the API behaves for any other.
+    # ``demo_mode`` is what the start check (``check_ready``), the learning jobs (a bot needs no model to be initialized here), the moderator's
+    # refine call and the API layer (``providers.binding_issues``) look at to skip the model-binding checks: nothing process-global is
+    # replaced, so installing the demo on one orchestrator (a test, say) cannot change how the API behaves for any other.
     orchestrator.demo_mode = True
     orchestrator.llm_port_factory = factory
     orchestrator.ensure_bindings_ready = lambda: None
     orchestrator.refresh_binding_issues = lambda: []
     orchestrator.session.binding_issues = []
+    orchestrator.demo_prepare = lambda: prepare_demo(orchestrator)
+    if prepare:
+        orchestrator.demo_prepare()

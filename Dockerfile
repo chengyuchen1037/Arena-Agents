@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Arena-Agents 运行镜像（v0.13）
+# Arena-Agents 运行镜像（v0.14）
 #
 # 基础镜像固定到具体小版本（python:3.12.15-slim-bookworm）。如需按内容寻址再固定 digest：
 #   FROM python:3.12.15-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70
@@ -26,17 +26,19 @@ COPY requirements.lock ./
 RUN pip install -r requirements.lock
 
 # 应用文件（代码与只读资产）。属主保持 root、arena 只读：运行时只有数据目录 /app/data 可写
-# （Provider 注册表、API Key、设置、名册、对局、日志全部写在那里）。
+# （Provider 注册表、API Key、设置、bots、官方契约、规则、对局、日志全部写在那里）。
 # 只复制运行所需目录；.env、data/、tests/、docs/、本机缓存等由 .dockerignore 排除。
 COPY config.yml ./
 COPY knowledge/ ./knowledge/
 COPY scenarios/ ./scenarios/
 COPY prompts/ ./prompts/
+# 默认 bot 库（v0.14）：首次启动时复制进数据目录。没有它，新装的程序里一个 bot 也没有。
+COPY bots/ ./bots/
 COPY static/ ./static/
 COPY app/ ./app/
 
 # 数据目录 /app/data：应用默认把数据放在“程序目录/data”，容器里程序目录就是 /app，所以不需要任何环境变量
-# （Provider 注册表、secrets.v1.enc、settings.json、名册、对局、日志、导出的存档都在这里）。
+# （Provider 注册表、secrets.v1.enc、settings.json、bots、契约、规则、对局、日志、导出的存档都在这里）。
 # 必须是一个卷，且必须对 arena(uid 10001) 可写：
 #   * 使用 compose 默认的命名卷 arena-appdata：首次创建时继承这里的属主(10001)与 0700 权限，无需额外操作；
 #   * 使用宿主机目录绑定挂载：Linux 上需先 `sudo chown -R 10001:10001 <目录> && chmod 700 <目录>`；

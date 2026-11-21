@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 from app.api.archive import router as archive_router
 from app.archive import jobs as jobs_module
 from app.archive import legacy
+from app.archive.format import FORMAT_VERSION
 from app.archive.jobs import ArchiveManager
 
 from .helpers import (
@@ -127,7 +128,9 @@ def test_export_then_download(client: TestClient, data_dir: Path) -> None:
     download = client.get(f"/api/archive/exports/{result['name']}")
     assert download.status_code == 200 and download.content == Path(result["path"]).read_bytes()
     disposition = download.headers["content-disposition"]
-    assert disposition.startswith("attachment") and result["name"] in disposition
+    # (H42: the user's browser saves "arena-agents-<time>.arenaagents"; the file in exports/ keeps the fixed name "arena-<time>.arenaagents")
+    assert result["download_name"] == "arena-agents-" + result["name"][len("arena-"):]
+    assert disposition == f'attachment; filename="{result["download_name"]}"; filename*=UTF-8\'\'{result["download_name"]}'
     assert download.headers["content-type"].startswith("application/octet-stream")
 
 
@@ -310,7 +313,7 @@ def test_a_newer_format_is_a_422_with_its_own_code(client: TestClient, blob: byt
 
     source = tmp_path / "in.arenaagents"
     source.write_bytes(blob)
-    newer = mutate_archive(source, tmp_path / "newer.arenaagents", lambda members, manifest: manifest.update(format_version=2))
+    newer = mutate_archive(source, tmp_path / "newer.arenaagents", lambda members, manifest: manifest.update(format_version=FORMAT_VERSION + 1))
     response = _upload(client, newer.read_bytes())
     assert response.status_code == 422 and response.json()["code"] == "unsupported_version" and "升级" in response.json()["detail"]
 

@@ -156,8 +156,11 @@ def test_default_limits_can_be_overridden_per_grant() -> None:
     receipt = open_turn(world, "c1", ["N1"], max_messages=1, max_chars_per_message=5, max_chars_total=100, duration_s=7)
     assert receipt.data["limits"] == {"max_messages": 1, "max_chars_per_message": 5, "max_chars_total": 100, "duration_s": 7.0}
     assert world.next_deadline() == 7.0
-    first = speak(world, "N1", "c1", "一二三四五六七")
-    assert first.truncated == {"dropped_chars": 2, "kept_chars": 5} and first.floor_left["messages"] == 0
+    too_long = speak(world, "N1", "c1", "一二三四五六七")  # 7 chars, the per-message cap of this grant is 5
+    assert too_long.code == Code.TOO_LONG and too_long.data == {"chars": 7, "limit": 5}
+    assert world.channel("c1").group.tokens[0].messages_used == 0  # the refusal costs nothing: the only message is still there
+    first = speak(world, "N1", "c1", "一二三四五")
+    assert first.ok and first.truncated is None and first.floor_left["messages"] == 0
     assert speak(world, "N1", "c1", "x").code == Code.CHANNEL_CLOSED  # the only token is spent: group completed
 
 

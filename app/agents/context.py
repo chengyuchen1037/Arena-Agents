@@ -3,6 +3,12 @@
 Pure and deterministic given the world state.  The FULL message of a conversation is built from
 ``render_board`` + memory + history; every later message is a DELTA (new history entries, board changes
 from ``app.agents.delta.diff_board``, wake reasons) so the conversation stays an append-only prefix.
+
+v0.14: the functions that show a *speaking limit* or a *line of speech* take ``style``.  ``"classic"`` (the default) is the
+v0.13.1 text, byte for byte - the moderator and ``LegacyBrain`` use it and a snapshot test locks it.  ``"bot"`` is what a
+v0.14 bot reads: a free discussion shows the limit of ONE message, a floor of a single message does not show a "total", a line
+of speech reads ``<who> 说：<text>`` (and marks the bot's own words) instead of ``<who>：<text>``, and the hard facts of the
+game get their own section (:func:`render_facts`).
 """
 
 from __future__ import annotations
@@ -13,6 +19,9 @@ from typing import Any
 
 from app.agents.sanitize import neutralize_untrusted_text as _safe
 from app.world.types import ENGINE_ID, MODERATOR_ID, AgentMemory, Envelope, LedgerEntry
+
+CLASSIC = "classic"
+BOT = "bot"
 
 STATUS_ZH = {"idle": "未开始", "running": "进行中", "paused": "已暂停", "finished": "已结束"}
 KIND_ZH = {
@@ -72,22 +81,51 @@ class Namer:
 # --------------------------------------------------------------------------------- board
 
 
-def _render_floor(channel: dict[str, Any]) -> list[str]:
+def _my_token_messages(floor: dict[str, Any], me_id: str) -> int | None:
+    """How many messages the floor token of ``me_id`` allows in all (``None`` = the board does not say)."""
+    for token in floor.get("queue") or []:
+        if str(token.get("holder")) == me_id and token.get("state") == "active":
+            try:
+                return int(token.get("max_messages"))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _message_cap(channel: dict[str, Any], floor: dict[str, Any]) -> Any:
+    """The limit of ONE message in this channel as the board states it: the discussion's own number when it has one, else what
+    the channel says the agent may write right now (``max_chars``; a system DM has no discussion)."""
+    free = floor.get("free") or {}
+    cap = free.get("max_chars_per_message")
+    return cap if cap is not None else channel.get("max_chars")
+
+
+def _render_floor(channel: dict[str, Any], style: str = CLASSIC, me_id: str = "") -> list[str]:
     lines: list[str] = []
     floor = channel.get("floor") or {}
     kind = floor.get("kind", "none")
+    bot = style == BOT
     if channel.get("can_write"):
         mine = floor.get("mine")
         if mine:
-            lines.append(
-                f"    ✅ 你现在可以发言：还可发 {mine.get('messages_left', '?')} 条，单条 ≤ "
-                f"{mine.get('chars_per_message', '?')} 字，总共还可写 {mine.get('chars_left', '?')} 字，"
-                f"剩余 {_secs(mine.get('seconds_left'))}"
-            )
+            if bot and _my_token_messages(floor, me_id) == 1:
+                # One message in all: a "total" would only suggest more room than the single-message limit leaves.
+                cap = channel.get("max_chars")
+                cap = mine.get("chars_per_message", "?") if cap is None else cap
+                lines.append(f"    ✅ 你现在可以发言：这次只能发 1 条，≤ {cap} 字，剩余 {_secs(mine.get('seconds_left'))}")
+            else:
+                lines.append(
+                    f"    ✅ 你现在可以发言：还可发 {mine.get('messages_left', '?')} 条，单条 ≤ "
+                    f"{mine.get('chars_per_message', '?')} 字，总共还可写 {mine.get('chars_left', '?')} 字，"
+                    f"剩余 {_secs(mine.get('seconds_left'))}"
+                )
         else:
             free = floor.get("free") or {}
             left = free.get("my_messages_left")
             extra = f"，你还可发 {left} 条" if left is not None else ""
+            cap = _message_cap(channel, floor) if bot else None
+            if cap is not None:
+                extra += f"，单条 ≤ {cap} 字"
             lines.append(f"    ✅ 你现在可以发言{extra}")
     else:
         why = channel.get("why_not")
@@ -103,11 +141,20 @@ def _render_floor(channel: dict[str, Any]) -> list[str]:
             lines.append(f"    发言组 {kind}{state}：{shown}；当前发言者：{floor.get('active') or '（无）'}")
     elif kind == "free" and floor.get("free"):  # system DMs are "free" without a discussion to report
         free = floor.get("free") or {}
-        lines.append(
-            f"    自由讨论：已进行 {_secs(free.get('elapsed_s'))}/{_secs(free.get('duration_s'))}，"
-            f"总字数 {free.get('chars_used', 0)}/{free.get('max_chars_total', '?')}，"
-            f"已冷场 {_secs(free.get('silent_s'))}"
-        )
+        if bot:
+            cap = free.get("max_chars_per_message")
+            one = f"单条 ≤ {cap} 字，" if cap is not None else ""
+            lines.append(
+                f"    自由讨论：已进行 {_secs(free.get('elapsed_s'))}/{_secs(free.get('duration_s'))}，{one}"
+                f"总字数 {free.get('chars_used', 0)}/{free.get('max_chars_total', '?')}（参考值），"
+                f"已冷场 {_secs(free.get('silent_s'))}"
+            )
+        else:
+            lines.append(
+                f"    自由讨论：已进行 {_secs(free.get('elapsed_s'))}/{_secs(free.get('duration_s'))}，"
+                f"总字数 {free.get('chars_used', 0)}/{free.get('max_chars_total', '?')}，"
+                f"已冷场 {_secs(free.get('silent_s'))}"
+            )
     return lines
 
 
@@ -130,7 +177,7 @@ def shared_answers_text(answers: list[dict[str, Any]], namer: Namer) -> str:
     ) or "（还没有人作答）"
 
 
-def render_board(board: dict[str, Any], namer: Namer, *, hint: str = "") -> str:
+def render_board(board: dict[str, Any], namer: Namer, *, hint: str = "", style: str = CLASSIC) -> str:
     me = board.get("me") or {}
     is_mod = bool(me.get("is_moderator"))
     lines: list[str] = ["【状态板】"]
@@ -171,7 +218,7 @@ def render_board(board: dict[str, Any], namer: Namer, *, hint: str = "") -> str:
         )
         if ch.get("readonly"):
             lines.append(f"    只读成员：{_ids(ch['readonly'])}")
-        lines.extend(_render_floor(ch))
+        lines.extend(_render_floor(ch, style, str(me.get("id") or "")))
 
     requests = board.get("requests") or []
     lines.append("\n待处理的请求：" if not is_mod else "\n进行中的请求：")
@@ -216,11 +263,74 @@ def render_board(board: dict[str, Any], namer: Namer, *, hint: str = "") -> str:
     return "\n".join(lines)
 
 
+# --------------------------------------------------------------------------------- hard facts
+
+FACTS_TITLE = "【硬事实台】"
+FACTS_INTRO = "规则直接产生的事实，和玩家自己公开说出的声明，按阶段排列。"
+FACT_CHARS = 6_000  # the default budget of the section in the FULL message
+
+
+def _fact_line(item: Any, namer: Namer) -> tuple[str, str, bool] | None:
+    """``(phase, line, is_claim)`` of one entry of the board's ``facts``; ``None`` for anything that is not one."""
+    if not isinstance(item, dict):
+        return None
+    kind = item.get("kind")
+    text = " ".join(str(item.get("text") or "").split())  # one line: a table row never breaks into two
+    if kind not in ("fact", "claim") or not text:
+        return None
+    head = f"#{item['seq']} " if isinstance(item.get("seq"), int) else ""
+    if kind == "claim":
+        who = namer.who(item.get("actor_id")) if item.get("actor_id") else ""
+        label = f"声明 {who}" if who else "声明"
+        text = _safe(text)  # what a player said is data, never structure
+    else:
+        label = "事实"
+    phase = " ".join(str(item.get("phase") or "").split())[:80] or "（阶段未记录）"
+    return phase, f"{head}{label}：{text}", kind == "claim"
+
+
+def render_facts(facts: Any, namer: Namer, *, max_chars: int = FACT_CHARS) -> str:
+    """The hard-facts section (v0.14, H10): what the rules produced (``fact``) and what players said in public (``claim``),
+    grouped by phase in the order they happened; ``""`` when there are none - or when ``facts`` is missing or odd (an older
+    world has no such key).  Over ``max_chars`` the oldest *claims* go first, then the oldest facts, and the section says how
+    many entries were left out (the visible history still has them)."""
+    rows = [row for row in (_fact_line(item, namer) for item in (facts if isinstance(facts, list) else [])) if row]
+    if not rows:
+        return ""
+    keep = list(range(len(rows)))
+    size = sum(len(rows[i][1]) + 1 for i in keep)
+    dropped = 0
+    for want_claim in (True, False):
+        for index in list(keep):
+            if size <= max_chars:
+                break
+            if rows[index][2] == want_claim:
+                keep.remove(index)
+                size -= len(rows[index][1]) + 1
+                dropped += 1
+    lines = [FACTS_TITLE + FACTS_INTRO]
+    if dropped:
+        lines.append(f"（更早的 {dropped} 条因篇幅已省略，见可见历史。）")
+    current: str | None = None
+    for index in keep:
+        phase, line, _is_claim = rows[index]
+        if phase != current:
+            lines.append(f"〔{phase}〕")
+            current = phase
+        lines.append(line)
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------------- history
 
 
-def render_entry(entry: LedgerEntry, namer: Namer, *, viewer: str) -> str | None:
-    """One history line, or ``None`` for entries not worth showing."""
+def render_entry(entry: LedgerEntry, namer: Namer, *, viewer: str, style: str = CLASSIC) -> str | None:
+    """One history line, or ``None`` for entries not worth showing.
+
+    ``style="bot"`` (v0.14): a player's speech reads ``#12 [频道] <id> <name> 说：<words>`` and the viewer's own reads
+    ``<id> <name>（你）说：<words>``.  The words go through the same ``neutralize_untrusted_text`` as ever, so a speech can still
+    not forge a record, a section or a speaker; the "说：" only keeps the log from looking like the shape a bot should write
+    (a line that starts with who is speaking)."""
     t, d = entry.type, entry.data
     ch = namer.channel(entry.channel_id) if entry.channel_id else ""
     prefix = f"#{entry.seq}"
@@ -238,6 +348,9 @@ def render_entry(entry: LedgerEntry, namer: Namer, *, viewer: str) -> str | None
         content = str(d.get("content", ""))
         if entry.actor_id not in (MODERATOR_ID, ENGINE_ID):
             content = _safe(content)  # a player's words are data, never structure
+            if style == BOT and kind in ("speech", "template"):
+                speaker = f"{who}（你）说：" if entry.actor_id == viewer else f"{who} 说："
+                return f"{prefix} [{ch}] {tag}{speaker}{content}{cut}"
         return f"{prefix} [{ch}] {tag}{who}：{content}{cut}"
     if t == "channel.created":
         return f"{prefix} 〔系统〕频道「{d.get('name', ch)}」已创建（{d.get('type', '')}，成员：{namer.whos(d.get('members'))}）"
@@ -305,12 +418,12 @@ def render_entry(entry: LedgerEntry, namer: Namer, *, viewer: str) -> str | None
 
 
 def render_history(
-    entries: list[LedgerEntry], namer: Namer, *, viewer: str, max_chars: int
+    entries: list[LedgerEntry], namer: Namer, *, viewer: str, max_chars: int, style: str = CLASSIC
 ) -> tuple[str, int]:
     """Newest-first budgeted history, returned oldest-first.  ``(text, omitted_entries)``."""
     lines: list[tuple[int, str]] = []
     for entry in entries:
-        line = render_entry(entry, namer, viewer=viewer)
+        line = render_entry(entry, namer, viewer=viewer, style=style)
         if line:
             lines.append((entry.seq, line))
     kept: list[str] = []
@@ -342,7 +455,7 @@ def render_memory(memory: AgentMemory, notes_text: str) -> str:
 MAX_WAKE_LINES = 14
 
 
-def render_wake(reasons: list[Envelope], namer: Namer, *, agent_id: str) -> str:
+def render_wake(reasons: list[Envelope], namer: Namer, *, agent_id: str, style: str = CLASSIC) -> str:
     """Why the agent was woken.  New messages are summed up per channel (a busy channel would otherwise
     fill the section with one line per message); everything else gets a line of its own."""
     lines = ["【本次唤醒】"]
@@ -356,7 +469,7 @@ def render_wake(reasons: list[Envelope], namer: Namer, *, agent_id: str) -> str:
                 senders.append(who)
             per_channel[str(env.channel_id or "")] = (senders, count + 1)
             continue
-        text = _wake_line(env, namer)
+        text = _wake_line(env, namer, style)
         if text:
             others.append(text)
     for channel_id, (senders, count) in per_channel.items():
@@ -398,7 +511,7 @@ def _revoke_reason(reason: Any) -> str:
     return _REVOKE_REASONS.get(text, text)
 
 
-def _wake_line(env: Envelope, namer: Namer) -> str:
+def _wake_line(env: Envelope, namer: Namer, style: str = CLASSIC) -> str:
     event = str(env.payload.get("event", ""))
     p = env.payload
     ch = namer.channel(env.channel_id)
@@ -416,6 +529,13 @@ def _wake_line(env: Envelope, namer: Namer) -> str:
             if many
             else "发言一条后发言权会自动交给下一位。"
         )
+        if style == BOT and not many:
+            # One message in all: the limit of that message is the only number that matters (a "total" would suggest more room).
+            cap = p.get("max_chars_per_message", "?")
+            total = p.get("max_chars_total")
+            if isinstance(cap, int) and isinstance(total, int):
+                cap = min(cap, total)
+            return f"你获得了 {ch} 的发言权{pos}：只能发 1 条，≤ {cap} 字，{_secs(p.get('seconds'))} 内有效。{tail}"
         return (
             f"你获得了 {ch} 的发言权{pos}：最多 {p.get('max_messages', '?')} 条，单条 ≤ "
             f"{p.get('max_chars_per_message', '?')} 字，总共 ≤ {p.get('max_chars_total', '?')} 字，{_secs(p.get('seconds'))} 内有效。{tail}"

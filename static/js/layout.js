@@ -360,5 +360,232 @@
     };
   }
 
-  root.ArenaLayout = { create, NARROW_MAX };
+  // ==========================================================================
+  // v0.14 (H29): moving the player cards while the game has not started
+  // ==========================================================================
+
+  const SEAT_DRAG_PX = 6; // a mouse / pen press that moves this far is a drag, not a click
+  const SEAT_LONG_PRESS_MS = 380; // a touch has to be held this long before the card can be moved (a swipe scrolls instead)
+  const SEAT_TOUCH_SLOP_PX = 10; // ... and must not wander further than this meanwhile
+  const SEAT_CLICK_GUARD_MS = 350; // the click that follows a drag is not a press on a card
+
+  /**
+   * The cards of the participant bar can be moved while the game has not started (the seating is the line-up of the bots): a mouse / pen press that moves,
+   * a touch that is held and then moved, or Alt+← / Alt+→ with the focus on a card.  This only works out WHAT was moved - `commit(from, to, {keyboard})`
+   * (indexes in seat order, `to` = the seat the card was dropped on) is the caller's: it changes the line-up and asks the server (app.js).
+   *
+   * ctx: { document, window, grid (the card container), View, armed() -> may the cards be moved now?, commit(from, to, info), onBusy(busy) }
+   * `busy()` is true from the press on a card until it is let go: the caller does not repaint the cards meanwhile (the card in the hand would be replaced
+   * under the finger, and a repaint between the press and the release loses the click).  `clickSuppressed()`: the click that ends a drag must not open the card.
+   */
+  function createSeatDrag(ctx) {
+    const opts = ctx || {};
+    const doc = opts.document || root.document;
+    const win = opts.window || root;
+    const View = opts.View || root.ArenaView;
+    const grid = opts.grid;
+    if (!doc || !grid || !View || typeof grid.addEventListener !== "function") return null;
+    const armed = opts.armed || (() => false);
+    const commit = opts.commit || (() => {});
+    const onBusy = opts.onBusy || (() => {});
+    const setTimer = (fn, ms) => win.setTimeout(fn, ms);
+    const clearTimer = (id) => win.clearTimeout(id);
+
+    const st = { press: null, drag: null, suppressUntil: 0 };
+
+    function closest(target, selector) {
+      let node = target;
+      if (node && typeof node.closest !== "function" && node.parentElement) node = node.parentElement;
+      return node && typeof node.closest === "function" ? node.closest(selector) : null;
+    }
+
+    const cardsOf = () => (typeof grid.querySelectorAll === "function" ? Array.from(grid.querySelectorAll(".pcard[data-actor]")) : []);
+
+    function classOf(node, method, name) {
+      if (node && node.classList && typeof node.classList[method] === "function") node.classList[method](name);
+    }
+
+    function prevent(evt) {
+      if (evt && typeof evt.preventDefault === "function" && evt.cancelable !== false) evt.preventDefault();
+    }
+
+    // ---- the press -------------------------------------------------------------------------------------------------
+    function listen(on) {
+      const method = on ? "addEventListener" : "removeEventListener";
+      if (typeof doc[method] !== "function") return;
+      doc[method]("pointermove", onMove);
+      doc[method]("pointerup", onUp);
+      doc[method]("pointercancel", onCancel);
+      doc[method]("keydown", onEscape);
+      doc[method]("contextmenu", onContextMenu);
+    }
+
+    function endPress() {
+      const p = st.press;
+      if (!p) return;
+      if (p.timer !== null) clearTimer(p.timer);
+      listen(false);
+      const d = st.drag;
+      if (d) {
+        if (d.card && d.card.style) d.card.style.transform = "";
+        classOf(d.card, "remove", "seat-dragging");
+        if (d.to >= 0) classOf(d.cards[d.to], "remove", "seat-target");
+        classOf(grid, "remove", "seats-dragging");
+      }
+      st.press = null;
+      st.drag = null;
+      onBusy(false);
+    }
+
+    function beginDrag() {
+      const p = st.press;
+      if (!p || st.drag) return;
+      const cards = cardsOf();
+      const rects = cards.map((c) => (typeof c.getBoundingClientRect === "function" ? c.getBoundingClientRect() : null));
+      st.drag = { from: p.index, card: p.card, cards, rects, to: -1 };
+      classOf(grid, "add", "seats-dragging");
+      classOf(p.card, "add", "seat-dragging");
+    }
+
+    function moveDrag(x, y) {
+      const d = st.drag;
+      const p = st.press;
+      if (!d || !p) return;
+      if (d.card && d.card.style) d.card.style.transform = `translate(${Math.round(x - p.x)}px, ${Math.round(y - p.y)}px)`;
+      const hit = View.seatIndexAt(d.rects, x, y);
+      const to = hit >= 0 && hit !== d.from ? hit : -1;
+      if (to === d.to) return;
+      if (d.to >= 0) classOf(d.cards[d.to], "remove", "seat-target");
+      if (to >= 0) classOf(d.cards[to], "add", "seat-target");
+      d.to = to;
+    }
+
+    function onMove(evt) {
+      const p = st.press;
+      if (!p || !evt) return;
+      if (p.pointerId !== undefined && evt.pointerId !== undefined && evt.pointerId !== p.pointerId) return;
+      if (evt.pointerType === "mouse" && evt.buttons === 0) {
+        endPress(); // (the button was let go outside the window: nobody told us)
+        return;
+      }
+      const x = Number(evt.clientX) || 0;
+      const y = Number(evt.clientY) || 0;
+      if (!st.drag) {
+        const distance = Math.hypot(x - p.x, y - p.y);
+        if (p.touch) {
+          if (distance > SEAT_TOUCH_SLOP_PX) endPress(); // a swipe: the page scrolls, nothing is moved
+          return;
+        }
+        if (distance < SEAT_DRAG_PX) return;
+        beginDrag();
+      }
+      moveDrag(x, y);
+      prevent(evt);
+    }
+
+    function onUp(evt) {
+      const p = st.press;
+      if (!p) return;
+      if (p.pointerId !== undefined && evt && evt.pointerId !== undefined && evt.pointerId !== p.pointerId) return;
+      const d = st.drag;
+      const from = d ? d.from : -1;
+      const to = d ? d.to : -1;
+      endPress();
+      if (d) {
+        st.suppressUntil = Date.now() + SEAT_CLICK_GUARD_MS;
+        if (to >= 0 && to !== from) commit(from, to, { keyboard: false });
+      }
+    }
+
+    function onCancel() {
+      if (!st.press) return;
+      if (st.drag) st.suppressUntil = Date.now() + SEAT_CLICK_GUARD_MS;
+      endPress();
+    }
+
+    function onEscape(evt) {
+      if (evt && evt.key === "Escape") onCancel();
+    }
+
+    function onContextMenu(evt) {
+      if (st.press && st.press.touch) prevent(evt); // (the long press of a touch is not the menu of the image under the finger)
+    }
+
+    function onTouchMove(evt) {
+      if (st.drag) prevent(evt);
+    }
+
+    function onDown(evt) {
+      if (!evt || (evt.button !== undefined && evt.button !== 0) || evt.isPrimary === false) return;
+      const card = closest(evt.target, ".pcard[data-actor]");
+      if (!card || closest(evt.target, "[data-mark-toggle]")) return;
+      if (!armed()) return; // the game has started / a seat is played / a replay is on screen: the cards are plain buttons
+      endPress();
+      const index = cardsOf().indexOf(card);
+      if (index < 0) return;
+      const touch = evt.pointerType === "touch";
+      st.press = {
+        card,
+        index,
+        x: Number(evt.clientX) || 0,
+        y: Number(evt.clientY) || 0,
+        pointerId: evt.pointerId,
+        touch,
+        timer: null,
+      };
+      if (touch) {
+        st.press.timer = setTimer(() => {
+          if (st.press) st.press.timer = null;
+          if (st.press && !st.drag) beginDrag();
+        }, SEAT_LONG_PRESS_MS);
+      }
+      listen(true);
+      onBusy(true);
+    }
+
+    // ---- the keyboard: Alt+← / Alt+→ with the focus on a card ---------------------------------------------------------
+    function onKey(evt) {
+      if (!evt || !evt.altKey || (evt.key !== "ArrowLeft" && evt.key !== "ArrowRight")) return;
+      const card = closest(evt.target, ".pcard[data-actor]");
+      if (!card || !armed()) return; // (Alt+← is "back" of the browser: nothing is taken from it while the cards cannot be moved)
+      const cards = cardsOf();
+      const from = cards.indexOf(card);
+      if (from < 0) return;
+      prevent(evt);
+      const to = View.seatKeyTarget(from, evt.key, cards.length);
+      if (to !== null) commit(from, to, { keyboard: true });
+    }
+
+    // the browser's own drag of an image (the avatar of a card is an <img>) would take the pointer away: while the cards can be moved it does not start
+    grid.addEventListener("dragstart", (evt) => {
+      if (armed()) prevent(evt);
+    });
+    grid.addEventListener("pointerdown", onDown);
+    grid.addEventListener("keydown", onKey);
+    // a held touch that is being moved must not scroll the page: that needs a listener that may cancel the event - and one that exists BEFORE the finger goes
+    // down (a browser decides at touchstart whether a touchmove can be cancelled), so it is registered once, here, and only cancels while a card is carried
+    grid.addEventListener("touchmove", onTouchMove, { passive: false });
+    // a press that is never let go (the window lost the focus, an alert, the tab went to the background) must not keep the cards frozen
+    if (typeof win.addEventListener === "function") win.addEventListener("blur", onCancel);
+    if (typeof doc.addEventListener === "function") {
+      doc.addEventListener("visibilitychange", () => {
+        if (doc.visibilityState === "hidden") onCancel();
+      });
+    }
+
+    return {
+      busy: () => st.press !== null,
+      dragging: () => st.drag !== null,
+      clickSuppressed: () => Date.now() < st.suppressUntil,
+      armed: () => Boolean(armed()),
+      cancel: onCancel,
+      /** The cards were drawn again (a key move): the focus goes to the card now at `index`, so Alt+← / → can be pressed again. */
+      focusIndex(index) {
+        const node = cardsOf()[index];
+        if (node && typeof node.focus === "function") node.focus();
+      },
+    };
+  }
+
+  root.ArenaLayout = { create, createSeatDrag, NARROW_MAX };
 })(typeof window !== "undefined" ? window : globalThis);

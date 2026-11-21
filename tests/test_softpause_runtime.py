@@ -849,13 +849,14 @@ async def test_after_a_restart_the_game_is_hard_paused_and_the_played_seat_is_un
 
 
 @async_test
-async def test_a_new_game_world_and_a_re_deal_keep_the_played_seat_untimed(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_a_new_game_world_and_a_rebuilt_table_keep_the_played_seat_untimed(monkeypatch: pytest.MonkeyPatch) -> None:
     table = SoftTable(monkeypatch)
     orch = table.orch
     await orch.takeover("p03")
     assert orch.world.untimed_holders == frozenset({"p03"})
-    await orch.shuffle_identities()  # a new world, the same person
-    assert orch.world.untimed_holders == frozenset({"p03"})
+    world = orch.world
+    orch.apply_table()  # a new world (what a new line-up does to a game that has not started: v0.14 has no re-deal), the same person
+    assert orch.world is not world and orch.world.untimed_holders == frozenset({"p03"})
     await orch.release_takeover()
     assert orch.world.untimed_holders == frozenset()
     await orch.takeover("p04")
@@ -874,7 +875,7 @@ async def test_every_way_to_get_another_world_tells_it_who_is_played(monkeypatch
     assert orch.world.untimed_holders == frozenset({"p03"})
 
     world = orch.world
-    await orch._rebuild_idle_world()  # what a new name or avatar does to an idle game: the same seed, a new world
+    await orch.bots_changed(roster=True)  # what a new name or avatar does to an idle game: the same seed, a new world
     assert orch.world is not world and orch.world.untimed_holders == frozenset({"p03"})
 
     world = orch.world

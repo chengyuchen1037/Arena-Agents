@@ -1,5 +1,6 @@
 """The archive part of the mock UI server (tools/mock_ui_server.py: MockArchive): the front end is developed against it,
-so its answers must have the shapes of the real API (docs/v0.12-contracts.md section 11.9)."""
+so its answers must have the shapes of the real API (docs/v0.12-contracts.md section 11.9; v0.14, §13.9: format 2 - the bots, the contract and
+the rules are in it, the logs always are (``include_logs`` is ignored), an archive of format 1 is still read)."""
 
 from __future__ import annotations
 
@@ -53,7 +54,7 @@ def test_the_mock_enforces_the_same_password_rule_as_the_real_one(case: dict) ->
 def test_export_runs_as_a_job_with_validated_progress_events() -> None:
     app, c = make_client()
     with c as client:
-        started = client.post("/api/archive/export", json={"include_keys": False, "include_logs": True})
+        started = client.post("/api/archive/export", json={"include_keys": False})
         assert started.status_code == 202 and set(started.json()) == {"job_id", "kind"}
         job = wait_job(client, started.json()["job_id"])
         assert job["status"] == "done" and job["kind"] == "export" and job["phase"] == "finalize"
@@ -61,16 +62,20 @@ def test_export_runs_as_a_job_with_validated_progress_events() -> None:
         assert result["name"].endswith(".arenaagents") and mock.EXPORT_NAME_RE.fullmatch(result["name"])
         assert result["path"].startswith("D:\\Arena-Agents\\data\\exports"), "a fictional path, never the checkout's"
         assert result["display_path"] == f"data/exports/{result['name']}"
-        assert result["contents"] == {"games": 3, "providers": 2, "roster_seats": 12, "has_secrets": False, "has_logs": True}
+        assert result["contents"] == {"games": 3, "providers": 2, "bots": 12, "contract": True, "rules": 1, "has_secrets": False, "has_logs": True}
         events = archive_events(app)
         assert events and all(mock.validate_event(e) == [] for e in events)
         assert {e["data"]["job_id"] for e in events} == {job["job_id"]}
         assert [e["data"]["phase"] for e in events if e["data"]["status"] == "running"][0] == "flush"
         assert events[-1]["data"]["status"] == "done" and "path" not in events[-1]["data"]["result"]
+        # (H42) the name the browser saves it under is another one than the internal name in data/exports/; the URL keeps the internal one
+        assert result["download_name"] == result["name"].replace("arena-", "arena-agents-", 1) and result["download_name"].startswith("arena-agents-")
         download = client.get(f"/api/archive/exports/{result['name']}")
-        assert download.status_code == 200 and f'filename="{result["name"]}"' in download.headers["content-disposition"]
+        assert download.status_code == 200 and f'filename="{result["download_name"]}"' in download.headers["content-disposition"]
+        assert f"filename*=UTF-8''{result['download_name']}" in download.headers["content-disposition"]
         with zipfile.ZipFile(io.BytesIO(download.content)) as z:
-            assert json.loads(z.read("manifest.json"))["format"] == "arenaagents"
+            manifest = json.loads(z.read("manifest.json"))
+            assert manifest["format"] == "arenaagents" and manifest["format_version"] == 2
 
 
 def test_export_with_keys_needs_a_strong_password() -> None:
@@ -80,9 +85,10 @@ def test_export_with_keys_needs_a_strong_password() -> None:
             response = client.post("/api/archive/export", json={"include_keys": True, "password": password})
             assert response.status_code == 422 and response.json()["code"] == "weak_password"
             assert response.json()["detail"]
+        # (v0.14, H36: the logs cannot be left out any more - ``include_logs: false`` is still accepted and ignored)
         ok = client.post("/api/archive/export", json={"include_keys": True, "password": PASSWORD, "include_logs": False})
         job = wait_job(client, ok.json()["job_id"])
-        assert job["result"]["contents"]["has_secrets"] is True and job["result"]["contents"]["has_logs"] is False
+        assert job["result"]["contents"]["has_secrets"] is True and job["result"]["contents"]["has_logs"] is True
         assert "encrypt" in {e["data"]["phase"] for e in archive_events(app)}
 
 
@@ -113,9 +119,14 @@ def test_import_scenarios_by_file_name() -> None:
         assert body["name"] == "my-demo.arenaagents" and body["size_bytes"] == len(b"not a real archive") and body["expires_in"] > 0
         summary = body["summary"]
         assert (summary["games"], summary["providers"], summary["has_secrets"], summary["has_logs"]) == (3, 2, False, True)
+        assert (summary["format_version"], summary["bots"], summary["contract"], summary["rules"]) == (2, 12, True, 1) and "roster_seats" not in summary
         assert len(summary["game_list"]) == 3 and summary["provider_names"] == ["DeepSeek", "Claude"]
         assert client.get("/api/archive/status").json()["import"]["import_id"] == body["import_id"]
         assert upload(client, "keys.arenaagents").json()["summary"]["has_secrets"] is True
+        # a v0.13 archive (format 1) is still read: its roster of seats becomes bots on import (H45), and the summary says so
+        old = upload(client, "v1-old.arenaagents").json()["summary"]
+        assert (old["format_version"], old["roster_seats"]) == (1, 12) and not ({"bots", "contract", "rules"} & set(old))
+        assert old["warnings"] == ["这是 v0.13 的旧格式存档：名册里的 12 个座位会在导入时迁移成 bot（性格设定变成底层设定，记忆会整理成印象）。"]
 
         refused = {"newer": ("unsupported_version", 422), "corrupt": ("invalid_archive", 422), "huge": ("too_large", 413)}
         for word, (code, status) in refused.items():
@@ -133,7 +144,8 @@ def test_a_real_archive_is_read_by_its_manifest() -> None:
         job = wait_job(client, client.post("/api/archive/export", json={"include_logs": False}).json()["job_id"])
         data = client.get(f"/api/archive/exports/{job['result']['name']}").content
         body = upload(client, "backup.arenaagents", data).json()
-        assert body["summary"]["games"] == 3 and body["summary"]["has_logs"] is False and body["summary"]["archive_id"] == job["result"]["archive_id"]
+        assert body["summary"]["games"] == 3 and body["summary"]["has_logs"] is True and body["summary"]["archive_id"] == job["result"]["archive_id"]
+        assert (body["summary"]["format_version"], body["summary"]["bots"]) == (2, 12)
 
 
 def test_the_upload_limit_and_the_running_game() -> None:

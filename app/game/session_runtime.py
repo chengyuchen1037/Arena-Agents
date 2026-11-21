@@ -16,7 +16,7 @@ Persistence rules (see docs/storage.md):
 * if the last game cannot be restored, the (untouched) files are kept and automatic saving is held
   back until the user explicitly starts or creates a game;
 * a game saved by an older engine (schema < 5, i.e. v0.12.1 or older) is *not* an error state (D3): it
-  stays untouched, a fresh game is created and the user is told why;
+  stays untouched, a fresh game is created and the user is told why (v5 - v0.13 - and v6 saves are both read, v0.14);
 * while the data directory is replaced as a whole (an archive import) nothing may be saved:
   :meth:`SessionRuntimeMixin.persistence_suspended`.
 """
@@ -36,7 +36,7 @@ from app.game.bindings import (
     fill_missing_from_defaults,
     normalized_binding,
 )
-from app.game.session import MODERATOR_ID, SESSION_SCHEMA_VERSION, BindingIssue, GameSession
+from app.game.session import MODERATOR_ID, SUPPORTED_SCHEMA_VERSIONS, BindingIssue, GameSession
 from app.providers.models import ModelBinding
 from app.storage.datadir import DataDirLockedError, ensure_data_dir, release_data_dir
 from app.storage.errors import StorageError
@@ -45,12 +45,12 @@ from app.storage.games import GameNotFoundError
 logger = logging.getLogger(__name__)
 
 OLD_SAVE_NOTICE = (
-    "上次的对局来自旧版本引擎（v0.12.1 及更早），v0.13 不兼容，已保留在原位置、未被改动；"
+    "上次的对局来自旧版本引擎（v0.12.1 及更早），v0.14 不兼容，已保留在原位置、未被改动；"
     "请用 tools/migrate_v0121_to_archive.py 转换后导入。已为你新建了一局。"
 )
 #: The same fact for a game the user asks to open (history "继续"): no new game is created then.
 OLD_SAVE_LOAD_NOTICE = (
-    "这局来自旧版本引擎（v0.12.1 及更早），v0.13 不兼容，不能载入；原文件没有被改动。"
+    "这局来自旧版本引擎（v0.12.1 及更早），v0.14 不兼容，不能载入；原文件没有被改动。"
     "请用 tools/migrate_v0121_to_archive.py 转换后导入。"
 )
 
@@ -358,7 +358,7 @@ class SessionRuntimeMixin:
             self._enter_recovery(last_id, exc)
             return None
         schema = payload.get("schema_version") if isinstance(payload, dict) else None
-        if schema != SESSION_SCHEMA_VERSION:
+        if schema not in SUPPORTED_SCHEMA_VERSIONS:
             # D3: older saves are not compatible.  Keep them, start fresh and say why.
             logger.info("Last session %s uses save format %r; not restoring (incompatible)", last_id, schema)
             self.session.restore_notice = OLD_SAVE_NOTICE
@@ -395,6 +395,7 @@ class SessionRuntimeMixin:
 
         validate_session_id(session_id)
         self._refuse_while_running("载入其他对局")
+        self._refuse_while_learning("载入其他对局")  # type: ignore[attr-defined]
         if session_id == self.session.session_id:
             return self.session
         payload = await asyncio.to_thread(self._games().load, session_id)
@@ -404,6 +405,7 @@ class SessionRuntimeMixin:
         if self._autosave_enabled and not self._recovery_pending:
             await self.persist_session("pre-load-game")  # raises when it cannot: the live game stays untouched
         self._refuse_while_running("载入其他对局")  # (the save above was an await: a start may have slipped in)
+        self._refuse_while_learning("载入其他对局")  # type: ignore[attr-defined]
         return await self._replace_game(loaded, "已载入对局")
 
     async def reload_from_data_dir(self) -> GameSession:
@@ -416,11 +418,14 @@ class SessionRuntimeMixin:
         takes itself otherwise, so no save of the old game can land in the new directory.
         """
         self._refuse_while_running("重新载入数据目录")
-        if self._review_running:  # type: ignore[attr-defined]
+        if self.review_running_ids():  # type: ignore[attr-defined]
             raise RuntimeError("赛后复盘正在进行，请等它结束后再重新载入数据目录。")
+        if self.init_running_ids():  # type: ignore[attr-defined]
+            raise RuntimeError("初始化正在进行，请等它结束（或先取消）后再重新载入数据目录。")
         async with self.persistence_suspended():
             self._autosave_dirty = False
             self._clear_store_caches()
+            self._learning_data_dir_replaced()  # type: ignore[attr-defined]  # (the totals of the initializations are read again)
             old_llm = self.llm
             self.llm = self._rebuild_llm()
             self._recovery_pending = False
@@ -481,8 +486,10 @@ class SessionRuntimeMixin:
             self.reload_config()
         except Exception:  # noqa: BLE001 - keep the config the process started with
             logger.warning("Config reload at startup failed", exc_info=True)
+        if getattr(self, "demo_mode", False):  # the demo starts with every card ✔ (fixed answers, no model)
+            self.demo_prepare()  # type: ignore[attr-defined]
         # The first game was built in the constructor, before the data directory was locked and readable:
-        # take the roster and the defaults from it now (same dealt identities, nothing is saved).
+        # take the bots and the defaults from it now (nothing is saved).
         report["restored"] = await self._restore_last_session()
         if self._recovery_pending:
             report["recovery_error"] = self.recovery_error
@@ -490,8 +497,8 @@ class SessionRuntimeMixin:
             if report["restored"] is None:
                 try:
                     self._reload_fresh_game_from_data_dir()
-                except Exception:  # noqa: BLE001 - a roster problem must not stop the application from coming up
-                    logger.warning("Could not load the roster from the data directory", exc_info=True)
+                except Exception:  # noqa: BLE001 - a problem with the bots must not stop the application from coming up
+                    logger.warning("Could not load the bots from the data directory", exc_info=True)
                 fill_missing_from_defaults(self.session, self._load_defaults())
             self.refresh_binding_issues()
         self._autosave_enabled = True
@@ -506,6 +513,10 @@ class SessionRuntimeMixin:
                 await self.pause("shutdown")
         except Exception:  # noqa: BLE001
             logger.exception("Pausing the game during shutdown failed")
+        try:
+            await self._learning_shutdown()  # type: ignore[attr-defined]  # (runs are cancelled: an initialization writes nothing until its end)
+        except Exception:  # noqa: BLE001
+            logger.exception("Stopping the learning runs during shutdown failed")
         try:
             if self._autosave_enabled:
                 await self.flush_autosave("shutdown")

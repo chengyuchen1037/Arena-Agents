@@ -7,6 +7,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const H = require("./harness.js");
+const M = require("./markup.js");
 
 const { F, target, settle, bootLive } = H;
 require(path.join(H.ROOT, "static", "js", "archive.js")); // (also loaded into every app sandbox by the harness)
@@ -14,15 +15,28 @@ const Archive = globalThis.ArenaArchiveUI.helpers;
 
 const CASES = JSON.parse(fs.readFileSync(path.join(H.ROOT, "tests", "archive", "password_cases.json"), "utf8"));
 const PW = "Correct-Horse-Battery-9";
-const NAME = "arena-20261118-004207.arenaagents";
+const NAME = "arena-20261118-004207.arenaagents"; // the fixed internal name in data/exports/ (the download URL)
+const DOWNLOAD_NAME = "arena-agents-20261118-004207.arenaagents"; // the name the browser saves it under (H42)
 
 const tests = [];
-const test = (name, fn) => tests.push([name, fn]);
+// Every test also checks the markup the page drew by the end of it (the fake DOM never parses markup: a stray </div>, a <div> in a <p> or an id that occurs
+// twice would pass unseen and break the page in a real browser) - see markup.js.
+const envs = [];
+const test = (name, fn) =>
+  tests.push([
+    name,
+    async () => {
+      envs.length = 0;
+      await fn();
+      for (const env of envs) assert.deepEqual(M.envProblems(env, H.HTML_SRC), [], `the markup drawn in "${name}" is well formed`);
+    },
+  ]);
 
 // ---- helpers ----------------------------------------------------------------------------------
 async function live(over = {}, overrides = {}, envOpts = {}) {
   const session = F.makeSession({ event_id: 500, status: "paused", ...over });
   const ctx = await bootLive({ session, ...overrides }, envOpts);
+  envs.push(ctx.env);
   ctx.env.sse("snapshot", { session }, 500);
   return ctx;
 }
@@ -70,12 +84,14 @@ const SUMMARY = (over = {}) => ({
 });
 const EXPORT_RESULT = {
   name: NAME,
+  download_name: DOWNLOAD_NAME,
   display_path: `data/exports/${NAME}`,
   size_bytes: 9800000,
   archive_id: "0123456789abcdef0123456789abcdef",
   created_at: "2026-11-18T00:42:07-08:00",
-  app_version: "v0.13.0",
-  contents: { games: 3, providers: 2, roster_seats: 12, has_secrets: false, has_logs: true },
+  app_version: "v0.14.0",
+  // v2 (v0.14): the bots, the contract, the rules; the logs are always in
+  contents: { games: 3, providers: 2, bots: 12, contract: true, rules: 1, has_secrets: false, has_logs: true },
   file_count: 31,
   uncompressed_bytes: 48000000,
   warnings: [],
@@ -110,14 +126,15 @@ test("pure helpers: sizes and the overall percentage of a job", () => {
 });
 
 // ---- the dialog ----------------------------------------------------------------------------------
-test("⚙ 设置 opens a dialog with exactly two things - export and import; ✕, Esc and the dark backdrop close it", async () => {
+test("⚙ 设置 opens a dialog of five columns; column ① (总存档) has the export and the import; ✕, Esc and the dark backdrop close it", async () => {
   const { env, backend } = await live();
   assert.notEqual(env.el("settings-modal").style.display, "flex");
   await openSettings(env);
   assert.ok(modalOpen(env));
   assert.equal(title(env), "设置");
   const html = body(env);
-  assert.equal([...html.matchAll(/class="settings-section-title"/g)].length, 2);
+  assert.deepEqual([...html.matchAll(/id="settings-col-(\w+)" data-col/g)].map((m) => m[1]), ["archive", "core", "contract", "rules", "games"], "the five columns, in this order (H35)");
+  assert.equal([...html.matchAll(/class="settings-section-title"/g)].length, 2, "the two things of column ①");
   assert.match(textOf(html), /导出存档/);
   assert.match(textOf(html), /导入存档/);
   assert.ok(backend.calls.some((c) => c.method === "GET" && c.url.endsWith("/api/archive/status")), "it asks what the server is doing");
@@ -176,20 +193,17 @@ test("a replay on screen does not hide the live game: the import follows the LIV
 });
 
 // ---- export --------------------------------------------------------------------------------------
-test("export without the API key: ask, ask about the logs (kept by default), start - no password anywhere", async () => {
+test("export without the API key: one question (the key?), then it starts at once - no password, no question about the logs (they are always in, H36)", async () => {
   const { env, backend } = await live();
   await openSettings(env);
   act(env, "export-start");
-  assert.match(title(env), /1\/3 API Key/);
+  assert.match(title(env), /1\/2 API Key/);
   assert.match(textOf(body(env)), /要把 API Key 一起导出吗/);
   assert.match(footer(env), /btn-export-keys-no/);
   act(env, "export-keys-no");
-  assert.match(title(env), /2\/2 思考日志/);
-  assert.match(body(env), /id="chk-archive-logs" checked/, "the logs are included unless the user says otherwise");
-  assert.doesNotMatch(body(env), /input-archive-password/);
-  act(env, "export-run");
   await settle();
-  assert.deepEqual(backend.exportCalls, [{ include_keys: false, include_logs: true }]);
+  assert.ok(!/chk-archive-logs|思考日志/.test(body(env)), "no step about the logs any more");
+  assert.deepEqual(backend.exportCalls, [{ include_keys: false, include_logs: true }], "(v2 servers ignore include_logs: it is always in)");
   assert.equal(title(env), "正在导出存档");
   assert.equal(env.app().archive()._state.export.jobId, "job-export-1");
 });
@@ -200,7 +214,7 @@ test("export with the API key: the password is typed twice, the rule shows live,
   await openSettings(env);
   act(env, "export-start");
   act(env, "export-keys-yes");
-  assert.match(title(env), /2\/3 设置密码/);
+  assert.match(title(env), /2\/2 设置密码/);
   assert.equal(env.el("btn-archive-next").disabled, true);
   const rules = () => env.el("archive-pw-rules").innerHTML;
   assert.match(rules(), /至少 12 位（现在 0 位）/);
@@ -225,13 +239,9 @@ test("export with the API key: the password is typed twice, the rule shows live,
   assert.doesNotMatch(rules(), /class="bad"/);
   assert.match(rules(), /大写✓ 小写✓ 数字✓ 符号✓/);
 
-  act(env, "export-to-logs");
-  assert.match(title(env), /3\/3 思考日志/);
-  env.el("settings-body").dispatch("change", { target: { id: "chk-archive-logs", checked: false } });
-  act(env, "export-run");
+  act(env, "export-run"); // (the password step's own button: "开始导出")
   await settle();
-  assert.deepEqual(backend.exportCalls, [{ include_keys: true, include_logs: false, password: PW }]);
-  // back and forth keeps what was typed
+  assert.deepEqual(backend.exportCalls, [{ include_keys: true, include_logs: true, password: PW }]);
   assert.equal(env.app().archive()._state.export.password, PW);
 });
 
@@ -242,27 +252,24 @@ test("an incomplete / weak password cannot move on, even when the button is clic
   act(env, "export-keys-yes");
   typeInto(env, "input-archive-password", "weak");
   typeInto(env, "input-archive-password2", "weak");
-  act(env, "export-to-logs");
-  assert.match(title(env), /2\/3 设置密码/, "still on the password step");
+  act(env, "export-run");
+  assert.match(title(env), /2\/2 设置密码/, "still on the password step");
   typeInto(env, "input-archive-password", PW);
-  act(env, "export-to-logs");
-  assert.match(title(env), /2\/3 设置密码/, "the entries still differ");
+  act(env, "export-run");
+  assert.match(title(env), /2\/2 设置密码/, "the entries still differ");
 });
 
-test("the way back: logs -> password -> keys; choosing 'no key' forgets a typed password", async () => {
+test("the way back: password -> keys; choosing 'no key' forgets a typed password", async () => {
   const { env, backend } = await live();
   await openSettings(env);
   act(env, "export-start");
   act(env, "export-keys-yes");
   typeInto(env, "input-archive-password", PW);
   typeInto(env, "input-archive-password2", PW);
-  act(env, "export-to-logs");
-  act(env, "export-to-password");
-  assert.match(title(env), /2\/3/);
+  assert.match(title(env), /2\/2 设置密码/);
   act(env, "export-to-keys");
+  assert.match(title(env), /1\/2 API Key/);
   act(env, "export-keys-no");
-  assert.match(title(env), /2\/2/);
-  act(env, "export-run");
   await settle();
   assert.deepEqual(backend.exportCalls, [{ include_keys: false, include_logs: true }], "no password is sent when no key is exported");
 });
@@ -272,7 +279,6 @@ test("progress: SSE events move the bar through the phases; the end opens the re
   await openSettings(env);
   act(env, "export-start");
   act(env, "export-keys-no");
-  act(env, "export-run");
   await settle();
   const job = "job-export-1";
   progress(env, { job_id: job, kind: "export", phase: "flush", done: 0, total: 1 });
@@ -294,7 +300,8 @@ test("progress: SSE events move the bar through the phases; the end opens the re
   assert.equal(savedPath(env), `D:\\Arena-Agents\\data\\exports\\${NAME}`);
   const html = textOf(body(env));
   assert.match(html, /9\.3 MB/);
-  assert.match(html, /3 局对局 · 2 个 Provider · 不含 API Key · 含思考日志/);
+  assert.match(html, /3 局对局 · 12 个 bot · 2 个 Provider · 含官方契约 · 1 个剧本 · 不含 API Key · 含思考日志/);
+  assert.equal((body(env).match(/id="archive-download-name">([^<]*)</) || [])[1], DOWNLOAD_NAME, "the name the user will see in the downloads folder (H42)");
   assert.match(footer(env), /btn-archive-download/);
   assert.ok(env.toasts.some((t) => /存档已导出/.test(t.textContent)));
 });
@@ -304,7 +311,6 @@ test("a remote browser gets no server path: the result shows data/exports/<name>
   await openSettings(env);
   act(env, "export-start");
   act(env, "export-keys-no");
-  act(env, "export-run");
   await settle();
   progress(env, { job_id: "job-export-1", kind: "export", phase: "finalize", done: 1, total: 1, status: "done", result: EXPORT_RESULT });
   await settle(); // (the fake server has no job record: the event's result is what there is)
@@ -317,23 +323,21 @@ test("the download button saves the file through a link; with an access token th
   await openSettings(env);
   act(env, "export-start");
   act(env, "export-keys-no");
-  act(env, "export-run");
   await settle();
   progress(env, { job_id: "job-export-1", kind: "export", phase: "finalize", done: 1, total: 1, status: "done", result: EXPORT_RESULT });
   await settle();
   act(env, "export-download");
-  assert.deepEqual(env.downloads, [{ href: `/arena/api/archive/exports/${NAME}`, download: NAME }]);
+  assert.deepEqual(env.downloads, [{ href: `/arena/api/archive/exports/${NAME}`, download: DOWNLOAD_NAME }], "the URL has the internal name, the file is saved under the download name");
 
   const secured = await live({}, { requireToken: "tok" }, { storedToken: "tok" });
   await openSettings(secured.env);
   act(secured.env, "export-start");
   act(secured.env, "export-keys-no");
-  act(secured.env, "export-run");
   await settle();
   progress(secured.env, { job_id: "job-export-1", kind: "export", phase: "finalize", done: 1, total: 1, status: "done", result: EXPORT_RESULT });
   await settle();
   act(secured.env, "export-download");
-  assert.deepEqual(secured.env.downloads, [{ href: `/arena/api/archive/exports/${NAME}?token=tok`, download: NAME }]);
+  assert.deepEqual(secured.env.downloads, [{ href: `/arena/api/archive/exports/${NAME}?token=tok`, download: DOWNLOAD_NAME }]);
 });
 
 test("the dialog can be closed while the server packs; the result pops up when it is done", async () => {
@@ -341,7 +345,6 @@ test("the dialog can be closed while the server packs; the result pops up when i
   await openSettings(env);
   act(env, "export-start");
   act(env, "export-keys-no");
-  act(env, "export-run");
   await settle();
   progress(env, { job_id: "job-export-1", kind: "export", phase: "pack", done: 1, total: 4 });
   act(env, "close");
@@ -435,7 +438,6 @@ test("the poll catches a finish the stream missed", async () => {
   await openSettings(env);
   act(env, "export-start");
   act(env, "export-keys-no");
-  act(env, "export-run");
   await settle();
   backend.archiveJobs["job-export-1"] = { job_id: "job-export-1", kind: "export", phase: "pack", done: 1, total: 4, status: "running" };
   runDialogTimer(env);
@@ -454,7 +456,6 @@ test("an export that fails ends in a message with the reason and a way to start 
   await openSettings(env);
   act(env, "export-start");
   act(env, "export-keys-no");
-  act(env, "export-run");
   await settle();
   const fail = { job_id: "job-export-1", kind: "export", phase: "pack", done: 1, total: 4, status: "error", code: "io_error", message: "磁盘空间不足，导出已中止。" };
   progress(env, fail);
@@ -463,7 +464,7 @@ test("an export that fails ends in a message with the reason and a way to start 
   progress(env, fail); // (the poll reports it again)
   assert.equal(title(env), "导出失败");
   act(env, "export-start");
-  assert.match(title(env), /1\/3 API Key/, "start over");
+  assert.match(title(env), /1\/2 API Key/, "start over");
 });
 
 test("the server refusing the password (422 weak_password) sends the user back to the password step with the reason", async () => {
@@ -473,10 +474,9 @@ test("the server refusing the password (422 weak_password) sends the user back t
   act(env, "export-keys-yes");
   typeInto(env, "input-archive-password", PW);
   typeInto(env, "input-archive-password2", PW);
-  act(env, "export-to-logs");
   act(env, "export-run");
   await settle();
-  assert.match(title(env), /2\/3 设置密码/);
+  assert.match(title(env), /2\/2 设置密码/);
   assert.match(textOf(body(env)), /密码至少需要 12 位（现在 5 位）。/);
   assert.equal(env.el("btn-archive-next").disabled, false, "what was typed is still there");
 });
@@ -486,7 +486,6 @@ test("another failure of the POST (a running import, no disk) is shown as an exp
   await openSettings(env);
   act(env, "export-start");
   act(env, "export-keys-no");
-  act(env, "export-run");
   await settle();
   assert.equal(title(env), "导出失败");
   assert.match(textOf(body(env)), /已有一个导出或导入任务正在进行/);
@@ -552,7 +551,8 @@ test("import: choose a file, the upload shows its progress (XHR), then the serve
   assert.match(facts, /v0\.13\.0/);
   assert.match(facts, /对局 3 局/);
   assert.match(facts, /Provider 2 个（DeepSeek、Claude）/);
-  assert.match(facts, /名册 12 个座位/);
+  assert.match(facts, /名册 12 个座位（旧格式：导入时迁移成 bot）/, "a v0.13 archive (format 1) still has a roster of seats");
+  assert.doesNotMatch(facts, /玩家（bot）|官方契约 (含|不含)|规则 \d+ 个剧本/, "(a v1 archive has no bots / contract / rules of its own)");
   assert.match(facts, /API Key 不含/);
   assert.match(facts, /思考日志 含/);
   assert.match(facts, /将\s*整体替换当前数据.*旧数据会先备份到\s*data\/backups\/.*最近 3 份/);

@@ -400,16 +400,16 @@ def overview(c: Canvas) -> None:
 
     # ---- Row 1: browser
     c.card(X, y1, W, h1, c.L("浏览器 · 单页观战界面", "Browser · single-page spectator UI"), "sky", sub="static/")
-    c.chips(X + 16, y1 + 40, [c.L("参与者栏", "Participants"), c.L("频道栏", "Channels"), c.L("信息流 + 请求卡片", "Feed + request cards"), c.L("玩家详情", "Player details"), c.L("上限 · 价格 · 名册", "Limit · Prices · Roster")], "sky", max_x=R - 16)
-    c.chips(X + 16, y1 + 68, [c.L("视角 · 接管", "Viewpoint · take over"), c.L("频道输入框 · 技能", "Channel input · ability"), c.L("历史 · 重放", "History · replay"), c.L("⚙ 设置：导出 / 导入存档", "⚙ Settings: archive")], "sky", max_x=R - 16)
+    c.chips(X + 16, y1 + 40, [c.L("参与者栏", "Participants"), c.L("频道栏", "Channels"), c.L("信息流 + 请求卡片", "Feed + request cards"), c.L("bot 面板", "Bot panel"), c.L("上限 · 价格", "Limit · Prices")], "sky", max_x=R - 16)
+    c.chips(X + 16, y1 + 68, [c.L("视角 · 接管", "Viewpoint · take over"), c.L("频道输入框 · 技能", "Channel input · ability"), c.L("历史 · 重放", "History · replay"), c.L("⚙ 设置：五栏", "⚙ Settings: 5 sections")], "sky", max_x=R - 16)
     # ---- Row 2: API
     c.card(X, y2, W, h2, "FastAPI · app/api", "blue")
-    c.chips(X + 16, y2 + 40, ["/api/state", "/api/events", "/api/control/*", "/api/roster*", "/api/budget", "/api/pricing/*"], "blue", mono=True, size=11.5, pad=8, gap=6, max_x=R - 16)
+    c.chips(X + 16, y2 + 40, ["/api/state", "/api/events", "/api/control/*", "/api/bots*", "/api/budget", "/api/pricing/*"], "blue", mono=True, size=11.5, pad=8, gap=6, max_x=R - 16)
     c.chips(X + 16, y2 + 68, ["/api/takeover*", "/api/seat/*", "/api/games*", "/api/archive/*"], "blue", mono=True, size=11.5, pad=8, gap=6, max_x=R - 16)
     # ---- Row 3: orchestrator
     c.card(X, y3, W, h3, "GameOrchestrator · app/game", "slate")
-    c.chips(X + 16, y3 + 40, [c.L("开始 / 暂停 / 继续", "start / pause / resume"), c.L("按局预算", "per-game budget"), c.L("名册 · 复盘 · 完善", "roster · review · refine"), c.L("存档 v5 · 自动保存", "save v5 · autosave")], "slate", max_x=R - 16)
-    c.chips(X + 16, y3 + 68, [c.L("接管座位 Takeover", "seat takeover"), c.L("重放投影 Replay", "replay projection"), c.L("模型绑定", "model bindings"), c.L("演示机器人", "demo bots")], "slate", max_x=R - 16)
+    c.chips(X + 16, y3 + 40, [c.L("开始 / 暂停 / 继续", "start / pause / resume"), c.L("按局预算", "per-game budget"), c.L("bot 阵容 · 开局检查 · 发牌", "bot line-up · start check · deal"), c.L("初始化 · 复盘", "initialize · review")], "slate", max_x=R - 16)
+    c.chips(X + 16, y3 + 68, [c.L("接管座位 Takeover", "seat takeover"), c.L("重放投影 Replay", "replay projection"), c.L("模型绑定", "model bindings"), c.L("存档 v6（读 v5）· 自动保存", "save v6 (reads v5) · autosave"), c.L("演示机器人", "demo bots")], "slate", max_x=R - 16)
     # ---- Row 4: runtime
     c.card(X, y4, W, h4, c.L("Runtime · app/runtime（asyncio）", "Runtime · app/runtime (asyncio)"), "indigo", sub=c.L("13 个 Agent = Actor + Worker", "13 agents = Actor + Worker"))
     c.rect(X + 14, y4 + 44, W - 28, 28, rx=14, fill="#ffffff", stroke=THEMES["indigo"]["stroke"], sw=1.2)
@@ -426,7 +426,7 @@ def overview(c: Canvas) -> None:
         px += (116 if wide else 92) + 10
     c.chips(X + 14, y4 + 134, ["ConversationBook", "LlmGate", "UsageBook", "TraceLog", "EventBus"], "indigo", size=11.5, pad=9, gap=6, max_x=R - 14)
     # ---- Row 5: brain
-    c.card(X, y5, W, h5, "Brain · app/agents", "violet", sub=c.L("提示词 · 工具 · 上下文", "prompts · tools · context"))
+    c.card(X, y5, W, h5, "Brain · app/agents", "violet", sub=c.L("BotBrain + Composer（四层记忆）· 工具 · 上下文", "BotBrain + Composer (4 memory layers) · tools · context"))
     c.chips(X + 16, y5 + 42, ["system prompt + tool schemas", c.L("FULL / DELTA 消息", "FULL / DELTA messages"), c.L("工具执行 → Intent", "tool execution → Intent"), c.L("笔记 · 压缩", "notes · compaction")], "violet", size=11.8, pad=9, gap=6, max_x=R - 16)
     # ---- Row 6: world
     c.card(X, y6, W, h6, "World · app/world", "emerald", sub=c.L("同步 · 单线程 · 与游戏无关", "synchronous · single-threaded · game-agnostic"))
@@ -437,9 +437,9 @@ def overview(c: Canvas) -> None:
     ws_h = y3 + h3 - y2 + 18
     c.card(SX, y2, SW, ws_h, c.L("数据目录 data/", "Data directory data/"), "slate", dash="6 4")
     yy = y2 + 52
-    for it in ["secrets.v1.enc", "providers.json", "settings.json", "roster/", "games/<id>/game.json", "logs/trace-*.jsonl", "pricing.json"]:
+    for it in ["secrets.v1.enc", "providers.json", "settings.json", "contract/ · rules/", "bots/", "games/<id>/game.json", "logs/trace-*.jsonl", "pricing.json"]:
         c.text(SX + 18, yy, it, size=12, mono=True, fill=INK2, max_w=SW - 36)
-        yy += 20
+        yy += 19
     c.text(SX + 18, yy + 14, c.L("只有 API Key 加密（第一项）", "only the API keys are encrypted"), size=11.5, fill=MUTED, max_w=SW - 34)
     c.text(SX + 18, yy + 30, c.L("其余明文 · 导出 = .arenaagents", "the rest is plain · export = .arenaagents"), size=11.5, fill=MUTED, max_w=SW - 34)
 
@@ -764,7 +764,7 @@ def worker(c: Canvas) -> None:
     corner_state(c, bx + bw, y, "acting")
     # tools note (right of ④)
     hN = c.box(sx, max(y - 6, dcy - 52 + hA + 14), sw_, None, c.L("工具的去处", "Where tools go"), "amber",
-               body=c.L("世界类 → `Intent`（`based_on_seq`）→ 提交闸门 → `Receipt`，作为工具结果；共享类：笔记 · 文档 · `compact_context`；`sleep(seconds?)`：`ends_run`，可带游戏时钟闹钟。", "World tools → `Intent` (`based_on_seq`) → commit gate → `Receipt` as the tool result; shared tools: notes · documents · `compact_context`; `sleep(seconds?)`: `ends_run`, optionally with a game-clock alarm."), size=11.3)
+               body=c.L("世界类 → `Intent`（`based_on_seq`）→ 提交闸门 → `Receipt`，作为工具结果；共享类：笔记 · `compact_context` · `jot` · `read_contract`（bot）· 文档（主持人）；`sleep(seconds?)`：`ends_run`，可带游戏时钟闹钟。", "World tools → `Intent` (`based_on_seq`) → commit gate → `Receipt` (tool result); shared: notes · `compact_context` · `jot` · `read_contract` (bots), documents (moderator); `sleep(seconds?)`: `ends_run`, optional game-clock alarm."), size=11.3)
     c.arrow([(mcx, y + h4), (mcx, y + h4 + 26)], color="#4f46e5")
     y = y + h4 + 26
     # ⑤ maintain
@@ -800,9 +800,9 @@ def worker(c: Canvas) -> None:
     # ---- right column
     ry = 100
     rows = [
-        ("system", c.L("角色 · 规则 · 手册 · 性格 · 记忆", "role · rules · manual · persona · memory"), "slate", True),
+        ("system", c.L("角色 · 规则 · 手册 · 记忆 L0–L2", "role · rules · manual · memory L0–L2"), "slate", True),
         ("tools", c.L("工具 schema", "tool schemas"), "slate", True),
-        ("user · FULL", c.L("状态板 · 笔记 · 可见历史", "board · notes · history"), "blue", False),
+        ("user · FULL", c.L("状态板 · 硬事实台 · 笔记 · 历史", "board · facts · notes · history"), "blue", False),
         ("assistant", c.L("思考 · 工具调用 → 工具结果", "thinking · tool calls → results"), "amber", False),
         ("user · DELTA", c.L("新条目 · 状态板变化", "new entries · board changes"), "emerald", False),
         ("assistant", c.L("工具调用 → 工具结果", "tool calls → results"), "amber", False),
@@ -846,10 +846,10 @@ def worker(c: Canvas) -> None:
 
     # ---- what the Brain tells the model (fills the right column down to the loop's bottom)
     by2 = gy + cardB + 20
-    full_t = c.L("FULL（对话的第一条）：状态板（现在能不能发言、发言权、待答请求、能力、标签）· 私人笔记与压缩摘要 · 可见历史（有长度预算）· 唤醒原因。",
-                 "FULL (first message): the board (can I speak now, floors, open requests, abilities, tags) · private notes and compaction summary · visible history (length-budgeted) · wake reasons.")
-    delta_t = c.L("DELTA（之后每次激活或合并）：`seen_seq` 之后的新条目 · 状态板里可行动的变化（`diff_board`）· 唤醒原因；没有新东西就不发。",
-                  "DELTA (every later activation or merge): entries after `seen_seq` · actionable changes of the board (`diff_board`) · wake reasons; nothing new, nothing sent.")
+    full_t = c.L("FULL（对话的第一条）：状态板（现在能不能发言、发言权、待答请求、能力、标签）· 硬事实台 · 私人笔记与压缩摘要 · 可见历史（有长度预算）· 唤醒原因。",
+                 "FULL (first message): the board (can I speak now, floors, open requests, abilities, tags) · the hard-facts table · private notes and compaction summary · visible history (length-budgeted) · wake reasons.")
+    delta_t = c.L("DELTA（之后每次激活或合并）：`seen_seq` 之后的新条目 · 状态板里可行动的变化（`diff_board`）· 唤醒原因；没有新东西就不发。bot 轮到发言或要作答时，消息末尾另有一段「此刻的提醒」（不进系统提示词）。",
+                  "DELTA (every later activation or merge): entries after `seen_seq` · actionable changes of the board (`diff_board`) · wake reasons; nothing new, nothing sent. When it is a bot's turn to speak or answer, the message ends with a short hint (never in the system prompt).")
     safe_t = c.L("玩家写的内容一律按“不可信数据”处理；称呼统一是 `N3 Carol`（工具参数用 id，说话用名字）。",
                  "What players write is always treated as untrusted data; people are called `N3 Carol` (ids in tool arguments, names in speech).")
     cardC = 32 + 14 + sum(c.wheight(t_, RW - 32, 11.5, 16) + 8 for t_ in (full_t, delta_t, safe_t)) + 6

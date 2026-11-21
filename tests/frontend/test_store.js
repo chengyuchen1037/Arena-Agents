@@ -34,7 +34,11 @@ test("normalizeSession fills every field the renderers read (even from {})", () 
   // v0.12.1 fields
   assert.deepEqual(s.budget, { max_tokens: null, max_cost_usd: null, force_stop: false, used_tokens: 0, used_cost_usd: 0, state: "ok" });
   assert.equal(s.memory_enabled, true);
-  assert.deepEqual(s.review, { available: false, done: [], running: false, progress: {} });
+  // v0.14 (§13.8): supported (a v5 game cannot be reviewed), the 60 seconds, what a running review has left
+  assert.deepEqual(s.review, { available: false, done: [], running: false, supported: true, deadline_s: 60, seconds_left: null, progress: {} });
+  assert.equal(s.dealt, true, "a server that does not say has dealt: its games always show the identities");
+  assert.deepEqual(s.system_status, { code: "", text: "", reason: "" });
+  assert.deepEqual(s.bots, { lineup: [], bots: [], memory_enabled: true, init_job: null, ready: { ok: true, problems: [] }, learning_usage: { calls: 0, tokens: 0, cost_usd: 0 } });
   assert.equal(s.stall_notice, "");
   assert.equal(s.demo, false);
   assert.equal("execution_depth" in s, false, "the execution depth is gone");
@@ -565,7 +569,7 @@ test("the moderator has a random avatar of its own: a snapshot keeps it, roster.
 test("review.progress tracks running / done / error per player; done players are remembered", () => {
   const s = fresh();
   let r = apply(s, "review.progress", { id: "N1", state: "running", message: "正在复盘…" });
-  assert.deepEqual(r.reviewEvent, { id: "N1", state: "running", message: "正在复盘…" });
+  assert.deepEqual(r.reviewEvent, { id: "N1", state: "running", message: "正在复盘…", bot_id: "", name: "", seconds_left: null, deadline_s: 60 });
   assert.equal(r.dirty.topbar, true, "the 复盘全部 button shows the progress");
   assert.equal(r.dirty.board, true);
   assert.equal(s.review.running, true);
@@ -656,6 +660,128 @@ test("mergeDirty / anyDirty combine repaint flags", () => {
   assert.equal(a.channels, false);
   assert.equal(Store.anyDirty(a), true);
   assert.equal(Store.anyDirty(Store.newDirty(true)), true);
+});
+
+// ---- v0.14: the bots at the table, the deal, the status label, the init / review progress (contract §13.7 / §13.8) -------------
+test("a session carries `dealt`, `system_status` and `bots`; every participant knows its bot and the bot's initialization status", () => {
+  const s = Store.normalizeSession(F.makeSession({ status: "idle", dealt: false, system_status: { code: "before_game", text: "对局前", reason: "" } }));
+  assert.equal(s.dealt, false);
+  assert.deepEqual(s.system_status, { code: "before_game", text: "对局前", reason: "" });
+  assert.equal(s.bots.bots.length, 12);
+  assert.deepEqual(s.bots.lineup, F.BOT_IDS);
+  assert.deepEqual(s.participants.map((p) => p.bot_id), F.BOT_IDS);
+  assert.ok(s.participants.every((p) => p.init_status === "ready"));
+  // a v5 game has no bots: "" and null; an unknown status is "not known" (null), never a made-up ✔
+  const v5 = Store.normalizeSession({ participants: [{ id: "N1" }, { id: "N2", bot_id: "b-1", init_status: "weird" }] });
+  assert.deepEqual([v5.participants[0].bot_id, v5.participants[0].init_status], ["", null]);
+  assert.deepEqual([v5.participants[1].bot_id, v5.participants[1].init_status], ["b-1", null]);
+  // an unknown system status code is shown as none (the page then falls back to the old status text)
+  assert.deepEqual(Store.normalizeSystemStatus({ code: "weird", text: "x", reason: "y" }), { code: "", text: "x", reason: "y" });
+});
+
+test("normalizeBots: every field typed, problems grouped, `limits` / `defaults` kept only when they are there", () => {
+  const raw = F.makeBotsFull({
+    init_job: { job_id: "j1", state: "running", ids: [F.botId(1)], started_at: 1763800000, deadline_s: 120 },
+    ready: { ok: false, problems: [F.makeProblem("bot", [{ code: "stale", message: "初始化之后契约变了。", fix: "init" }], { bot_id: F.botId(2), seat: "N2", name: "Bob" })] },
+  });
+  const b = Store.normalizeBots(raw);
+  assert.equal(b.bots.length, 12);
+  assert.deepEqual(b.bots[0].core.chars, raw.bots[0].core.chars);
+  assert.equal(b.bots[0].init.status, "ready");
+  assert.equal(b.bots[0].frozen, true);
+  assert.deepEqual(b.init_job, { job_id: "j1", state: "running", ids: [F.botId(1)], started_at: 1763800000, deadline_s: 120 });
+  assert.deepEqual(b.ready.problems[0], { scope: "bot", bot_id: F.botId(2), seat: "N2", name: "Bob", items: [{ code: "stale", message: "初始化之后契约变了。", fix: "init" }] });
+  assert.equal(b.ready.ok, false);
+  assert.equal(b.limits.core_limits.voice, 600);
+  assert.equal(b.defaults.length, 12);
+  assert.equal("limits" in Store.normalizeBots(F.makeBots()), false, "the live part has no limits");
+  // garbage becomes harmless defaults
+  const bad = Store.normalizeBots({ bots: [null, { id: "b-1", init: { status: "weird" }, memory_stats: "x", staging: "many" }], ready: { problems: [{ items: [null, { code: 5 }] }] } });
+  assert.equal(bad.bots.length, 1);
+  assert.equal(bad.bots[0].init.status, "uninitialized");
+  assert.equal(bad.bots[0].staging, 0);
+  assert.deepEqual(bad.bots[0].memory_stats.people, 0);
+  assert.equal(bad.ready.ok, false, "a list of problems says not ready, whatever `ok` says");
+});
+
+test("bots.updated replaces the live BotsPayload and the seats' bot / status follow it; session.updated cannot overwrite it", () => {
+  const s = fresh();
+  const stale = F.makeBots();
+  stale.bots[2] = F.makeBotSummary(3, { init: { status: "stale", stale: ["contract"] } });
+  const r = apply(s, "bots.updated", { bots: stale });
+  assert.equal(r.botsEvent, s.bots);
+  assert.equal(s.bots.bots[2].init.status, "stale");
+  assert.equal(s.participants[2].init_status, "stale", "the card of seat 3 shows ⚠ now");
+  assert.equal(s.participants[0].init_status, "ready");
+  assert.deepEqual([r.dirty.board, r.dirty.topbar, r.dirty.popover], [true, true, true]);
+  // a new line-up: the bot of seat 1 is the one that was in seat 2
+  const order = F.makeBots();
+  const [a, b2] = order.bots.slice(0, 2);
+  order.bots[0] = { ...b2, seat: "N1" };
+  order.bots[1] = { ...a, seat: "N2" };
+  order.lineup = order.bots.map((x) => x.id);
+  apply(s, "bots.updated", { bots: order });
+  assert.equal(s.participants[0].bot_id, F.botId(2));
+  assert.equal(s.participants[1].bot_id, F.botId(1));
+  // session.updated never replaces the collection that has an event of its own
+  apply(s, "session.updated", { bots: { lineup: [], bots: [] }, memory_enabled: false });
+  assert.equal(s.bots.bots.length, 12);
+  assert.equal(s.memory_enabled, false);
+  // session.updated carries the status label, the deal and the review of the new shapes
+  apply(s, "session.updated", { system_status: { code: "reviewing", text: "复盘中", reason: "" }, dealt: true, review: { available: true, done: [], running: true, supported: true, deadline_s: 60, seconds_left: 41 } });
+  assert.deepEqual(s.system_status, { code: "reviewing", text: "复盘中", reason: "" });
+  assert.equal(s.review.seconds_left, 41);
+  assert.equal(s.review.running, true);
+});
+
+test("bot.init.progress: the newest event of every bot of the running job is kept; a new job starts a clean list", () => {
+  const s = fresh();
+  const ev1 = { job_id: "j1", bot_id: F.botId(1), name: "Alice", state: "running", seconds_left: 100, deadline_s: 120, files_written: ["arch_notes"], error: null };
+  let r = apply(s, "bot.init.progress", ev1);
+  assert.deepEqual(r.initEvent, ev1);
+  assert.deepEqual(s.init_progress[F.botId(1)], ev1);
+  assert.equal(r.dirty.board, true);
+  apply(s, "bot.init.progress", { ...ev1, bot_id: F.botId(2), name: "Bob", state: "queued", seconds_left: null, files_written: [] });
+  apply(s, "bot.init.progress", { ...ev1, seconds_left: 99, files_written: ["arch_notes", "digest"] });
+  assert.equal(Object.keys(s.init_progress).length, 2);
+  assert.deepEqual(s.init_progress[F.botId(1)].files_written, ["arch_notes", "digest"]);
+  apply(s, "bot.init.progress", { ...ev1, job_id: "j2", seconds_left: 120 });
+  assert.deepEqual(Object.keys(s.init_progress), [F.botId(1)], "the entries of the older job are gone");
+  // an unknown state counts as running; a failure keeps its reason; garbage without a bot is a no-op
+  const failed = apply(s, "bot.init.progress", { job_id: "j2", bot_id: F.botId(3), state: "failed", error: "模型调用失败", deadline_s: 120 }).initEvent;
+  assert.deepEqual([failed.state, failed.error, failed.seconds_left, failed.files_written], ["failed", "模型调用失败", null, []]);
+  assert.equal(apply(s, "bot.init.progress", { job_id: "j2", bot_id: F.botId(4), state: "weird" }).initEvent.state, "running");
+  assert.equal(apply(s, "bot.init.progress", {}).initEvent, null);
+  assert.equal("init_progress" in Store.normalizeSession(F.makeSession()), false, "it is the client's own state: not part of a snapshot");
+});
+
+test("review.progress (v0.14): queued -> running with a countdown -> done / timeout with `changes`; a timed-out review counts as done", () => {
+  const s = fresh();
+  let r = apply(s, "review.progress", { id: "N3", bot_id: F.botId(3), name: "Carol", state: "queued", message: "排队中…", seconds_left: null, deadline_s: 60, changes: null });
+  assert.equal(s.review.running, true, "queued counts: the review is under way");
+  assert.deepEqual([r.reviewEvent.bot_id, r.reviewEvent.name, r.reviewEvent.seconds_left], [F.botId(3), "Carol", null]);
+  r = apply(s, "review.progress", { id: "N3", bot_id: F.botId(3), name: "Carol", state: "running", message: "正在复盘…", seconds_left: 44, deadline_s: 60, changes: null });
+  assert.equal(s.review.progress.N3.seconds_left, 44);
+  assert.equal("changes" in r.reviewEvent, false, "only a finished review has changes");
+  const changes = { files: [{ file: "people", before: "", after: "- Bob：话少" }, { file: "playbook", before: "a", after: "b" }], proposals: 1 };
+  r = apply(s, "review.progress", { id: "N3", bot_id: F.botId(3), name: "Carol", state: "timeout", message: "到了 60 秒", seconds_left: 0, deadline_s: 60, changes });
+  assert.deepEqual(r.reviewEvent.changes, changes);
+  assert.deepEqual(s.review.progress.N3.changes, changes);
+  assert.deepEqual(s.review.done, ["N3"]);
+  assert.equal(s.review.running, false);
+  r = apply(s, "review.progress", { id: "N4", state: "error", message: "模型不可用", changes: null });
+  assert.deepEqual(s.review.done, ["N3"], "an error is not done: it can be asked for again");
+  assert.deepEqual(Store.normalizeReviewChanges({ files: [{ file: "people" }, null, { before: "x" }], proposals: "2" }), { files: [{ file: "people", before: "", after: "" }], proposals: 2 });
+  assert.equal(Store.normalizeReviewChanges(null), null);
+});
+
+test("a snapshot and a call line of purpose `init` (H24): the error log knows the new purpose", () => {
+  assert.equal(Store.normalizeCall(F.makeCall(1, { purpose: "init", actor_id: F.botId(1), actor_name: "Alice" })).purpose, "init");
+  assert.equal(Store.normalizeCall(F.makeCall(2, { purpose: "weird" })).purpose, "turn");
+  const r = apply(fresh(), "snapshot", { session: F.makeSession({ status: "idle", dealt: false }) });
+  assert.equal(r.replaced, true);
+  assert.equal(r.session.dealt, false);
+  assert.equal(r.session.bots.bots.length, 12);
 });
 
 // ---- runner -----------------------------------------------------------------------------------

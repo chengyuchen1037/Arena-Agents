@@ -1,0 +1,100 @@
+# L4 · 警长票：报查杀的真预言家，对发金水的悍跳狼
+# 在测什么：站边准确率：一个预言家报了一个查杀（报错了自己就走），另一个预言家给别人发了金水（无法验证），第三位候选人退了水。该投谁？
+# 被测座位：N9（villager）；12 人暗牌局（werewolf_12p 2.2.0）。局面：第 1 天警长竞选：N2、N6、N8 上警，N2 自称预言家（验 N5，金水），N6 自称预言家（验 N4，查杀），N8 退水并列出可核对的几点、不定票；警下 9 位玩家投票，被测座位是其中之一。
+# 来源：本机存档 2b91 的决策点 #106。保留的是结构——座位和真实身份、谁跳了预言家、报了什么查验、谁退水、其余玩家的票型和立场；所有发言都是重写的（脱敏）：没有存档里的原话，名字用默认名。
+# 存档终局揭晓的真相：N6 才是预言家（他报的查杀 N4 属实：N4 确实是狼）；N2 是悍跳的狼，他给 N5 的金水是随手发的一张好人牌（N5 是平民）。
+# 正确的警长票：N6（truth.answer）；投给 N2 是站错了边（truth.wrong）。
+# 陷阱：N2 的发言更长、更像在“立规矩”，把验人的理由和警徽流的排法都摆出来了；N6 更短更硬，还指出了 N2 警徽流的“省事”之处；N8 的退水发言看上去最中立、最有条理，容易让人觉得“两边都有道理”。
+# 真实走向：警下 9 人里 5 人投了 N2（悍跳的狼）、4 人投了真预言家 N6；N2 当选警长；第 1 天白狼王自爆带走了 N6；终局狼人阵营获胜。（被测座位在存档里选了 N2。）
+# 本文件由 bench/cases/l4.py 生成，不要手改：改代码后运行 `python -m bench fixtures` 重写。
+format: arena-situation
+version: 1
+id: l4-sheriff-kill-check-vs-gold-check
+title: 警长票：报查杀的真预言家，对发金水的悍跳狼
+tags: [L4, real, sheriff, side]
+scenario: werewolf_12p
+seed: 4103
+deal: start
+players:
+  count: 12
+  names: [Alice, Bob, Carol, David, Eve, Frank, Grace, Henry, Ivy, Jack, Kate, Leo]
+roles: [hunter, werewolf, villager, werewolf, villager, seer, witch, villager, villager, white_wolf, werewolf, guard]
+
+steps:
+  - {as: moderator, tool: set_phase, args: {text: 准备阶段 · 建立频道}, at: 3.0}
+  - {as: moderator, tool: create_channel, args: {channel_id: public, name: 公共频道, type: public, mode: closed, members: [N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12]}}
+  - {as: moderator, tool: create_channel, args: {channel_id: wolf-team, name: 狼人阵营, type: group, mode: closed, members: [N2, N4, N10, N11]}, at: 3.4}
+  - {as: moderator, tool: send_message, args: {channel_id: wolf-team, content: 你们是狼人阵营的队友：N2、N4、N10、N11。夜间会在这里商议，并用“刀口”请求拍刀；允许自刀或空刀。}, at: 4.9}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 对局开始。本局是 12 人暗牌局：出局不公布身份和死因。夜间行动由我私下询问，请留意你的待处理请求。}, at: 5.9}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 夜}, at: 9.9}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 第 1 夜，天黑请闭眼。}, at: 10.0}
+  - {as: moderator, tool: open_request, args: {to: [N12], kind: choice, question: 第 1 夜：请选择今晚守护的玩家（可以守自己，也可以空守；不能连续两晚守护同一人）。, options: [{id: none, label: 空守}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], default: none}, label: guard1, at: 12.0}
+  - {as: N12, tool: respond, args: {request_id: '@guard1', value: none}, at: 17.8}
+  - {as: moderator, tool: update_player, args: {player_id: N12, set_attributes: {last_guard: ''}}, at: 18.8}
+  - {as: moderator, tool: open_floor, args: {channel_id: wolf-team, mode: free, holders: [N2, N4, N10, N11], limits: {duration_s: 100, max_messages_per_member: 6, max_chars_per_message: 300, max_chars_total: 3000, silence_s: 40}}, at: 20.8}
+  - {as: moderator, tool: open_request, args: {to: [N2, N4, N10, N11], kind: choice, question: 第 1 夜：请和队友商量后选定今晚的刀口（可以自刀，也可以空刀）。你可以随时改选，队友的选择实时可见；大家选得一致，刀口立刻确定。, options: [{id: none, label: 空刀}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], share_answers: true, auto_close: unanimous, duration_s: 150}, label: wolf1, at: 21.8}
+  - {as: moderator, tool: send_message, args: {channel_id: wolf-team, content: 第 1 夜：请商议今晚的刀口，并用你的“刀口”请求拍刀；想改就再选一次，队友的选择大家都看得到。大家选得一致，刀口立刻确定。}, at: 22.3}
+  - {answer: '@wolf1', values: {N2: N7, N4: N7, N10: N7, N11: N7}, at: 29.9}
+  - {as: moderator, tool: close_floor, args: {channel_id: wolf-team}, at: 31.9}
+  - {as: moderator, tool: announce, args: {channel_id: wolf-team, template_id: wolf_target, params: {target: N7}}, at: 33.4}
+  - {as: moderator, tool: open_request, args: {to: [N6], kind: choice, question: 第 1 夜：请选择要查验的玩家。, options: [{id: skip, label: 不查验}, {id: N1, label: N1}, {id: N2, label: N2}, {id: N3, label: N3}, {id: N4, label: N4}, {id: N5, label: N5}, {id: N6, label: N6}, {id: N7, label: N7}, {id: N8, label: N8}, {id: N9, label: N9}, {id: N10, label: N10}, {id: N11, label: N11}, {id: N12, label: N12}], default: skip}, label: seer1, at: 35.4}
+  - {as: N6, tool: respond, args: {request_id: '@seer1', value: N4}, at: 41.1}
+  - {as: moderator, tool: announce, args: {channel_id: dm-N6, template_id: seer_result, params: {target: N4, side: 狼人阵营}}, at: 43.1}
+  - {as: moderator, tool: send_message, args: {channel_id: dm-N7, content: 今晚被狼人袭击的是 N7。}, at: 45.1}
+  - {as: moderator, tool: open_request, args: {to: [N7], kind: choice, question: 第 1 夜：请选择本晚唯一的用药动作（同一晚只能用一瓶药，也可以不用）。, options: [{id: pass, label: 本晚不用药}, {id: save, label: 使用解药（救今晚被袭击的人）}, {id: 'poison:N1', label: 毒杀 N1}, {id: 'poison:N2', label: 毒杀 N2}, {id: 'poison:N3', label: 毒杀 N3}, {id: 'poison:N4', label: 毒杀 N4}, {id: 'poison:N5', label: 毒杀 N5}, {id: 'poison:N6', label: 毒杀 N6}, {id: 'poison:N7', label: 毒杀 N7}, {id: 'poison:N8', label: 毒杀 N8}, {id: 'poison:N9', label: 毒杀 N9}, {id: 'poison:N10', label: 毒杀 N10}, {id: 'poison:N11', label: 毒杀 N11}, {id: 'poison:N12', label: 毒杀 N12}], default: pass}, label: witch1, at: 47.1}
+  - {as: N7, tool: respond, args: {request_id: '@witch1', value: save}, at: 52.5}
+  - {as: moderator, tool: update_player, args: {player_id: N7, set_attributes: {antidote: 0}}, at: 53.5}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 警长竞选}, at: 56.5}
+  - {as: moderator, tool: open_request, args: {to: [N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12], kind: choice, question: 是否上警竞选警长？本选择保密。, options: [{id: 'yes', label: 上警}, {id: 'no', label: 不上警}], sealed: true, default: 'no'}, label: run, at: 58.5}
+  - {answer: '@run', values: {N1: 'no', N2: 'yes', N3: 'no', N4: 'no', N5: 'no', N6: 'yes', N7: 'no', N8: 'yes', N9: 'no', N10: 'no', N11: 'no', N12: 'no'}, at: 63.3}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: sheriff_candidates, params: {players: [N2, N6, N8]}}, at: 65.8}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 天 · 警长竞选演说}, at: 67.3}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N2, N6, N8], limits: {max_messages: 1}}, at: 67.6}
+  - {say: {N2: 我是预言家，昨晚验了 N5，是好人。选中段位，是因为狼多半藏在那里，先拿一张干净的牌垫底。接下来两晚打算验 N8、N3——N8 我会重点看他今晚的发言，如果左右逢源，就是我的第二验。同台的 N6、N8，要认预言家就先把首夜结果和后两晚的计划摆出来，只说感觉不算数。你报了，我就跟你逐条对；对不上的自己退。你要是村民，上警只是来试探我，现在退还来得及。警下的票请投给我：摆得出验人记录的人，比光会煽情的人靠谱。}, channel: public, at: 80.6}
+  - {say: {N6: 我才是预言家。第一晚我验的是 N4，结果是狼人，这是查杀。N2 是对跳的悍跳位：他给 N5 的金水没法验证，可他排警徽流时把同台另外两个人都写进去了，先替自己占住别人的位置，这是悍跳最省力的写法。我的安排：今晚验 N2，把悍跳位定下来，下一晚验 N8。万一我出局，遗言只有两句：N4 是狼，N2 是悍跳。今天我的票不分散，狼的排序，N4 在前，N2 在后。请台下把票给我——敢亮出查杀、也敢和悍跳位硬碰的人，才配拿这块警徽。}, channel: public, at: 98.6}
+  - {say: {N8: 我上警，本来只是想把规矩摆上桌；现在两份查验都出来了，我退出竞选，投票权交回台下。两边我暂时不下结论，只列几点可核对的：第一，N2 说选中段位是因为狼多半在那，是先有结论再找理由；他的警徽流把另外两个候选人都点了名，这种做法真预言家也会用，所以我只扣一点分，不定罪。第二，N6 报了查杀，这是今天风险最大的位置，报错自己就得走，核对起来也最容易；不过查杀本身算不上证据，N4 怎么应对才是。今天的焦点是 N4：希望他先自证：结构、对位、票向都讲清楚，光喊冤不够，抢着反咬也不好。谁在 N4 开口前就替他定性，我会留意。我的票先不锁，等 N4 说完，在 N2 和 N6 之间选。}, channel: public, at: 111.7}
+  - {as: moderator, tool: open_request, args: {to: [N2, N6, N8], kind: choice, question: 是否退水？退水后你仍然没有本轮警长投票权。, options: [{id: stay, label: 不退水}, {id: quit, label: 退水}], sealed: true, default: stay}, label: quit, at: 113.7}
+  - {answer: '@quit', values: {N2: stay, N6: stay, N8: quit}, at: 120.3}
+  - {as: moderator, tool: announce, args: {channel_id: public, template_id: sheriff_candidates, params: {players: [N2, N6]}}, at: 122.3}
+  - {as: moderator, tool: open_request, args: {to: [N1, N3, N4, N5, N7, N9, N10, N11, N12], kind: choice, question: 警长投票：请在候选人中选一名。, options: [{id: N2, label: N2}, {id: N6, label: N6}], sealed: true}, label: badge, at: 124.3}
+  - {answer: '@badge', values: {N1: N6, N3: N6, N4: N2, N5: N2, N7: N6, N10: N2, N11: N2, N12: N6}, at: 129.0}
+
+decision:
+  seat: N9
+  expect: [respond]
+brief: 第 1 天警长竞选：N2、N6、N8 上警，N2 自称预言家（验 N5，金水），N6 自称预言家（验 N4，查杀），N8 退水并列出可核对的几点、不定票；警下 9 位玩家投票，被测座位是其中之一。 被测座位是 N9（villager）。
+truth:
+  request: '@badge'
+  answer:
+  - N6
+  wrong:
+  - N2
+  kind: side
+  decisive: 存档终局揭晓的真相：N6 才是预言家（他报的查杀 N4 属实：N4 确实是狼）；N2 是悍跳的狼，他给 N5 的金水是随手发的一张好人牌（N5 是平民）。
+  evidence:
+  - 昨晚验了 N5，是好人
+  - 第一晚我验的是 N4，结果是狼人
+  - 我退出竞选，投票权交回台下
+  trap: N2 的发言更长、更像在“立规矩”，把验人的理由和警徽流的排法都摆出来了；N6 更短更硬，还指出了 N2 警徽流的“省事”之处；N8 的退水发言看上去最中立、最有条理，容易让人觉得“两边都有道理”。
+  roles:
+    N2: werewolf
+    N4: werewolf
+    N5: villager
+    N6: seer
+    N8: villager
+  source: 本机存档 2b91 的第 106 条记录（脱敏重写）
+  notes: 存档里的真实走向：警下 9 人里 5 人投了 N2（悍跳的狼）、4 人投了真预言家 N6；N2 当选警长；第 1 天白狼王自爆带走了 N6；终局狼人阵营获胜。 第 1 夜平安（狼刀 N7，被女巫自救）。N4 的“查杀”是对的，但全场没有谁能当场验证。
+meta:
+  source: 2b91
+  seq: 106
+  real_choice: N2
+  real_ballots:
+    N1: N6
+    N3: N6
+    N4: N2
+    N5: N2
+    N7: N6
+    N10: N2
+    N11: N2
+    N12: N6
+  winner: 狼人阵营

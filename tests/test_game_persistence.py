@@ -39,8 +39,11 @@ async def test_persist_saves_a_full_json_snapshot_and_then_moves_the_pointer(mon
     assert await orch.persist_session("manual") is True
 
     saved = orch.game_store.data[session.session_id]
-    assert saved["schema_version"] == SESSION_SCHEMA_VERSION == 5
-    assert saved["world"]["ledger"] and saved["world"]["state"]["players"]  # the whole game, dealt
+    assert saved["schema_version"] == SESSION_SCHEMA_VERSION == 6
+    assert saved["world"]["ledger"] and saved["world"]["state"]["players"]  # the whole game (not dealt yet: H52)
+    assert saved["world"]["state"]["dealt"] is False and not any(p["role"] for p in saved["world"]["state"]["players"])
+    assert [p["bot_id"] for p in saved["participants"]] == saved["lineup"] and all(saved["lineup"])  # v6: the bots in the seats
+    assert saved["contract_snapshot"] == {} and all(p["memory_snapshot"] == {} for p in saved["participants"])  # (taken at the start)
     assert saved["scenario_spec"]["id"] == "minimal_test"
     assert saved["model_bindings"]["p01"]["model_id"] == "big"
     assert "api_key" not in str(saved) and "example.invalid" not in str(saved)

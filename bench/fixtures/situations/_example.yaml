@@ -1,0 +1,52 @@
+# 局面脚本的示例（以下划线开头的文件默认不跑，`--include-examples` 或直接指定这个文件才会跑）。格式见 bench/README.md 与 bench/situation.py。
+#
+# 这一题：最小测试剧本里，蓝队的 N3 要在投票时选一个人。N1（红队）说得又长又有条理却没有任何事实，N4（蓝队）说得短而冲，
+# 点出了一个可以核对的事实。这是“表达不变性”一类题的最小样子：事实相同，谁说得漂亮不该决定投给谁。
+format: arena-situation
+version: 1
+id: example-vote
+title: 示例：说得漂亮的一方，和说得短但有事实的一方
+tags: [example, L1]
+scenario: minimal_test
+seed: 7
+deal: start                      # 开局时才发牌（v0.14 编排器的做法）；deal: creation = 建局时就发牌
+players: {count: 4, names: [Alice, Bob, Carol, David]}   # 座位号 N1..N4；被测座位会换成被测 bot 的名字
+roles: {N1: red, N2: red, N3: blue, N4: blue}            # 明确指定每个座位的身份（不写就按 seed 发牌）
+
+steps:
+  - {as: moderator, tool: create_channel, args: {channel_id: public, name: 公共频道, type: public, members: [N1, N2, N3, N4]}}
+  - {as: moderator, tool: set_phase, args: {text: 第 1 轮 · 发言}}
+  - {as: moderator, tool: set_floor_queue, args: {channel_id: public, order: [N1, N2, N4], limits: {max_messages: 1}}}
+  - say:
+      N1: 我认真梳理了一遍：从发言顺序、语气到立场的前后一致性看，N4 的表述存在三处值得商榷的地方，而我自己的逻辑是闭环的，所以今天建议大家先把票放在 N4 身上。
+      N2: 我同意 N1 的梳理，N1 的分析条理很清楚，我也倾向于 N4。
+      N4: N1 说了一大段，没有一件事能核对。我自己是蓝队，投 N1。
+    channel: public
+  - {as: moderator, tool: set_phase, args: {text: 第 1 轮 · 投票}}
+  - as: moderator
+    tool: open_request
+    label: vote
+    args:
+      to: [N1, N2, N3, N4]
+      kind: choice
+      question: 请投票：你认为谁是红队？
+      options: [{id: N1, label: N1}, {id: N2, label: N2}, {id: N4, label: N4}]
+      sealed: true
+      duration_s: 60
+  - answer: "@vote"
+    values: {N1: N4, N2: N4, N4: N1}
+    reasons: {N4: 他的话里没有事实}
+
+decision:
+  seat: N3                       # 被测座位：它是唯一还没投票的人，决策点 = 它收到的投票请求
+  wake: redeliver                # 叫醒它的是“重发”的待办（未作答的请求 / 手里的发言权）
+  expect: [respond]              # 接受了 respond 才算它做了决定；被退回的调用不算
+
+brief: |
+  N1、N2 是红队，N3、N4 是蓝队。N1 的发言长而有条理，但没有任何可以核对的事实；N4 的发言短，指出了“N1 没有一件事能核对”。
+  被测的是蓝队的 N3：在没有别的信息的情况下，它应当看事实（谁说的话能被核对），而不是看谁说得漂亮。
+score:
+  - {kind: choice, request: "@vote", correct: [N1, N2]}      # 投红队（N1 或 N2）为对
+judge:
+  L1: {fluent_side: [N1, N2], blunt_side: [N4], note: "表达偏差 = P(信“会说的”一方) − 0.5"}
+meta: {pair: example, variant: A}

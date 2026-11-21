@@ -217,13 +217,14 @@ test("takeoverBar().softPause: pause only while the game runs; draining and held
   assert.equal(View.takeoverBar(Store.normalizeSession(F.makeSession(playedOver("N3", { soft_pause: held() })))).canRelease, false);
 });
 
-test("the status text and dot say what a soft pause is doing; the top bar's own controls are not changed", () => {
+test("the status label (v0.14, H26) and its dot say what a soft pause is doing; the top bar's own controls are not changed", () => {
   const s = (over) => Store.normalizeSession(F.makeSession({ active_status_text: "对局进行中", ...over }));
-  assert.equal(View.statusText(s({ status: "running" })), "对局进行中");
-  assert.equal(View.statusText(s({ status: "running", soft_pause: draining(2) })), "对局进行中 · ⏳ 收尾中（还有 2 个回答）");
-  assert.equal(View.statusText(s({ status: "running", soft_pause: held() })), "对局进行中 · ⏸ agent 已暂停");
-  assert.equal(View.statusText(s({ status: "paused", active_status_text: "已暂停", soft_pause: held() })), "已暂停");
-  assert.equal(View.statusText({ status: "running", soft_pause: held() }), "对局进行中 · ⏸ agent 已暂停", "also without the server's text");
+  const label = (session) => View.systemStatus(session).label;
+  assert.equal(label(s({ status: "running" })), "对局中");
+  assert.equal(label(s({ status: "running", soft_pause: draining(2) })), "对局中 · 收尾中（还有 2 个回答）");
+  assert.equal(label(s({ status: "running", soft_pause: held() })), "对局中 · agent 已暂停", "the soft pause is 对局中 · agent 已暂停 (the server says the same)");
+  assert.equal(label(s({ status: "paused", active_status_text: "已暂停", soft_pause: held() })), "已暂停", "a hard pause ends the soft pause");
+  assert.equal(label({ status: "running", soft_pause: held() }), "对局中 · agent 已暂停", "also without the server's label");
   assert.deepEqual([View.statusDotClass(s({ status: "running" })), View.statusDotClass(s({ status: "running", soft_pause: draining(1) })), View.statusDotClass(s({ status: "running", soft_pause: held() }))], ["active", "active", "paused"]);
   // 暂停 is the hard pause (it works in a soft pause), 继续 belongs to the takeover bar (the game still "runs")
   assert.deepEqual(View.controlState(s({ status: "running", soft_pause: held() })), { start: false, pause: true, resume: false });
@@ -343,7 +344,7 @@ test("⏸ 暂停 agent → ⏳ 收尾中（还有 N 个回答）→ ⏸ agent �
   b = bar(env);
   assert.deepEqual([b.text, b.phase, b.button, b.action, b.nowHidden, b.soft], ["⏸ agent 已暂停", "held", "▶ 继续", "resume", true, true]);
   assert.match(attr(env, "softpause-status", "title"), /所有 agent 已暂停，游戏计时已冻结/);
-  assert.match(env.el("active-status-text").textContent, /⏸ agent 已暂停/);
+  assert.equal(env.el("active-status-text").textContent, "对局中 · agent 已暂停");
   assert.equal(env.el("active-status-dot").className, "status-dot paused");
   // (the top bar: 暂停 = the hard pause stays possible, 继续 is the takeover bar's)
   assert.deepEqual([env.el("btn-pause").disabled, env.el("btn-resume").disabled], [false, true]);
@@ -710,13 +711,14 @@ test("every class of the soft-pause markup has a rule in style.css (a mistyped c
   assert.ok(env.el("takeover-bar").classList.contains("is-soft-paused"));
   assert.equal(attr(env, "softpause-status", "data-phase"), "held");
   assert.match(html(env, "participants-grid"), /class="pcard[^"]* st-held"/);
-  // the phone: the bar wraps and the soft-pause part takes a line of its own, in the first row of the page (not in the ⋯ menu)
-  assert.match(css, /html\[data-layout="phone"\] \.takeover-bar \.softpause \{[^}]*order: 3;[^}]*flex: 1 0 100%;/);
+  // the phone: the bar is a line of its own under the viewpoint label (the soft-pause part and 退出接管, wrapping when they do not fit),
+  // in the first row of the page (not in the ⋯ menu)
+  assert.match(css, /html\[data-layout="phone"\] \.takeover-bar \.softpause \{[^}]*flex: 1 1 auto;/);
   assert.match(css, /html\[data-layout="phone"\] \.takeover-bar \{[^}]*flex-wrap: wrap;/);
   const relocations = (fs.readFileSync(path.join(H.ROOT, "static", "js", "app.js"), "utf8").match(/const RELOCATIONS = \[([\s\S]*?)\];/) || [, ""])[1];
   const moved = [...relocations.matchAll(/\bid:\s*"([^"]+)"/g)].map((m) => m[1]);
-  assert.ok(moved.includes("viewpoint-bar") && moved.length >= 5, "(the list of what moves into the ⋯ menu was found)");
-  assert.deepEqual(moved.filter((id) => /softpause|takeover-bar|release-takeover/.test(id)), [], "the takeover bar (and its soft-pause button) is never moved into the ⋯ menu");
+  assert.ok(moved.includes("btn-theme") && moved.length >= 5, "(the list of what moves into the ⋯ menu was found)");
+  assert.deepEqual(moved.filter((id) => /softpause|takeover-bar|release-takeover|viewpoint/.test(id)), [], "the viewpoint label, the takeover bar (and its soft-pause button) are never moved into the ⋯ menu (H27)");
 });
 
 // -------------------------------------------------------------------------------------------------

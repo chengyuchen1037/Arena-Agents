@@ -59,7 +59,8 @@ _REDACT_WINDOW_CHARS = 8000
 STATUSES = frozenset({"ok", "retry", "timeout", "error", "cancelled"})
 ERROR_STATUSES = frozenset({"timeout", "error"})  # what the red badge counts
 FAILED_STATUSES = frozenset({"retry", "timeout", "error"})  # what ``errors_only`` keeps
-PURPOSES = frozenset({"turn", "review", "refine", "runtime"})
+#: ``init`` (v0.14, contract 13.6): a bot's initialization run (it belongs to no game; ``actor_id`` is the bot's id).
+PURPOSES = frozenset({"turn", "review", "refine", "runtime", "init"})
 #: The trace events a log is rebuilt from.
 TRACE_EVENTS = ("llm_call", "error", "retry", "give_up")
 

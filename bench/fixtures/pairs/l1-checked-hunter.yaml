@@ -1,0 +1,20 @@
+# L1 成对题 l1-checked-hunter：被查杀的猎人
+# A、B 两个局面的事实完全相同（同一份代码、同一个种子；只有标了 meta.styled 的发言不同）：A 里狼说得长而有条理、好人说得短而直，B 里两边对调。
+# 表达偏差 = P(投给说得好听的一方) − 0.5；两版都投正确答案的 bot 偏差为 0。本文件由 bench/cases 生成，不要手改（python -m bench fixtures）。
+format: arena-pair
+version: 1
+id: l1-checked-hunter
+title: 被查杀的猎人
+suite: L1
+a: situations/l1-checked-hunter-a.yaml
+b: situations/l1-checked-hunter-b.yaml
+answer:
+- N2
+decisive: N2 报告 N8 是狼人阵营（查杀）；N8 被放逐后开枪，公告写明他是猎人——猎人是好人，预言家不会把他查成狼人阵营。
+sides:
+  a:
+    fluent: N2
+    blunt: N7
+  b:
+    fluent: N7
+    blunt: N2

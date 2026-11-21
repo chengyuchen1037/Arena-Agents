@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-import app.game.orchestrator as orchestrator_module
+import game_fakes
 from app.game.orchestrator import GameOrchestrator
 from app.world.types import MODERATOR_ID
 
@@ -50,8 +50,9 @@ class HangingLlm(BotLlm):
 
 def test_a_hanging_model_call_does_not_stall_the_game(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
-        monkeypatch.setattr(orchestrator_module, "load_config", lambda *a, **k: copy.deepcopy(BASE_CFG))
+        game_fakes.patch_config(monkeypatch, BASE_CFG)
         orch = GameOrchestrator()
+        game_fakes.ready_bots(orch)  # (v0.14: a game starts only with bots that are initialized)
         orch.ensure_bindings_ready = lambda: None  # type: ignore[method-assign]
         holder: dict[str, HangingLlm] = {}
 

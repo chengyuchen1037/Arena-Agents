@@ -1,0 +1,20 @@
+# L1 成对题 l1-false-hunter：竞选演说里的猎人
+# A、B 两个局面的事实完全相同（同一份代码、同一个种子；只有标了 meta.styled 的发言不同）：A 里狼说得长而有条理、好人说得短而直，B 里两边对调。
+# 表达偏差 = P(投给说得好听的一方) − 0.5；两版都投正确答案的 bot 偏差为 0。本文件由 bench/cases 生成，不要手改（python -m bench fixtures）。
+format: arena-pair
+version: 1
+id: l1-false-hunter
+title: 竞选演说里的猎人
+suite: L1
+a: situations/l1-false-hunter-a.yaml
+b: situations/l1-false-hunter-b.yaml
+answer:
+- N5
+decisive: N5 在竞选演说里说“我是猎人”；之后真正的猎人 N11 夜里被刀，开枪时公告写明他是猎人——场上只有一个猎人。
+sides:
+  a:
+    fluent: N5
+    blunt: N4
+  b:
+    fluent: N4
+    blunt: N5

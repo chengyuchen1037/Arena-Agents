@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 import app.game.orchestrator as orchestrator_module
+from app.bots.types import CoreFiles
 from app.game.orchestrator import GameOrchestrator
 from app.providers.models import (
     ModelBinding,
@@ -136,13 +137,52 @@ class FakeProviders:
         raise ModelNotFound(binding.model_id)
 
 
+def patch_config(monkeypatch: pytest.MonkeyPatch, cfg: dict[str, Any] | None = None) -> None:
+    """``config.yml`` is ``cfg`` (default: :data:`CFG`: four seats and the small scenario) for the orchestrator *and* for the stores that read it
+    themselves (the rules store copies the default scenario named in it into the data directory, v0.14)."""
+    import app.config as app_config
+
+    fake = lambda *a, **k: copy.deepcopy(cfg if cfg is not None else CFG)  # noqa: E731
+    monkeypatch.setattr(orchestrator_module, "load_config", fake)
+    monkeypatch.setattr(app_config, "load_config", fake)
+    try:  # (the rules store remembers what ``config.yml`` names by the bytes of the file: not what a test says it names)
+        import app.storage.rules as rules_module
+
+        monkeypatch.setattr(rules_module, "_config_cache", {})
+    except ImportError:  # pragma: no cover - the rules store is not there (yet)
+        pass
+
+
+PLAYBOOK_TEXT = "- [把握:低|支持:0|反例:0|来源:测试|#发言] 先听完再下判断。"
+
+
+def ready_bots(orch: GameOrchestrator) -> None:
+    """Make every bot of the table fit to start a game (v0.14, H25): an L0 where it has none, and a finished initialization that matches the
+    contract and the scenario in force (what a real initialization would have written - without a model)."""
+    store = orch._bots()
+    sources = orch.source_hashes()
+    for bot_id in store.lineup():
+        if not store.core(bot_id).complete:
+            store.set_core(bot_id, CoreFiles(identity="一名测试玩家。", voice="说话简短。篇幅：10–60 字", mind="先看事实，再下判断。"))
+        store.commit_init(
+            bot_id,
+            sources.scenario_id,
+            {"arch_notes": "平台说明已读。", "digest": "规则要点已读。", "playbook": PLAYBOOK_TEXT},
+            model="test",
+            duration_s=0.1,
+            sources=sources,
+        )
+
+
 def real_orch(
     monkeypatch: pytest.MonkeyPatch,
     *,
     defaults: dict[str, ModelBinding] | None = None,
     providers: tuple[ProviderConfig, ...] = (PROVIDER,),
+    ready: bool = True,
 ) -> GameOrchestrator:
-    monkeypatch.setattr(orchestrator_module, "load_config", lambda *a, **k: copy.deepcopy(CFG))
+    """A real orchestrator over fake stores.  ``ready`` (default): the bots of its table are initialized, so the game can start (H25)."""
+    patch_config(monkeypatch)
     orch = GameOrchestrator()
     orch.provider_store = FakeProviders(*providers)
     orch.settings_store = FakeSettings(defaults)
@@ -151,6 +191,8 @@ def real_orch(
     # The constructor ran against the real (isolated) stores; rebuild the fresh game the way startup()
     # does, so its default bindings come from the stores injected above.
     orch._reset_game(default_bindings=orch._load_defaults())
+    if ready:
+        ready_bots(orch)
     orch.refresh_binding_issues()
     return orch
 
@@ -173,3 +215,57 @@ def bound(model: str = "big", pid: str = "prov", depth: str = "high", window: in
 
 def all_bound() -> dict[str, ModelBinding]:
     return {actor: BINDING for actor in [MODERATOR_ID, *(p["id"] for p in PLAYERS)]}
+
+
+# ---------------------------------------------------------------------------- a table of four seats like the real ones (N1.. Alice..)
+#: The seats of the real bot store are called ``N1``.. and the default library's first four bots sit in them (v0.14): tests that need the real store
+#: (a review, the names of the bots) use this table instead of the ``p01``.. seats of :data:`CFG`.
+TABLE_IDS = ["N1", "N2", "N3", "N4"]
+TABLE_NAMES = ["Alice", "Bob", "Carol", "David"]
+TABLE_CFG: dict[str, Any] = {
+    **copy.deepcopy(CFG),
+    "participants": [{"id": pid, "seat": str(i), "name": name} for i, (pid, name) in enumerate(zip(TABLE_IDS, TABLE_NAMES), start=1)],
+}
+
+
+def make_table_orch(monkeypatch: pytest.MonkeyPatch, *, bound_all: bool = True, ready: bool = True, cfg: dict[str, Any] | None = None) -> GameOrchestrator:
+    """A real orchestrator over fake stores for the four seats ``N1``..``N4`` (``cfg`` replaces the table); every bot is initialized (``ready``) so
+    that a game can start, and - with ``bound_all`` - every actor has a model."""
+    patch_config(monkeypatch, cfg or TABLE_CFG)
+    orch = GameOrchestrator()
+    orch.provider_store = FakeProviders(PROVIDER)
+    orch.settings_store = FakeSettings({a: bound() for a in [MODERATOR_ID, *TABLE_IDS]} if bound_all else {})
+    orch.game_store = FakeGames()
+    orch._autosave_delay = 0.01
+    orch._reset_game(default_bindings=orch._load_defaults())
+    if ready:
+        ready_bots(orch)
+    orch.refresh_binding_issues()
+    return orch
+
+
+def idle(world: Any, me: str) -> list[Call]:
+    return []
+
+
+def chatty(world: Any, me: str) -> list[Call]:
+    """Opens a free discussion once; the players then keep answering each other: continuous activity (= spending)."""
+    if world.channel("public") is not None:
+        return []
+    return [
+        ("create_channel", {"channel_id": "public", "name": "公共频道", "members": TABLE_IDS, "type": "public"}),
+        ("open_floor", {"channel_id": "public", "mode": "free", "limits": {"max_messages_per_member": 6}}),
+    ]
+
+
+def events_of(orch: GameOrchestrator, *types: str) -> list[Any]:
+    replay, _ = orch.bus.subscribe("0")
+    return [e for e in (replay or []) if e.type in types]
+
+
+async def wait_for(predicate: Callable[[], Any], timeout: float = 10.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("timed out waiting for the condition")
+        await asyncio.sleep(0.02)

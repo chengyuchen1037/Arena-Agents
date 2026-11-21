@@ -6,7 +6,8 @@ private memory (contracts §2.3 "游戏类", §2.5 ledger catalogue, §2.6 deliv
     self.game = GameModule(self)
     self.add_module(self.game)
 
-and ``new_game`` calls ``self.game.deal()`` once the players and their system DMs exist.  The
+and ``new_game`` calls ``self.game.deal()`` once the players and their system DMs exist (v0.14, H52: unless the caller
+asks for ``deal=False`` and calls ``World.deal_identities()`` when the game starts).  The
 memory helpers (``memory`` / ``write_note`` / ``read_notes_text`` / ``compact``) and ``board`` are what
 the ``WorldPort`` methods of the same name delegate to.
 
@@ -309,6 +310,22 @@ class GameModule(WorldModule):
         return [p.id for p in self.w.state.players if p.id not in excluded]
 
     # -------------------------------------------------------------------------- dealing --
+    def identity_pool(self) -> list[str]:
+        """The role ids of ``setup.identity_pool`` expanded by their counts, in declaration order (not shuffled);
+        empty when the scenario has nothing to deal."""
+        pool: list[str] = []
+        for item in self.w.spec.setup.identity_pool:
+            pool.extend([item.role] * item.count)
+        return pool
+
+    def check_pool(self) -> None:
+        """Raise ``ValueError`` when the scenario has an identity pool whose size differs from the number of
+        players (the check a game creation makes even when the dealing itself is left to the game start)."""
+        pool = self.identity_pool()
+        players = self.w.state.players
+        if pool and len(pool) != len(players):
+            raise ValueError(f"身份池共有 {len(pool)} 个身份，但对局有 {len(players)} 名玩家，无法发牌。")
+
     def deal(self) -> list[dict[str, Any]]:
         """Deal ``setup.identity_pool`` to ``state.players`` (already created, in play order).
 
@@ -316,19 +333,20 @@ class GameModule(WorldModule):
         gets ``role`` / ``faction`` / ``tags`` / ``attributes`` of its role, and one ``player.updated``
         entry is written (``actor=engine``, visible to the player and the moderator,
         ``reason="deal"``).  Raises ``ValueError`` when the number of players differs from the size
-        of the pool; a scenario without any identity pool deals nothing.
+        of the pool; a scenario without any identity pool deals nothing.  Sets ``state.dealt`` (v0.14, H52) and
+        refuses to deal twice (``RuntimeError``): the identities of a game are dealt exactly once.
         Returns ``[{"player_id", "role", "faction"}]`` in player order.
         """
         w = self.w
+        if w.state.dealt:
+            raise RuntimeError("身份已经发过牌了，一局只发一次牌。")
         setup = w.spec.setup
         players = list(w.state.players)
-        pool: list[str] = []
-        for item in setup.identity_pool:
-            pool.extend([item.role] * item.count)
+        pool = self.identity_pool()
         if not pool:
+            w.state.dealt = True  # nothing to deal: the game is as dealt as it will ever be
             return []
-        if len(pool) != len(players):
-            raise ValueError(f"身份池共有 {len(pool)} 个身份，但对局有 {len(players)} 名玩家，无法发牌。")
+        self.check_pool()
         if setup.shuffle:
             w.rng.shuffle(pool)
         dealt: list[dict[str, Any]] = []
@@ -354,6 +372,7 @@ class GameModule(WorldModule):
                 visible_to=[player.id, MODERATOR_ID],
             )
             dealt.append({"player_id": player.id, "role": role_id, "faction": role.faction})
+        w.state.dealt = True
         return dealt
 
     # ---------------------------------------------------------------------- requests ----

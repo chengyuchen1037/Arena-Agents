@@ -1,29 +1,32 @@
 /* ==========================================================================
-   Arena-Agents v0.13 — playing a seat: the viewpoint bar, the takeover bar, the reshuffle reminder
+   Arena-Agents v0.14 — playing a seat: the viewpoint label and its menu, the takeover bar
    Loaded after roster.js / budget.js and before app.js. Exposes window.ArenaTakeoverUI.create(ctx).
 
-   Owns (docs/v0.13-plan.md F1-F5, contract §11.7)
-     - the viewpoint bar  [👁 视角 ▾] [切换] [接管]: the drop-down only chooses what to look at, "切换" applies
-       it, "接管" (only while the game has not started or is paused, never for "上帝视角") plays the chosen
-       seat after a confirmation:                         POST api/takeover {seat}
-     - the takeover bar   🎮 正在扮演 3 · Carol [⏸ 暂停 agent] [退出接管]: it replaces the viewpoint bar while a
-       seat is played (the viewpoint is locked to it); leaving needs a paused / unstarted / finished game and a
-       confirmation:                                       POST api/takeover/release
+   Owns (docs/v0.14-plan.md H27, H52; docs/v0.13-plan.md F1-F4, contract §11.7 / §13.10)
+     - the viewpoint label (H27)    [👁 全局视角 ▾] · [👁 Alice视角 ▾] · [🎮 Alice视角（接管） ▾]: a pure front-end state, worked out from the
+       viewpoint that was chosen and `takeover.seat`.  A click opens its menu:
+           全局视角
+           1 · Alice   [观看] [接管]         "以 X 的视角观看" / "接管 X" for every player
+           …
+           退出接管（3 · Carol）              only while a seat is played
+       A choice is applied at once ("观看" only changes what the page shows; nothing is requested from the server).  "接管" (only while the
+       game has not started or is paused, never twice) plays the seat after a confirmation:       POST api/takeover {seat}
+       While a seat is played the viewpoint is locked to it: only "退出接管" works.
+     - the takeover bar   [⏸ 暂停 agent] [退出接管]: next to the label while a seat is played; leaving needs a paused / unstarted / finished game
+       and a confirmation:                                       POST api/takeover/release
      - the soft pause (v0.13.1, docs/v0.13.1-plan.md G1-G7, contract §12.2), also part of the takeover bar:
          [⏸ 暂停 agent]   POST api/control/soft-pause   the calls in flight finish, then every agent holds, the
                           game clock stops - the person can still read, write and answer.  Only while the game runs.
          ⏳ 收尾中（还有 N 个回答） → ⏸ agent 已暂停      the two phases (session.soft_pause)
          [▶ 继续]         POST api/control/soft-resume  (also while it is still draining: that cancels it)
          立即暂停          POST api/control/pause         = the top bar's hard pause: cancels the calls in flight
-     - the reminder of a seat taken over before the game started: "你已经知道自己的身份，建议点击「重新发牌」"
-       + 「重新发牌」 (POST api/control/shuffle-identities). It disappears once the game started, and the
-       click handler checks that again (a double click / a second tab must not re-deal a running game).
+   (v0.14, H52: the identities are dealt when the game starts - a seat taken over before that has nothing to re-deal, the page asks for none.)
 
-   Everything it decides comes from the pure functions of view.js (viewpointBar, takeoverBar (+ softPause),
-   reshuffleReminder, takeoverAvailability); this file only wires them to the DOM and the API.
+   Everything it decides comes from the pure functions of view.js (viewpointChip, viewpointMenu, takeoverBar (+ softPause),
+   takeoverAvailability); this file only wires them to the DOM and the API.
 
    ctx: { api, Core, View, showToast, getSession, getViewpoint, setViewpoint(id), openDialog(options),
-          adoptSession(session, opts), refreshState() }
+          adoptSession(session, opts), refreshState(), isReplaying() }
    ========================================================================== */
 
 (function (root) {
@@ -35,6 +38,7 @@
     const View = opts.View || root.ArenaView;
     const api = opts.api;
     const doc = opts.document || root.document;
+    const win = opts.window || root;
     if (!Core || !View || !api || !doc) return null;
 
     const esc = Core.escapeHtml;
@@ -50,25 +54,22 @@
 
     const el = {
       bar: $("viewpoint-bar"),
-      select: $("select-viewpoint"),
-      btnSwitch: $("btn-viewpoint-switch"),
-      btnTakeover: $("btn-takeover"),
+      chip: $("btn-viewpoint"),
+      chipText: $("viewpoint-text"),
+      chipIcon: $("viewpoint-icon"),
+      menu: $("viewpoint-menu"),
       takeoverBar: $("takeover-bar"),
       seat: $("takeover-seat"),
       btnRelease: $("btn-release-takeover"),
       softStatus: $("softpause-status"),
       btnSoft: $("btn-softpause"),
       btnSoftNow: $("btn-softpause-now"),
-      reminder: $("takeover-reminder"),
-      reminderText: $("takeover-reminder-text"),
-      btnReshuffle: $("btn-shuffle-identities"),
     };
 
     const st = {
-      draft: null, // what the drop-down shows (chosen, not applied yet)
-      applied: null, // the viewpoint the draft was last synchronised with
-      optionsHtml: null,
-      busy: false, // a takeover / release / reshuffle request is in flight (no double clicks)
+      busy: false, // a takeover / release request is in flight (no double clicks)
+      menuOpen: false,
+      menuHtml: null, // what the menu shows now (it is only written when it changed)
     };
 
     const session = () => getSession() || {};
@@ -79,6 +80,80 @@
 
     function setTitle(node, text) {
       if (node && typeof node.setAttribute === "function") node.setAttribute("title", text || "");
+    }
+
+    function setText(node, text) {
+      if (node && node.textContent !== text) node.textContent = text;
+    }
+
+    function toggleClass(node, name, on) {
+      if (node && node.classList && typeof node.classList.toggle === "function") node.classList.toggle(name, Boolean(on));
+    }
+
+    // -----------------------------------------------------------------------
+    // the menu behind the label
+    // -----------------------------------------------------------------------
+
+    /** The markup of the menu (a pure function of the session and the viewpoint; `busy` greys everything while a request is on its way). */
+    function menuHtml(model) {
+      const dis = (enabled) => (enabled && !st.busy ? "" : " disabled");
+      const rows = model.players
+        .map((p) => {
+          // (the check slot is always there: the names stay in line)
+          const check = `<span class="vp-check"${p.current ? ` title="现在的视角"` : ""}>${p.current ? "✓" : ""}</span>`;
+          const played = p.played ? `<span class="vp-played" title="你正在扮演这个座位">🎮</span>` : "";
+          return (
+            `<div class="vp-row${p.current ? " current" : ""}${p.played ? " played" : ""}" role="group" aria-label="${esc(p.name)}" data-seat="${esc(p.id)}">` +
+            `<span class="vp-name">${check}<span class="vp-label">${esc(p.label)}</span>${played}</span>` +
+            `<button type="button" class="btn btn-xs vp-view" role="menuitem" data-vp-view="${esc(p.id)}" title="${esc(p.view.title)}"` +
+            ` aria-label="以 ${esc(p.name)} 的视角观看"${dis(p.view.enabled)}>观看</button>` +
+            `<button type="button" class="btn btn-xs btn-takeover vp-take" role="menuitem" data-vp-take="${esc(p.id)}" title="${esc(p.takeover.title)}"` +
+            ` aria-label="接管 ${esc(p.name)}"${dis(p.takeover.enabled)}>接管</button></div>`
+          );
+        })
+        .join("");
+      const god =
+        `<button type="button" class="dropdown-item vp-god${model.god.current ? " current" : ""}" role="menuitem" data-vp-view="god"` +
+        ` title="${esc(model.god.reason)}"${dis(model.god.enabled)}><span class="vp-check">${model.god.current ? "✓" : ""}</span>${esc(model.god.label)}</button>`;
+      const head = `<div class="vp-head">以 X 的视角观看 · 接管 X</div>`;
+      const note = model.takeoverNote ? `<div class="vp-note form-hint">${esc(model.takeoverNote)}</div>` : "";
+      const release = model.release
+        ? `<button type="button" class="dropdown-item danger vp-release" role="menuitem" data-vp-release title="${esc(model.release.title)}"${dis(model.release.enabled)}>` +
+          `${esc(model.release.label)}</button>`
+        : "";
+      return `${god}${head}${rows}${note}${release}`;
+    }
+
+    /** Put the menu under the label, inside the screen (the menu is position: fixed, like the roster menu of the participant bar). */
+    function placeMenu() {
+      if (!el.menu || !el.chip || typeof el.chip.getBoundingClientRect !== "function") return;
+      const r = el.chip.getBoundingClientRect();
+      const vw = Number(win.innerWidth) || 1280;
+      const mw = el.menu.offsetWidth || 300;
+      if (el.menu.style) {
+        el.menu.style.left = `${Math.round(Math.min(Math.max(8, r.left), Math.max(8, vw - mw - 8)))}px`;
+        el.menu.style.top = `${Math.round(r.bottom + 5)}px`;
+      }
+    }
+
+    function setMenu(open) {
+      st.menuOpen = Boolean(open);
+      if (el.menu) el.menu.hidden = !st.menuOpen;
+      if (el.chip && typeof el.chip.setAttribute === "function") el.chip.setAttribute("aria-expanded", st.menuOpen ? "true" : "false");
+      toggleClass(el.chip, "open", st.menuOpen);
+      if (st.menuOpen) {
+        renderMenu(true);
+        placeMenu();
+      }
+    }
+
+    function renderMenu(force) {
+      if (!el.menu || (!st.menuOpen && !force)) return;
+      const html = menuHtml(View.viewpointMenu(session(), getViewpoint()));
+      if (force || html !== st.menuHtml) {
+        st.menuHtml = html;
+        el.menu.innerHTML = html;
+      }
     }
 
     // -----------------------------------------------------------------------
@@ -108,40 +183,19 @@
 
     function render() {
       const s = session();
-      const applied = getViewpoint();
-      if (el.select) {
-        const html = View.viewpointOptions(s)
-          .map((o) => `<option value="${esc(o.id)}">${esc(o.label)}</option>`)
-          .join("");
-        if (html !== st.optionsHtml) {
-          st.optionsHtml = html;
-          el.select.innerHTML = html;
-        }
-      }
-      // the drop-down keeps a pending choice until the applied viewpoint moves under it (a card's "view as",
-      // a new game, a lock) - then it follows
-      if (st.draft === null || st.applied !== applied) {
-        st.draft = applied;
-        st.applied = applied;
-      }
-      st.draft = View.normalizeViewpoint(s, st.draft);
-      const bar = View.viewpointBar(s, st.draft, applied);
-      if (el.select && el.select.value !== bar.draft) el.select.value = bar.draft;
-      if (el.select && el.select.classList) el.select.classList.toggle("is-player", bar.draft !== View.GOD);
-      setHidden(el.bar, bar.locked);
-      if (el.btnSwitch) {
-        el.btnSwitch.disabled = !bar.canSwitch || st.busy;
-        setTitle(el.btnSwitch, bar.switchTitle);
-      }
-      if (el.btnTakeover) {
-        const replaying = Boolean(isReplaying());
-        el.btnTakeover.disabled = replaying || !bar.canTakeover || st.busy;
-        setTitle(el.btnTakeover, replaying ? "重放中不能接管：请先退出重放" : bar.takeoverTitle);
-      }
+      // the label: 全局视角 / Alice视角 / 🎮 Alice视角（接管）
+      const chip = View.viewpointChip(s, getViewpoint());
+      setText(el.chipText, chip.text);
+      setText(el.chipIcon, chip.icon);
+      setTitle(el.chip, chip.title);
+      if (el.chip && typeof el.chip.setAttribute === "function") el.chip.setAttribute("data-kind", chip.kind);
+      toggleClass(el.chip, "is-player", chip.kind === "player");
+      toggleClass(el.chip, "is-played", chip.kind === "played");
+      renderMenu(false);
 
       const tb = View.takeoverBar(s);
       setHidden(el.takeoverBar, !tb);
-      // (the stylesheet frees the phone's first row while a seat is played: no version badge)
+      // (the stylesheet lets the phone's first row hold the label and the bar while a seat is played)
       const page = doc.documentElement;
       if (page && typeof page.setAttribute === "function") page.setAttribute("data-takeover", tb ? "1" : "0");
       if (tb) {
@@ -152,14 +206,7 @@
         }
         renderSoftPause(tb.softPause);
       }
-      if (el.takeoverBar && el.takeoverBar.classList && typeof el.takeoverBar.classList.toggle === "function") {
-        el.takeoverBar.classList.toggle("is-soft-paused", Boolean(tb && tb.softPause.phase));
-      }
-
-      const reminder = View.reshuffleReminder(s);
-      setHidden(el.reminder, !reminder.visible);
-      if (reminder.visible && el.reminderText) el.reminderText.textContent = reminder.text;
-      if (el.btnReshuffle) el.btnReshuffle.disabled = !reminder.visible || st.busy;
+      toggleClass(el.takeoverBar, "is-soft-paused", Boolean(tb && tb.softPause.phase));
     }
 
     // -----------------------------------------------------------------------
@@ -179,24 +226,29 @@
       }
     }
 
-    /** "切换": apply the drop-down's choice as the spectator viewpoint (never while a seat is played). */
-    function switchViewpoint() {
+    /** 「观看」 / 全局视角: apply the viewpoint at once (never while a seat is played). */
+    function viewAs(id) {
       const s = session();
-      if (View.takeoverSeat(s)) return false;
-      const target = View.normalizeViewpoint(s, st.draft);
+      if (View.takeoverSeat(s)) {
+        showToast("接管期间视角已锁定为你扮演的座位：请先退出接管");
+        return false;
+      }
+      const target = View.normalizeViewpoint(s, id);
+      setMenu(false);
       if (target === getViewpoint()) return false;
       setViewpoint(target);
       return true;
     }
 
-    /** "接管": play the seat chosen in the drop-down, after a confirmation. */
+    /** 「接管」: play `seatId`, after a confirmation. */
     function takeover(seatId) {
+      setMenu(false);
       return exclusive(async () => {
         if (isReplaying()) {
           showToast("重放中不能接管：请先退出重放");
           return false;
         }
-        const seat = seatId || st.draft;
+        const seat = seatId;
         const check = View.takeoverAvailability(session(), seat);
         if (!check.ok) {
           showToast(check.reason);
@@ -212,7 +264,7 @@
             `<li>你会看到该座位的视角，视角被锁定；退出接管后恢复。</li>` +
             `<li>主持人和其他玩家都不知道有人类参与。</li>` +
             `<li>发言权时长、请求截止时间仍由主持人决定，超时按规则处理。</li>` +
-            `${session().status === "idle" ? "<li>对局还没有开始：接管后你会先看到自己的身份，可以重新发牌。</li>" : ""}` +
+            `${session().status === "idle" ? "<li>对局还没有开始：身份在点击「开始」时才发牌，开始后你会在自己的座位上看到它。接管期间不能调整座位。</li>" : ""}` +
             `</ul>`,
           okText: "接管",
           cancelText: "取消",
@@ -239,6 +291,7 @@
 
     /** "退出接管": give the seat back to its agent (only while the game does not run), after a confirmation. */
     function release() {
+      setMenu(false);
       return exclusive(async () => {
         const s = session();
         const bar = View.takeoverBar(s);
@@ -273,30 +326,6 @@
         } catch (err) {
           showToast(err.message);
           await refreshState();
-          return false;
-        }
-      });
-    }
-
-    /**
-     * 「重新发牌」: re-deal every seat (POST api/control/shuffle-identities) - only before the game starts.
-     * The state is checked again right here, not only when the button was drawn: a double click, a second
-     * tab or a slow render must never re-deal a game that has started (the server refuses it as well).
-     */
-    function reshuffle() {
-      return exclusive(async () => {
-        if (!View.reshuffleReminder(session()).visible) {
-          showToast("对局已经开始，不能再重新发牌");
-          return false;
-        }
-        try {
-          const res = await api.post("api/control/shuffle-identities");
-          if (res && res.session) adoptSession(res.session, { force: true });
-          showToast("已重新发牌：请看看你新的身份");
-          return true;
-        } catch (err) {
-          showToast(err.message);
-          await refreshState(); // (a refused re-deal means the game has started: the reminder must go)
           return false;
         }
       });
@@ -387,22 +416,46 @@
       if (node && typeof node.addEventListener === "function") node.addEventListener(type, handler);
     }
 
-    on(el.select, "change", () => {
-      st.draft = el.select.value;
-      render();
+    function closestFrom(target, selector) {
+      let node = target;
+      if (node && typeof node.closest !== "function" && node.parentElement) node = node.parentElement;
+      return node && typeof node.closest === "function" ? node.closest(selector) : null;
+    }
+
+    on(el.chip, "click", () => {
+      setMenu(!st.menuOpen);
     });
-    on(el.btnSwitch, "click", () => {
-      switchViewpoint();
-      render();
+    on(el.menu, "click", (evt) => {
+      const view = closestFrom(evt && evt.target, "[data-vp-view]");
+      if (view) {
+        if (!view.disabled) viewAs(view.getAttribute("data-vp-view"));
+        return;
+      }
+      const take = closestFrom(evt && evt.target, "[data-vp-take]");
+      if (take) {
+        if (!take.disabled) takeover(take.getAttribute("data-vp-take"));
+        return;
+      }
+      const rel = closestFrom(evt && evt.target, "[data-vp-release]");
+      if (rel && !rel.disabled) release();
     });
-    on(el.btnTakeover, "click", () => {
-      takeover();
+    // a click outside the menu (and outside its label) closes it; so does Escape
+    on(doc, "click", (evt) => {
+      if (!st.menuOpen) return;
+      const path = evt && typeof evt.composedPath === "function" ? evt.composedPath() : [];
+      const inside = path.length
+        ? path.some((n) => n === el.menu || n === el.chip)
+        : Boolean(closestFrom(evt && evt.target, "#viewpoint-menu") || closestFrom(evt && evt.target, "#btn-viewpoint"));
+      if (!inside) setMenu(false);
+    });
+    on(doc, "keydown", (evt) => {
+      if (st.menuOpen && evt && evt.key === "Escape") {
+        setMenu(false);
+        if (el.chip && typeof el.chip.focus === "function") el.chip.focus();
+      }
     });
     on(el.btnRelease, "click", () => {
       release();
-    });
-    on(el.btnReshuffle, "click", () => {
-      reshuffle();
     });
     on(el.btnSoft, "click", () => {
       // one button, two meanings: it says 「⏸ 暂停 agent」 until a soft pause exists, then 「▶ 继续」
@@ -415,14 +468,15 @@
 
     return {
       render,
-      switchViewpoint,
+      viewAs,
       takeover,
       release,
-      reshuffle,
       softPause,
       softResume,
       hardPause,
-      draft: () => st.draft,
+      openMenu: () => setMenu(true),
+      closeMenu: () => setMenu(false),
+      menuOpen: () => st.menuOpen,
       _state: st,
     };
   }

@@ -16,7 +16,8 @@ jobs:
   test:
     # Linux 覆盖 Docker/Secret 主密钥路径；Windows 覆盖 DPAPI 主密钥包装路径。
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # 全部测试约 5800 个（v0.13.1 是约 3600 个）；Windows 跑道最慢，留足时间。
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:

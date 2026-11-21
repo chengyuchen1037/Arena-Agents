@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import app.game.orchestrator as orchestrator_module
-from app.game.orchestrator import GameOrchestrator
+from app.game.orchestrator import GameOrchestrator, NotReadyError
 from app.providers.models import ModelBinding
 from app.providers.store import get_provider_store
 from app.storage import reset_stores_for_tests
@@ -18,12 +18,18 @@ from app.storage.games import get_game_store
 from app.storage.secrets import SecretStore
 from app.storage.settings import get_default_bindings, get_last_session_id
 from app.world.types import MODERATOR_ID
-from game_fakes import CFG, PLAYERS, async_test
+import game_fakes
+from game_fakes import async_test
+
+# The real settings store keeps the default bindings by bot and speaks of the seats as N1.. (v0.14, H4): this file runs against it, so its
+# four seats are called like the real ones (``game_fakes.CFG`` calls them p01.. - which the store would read as v0.12.0 seat ids).
+PLAYERS = [{"id": f"N{i}", "seat": str(i), "name": f"P{i}", "persona": ""} for i in range(1, 5)]
+CFG = {**copy.deepcopy(game_fakes.CFG), "participants": PLAYERS}
 
 
 @pytest.fixture(autouse=True)
 def small_scenario(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(orchestrator_module, "load_config", lambda *a, **k: copy.deepcopy(CFG))
+    game_fakes.patch_config(monkeypatch, CFG)
 
 
 @pytest.fixture()
@@ -64,7 +70,7 @@ async def test_game_survives_a_restart_paused_with_bindings_and_costs(data_dir: 
     await first.update_model_bindings(bind_everybody(provider_id))
     first.world.state.phase = "第 2 天"
     first.usage.record_usage(
-        "p01", prompt_tokens=1_000_000, completion_tokens=0, provider_id=provider_id, model_id="m1",
+        "N1", prompt_tokens=1_000_000, completion_tokens=0, provider_id=provider_id, model_id="m1",
         input_price_per_m=1.0, output_price_per_m=2.0,
     )
     first.session.status = "running"  # was mid-game when the process died
@@ -82,8 +88,8 @@ async def test_game_survives_a_restart_paused_with_bindings_and_costs(data_dir: 
     assert game.session_id == session_id and second.world.state.phase == "第 2 天"
     assert game.status == "paused" and second._supervisor is None  # never auto-resumes
     assert game.restored_from_save and game.restore_notice == "已恢复上次对局（已暂停）"
-    assert game.model_bindings["p03"].provider_id == provider_id
-    assert game.model_bindings["p03"].context_window_tokens == 64_000  # model's real window
+    assert game.model_bindings["N3"].provider_id == provider_id
+    assert game.model_bindings["N3"].context_window_tokens == 64_000  # model's real window
     assert game.binding_issues == []
     assert second.usage.total_cost_usd == pytest.approx(1.0)
     assert second.usage.by_model[f"{provider_id}::m1"].calls == 1
@@ -97,7 +103,7 @@ async def test_game_survives_a_restart_paused_with_bindings_and_costs(data_dir: 
 async def test_games_are_readable_json_and_only_the_api_key_is_encrypted(data_dir: Path) -> None:
     provider_id = make_provider()
     orch = GameOrchestrator()
-    await orch.update_model_bindings({"p01": ModelBinding(provider_id=provider_id, model_id="m1")})
+    await orch.update_model_bindings({"N1": ModelBinding(provider_id=provider_id, model_id="m1")})
     orch.world.commit("message", MODERATOR_ID, {"content": "PLAINTEXT-MARKER-9981", "kind": "speech"}, visible_to="*")
     await orch.persist_session("test")
 
@@ -116,11 +122,11 @@ async def test_games_are_readable_json_and_only_the_api_key_is_encrypted(data_di
     assert secrets_file.is_file() and SECRET.encode() not in secrets_file.read_bytes()
     assert [p for p in files if SECRET.encode() in p.read_bytes()] == []
     assert SecretStore(data_dir).read_all() == {provider_id: SECRET}
-    assert get_default_bindings()["p01"].model_id == "m1"
+    assert get_default_bindings()["N1"].model_id == "m1"
     assert get_last_session_id() == orch.session.session_id
     # And the saved game is readable through the store, with ids only.
     saved = get_game_store().load(orch.session.session_id)
-    assert saved["model_bindings"]["p01"]["provider_id"] == provider_id
+    assert saved["model_bindings"]["N1"]["provider_id"] == provider_id
     assert SECRET not in json.dumps(saved)
     await orch.shutdown()
 
@@ -140,8 +146,10 @@ async def test_deleting_the_bound_provider_surfaces_a_rebind_requirement_not_a_f
     assert restarted.session.session_id == orch.session.session_id
     assert len(restarted.session.binding_issues) == 5  # the moderator and the four players
     assert all("Provider" in i.message for i in restarted.session.binding_issues)
-    with pytest.raises(RuntimeError, match="需要重新绑定"):
+    with pytest.raises(NotReadyError) as refused:  # (v0.14: the start check lists the models among its problems)
         await restarted.start_or_resume()
+    assert {p["scope"] for p in refused.value.problems} >= {"binding"}
+    assert [p for p in refused.value.problems if p["scope"] == "binding" and p["seat"] == "N3"]
     assert restarted.session.status == "idle"  # the refused start changed nothing (the saved game never started)
-    assert restarted.world.running is False
+    assert restarted.world.running is False and not restarted.world.state.dealt
     await restarted.shutdown()

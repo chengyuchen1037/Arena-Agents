@@ -20,7 +20,7 @@ from app.game.orchestrator import GameOrchestrator
 from app.providers.store import ProviderStore, get_provider_store
 from app.storage import reset_stores_for_tests
 from app.storage.games import GameStore
-from app.storage.roster import RosterStore
+from app.storage.bots import BotStore
 from app.storage.secrets import SecretStore
 from app.storage.settings import SettingsStore
 from game_fakes import async_test, bots_for, idle_moderator, real_orch
@@ -30,7 +30,7 @@ KEY_OLD = "sk-test-OLD-secret-value-111111"
 
 
 def make_archive_dir(path: Path, *, game: bool = True, phase: str = "IMPORTED GAME", provider: bool = True) -> dict[str, str]:
-    """A data directory as an import would bring it: a game, a provider with its key, a roster, bindings."""
+    """A data directory as an import would bring it: a game, a provider with its key, the bots, bindings."""
     ids: dict[str, str] = {}
     if game:
         payload = GameOrchestrator().session_payload()
@@ -44,7 +44,9 @@ def make_archive_dir(path: Path, *, game: bool = True, phase: str = "IMPORTED GA
         created = ProviderStore(path).create_provider("Imported", "openai_chat", "https://api.example.com/v1", KEY_NEW)
         ProviderStore(path).add_model(created.id, "m1", 1.0, 2.0, 64_000)
         ids["provider"] = created.id
-    RosterStore(path).set_name("N3", "Imported")
+    table = BotStore(path)  # (v0.14: the bots - the third one is called "Imported")
+    table.bootstrap()
+    table.update_bot(table.lineup()[2], name="Imported")
     return ids
 
 
@@ -98,11 +100,11 @@ async def test_a_replaced_data_directory_is_read_again_and_its_last_game_comes_b
     assert session is orch.session and session.session_id == ids["game"] != old_id
     assert session.status == "paused" and orch.world.state.phase == "IMPORTED GAME" and not orch.world.running
     assert session.restored_from_save and session.restore_notice == "已恢复上次对局（已暂停）"
-    # providers, keys and the roster of the new directory are what the program sees now
+    # providers, keys and the bots of the new directory are what the program sees now
     assert [p.id for p in get_provider_store().list_providers()] == [ids["provider"]]
     assert get_provider_store().get_provider(ids["provider"]).api_key == KEY_NEW
     assert old_provider.id not in {p.id for p in get_provider_store().list_providers()}
-    assert orch.roster_payload()["seats"][2]["name"] == "Imported"
+    assert orch.bots_payload()["bots"][2]["name"] == "Imported"
     # nothing of the old game was written into the new directory, before or after
     await asyncio.sleep(0.2)
     assert not GameStore(live).exists(old_id)
@@ -203,10 +205,14 @@ async def test_reload_is_refused_while_a_game_runs_or_a_review_is_being_written(
         assert orch.session is live_session and live_session.status == "running"
     finally:
         await orch.pause()
-    orch._review_running = {"N1"}
+    orch.review_running_ids = lambda: {"N1"}  # type: ignore[method-assign]  # (a review is being written)
     with pytest.raises(RuntimeError, match="复盘"):
         await orch.reload_from_data_dir()
-    orch._review_running = None
+    del orch.review_running_ids
+    orch.init_running_ids = lambda: {"b-00000001"}  # type: ignore[method-assign]  # (an initialization is being run)
+    with pytest.raises(RuntimeError, match="初始化"):
+        await orch.reload_from_data_dir()
+    del orch.init_running_ids
 
 
 # ------------------------------------------------------------------ persistence_suspended

@@ -12,8 +12,8 @@ import pytest
 
 from app.llm.types import LLMResponse
 from app.world.types import MODERATOR_ID
-from game_fakes import async_test
-from test_roster_runtime import IDS, chatty, events_of, make_orch, wait_for
+from game_fakes import TABLE_IDS as IDS
+from game_fakes import async_test, chatty, events_of, make_table_orch as make_orch, wait_for
 from v12.bots import BotLlm, simple_player
 
 

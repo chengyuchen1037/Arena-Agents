@@ -1,4 +1,4 @@
-"""The archive against the REAL application: the real stores (games, providers, roster, settings, the key store with the
+"""The archive against the REAL application: the real stores (games, providers, bots, contract, rules, settings, the key store with the
 test master key), the real orchestrator and its event bus, the real HTTP app.  Nothing here is faked except the models
 (no game is played).  This is where "export, change everything, import, and it is as it was" is proved end to end."""
 
@@ -16,15 +16,18 @@ from fastapi.testclient import TestClient
 
 from app.archive import jobs as jobs_module
 from app.archive import importer
-from app.archive.errors import ArchivePasswordError
+from app.archive.errors import ArchiveFormatError, ArchivePasswordError
 from app.archive.export import ExportOptions
+from app.archive.format import classify
 from app.archive.jobs import ArchiveJob, ArchiveManager
 from app.archive.ports import OrchestratorAdapter
 from app.game.orchestrator import GameOrchestrator
 from app.providers.store import get_provider_store
 from app.storage import reset_stores_for_tests
+from app.storage.bots import get_bot_store
+from app.storage.contract import get_contract_store
 from app.storage.games import GameStore
-from app.storage.roster import RosterStore
+from app.storage.rules import get_rules_store
 from app.storage.secrets import SecretStore
 from app.storage.settings import SettingsStore, get_settings_store
 from game_fakes import async_test
@@ -35,6 +38,9 @@ PASSWORD = "Correct-Horse-Battery-9"
 KEY_A = "sk-test-real-A-0123456789abcdef"
 KEY_B = "sk-test-real-B-0123456789abcdef"
 KEY_LOCAL = "sk-test-local-0123456789abcdef"
+CAROL = "Carol-the-Archived"
+PROVIDERS = ("alpha", "beta", "gamma")  # (the keys of what make_world() returns that are providers; "carol" and "first" are bots)
+NOTES = "先听完再表态。"  # (the canonical text of a memory part: no trailing newline)
 
 
 async def finished(job: ArchiveJob, timeout: float = 60.0) -> ArchiveJob:
@@ -60,16 +66,20 @@ async def booted() -> GameOrchestrator:
 
 
 def make_world(data: Path) -> dict[str, Any]:
-    """Two providers (one with a key, one without), roster names, a default binding, a paused game with a log."""
+    """Two providers (one with a key, one without), a renamed bot with a persona and some memory, a paused game with a log."""
     providers = get_provider_store()
     first = providers.create_provider("Alpha", "openai_chat", "https://api.example.com/v1", KEY_A)
     providers.add_model(first.id, "m1", 1.0, 2.0, 64_000)
     second = providers.create_provider("Beta", "anthropic_messages", "https://api.example.org", KEY_B)
     providers.add_model(second.id, "claude-x", 3.0, 15.0, 200_000)
     keyless = providers.create_provider("Gamma", "openai_chat", "https://api.example.net/v1", "")
-    RosterStore(data).set_name("N3", "Carol-the-Archived")
-    RosterStore(data).set_persona("N1", "说话简短，喜欢反问。")
-    return {"alpha": first.id, "beta": second.id, "gamma": keyless.id}
+    bots = get_bot_store()
+    lineup = bots.lineup()
+    bots.update_bot(lineup[2], name=CAROL)
+    merged = bots.core_markdown(lineup[0]).rstrip("\n") + "\n\n# 附加：口头禅\n「行，听你的，出了再说。」\n"
+    bots.set_core_markdown(lineup[0], merged)
+    assert bots.write_part(lineup[0], "arch_notes", NOTES).ok
+    return {"alpha": first.id, "beta": second.id, "gamma": keyless.id, "carol": lineup[2], "first": lineup[0]}
 
 
 def write_log(data: Path, session_id: str, text: str = "think") -> None:
@@ -105,10 +115,11 @@ async def test_export_change_everything_import_and_it_is_as_it_was(data: Path) -
     assert events and events[-1].data["status"] == "done" and "path" not in events[-1].data["result"]
 
     # ---- the user changes everything after the export
-    for provider_id in ids.values():
-        get_provider_store().delete_provider(provider_id)
+    for key in PROVIDERS:
+        get_provider_store().delete_provider(ids[key])
     delta = get_provider_store().create_provider("Delta", "openai_chat", "https://api.example.io/v1", KEY_LOCAL)
-    RosterStore(data).set_name("N3", "Somebody Else")
+    get_bot_store().update_bot(ids["carol"], name="Somebody Else")
+    get_bot_store().write_part(ids["first"], "arch_notes", "改过的笔记。\n")
     await orch.new_game()  # a different, newer game becomes current
     new_id = orch.session.session_id
     assert new_id != saved_id
@@ -126,10 +137,13 @@ async def test_export_change_everything_import_and_it_is_as_it_was(data: Path) -
     # ---- it is as it was at the export
     assert orch.session.session_id == saved_id and orch.session.status in ("idle", "paused")
     providers = {p.id: p for p in get_provider_store().list_providers()}
-    assert set(providers) == set(ids.values()) and delta.id not in providers
+    assert set(providers) == {ids[key] for key in PROVIDERS} and delta.id not in providers
     assert providers[ids["alpha"]].api_key == KEY_A and providers[ids["beta"]].api_key == KEY_B and providers[ids["gamma"]].api_key == ""
     assert providers[ids["alpha"]].models[0].id == "m1"
-    assert orch.roster_payload()["seats"][2]["name"] == "Carol-the-Archived"
+    bots = get_bot_store()
+    assert bots.name_of(ids["carol"]) == CAROL and orch.bots_payload()["bots"][2]["name"] == CAROL, "the bots are as they were: names ..."
+    assert bots.read_part(ids["first"], "arch_notes") == NOTES and "附加：口头禅" in bots.core_markdown(ids["first"]), "... L0 with its extra section, memory"
+    assert bots.check_integrity() == [] and len(bots.lineup()) == 12
     assert (data / "logs" / saved_id / "trace-0001.jsonl").read_text(encoding="utf-8") == json.dumps({"event": "think"}) + "\n"
     assert SecretStore(data).read_all() == {ids["alpha"]: KEY_A, ids["beta"]: KEY_B}
     assert GameStore(data).exists(saved_id) and not GameStore(data).exists(new_id)
@@ -265,13 +279,118 @@ def _wait(client: TestClient, job_id: str) -> dict[str, Any]:
 
 
 def test_the_stores_the_archive_uses_are_the_ones_of_the_application(data: Path) -> None:
-    """A guard for the assumptions the archive code makes about storage (file names it packs and unpacks)."""
+    """A guard for the assumptions the archive code makes about storage: every file the application keeps in its data directory is either
+    one the archive takes along (its whitelist knows the name) or one that is machine-bound / temporary and never goes into an archive."""
     ids = make_world(data)
+    get_contract_store()
+    get_rules_store()
     GameStore(data).save("aaaa1111aaaa", {"session_id": "aaaa1111aaaa", "schema_version": 5})
+    write_log(data, "aaaa1111aaaa")
     SettingsStore(data).set_ui_pref("legacy_data_dismissed", True)
     names = {p.relative_to(data).as_posix() for p in data.rglob("*") if p.is_file()}
-    for expected in ("providers.json", "secrets.v1.enc", "roster/roster.json", "roster/N1.persona.md", "games/aaaa1111aaaa/game.json", "settings.json"):
+    sid = next(name.split("/")[1] for name in names if name.startswith("rules/") and name.endswith("/scenario.md"))
+    bot = ids["first"]
+    for expected in (
+        "providers.json",
+        "secrets.v1.enc",
+        "settings.json",
+        "contract/contract.md",
+        "contract/source.json",
+        f"rules/{sid}/scenario.md",
+        f"rules/{sid}/source.json",
+        "bots/lineup.json",
+        f"bots/{bot}/bot.json",
+        f"bots/{bot}/core/identity.md",
+        f"bots/{bot}/arch/notes.md",
+        "games/aaaa1111aaaa/game.json",
+        "logs/aaaa1111aaaa/trace-0001.jsonl",
+    ):
         assert expected in names, f"{expected} is no longer how the application stores its data: the archive must follow"
+    # (machine-bound or temporary, or a copy of something that is exported: ``providers.backup.json`` is the provider store's own rolling backup of
+    # ``providers.json``, which the archive holds)
+    never = {".lock", "master.v1.dpapi", "secrets.v1.enc", "providers.backup.json", "backups", "exports", "tmp"}
+    for name in sorted(names):
+        if name.split("/", 1)[0] in never:
+            continue
+        try:
+            classify(name, version=2)
+        except ArchiveFormatError as exc:  # pragma: no cover - the failure message is the point
+            pytest.fail(f"the application keeps {name} but the archive would not take it along ({exc.message}): extend the whitelist, or leave it out on purpose")
     providers = json.loads((data / "providers.json").read_text(encoding="utf-8"))
     assert [p["id"] for p in providers["providers"]] == [ids["alpha"], ids["beta"], ids["gamma"]] and "api_key" not in json.dumps(providers)
     assert json.loads((data / "settings.json").read_text(encoding="utf-8"))["ui"]["legacy_data_dismissed"] is True
+
+
+def test_the_http_app_exports_deletes_and_imports_a_game_with_the_real_application(data: Path) -> None:
+    """A game goes out as an .arenagame, is deleted (the live game: a new blank one takes its place) and comes back - through the real
+    FastAPI app and the real orchestrator."""
+    from app.main import app
+
+    jobs_module.reset_archive_manager()
+    with TestClient(app) as client:
+        first = client.get("/api/games").json()["current"]
+        write_log(data, first, "a thought")
+        exported = client.get(f"/api/games/{first}/export")
+        assert exported.status_code == 200 and exported.content[:2] == b"PK"
+        assert f"game-{first}-" in exported.headers["content-disposition"] and exported.headers["content-disposition"].count(".arenagame") >= 1
+
+        detail = client.get(f"/api/games/{first}/detail").json()
+        assert len(detail["participants"]) == 12 and all(p["role"] is None and p["faction"] is None for p in detail["participants"])
+        assert detail["files"]["log_bytes"] > 0 and detail["files"]["game_bytes"] > 0, "(the export saved the live game first)"
+
+        deleted = client.delete(f"/api/games/{first}")
+        assert deleted.status_code == 200 and deleted.json()["new_game"] is True and deleted.json()["new_session_id"] != first
+        listed = client.get("/api/games").json()
+        assert first not in [g["session_id"] for g in listed["games"]] and listed["current"] == deleted.json()["new_session_id"]
+        assert not (data / "logs" / first).exists()
+
+        imported = client.post("/api/games/import?name=mine.arenagame", content=exported.content, headers={"Content-Type": "application/octet-stream"})
+        assert imported.status_code == 200, imported.text
+        assert imported.json() == {"session_id": first, "status": "idle", "replaced": False, "copied": False}
+        games = {g["session_id"]: g for g in client.get("/api/games").json()["games"]}
+        assert games[first]["readable"] is True and games[first]["log_bytes"] > 0 and games[first]["review"]["total"] == 12
+        again = client.post("/api/games/import", content=exported.content)
+        assert again.status_code == 409 and again.json()["code"] == "exists" and again.json()["session_id"] == first
+        kept = client.post("/api/games/import?on_conflict=copy", content=exported.content)
+        assert kept.status_code == 200 and kept.json()["copied"] is True and kept.json()["session_id"] not in (first, listed["current"])
+        assert tmp_names(data) == [], "no upload and no unpacked copy is left in tmp/"
+        loaded = client.post(f"/api/games/{first}/load")
+        assert loaded.status_code == 200 and client.get("/api/games").json()["current"] == first, "the imported game can be continued"
+
+
+def tmp_names(data: Path) -> list[str]:
+    folder = data / "tmp"
+    return sorted(p.name for p in folder.iterdir()) if folder.is_dir() else []
+
+
+def test_the_http_app_serves_the_contract_the_rules_and_a_bots_file(data: Path) -> None:
+    """The routers of the files stream and the bots, wired into the real app: GET / PUT / reset of the contract (the orchestrator is told), the
+    rules, and a .arenabot made by the real codec."""
+    from app.main import app
+
+    jobs_module.reset_archive_manager()
+    with TestClient(app) as client:
+        contract = client.get("/api/contract")
+        assert contract.status_code == 200
+        body = contract.json()
+        assert body["source"]["origin"] == "default" and body["markdown"].startswith("---") and body["problems"] == [] and body["required_terms"]
+        changed = client.put("/api/contract", json={"markdown": body["markdown"].rstrip("\n") + "\n\n补充说明：多看票型。\n"})
+        assert changed.status_code == 200 and changed.json()["source"]["origin"] == "imported"
+        assert client.get("/api/contract?download=1").status_code == 200
+        refused = client.put("/api/contract", json={"markdown": "no front matter, no sections"})
+        assert refused.status_code == 400 and refused.json()["code"] == "invalid" and refused.json()["problems"]
+        assert client.get("/api/contract").json()["source"]["origin"] == "imported", "a refused contract changes nothing"
+        assert client.post("/api/contract:reset").json()["source"]["origin"] == "default"
+
+        scenarios = client.get("/api/rules").json()["scenarios"]
+        assert scenarios and scenarios[0]["origin"] == "default" and scenarios[0]["problem"] is None
+        sid = scenarios[0]["id"]
+        material = client.put(f"/api/rules/{sid}/materials/opening-notes", json={"markdown": "# 开局笔记\n\n先看票型。\n"})
+        assert material.status_code == 200 and [m["slug"] for m in material.json()["materials"]] == ["opening-notes"]
+        assert client.delete(f"/api/rules/{sid}/materials/opening-notes").status_code == 200
+        assert client.get(f"/api/rules/{sid}?download=1").headers["content-disposition"].count(".scenario.md") >= 1
+
+        first = client.get("/api/bots").json()["lineup"][0]
+        exported = client.get(f"/api/bots/{first}/export")
+        assert exported.status_code == 200 and exported.content[:2] == b"PK" and ".arenabot" in exported.headers["content-disposition"]
+        assert tmp_names(data) == []

@@ -1,0 +1,42 @@
+# M3 · 规则测验：白狼王可以在什么时候自爆？
+# 在测什么：规则理解（explosion）——“二、身份与技能「白狼王」”。bot 的提示里有完整的官方规则；这题看它有没有读对、记对。
+# 被测座位：N3（villager）；局面只有开局的频道和一条主持人发来的测验请求。
+# 正确答案：b（白天非投票的正式发言环节（含警长竞选演说和平票 PK 发言），主持人启用期间）。错误选项是常见的误解：别的版本的规则、相反的说法、只对一半的说法。
+# 本文件由 bench/cases/m3.py 生成，不要手改：改代码后运行 `python -m bench fixtures` 重写。
+format: arena-situation
+version: 1
+id: m3-explosion-timing
+title: 规则测验：explosion-timing
+tags: [M3, explosion]
+scenario: werewolf_12p
+seed: 3329
+deal: start
+players:
+  count: 12
+  names: [Alice, Bob, Carol, David, Eve, Frank, Grace, Henry, Ivy, Jack, Kate, Leo]
+roles: [villager, werewolf, villager, guard, villager, villager, seer, hunter, white_wolf, werewolf, witch, werewolf]
+
+steps:
+  - {as: moderator, tool: set_phase, args: {text: 准备阶段 · 建立频道}, at: 3.0}
+  - {as: moderator, tool: create_channel, args: {channel_id: public, name: 公共频道, type: public, mode: closed, members: [N1, N2, N3, N4, N5, N6, N7, N8, N9, N10, N11, N12]}}
+  - {as: moderator, tool: create_channel, args: {channel_id: wolf-team, name: 狼人阵营, type: group, mode: closed, members: [N2, N9, N10, N12]}, at: 3.4}
+  - {as: moderator, tool: send_message, args: {channel_id: wolf-team, content: 你们是狼人阵营的队友：N2、N9、N10、N12。夜间会在这里商议，并用“刀口”请求拍刀；允许自刀或空刀。}, at: 4.9}
+  - {as: moderator, tool: send_message, args: {channel_id: public, content: 对局开始。本局是 12 人暗牌局：出局不公布身份和死因。夜间行动由我私下询问，请留意你的待处理请求。}, at: 5.9}
+  - {as: moderator, tool: set_phase, args: {text: 规则测验}, at: 8.9}
+  - {as: moderator, tool: open_request, args: {to: [N3], kind: choice, question: 规则测验：白狼王可以在什么时候自爆？, options: [{id: a, label: 任何时候，包括夜里}, {id: b, label: 白天非投票的正式发言环节（含警长竞选演说和平票 PK 发言），主持人启用期间}, {id: c, label: 只有放逐投票期间}, {id: d, label: 只有被放逐之后}], duration_s: 90}, label: quiz, at: 10.9}
+
+decision:
+  seat: N3
+  expect: [respond]
+brief: 规则测验（explosion）：白狼王可以在什么时候自爆？ 正确答案 b：白天非投票的正式发言环节（含警长竞选演说和平票 PK 发言），主持人启用期间。
+truth:
+  request: '@quiz'
+  answer:
+  - b
+  kind: rules
+  rule: 二、身份与技能「白狼王」
+  decisive: 官方规则：二、身份与技能「白狼王」。正确的是“白天非投票的正式发言环节（含警长竞选演说和平票 PK 发言），主持人启用期间”。
+  notes: explosion
+meta:
+  quiz: explosion-timing
+  topic: explosion

@@ -30,7 +30,9 @@ from starlette.requests import ClientDisconnect
 from app.archive import legacy
 from app.archive.errors import ArchiveError, ArchiveLimitError, safe_text
 from app.archive.export import ExportOptions
+from app.archive.format import download_name
 from app.archive.jobs import ArchiveManager, get_archive_manager
+from app.api._common import content_disposition
 from app.api.security import is_local_request, max_archive_bytes, require_trusted_client, verify_api_access
 
 logger = logging.getLogger(__name__)
@@ -111,9 +113,13 @@ async def get_job(job_id: str, request: Request) -> dict[str, Any]:
 @router.get("/archive/exports/{name}")
 @_guarded
 async def download_export(name: str) -> FileResponse:
-    """The file of a finished export as an attachment; only ``arena-<time>.arenaagents`` inside ``data/exports/``."""
+    """The file of a finished export as an attachment (named ``arena-agents-<time>.arenaagents``, H42); only ``arena-<time>.arenaagents``
+    inside ``data/exports/`` is served."""
     path = _manager().export_file(name)
-    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+    # (H42: the browser saves ``arena-agents-<time>.arenaagents``; the file in exports/ keeps its fixed internal name)
+    return FileResponse(
+        path, media_type="application/octet-stream", headers={"Content-Disposition": content_disposition(download_name(path.name))}
+    )
 
 
 # ------------------------------------------------------------------------------------------------ import

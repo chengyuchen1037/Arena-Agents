@@ -460,6 +460,22 @@ def test_a_rebuilt_log_shows_what_the_live_log_showed(tmp_path):
     assert announced == [] and sum(p.stat().st_size for p in trace.files()) == size  # nothing announced, nothing written back
 
 
+def test_an_init_line_is_an_init_line_again_after_a_rebuild_from_the_trace(tmp_path):
+    """v0.14: a bot's initialization is logged with ``purpose = "init"``; the log rebuilt from the trace (restart, a loaded game)
+    keeps it (it used to fall back to ``turn``)."""
+    trace = TraceLog(tmp_path, "s1")
+    live, _events, _clock = make_log(trace=trace)
+    # (a learning run has no Agent: the call log's own trace event is the only record of the call, as for a review)
+    call(live, "ok", actor="a1", purpose="init", provider_id="prov", model_id="m1", attempt=1, elapsed_ms=5, prompt_tokens=7,
+         completion_tokens=3, cache_read_tokens=0, cache_write_tokens=0, finish_reason="stop")
+    trace.close()
+
+    assert [e["purpose"] for e in live.entries()] == ["init"]
+    rebuilt = CallLog("s1", clock=Clock(), names=lambda actor: NAMES.get(actor, actor))
+    assert rebuilt.load_from_trace(trace.directory) == 1
+    assert [e["purpose"] for e in rebuilt.entries()] == ["init"]
+
+
 def test_an_ok_call_after_retries_gets_its_attempt_number_from_the_retries_before_it(tmp_path):
     trace = TraceLog(tmp_path, "s1")
     trace.write("llm_call", "a1", status="retry", attempt=1, provider="p", model="m", http_status=500)
