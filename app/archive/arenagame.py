@@ -251,7 +251,9 @@ def pack_arenagame(
     if len(sources) + 1 > MAX_ENTRIES:
         raise ArchiveLimitError("这局的日志文件太多了，无法导出。")
 
-    created = (now or datetime.now()).astimezone()
+    created = (now or datetime.now().astimezone()).replace(microsecond=0)
+    if created.tzinfo is None:  # (a time with an offset keeps it, like the manifest of the whole archive: the file does not depend on the time zone of the machine)
+        created = created.astimezone()
     game_member = f"games/{session_id}/game.json"
     entries = [FileEntry(path=game_member, size=len(game), sha256=hashlib.sha256(game).hexdigest())]
     part = target.with_name(target.name + ".part")

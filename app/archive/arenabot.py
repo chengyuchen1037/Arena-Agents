@@ -254,7 +254,9 @@ def pack_arenabot(
 
     target = Path(target)
     rows = _sources(files)
-    created = (now or datetime.now()).astimezone()
+    created = (now or datetime.now().astimezone()).replace(microsecond=0)
+    if created.tzinfo is None:  # (a time with an offset keeps it, like the manifest of the whole archive: the file does not depend on the time zone of the machine)
+        created = created.astimezone()
     entries = [FileEntry(path=member, size=len(data), sha256=hashlib.sha256(data).hexdigest()) for member, data, _mtime in rows]
     manifest = BotManifest(
         format=FORMAT_NAME,
