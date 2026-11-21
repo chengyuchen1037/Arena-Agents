@@ -118,7 +118,9 @@ def test_without_out_the_results_go_to_the_scratch_directory_under_the_run_id(tm
 
 def test_the_default_scratch_directory_is_inside_the_projects_ignored_directory() -> None:
     assert safety.default_out_dir("x") == ROOT / ".pytest_tmp" / "bench-runs" / "x"
-    assert ".pytest_tmp/" in (ROOT / ".gitignore").read_text(encoding="utf-8").replace("\\", "/")
+    gitignore = ROOT / ".gitignore"
+    if gitignore.is_file():  # (a fresh checkout - CI - has none: the project does not track it)
+        assert ".pytest_tmp/" in gitignore.read_text(encoding="utf-8").replace("\\", "/")
 
 
 def test_while_a_run_goes_on_the_data_directory_is_a_scratch_directory_inside_the_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:

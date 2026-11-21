@@ -41,7 +41,9 @@ def test_the_directory_the_app_was_started_with_counts_as_real_data(monkeypatch:
 def test_the_default_output_directory_is_under_the_scratch_directory_of_the_project() -> None:
     out = default_out_dir("20260101-000000-abcd")
     assert out == REPO_ROOT / ".pytest_tmp" / "bench-runs" / "20260101-000000-abcd" == DEFAULT_RUNS_DIR / "20260101-000000-abcd"
-    assert ".pytest_tmp/" in (REPO_ROOT / ".gitignore").read_text(encoding="utf-8").replace("\\", "/")  # (ignored by git, like every scratch directory)
+    gitignore = REPO_ROOT / ".gitignore"
+    if gitignore.is_file():  # (ignored by git, like every scratch directory; a fresh checkout - CI - has no .gitignore: the project does not track it)
+        assert ".pytest_tmp/" in gitignore.read_text(encoding="utf-8").replace("\\", "/")
     temp = Path(tempfile.gettempdir())
     assert temp not in out.parents or temp in (REPO_ROOT, *REPO_ROOT.parents)  # (unless the project itself lives under the temporary directory, e.g. a checkout in /tmp)
 
